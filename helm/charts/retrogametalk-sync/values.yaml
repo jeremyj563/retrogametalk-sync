@@ -1,0 +1,150 @@
+# Default values for retrogametalk-sync.
+# Override any settings in a custom values file passed via `helm install -f my-values.yaml`.
+
+# Number of pod replicas. Keep at 1 when using a ReadWriteOnce PVC.
+# For multi-pod horizontal scaling across consoles, deploy separate releases with
+# distinct `scraper.systemFilter` values or use a ReadWriteMany storageClass.
+replicaCount: 1
+
+image:
+  # Container image repository built from the project Dockerfile
+  repository: retrogametalk-sync
+  # Image tag (defaults to Chart.AppVersion if empty)
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Optional imagePullSecrets for private container registries
+imagePullSecrets: []
+
+# Override chart naming if desired
+nameOverride: ""
+fullnameOverride: ""
+
+# Graceful termination window (seconds) so active .part downloads clean up cleanly on SIGTERM
+terminationGracePeriodSeconds: 30
+
+service:
+  # Kubernetes Service type (ClusterIP, NodePort, LoadBalancer)
+  type: ClusterIP
+  # Port exposed by the Kubernetes Service
+  port: 80
+  # Container HTTP port (must match scraper.port)
+  targetPort: 3000
+  # Optional Service annotations
+  annotations: {}
+
+ingress:
+  # Set to true to expose the CRT web control console via an Ingress controller
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # nginx.ingress.kubernetes.io/proxy-buffering: "off"  # Recommended for SSE /api/events
+    # nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  hosts:
+    - host: rgt-sync.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: rgt-sync-tls
+  #    hosts:
+  #      - rgt-sync.local
+
+# Persistent storage for SQLite state (scraper.db, cookies.json) and mirrored ROM archives
+persistence:
+  enabled: true
+  # Specify a StorageClass (leave empty to use cluster default)
+  storageClass: ""
+  # Use ReadWriteOnce for single-pod StatefulSet, or ReadWriteMany for shared multi-pod mirrors
+  accessMode: ReadWriteOnce
+  # Volume size for your mirrored repository archive
+  size: 250Gi
+  # Optionally bind an already-provisioned PersistentVolumeClaim instead of creating one
+  existingClaim: ""
+  # Mount path inside the container
+  mountPath: /run/repo
+
+# RetroGameTalk credentials and SQLite encryption key.
+# Leave username/password empty if you prefer configuring them interactively in the UI.
+credentials:
+  # Name of an existing Kubernetes Secret containing RGT_USERNAME, RGT_PASSWORD, ENCRYPTION_KEY.
+  # When set, the chart will not create a Secret resource.
+  existingSecret: ""
+  # Optional RetroGameTalk account username (locks UI username field when non-empty)
+  username: ""
+  # Optional RetroGameTalk account password (locks UI password field when non-empty)
+  password: ""
+  # Optional 32+ character key used for AES-256-GCM credential encryption in SQLite.
+  # If omitted, the container generates and persists a volume-local .keyfile automatically.
+  encryptionKey: ""
+
+# Scraper engine, scheduler, and adaptive AIMD rate-limit configuration
+scraper:
+  # HTTP server listening port inside the container
+  port: 3000
+  # SQLite database, keyfile, and cookie jar directory (inside persistence.mountPath)
+  dataDir: /run/repo
+  # Mirrored local filesystem root where <system>/<release>/<file> directories are written
+  downloadDir: /run/repo/repository
+  # Target RetroGameTalk repository index URL
+  baseUrl: "https://retrogametalk.com/repo/"
+  # RetroGameTalk XenForo login URL
+  loginUrl: "https://retrogametalk.com/login/"
+  # Enable or pause automatic cron scheduling ("true" or "false"; empty uses UI/SQLite setting)
+  scheduleEnabled: ""
+  # 5-field cron schedule for incremental sync runs (empty uses UI/SQLite default "0 */6 * * *")
+  cronSchedule: ""
+  # Optional comma-separated console slugs for pod sharding (e.g. "nes-roms,snes-rom,gba-roms").
+  # Leave empty to manage console selection in the Operations UI or mirror all consoles.
+  systemFilter: ""
+  # Optional HTTP User-Agent string (empty uses UI/SQLite default)
+  userAgent: ""
+  # Adaptive AIMD rate-limit overrides (leave empty strings to manage dynamically via UI/SQLite)
+  rateLimit:
+    baseDelayMs: ""
+    minDelayMs: ""
+    maxDelayMs: ""
+    backoffMultiplier: ""
+    maxRetries: ""
+    maxConcurrency: ""
+    requestTimeoutMs: ""
+
+# Prometheus metrics scraping annotations on the Pod template (/metrics)
+metrics:
+  prometheusScrape: true
+
+# Kubernetes liveness and readiness probe tuning
+probes:
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+# Compute resource requests and limits
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+# Pod-level security context (matches non-root uid/gid 1000/100 in the Dockerfile)
+podSecurityContext:
+  fsGroup: 100
+
+securityContext:
+  runAsNonRoot: true
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
