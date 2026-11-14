@@ -1,0 +1,79 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Chakra Petch", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-crt-bg: #070a08;
+  --color-crt-surface: #0d130f;
+  --color-crt-elevated: #121b15;
+  --color-crt-border: #1e2d23;
+  --color-crt-border-strong: #2c4333;
+  --color-crt-text: #e5f2e8;
+  --color-crt-muted: #8aa391;
+  --color-crt-phosphor: #38e56b;
+  --color-crt-phosphor-dim: #1d7a3a;
+  --color-crt-amber: #f59e0b;
+  --color-crt-crimson: #ef4444;
+}
+
+@layer base {
+  html,
+  body {
+    background-color: var(--color-crt-bg);
+    color: var(--color-crt-text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Subtle CRT phosphor radial ambient glow without compromising text contrast */
+  .crt-canvas {
+    background-color: var(--color-crt-bg);
+    background-image: radial-gradient(
+      ellipse 80% 50% at 50% 0%,
+      rgba(56, 229, 107, 0.045) 0%,
+      transparent 70%
+    );
+  }
+
+  /* Optional subtle CRT scanline overlay (disabled under prefers-reduced-motion) */
+  .crt-scanlines::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 40;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.14) 0px,
+      rgba(0, 0, 0, 0.14) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    opacity: 0.35;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .crt-scanlines::after {
+      display: none;
+    }
+  }
+
+  /* Custom thin CRT scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #070a08;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #1e2d23;
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #2c4333;
+  }
+}

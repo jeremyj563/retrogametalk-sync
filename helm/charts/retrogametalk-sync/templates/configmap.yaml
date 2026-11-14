@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "retrogametalk-sync.fullname" . }}-config
+  labels:
+    {{- include "retrogametalk-sync.labels" . | nindent 4 }}
+data:
+  NODE_ENV: "production"
+  PORT: {{ .Values.scraper.port | quote }}
+  DATA_DIR: {{ .Values.scraper.dataDir | quote }}
+  DOWNLOAD_DIR: {{ .Values.scraper.downloadDir | quote }}
+  RGT_BASE_URL: {{ .Values.scraper.baseUrl | quote }}
+  RGT_LOGIN_URL: {{ .Values.scraper.loginUrl | quote }}
+  {{- if ne (toString .Values.scraper.scheduleEnabled) "" }}
+  SCRAPER_SCHEDULE_ENABLED: {{ .Values.scraper.scheduleEnabled | quote }}
+  {{- end }}
+  {{- if .Values.scraper.cronSchedule }}
+  CRON_SCHEDULE: {{ .Values.scraper.cronSchedule | quote }}
+  {{- end }}
+  {{- if .Values.scraper.systemFilter }}
+  SCRAPER_SYSTEM_FILTER: {{ .Values.scraper.systemFilter | quote }}
+  {{- end }}
+  {{- if .Values.scraper.userAgent }}
+  SCRAPER_USER_AGENT: {{ .Values.scraper.userAgent | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.scraper.rateLimit.baseDelayMs) "" }}
+  SCRAPER_BASE_DELAY_MS: {{ .Values.scraper.rateLimit.baseDelayMs | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.scraper.rateLimit.minDelayMs) "" }}
+  SCRAPER_MIN_DELAY_MS: {{ .Values.scraper.rateLimit.minDelayMs | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.scraper.rateLimit.maxDelayMs) "" }}
+  SCRAPER_MAX_DELAY_MS: {{ .Values.scraper.rateLimit.maxDelayMs | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.scraper.rateLimit.backoffMultiplier) "" }}
+  SCRAPER_BACKOFF_MULTIPLIER: {{ .Values.scraper.rateLimit.backoffMultiplier | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.scraper.rateLimit.maxRetries) "" }}
+  SCRAPER_MAX_RETRIES: {{ .Values.scraper.rateLimit.maxRetries | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.scraper.rateLimit.maxConcurrency) "" }}
+  SCRAPER_MAX_CONCURRENCY: {{ .Values.scraper.rateLimit.maxConcurrency | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.scraper.rateLimit.requestTimeoutMs) "" }}
+  SCRAPER_REQUEST_TIMEOUT_MS: {{ .Values.scraper.rateLimit.requestTimeoutMs | quote }}
+  {{- end }}
