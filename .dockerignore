@@ -1,0 +1,10 @@
+node_modules
+dist
+data
+mirror-data
+.git
+.github
+.env
+.env.*
+!.env.example
+*.log
