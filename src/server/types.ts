@@ -1,7 +1,8 @@
 export type RunTrigger = 'scheduled' | 'manual' | 'retry';
 export type RunMode = 'incremental' | 'full' | 'dry_run';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'failed';
-export type ItemStatus = 'queued' | 'downloading' | 'downloaded' | 'skipped' | 'failed';
+export type FileItemStatus = 'queued' | 'downloading' | 'downloaded' | 'skipped' | 'failed';
+export type ItemStatus = FileItemStatus | 'partial';
 export type LogLevel = 'info' | 'download' | 'throttle' | 'warn' | 'error';
 
 export interface ScraperConfigPublic {
@@ -68,15 +69,71 @@ export interface SyncRunRecord {
   errorSummary: string | null;
 }
 
-export interface RepositoryItemRecord {
+export interface ReleaseMetadata {
+  wpPostId?: number | null;
+  wpPostType?: string | null;
+  title: string;
+  subtitle: string | null;
+  consoleName: string | null;
+  publisher: string | null;
+  developer?: string | null;
+  releaseYear: string | null;
+  genres: string[];
+  regions: string[];
+  languages: string[];
+  sources?: string[];
+  formats?: string[];
+  releaseTags?: string[];
+  downloadsCount: string | null;
+  releasedAgo: string | null;
+  updatedDate: string | null;
+  specs: { label: string; value: string }[];
+  descriptionHtml: string;
+  descriptionText: string;
+  coverUrl: string | null;
+  coverLocalRelPath: string | null;
+  screenshotUrls: string[];
+  screenshotLocalRelPaths: string[];
+  sourcePageUrl: string;
+  fetchedAt: string;
+}
+
+export interface CatalogFacets {
+  tags: string[];
+  genres: string[];
+  regions: string[];
+  languages: string[];
+  sources: string[];
+}
+
+export interface ReleaseFileRecord {
   id: number;
+  releaseId: number;
   remoteUrl: string;
   downloadUrl: string;
   remotePath: string;
   localPath: string;
   filename: string;
+  displayLabel: string;
+  fileRole: string;
+  fileSizeBytes: number;
+  status: FileItemStatus;
+  errorMessage: string | null;
+  lastRunId: number | null;
+  discoveredAt: string;
+  downloadedAt: string | null;
+}
+
+export interface RepositoryItemRecord {
+  id: number;
+  wpPostId: number | null;
+  wpPostType: string | null;
+  remoteUrl: string;
+  remotePath: string;
+  localPath: string;
   systemName: string;
   releaseType: string;
+  releaseTags: string[];
   title: string;
   fileSizeBytes: number;
   publishedAt: string | null;
@@ -85,6 +142,19 @@ export interface RepositoryItemRecord {
   lastRunId: number | null;
   discoveredAt: string;
   downloadedAt: string | null;
+  publisher: string | null;
+  developer: string | null;
+  releaseYear: string | null;
+  genres: string[];
+  regions: string[];
+  languages: string[];
+  sources: string[];
+  coverLocalPath: string | null;
+  screenshotsCount: number;
+  hasMetadata: boolean;
+  metadata: ReleaseMetadata | null;
+  filesCount: number;
+  files: ReleaseFileRecord[];
 }
 
 export interface ActivityLogRecord {

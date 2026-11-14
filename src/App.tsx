@@ -200,8 +200,9 @@ export default function App() {
     setRuns((prev) => prev.filter((r) => r.status === 'running'));
   };
 
-  const handleRetryItem = async (itemId: number) => {
-    const res = await fetch(`/api/items/${itemId}/retry`, { method: 'POST' });
+  const handleRetryItem = async (itemId: number, fileId?: number) => {
+    const qs = fileId ? `?fileId=${encodeURIComponent(String(fileId))}` : '';
+    const res = await fetch(`/api/items/${itemId}/retry${qs}`, { method: 'POST' });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
       setErrorBanner(d.error || `Retry failed (HTTP ${res.status})`);

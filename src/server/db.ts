@@ -2,11 +2,16 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import type {
   ActivityLogRecord,
+  CatalogFacets,
   ConfigUpdateInput,
+  FileItemStatus,
   ItemStatus,
   LogLevel,
+  ReleaseFileRecord,
+  ReleaseMetadata,
   RepositoryItemRecord,
   RunMode,
   RunStatus,
@@ -105,6 +110,11 @@ export function initDb(): Database.Database {
   db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
   db.pragma('busy_timeout = 5000');
+  db.pragma('foreign_keys = ON');
+
+  const hadLegacyItemsTable = Boolean(
+    db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'repository_items'`).get(),
+  );
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS scraper_config (
@@ -148,28 +158,60 @@ export function initDb(): Database.Database {
       error_summary TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS repository_items (
+    CREATE TABLE IF NOT EXISTS catalog_releases (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      remote_url TEXT NOT NULL UNIQUE,
+      wp_post_id INTEGER,
+      wp_post_type TEXT,
+      remote_path TEXT NOT NULL,
+      local_path TEXT NOT NULL,
+      system_name TEXT NOT NULL,
+      release_type TEXT NOT NULL DEFAULT 'Retail ROM',
+      release_tags_json TEXT NOT NULL DEFAULT '[]',
+      title TEXT NOT NULL,
+      file_size_bytes INTEGER NOT NULL DEFAULT 0,
+      published_at TEXT,
+      status TEXT NOT NULL DEFAULT 'queued',
+      error_message TEXT,
+      last_run_id INTEGER,
+      discovered_at TEXT NOT NULL,
+      downloaded_at TEXT,
+      publisher TEXT,
+      developer TEXT,
+      release_year TEXT,
+      genres_json TEXT NOT NULL DEFAULT '[]',
+      regions_json TEXT NOT NULL DEFAULT '[]',
+      languages_json TEXT NOT NULL DEFAULT '[]',
+      sources_json TEXT NOT NULL DEFAULT '[]',
+      cover_local_path TEXT,
+      screenshots_json TEXT NOT NULL DEFAULT '[]',
+      metadata_json TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_releases_system ON catalog_releases(system_name);
+    CREATE INDEX IF NOT EXISTS idx_releases_status ON catalog_releases(status);
+
+    CREATE TABLE IF NOT EXISTS catalog_release_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      release_id INTEGER NOT NULL REFERENCES catalog_releases(id) ON DELETE CASCADE,
       remote_url TEXT NOT NULL UNIQUE,
       download_url TEXT NOT NULL,
       remote_path TEXT NOT NULL,
       local_path TEXT NOT NULL,
       filename TEXT NOT NULL,
-      system_name TEXT NOT NULL,
-      release_type TEXT NOT NULL DEFAULT 'rom',
-      title TEXT NOT NULL,
+      display_label TEXT NOT NULL,
+      file_role TEXT NOT NULL DEFAULT 'ROM',
       file_size_bytes INTEGER NOT NULL DEFAULT 0,
-      published_at TEXT,
       status TEXT NOT NULL,
       error_message TEXT,
       last_run_id INTEGER,
       discovered_at TEXT NOT NULL,
-      downloaded_at TEXT
+      downloaded_at TEXT,
+      UNIQUE(release_id, filename)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_items_system ON repository_items(system_name);
-    CREATE INDEX IF NOT EXISTS idx_items_status ON repository_items(status);
-    CREATE INDEX IF NOT EXISTS idx_items_filename ON repository_items(filename);
+    CREATE INDEX IF NOT EXISTS idx_release_files_release_id ON catalog_release_files(release_id);
+    CREATE INDEX IF NOT EXISTS idx_release_files_local_path ON catalog_release_files(local_path);
 
     CREATE TABLE IF NOT EXISTS activity_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,7 +256,6 @@ export function initDb(): Database.Database {
       now,
     );
   } else {
-    // Migrate legacy placeholder URLs to live RetroGameTalk XenForo/Repo endpoints
     if (existing.base_url === 'https://retrogametalk.com/repository/') {
       db.prepare('UPDATE scraper_config SET base_url = ? WHERE id = 1').run('https://retrogametalk.com/repo/');
     }
@@ -230,10 +271,15 @@ export function initDb(): Database.Database {
     }
   }
 
-  // Ensure discovered_systems_json column exists for existing databases
   const cols = db.prepare('PRAGMA table_info(scraper_config)').all() as { name: string }[];
   if (!cols.some((c) => c.name === 'discovered_systems_json')) {
     db.prepare(`ALTER TABLE scraper_config ADD COLUMN discovered_systems_json TEXT NOT NULL DEFAULT '[]'`).run();
+  }
+
+  // Cleanly reset legacy flat catalog index so the next sync imports grouped release entries + WP tags
+  if (hadLegacyItemsTable) {
+    db.prepare('DROP TABLE IF EXISTS repository_items').run();
+    db.prepare('UPDATE scraper_config SET last_watermark_at = NULL WHERE id = 1').run();
   }
 
   // Recover any stale running jobs left behind by an abrupt container kill
@@ -244,7 +290,13 @@ export function initDb(): Database.Database {
   `).run(now);
 
   db.prepare(`
-    UPDATE repository_items
+    UPDATE catalog_release_files
+    SET status = 'failed', error_message = COALESCE(error_message, 'Interrupted by process restart')
+    WHERE status = 'downloading'
+  `).run();
+
+  db.prepare(`
+    UPDATE catalog_releases
     SET status = 'failed', error_message = COALESCE(error_message, 'Interrupted by process restart')
     WHERE status = 'downloading'
   `).run();
@@ -568,89 +620,522 @@ function mapRunRow(row: Record<string, unknown>): SyncRunRecord {
   };
 }
 
-export function upsertRepositoryItem(item: {
+function parseJsonStringArray(raw: unknown): string[] {
+  try {
+    const parsed = JSON.parse(String(raw || '[]'));
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function mapFileRow(row: Record<string, unknown>): ReleaseFileRecord {
+  return {
+    id: Number(row.id),
+    releaseId: Number(row.release_id),
+    remoteUrl: String(row.remote_url),
+    downloadUrl: String(row.download_url),
+    remotePath: String(row.remote_path),
+    localPath: String(row.local_path),
+    filename: String(row.filename),
+    displayLabel: String(row.display_label || row.filename),
+    fileRole: String(row.file_role || 'ROM'),
+    fileSizeBytes: Number(row.file_size_bytes || 0),
+    status: String(row.status) as FileItemStatus,
+    errorMessage: row.error_message ? String(row.error_message) : null,
+    lastRunId: row.last_run_id !== null ? Number(row.last_run_id) : null,
+    discoveredAt: String(row.discovered_at),
+    downloadedAt: row.downloaded_at ? String(row.downloaded_at) : null,
+  };
+}
+
+function mapReleaseRow(row: Record<string, unknown>, files: ReleaseFileRecord[]): RepositoryItemRecord {
+  let parsedMeta: ReleaseMetadata | null = null;
+  if (row.metadata_json) {
+    try {
+      parsedMeta = JSON.parse(String(row.metadata_json)) as ReleaseMetadata;
+    } catch {
+      parsedMeta = null;
+    }
+  }
+  const screenshots = parseJsonStringArray(row.screenshots_json);
+  const releaseTags = parseJsonStringArray(row.release_tags_json);
+  const genres = parseJsonStringArray(row.genres_json);
+  const regions = parseJsonStringArray(row.regions_json);
+  const languages = parseJsonStringArray(row.languages_json);
+  const sources = parseJsonStringArray(row.sources_json);
+
+  return {
+    id: Number(row.id),
+    wpPostId: row.wp_post_id !== null && row.wp_post_id !== undefined ? Number(row.wp_post_id) : null,
+    wpPostType: row.wp_post_type ? String(row.wp_post_type) : null,
+    remoteUrl: String(row.remote_url),
+    remotePath: String(row.remote_path),
+    localPath: String(row.local_path),
+    systemName: String(row.system_name),
+    releaseType: String(row.release_type || releaseTags[0] || 'Retail ROM'),
+    releaseTags,
+    title: String(row.title),
+    fileSizeBytes: Number(row.file_size_bytes || 0),
+    publishedAt: row.published_at ? String(row.published_at) : null,
+    status: String(row.status) as ItemStatus,
+    errorMessage: row.error_message ? String(row.error_message) : null,
+    lastRunId: row.last_run_id !== null ? Number(row.last_run_id) : null,
+    discoveredAt: String(row.discovered_at),
+    downloadedAt: row.downloaded_at ? String(row.downloaded_at) : null,
+    publisher: row.publisher ? String(row.publisher) : null,
+    developer: row.developer ? String(row.developer) : null,
+    releaseYear: row.release_year ? String(row.release_year) : null,
+    genres,
+    regions,
+    languages,
+    sources,
+    coverLocalPath: row.cover_local_path ? String(row.cover_local_path) : null,
+    screenshotsCount: screenshots.length,
+    hasMetadata: Boolean(parsedMeta),
+    metadata: parsedMeta,
+    filesCount: files.length,
+    files,
+  };
+}
+
+function loadFilesByReleaseIds(releaseIds: number[]): Map<number, ReleaseFileRecord[]> {
+  const map = new Map<number, ReleaseFileRecord[]>();
+  if (releaseIds.length === 0) return map;
+  const placeholders = releaseIds.map(() => '?').join(',');
+  const rows = getDb()
+    .prepare(`SELECT * FROM catalog_release_files WHERE release_id IN (${placeholders}) ORDER BY id ASC`)
+    .all(...releaseIds) as Record<string, unknown>[];
+  for (const row of rows) {
+    const file = mapFileRow(row);
+    const list = map.get(file.releaseId) || [];
+    list.push(file);
+    map.set(file.releaseId, list);
+  }
+  return map;
+}
+
+export function recomputeReleaseRollup(releaseId: number): RepositoryItemRecord | null {
+  const row = getDb().prepare('SELECT * FROM catalog_releases WHERE id = ?').get(releaseId) as
+    | Record<string, unknown>
+    | undefined;
+  if (!row) return null;
+
+  const fileRows = getDb()
+    .prepare('SELECT * FROM catalog_release_files WHERE release_id = ? ORDER BY id ASC')
+    .all(releaseId) as Record<string, unknown>[];
+  const files = fileRows.map(mapFileRow);
+
+  const genres = parseJsonStringArray(row.genres_json);
+  const languages = parseJsonStringArray(row.languages_json);
+  const sources = parseJsonStringArray(row.sources_json);
+  const systemName = String(row.system_name);
+
+  const fileRoles = files.map((f) => f.fileRole);
+  const releaseTags = deriveReleaseTags({ genres, languages, sources, systemName }, fileRoles);
+  const primaryType = releaseTags[0] || 'Retail ROM';
+
+  let totalBytes = 0;
+  let downloadedCount = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
+  let downloadingCount = 0;
+  let firstError: string | null = null;
+  let latestDownloadedAt: string | null = row.downloaded_at ? String(row.downloaded_at) : null;
+
+  for (const file of files) {
+    if (file.fileSizeBytes > 0) totalBytes += file.fileSizeBytes;
+    if (file.status === 'downloaded') downloadedCount += 1;
+    else if (file.status === 'skipped') skippedCount += 1;
+    else if (file.status === 'failed') {
+      failedCount += 1;
+      if (!firstError && file.errorMessage) firstError = `${file.filename}: ${file.errorMessage}`;
+    } else if (file.status === 'downloading') {
+      downloadingCount += 1;
+    }
+    if (file.downloadedAt && (!latestDownloadedAt || file.downloadedAt > latestDownloadedAt)) {
+      latestDownloadedAt = file.downloadedAt;
+    }
+  }
+
+  let status: ItemStatus = String(row.status) as ItemStatus;
+  if (files.length > 0) {
+    if (downloadingCount > 0) status = 'downloading';
+    else if (failedCount === files.length) status = 'failed';
+    else if (failedCount > 0 || downloadedCount + skippedCount < files.length) {
+      status = downloadedCount + skippedCount > 0 ? 'partial' : 'queued';
+    } else if (skippedCount === files.length) {
+      status = 'skipped';
+    } else {
+      status = 'downloaded';
+    }
+  }
+
+  // Keep embedded metadata.releaseTags synchronized when metadata_json exists
+  let metadataJson = row.metadata_json ? String(row.metadata_json) : null;
+  if (metadataJson) {
+    try {
+      const parsed = JSON.parse(metadataJson) as ReleaseMetadata;
+      parsed.releaseTags = releaseTags;
+      metadataJson = JSON.stringify(parsed);
+    } catch {
+      // Leave metadata_json intact if malformed
+    }
+  }
+
+  getDb().prepare(`
+    UPDATE catalog_releases SET
+      release_type = ?,
+      release_tags_json = ?,
+      file_size_bytes = ?,
+      status = ?,
+      error_message = ?,
+      downloaded_at = ?,
+      metadata_json = ?
+    WHERE id = ?
+  `).run(
+    primaryType,
+    JSON.stringify(releaseTags),
+    totalBytes,
+    status,
+    failedCount > 0 ? firstError || `${failedCount} file transfer(s) failed` : null,
+    latestDownloadedAt,
+    metadataJson,
+    releaseId,
+  );
+
+  return getCatalogReleaseById(releaseId);
+}
+
+export function upsertCatalogRelease(input: {
+  remoteUrl: string;
+  remotePath: string;
+  localPath: string;
+  systemName: string;
+  title: string;
+  publishedAt?: string | null;
+  status?: ItemStatus;
+  lastRunId?: number | null;
+  metadata?: ReleaseMetadata | null;
+  coverLocalPath?: string | null;
+  screenshotLocalPaths?: string[];
+}): RepositoryItemRecord {
+  const canonicalUrl = input.remoteUrl.split('#')[0];
+  const now = new Date().toISOString();
+  const meta = input.metadata ?? null;
+
+  const genres = meta?.genres || [];
+  const regions = meta?.regions || [];
+  const languages = meta?.languages || [];
+  const sources = meta?.sources || [];
+  const releaseTags =
+    meta?.releaseTags && meta.releaseTags.length > 0
+      ? meta.releaseTags
+      : deriveReleaseTags({ genres, languages, sources, systemName: input.systemName }, []);
+  const primaryType = releaseTags[0] || 'Retail ROM';
+
+  const wpPostId = meta?.wpPostId ?? null;
+  const wpPostType = meta?.wpPostType ?? null;
+  const publisher = meta?.publisher ?? null;
+  const developer = meta?.developer ?? null;
+  const releaseYear = meta?.releaseYear ?? null;
+  const genresJson = meta ? JSON.stringify(genres) : null;
+  const regionsJson = meta ? JSON.stringify(regions) : null;
+  const languagesJson = meta ? JSON.stringify(languages) : null;
+  const sourcesJson = meta ? JSON.stringify(sources) : null;
+  const tagsJson = JSON.stringify(releaseTags);
+  const coverLocalPath = input.coverLocalPath ?? null;
+  const screenshotsJson = input.screenshotLocalPaths ? JSON.stringify(input.screenshotLocalPaths) : null;
+  const metadataJson = meta ? JSON.stringify({ ...meta, releaseTags }) : null;
+
+  getDb().prepare(`
+    INSERT INTO catalog_releases (
+      remote_url, wp_post_id, wp_post_type, remote_path, local_path, system_name,
+      release_type, release_tags_json, title, published_at, status, last_run_id, discovered_at,
+      publisher, developer, release_year, genres_json, regions_json, languages_json, sources_json,
+      cover_local_path, screenshots_json, metadata_json
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, COALESCE(?, '[]'), COALESCE(?, '[]'), COALESCE(?, '[]'), COALESCE(?, '[]'),
+      ?, COALESCE(?, '[]'), ?
+    )
+    ON CONFLICT(remote_url) DO UPDATE SET
+      wp_post_id = COALESCE(excluded.wp_post_id, catalog_releases.wp_post_id),
+      wp_post_type = COALESCE(excluded.wp_post_type, catalog_releases.wp_post_type),
+      remote_path = excluded.remote_path,
+      local_path = excluded.local_path,
+      system_name = excluded.system_name,
+      title = COALESCE(NULLIF(excluded.title, ''), catalog_releases.title),
+      published_at = COALESCE(excluded.published_at, catalog_releases.published_at),
+      last_run_id = COALESCE(excluded.last_run_id, catalog_releases.last_run_id),
+      publisher = COALESCE(excluded.publisher, catalog_releases.publisher),
+      developer = COALESCE(excluded.developer, catalog_releases.developer),
+      release_year = COALESCE(excluded.release_year, catalog_releases.release_year),
+      genres_json = CASE WHEN ? IS NOT NULL THEN excluded.genres_json ELSE catalog_releases.genres_json END,
+      regions_json = CASE WHEN ? IS NOT NULL THEN excluded.regions_json ELSE catalog_releases.regions_json END,
+      languages_json = CASE WHEN ? IS NOT NULL THEN excluded.languages_json ELSE catalog_releases.languages_json END,
+      sources_json = CASE WHEN ? IS NOT NULL THEN excluded.sources_json ELSE catalog_releases.sources_json END,
+      cover_local_path = COALESCE(excluded.cover_local_path, catalog_releases.cover_local_path),
+      screenshots_json = CASE WHEN ? IS NOT NULL THEN excluded.screenshots_json ELSE catalog_releases.screenshots_json END,
+      metadata_json = COALESCE(excluded.metadata_json, catalog_releases.metadata_json)
+  `).run(
+    canonicalUrl,
+    wpPostId,
+    wpPostType,
+    input.remotePath,
+    input.localPath,
+    input.systemName,
+    primaryType,
+    tagsJson,
+    input.title,
+    input.publishedAt ?? null,
+    input.status ?? 'queued',
+    input.lastRunId ?? null,
+    now,
+    publisher,
+    developer,
+    releaseYear,
+    genresJson,
+    regionsJson,
+    languagesJson,
+    sourcesJson,
+    coverLocalPath,
+    screenshotsJson,
+    metadataJson,
+    genresJson,
+    regionsJson,
+    languagesJson,
+    sourcesJson,
+    screenshotsJson,
+  );
+
+  const row = getDb().prepare('SELECT id FROM catalog_releases WHERE remote_url = ?').get(canonicalUrl) as {
+    id: number;
+  };
+  return recomputeReleaseRollup(Number(row.id))!;
+}
+
+export function upsertReleaseFile(input: {
+  releaseId: number;
   remoteUrl: string;
   downloadUrl: string;
   remotePath: string;
   localPath: string;
   filename: string;
-  systemName: string;
-  releaseType: string;
-  title: string;
+  displayLabel?: string;
+  fileRole?: string;
   fileSizeBytes?: number;
-  publishedAt?: string | null;
-  status: ItemStatus;
+  status: FileItemStatus;
   errorMessage?: string | null;
   lastRunId?: number | null;
   downloadedAt?: string | null;
-}): RepositoryItemRecord {
+}): { file: ReleaseFileRecord; release: RepositoryItemRecord } {
   const now = new Date().toISOString();
+  const displayLabel = input.displayLabel || input.filename;
+  const parent = getCatalogReleaseById(input.releaseId);
+  const fileRole =
+    input.fileRole ||
+    classifyFileRole(input.filename, displayLabel, {
+      genres: parent?.genres,
+      languages: parent?.languages,
+      sources: parent?.sources,
+      title: parent?.title,
+      systemName: parent?.systemName,
+    });
+
   getDb().prepare(`
-    INSERT INTO repository_items (
-      remote_url, download_url, remote_path, local_path, filename, system_name,
-      release_type, title, file_size_bytes, published_at, status, error_message,
+    INSERT INTO catalog_release_files (
+      release_id, remote_url, download_url, remote_path, local_path, filename,
+      display_label, file_role, file_size_bytes, status, error_message,
       last_run_id, discovered_at, downloaded_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(remote_url) DO UPDATE SET
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(release_id, filename) DO UPDATE SET
+      remote_url = excluded.remote_url,
       download_url = excluded.download_url,
       remote_path = excluded.remote_path,
       local_path = excluded.local_path,
-      filename = excluded.filename,
-      system_name = excluded.system_name,
-      release_type = excluded.release_type,
-      title = excluded.title,
-      file_size_bytes = CASE WHEN excluded.file_size_bytes > 0 THEN excluded.file_size_bytes ELSE repository_items.file_size_bytes END,
-      published_at = COALESCE(excluded.published_at, repository_items.published_at),
+      display_label = excluded.display_label,
+      file_role = excluded.file_role,
+      file_size_bytes = CASE WHEN excluded.file_size_bytes > 0 THEN excluded.file_size_bytes ELSE catalog_release_files.file_size_bytes END,
       status = excluded.status,
       error_message = excluded.error_message,
-      last_run_id = COALESCE(excluded.last_run_id, repository_items.last_run_id),
-      downloaded_at = COALESCE(excluded.downloaded_at, repository_items.downloaded_at)
+      last_run_id = COALESCE(excluded.last_run_id, catalog_release_files.last_run_id),
+      downloaded_at = COALESCE(excluded.downloaded_at, catalog_release_files.downloaded_at)
   `).run(
-    item.remoteUrl,
-    item.downloadUrl,
-    item.remotePath,
-    item.localPath,
-    item.filename,
-    item.systemName,
-    item.releaseType,
-    item.title,
-    item.fileSizeBytes ?? 0,
-    item.publishedAt ?? null,
-    item.status,
-    item.errorMessage ?? null,
-    item.lastRunId ?? null,
+    input.releaseId,
+    input.remoteUrl,
+    input.downloadUrl,
+    input.remotePath,
+    input.localPath,
+    input.filename,
+    displayLabel,
+    fileRole,
+    input.fileSizeBytes ?? 0,
+    input.status,
+    input.errorMessage ?? null,
+    input.lastRunId ?? null,
     now,
-    item.downloadedAt ?? null,
+    input.downloadedAt ?? null,
   );
 
-  const row = getDb().prepare('SELECT * FROM repository_items WHERE remote_url = ?').get(item.remoteUrl) as Record<string, unknown>;
-  return mapItemRow(row);
+  const fileRow = getDb()
+    .prepare('SELECT * FROM catalog_release_files WHERE release_id = ? AND filename = ?')
+    .get(input.releaseId, input.filename) as Record<string, unknown>;
+  const release = recomputeReleaseRollup(input.releaseId)!;
+  return {
+    file: mapFileRow(fileRow),
+    release,
+  };
+}
+
+export function updateCatalogReleaseMetadata(
+  id: number,
+  metadata: ReleaseMetadata,
+  coverLocalPath: string | null,
+  screenshotLocalPaths: string[],
+): RepositoryItemRecord | null {
+  const existing = getCatalogReleaseById(id);
+  if (!existing) return null;
+
+  const genres = metadata.genres || [];
+  const regions = metadata.regions || [];
+  const languages = metadata.languages || [];
+  const sources = metadata.sources || [];
+
+  const tx = getDb().transaction(() => {
+    getDb().prepare(`
+      UPDATE catalog_releases SET
+        wp_post_id = COALESCE(?, wp_post_id),
+        wp_post_type = COALESCE(?, wp_post_type),
+        title = COALESCE(NULLIF(?, ''), title),
+        publisher = ?,
+        developer = ?,
+        release_year = ?,
+        genres_json = ?,
+        regions_json = ?,
+        languages_json = ?,
+        sources_json = ?,
+        cover_local_path = ?,
+        screenshots_json = ?,
+        metadata_json = ?
+      WHERE id = ?
+    `).run(
+      metadata.wpPostId ?? null,
+      metadata.wpPostType ?? null,
+      metadata.title,
+      metadata.publisher ?? null,
+      metadata.developer ?? null,
+      metadata.releaseYear ?? null,
+      JSON.stringify(genres),
+      JSON.stringify(regions),
+      JSON.stringify(languages),
+      JSON.stringify(sources),
+      coverLocalPath,
+      JSON.stringify(screenshotLocalPaths),
+      JSON.stringify(metadata),
+      id,
+    );
+
+    // Reclassify child file roles using the refreshed RGT taxonomy context
+    for (const file of existing.files) {
+      const nextRole = classifyFileRole(file.filename, file.displayLabel, {
+        genres,
+        languages,
+        sources,
+        title: metadata.title,
+        systemName: existing.systemName,
+      });
+      getDb().prepare('UPDATE catalog_release_files SET file_role = ? WHERE id = ?').run(nextRole, file.id);
+    }
+  });
+
+  tx();
+  return recomputeReleaseRollup(id);
+}
+
+export function getCatalogReleaseById(id: number): RepositoryItemRecord | null {
+  const row = getDb().prepare('SELECT * FROM catalog_releases WHERE id = ?').get(id) as
+    | Record<string, unknown>
+    | undefined;
+  if (!row) return null;
+  const filesMap = loadFilesByReleaseIds([Number(row.id)]);
+  return mapReleaseRow(row, filesMap.get(Number(row.id)) || []);
 }
 
 export function getRepositoryItemById(id: number): RepositoryItemRecord | null {
-  const row = getDb().prepare('SELECT * FROM repository_items WHERE id = ?').get(id) as Record<string, unknown> | undefined;
-  return row ? mapItemRow(row) : null;
+  return getCatalogReleaseById(id);
+}
+
+export function getCatalogReleaseByRemoteUrl(remoteUrl: string): RepositoryItemRecord | null {
+  const canonical = remoteUrl.split('#')[0];
+  const row = getDb().prepare('SELECT * FROM catalog_releases WHERE remote_url = ?').get(canonical) as
+    | Record<string, unknown>
+    | undefined;
+  if (!row) return null;
+  const filesMap = loadFilesByReleaseIds([Number(row.id)]);
+  return mapReleaseRow(row, filesMap.get(Number(row.id)) || []);
 }
 
 export function getRepositoryItemByRemoteUrl(remoteUrl: string): RepositoryItemRecord | null {
-  const row = getDb().prepare('SELECT * FROM repository_items WHERE remote_url = ?').get(remoteUrl) as Record<string, unknown> | undefined;
-  return row ? mapItemRow(row) : null;
+  return getCatalogReleaseByRemoteUrl(remoteUrl);
+}
+
+export function getReleaseFileById(fileId: number): ReleaseFileRecord | null {
+  const row = getDb().prepare('SELECT * FROM catalog_release_files WHERE id = ?').get(fileId) as
+    | Record<string, unknown>
+    | undefined;
+  return row ? mapFileRow(row) : null;
+}
+
+export function countSiblingItemsInDir(dirPath: string): number {
+  const normalized = path.resolve(dirPath);
+  const prefix = normalized.endsWith(path.sep) ? normalized : normalized + path.sep;
+  const row = getDb()
+    .prepare('SELECT COUNT(*) as count FROM catalog_release_files WHERE local_path LIKE ?')
+    .get(`${prefix}%`) as { count: number };
+  return Number(row.count || 0);
+}
+
+function listDistinctJsonFacet(
+  columnName: 'release_tags_json' | 'genres_json' | 'regions_json' | 'languages_json' | 'sources_json',
+): string[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT DISTINCT je.value as val FROM catalog_releases, json_each(${columnName}) as je WHERE je.value IS NOT NULL AND je.value != '' ORDER BY je.value ASC`,
+    )
+    .all() as { val: string }[];
+  return rows.map((r) => String(r.val));
 }
 
 export function queryRepositoryItems(params: {
   search?: string;
   system?: string;
   status?: string;
+  tag?: string;
+  genre?: string;
+  region?: string;
+  language?: string;
   limit?: number;
   offset?: number;
-}): { items: RepositoryItemRecord[]; total: number } {
+}): { items: RepositoryItemRecord[]; total: number; facets: CatalogFacets } {
   const conditions: string[] = [];
   const args: unknown[] = [];
 
   if (params.search && params.search.trim()) {
     const q = `%${params.search.trim()}%`;
-    conditions.push('(title LIKE ? OR filename LIKE ? OR remote_path LIKE ? OR system_name LIKE ?)');
-    args.push(q, q, q, q);
+    conditions.push(`(
+      title LIKE ?
+      OR remote_path LIKE ?
+      OR system_name LIKE ?
+      OR COALESCE(publisher, '') LIKE ?
+      OR COALESCE(developer, '') LIKE ?
+      OR EXISTS (
+        SELECT 1 FROM catalog_release_files f
+        WHERE f.release_id = catalog_releases.id AND (f.filename LIKE ? OR f.display_label LIKE ?)
+      )
+    )`);
+    args.push(q, q, q, q, q, q, q);
   }
   if (params.system && params.system !== 'all') {
     conditions.push('system_name = ?');
@@ -660,40 +1145,49 @@ export function queryRepositoryItems(params: {
     conditions.push('status = ?');
     args.push(params.status);
   }
+  if (params.tag && params.tag !== 'all') {
+    conditions.push('EXISTS (SELECT 1 FROM json_each(release_tags_json) WHERE value = ?)');
+    args.push(params.tag);
+  }
+  if (params.genre && params.genre !== 'all') {
+    conditions.push('EXISTS (SELECT 1 FROM json_each(genres_json) WHERE value = ?)');
+    args.push(params.genre);
+  }
+  if (params.region && params.region !== 'all') {
+    conditions.push('EXISTS (SELECT 1 FROM json_each(regions_json) WHERE value = ?)');
+    args.push(params.region);
+  }
+  if (params.language && params.language !== 'all') {
+    conditions.push('EXISTS (SELECT 1 FROM json_each(languages_json) WHERE value = ?)');
+    args.push(params.language);
+  }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const limit = Math.min(200, Math.max(1, params.limit ?? 50));
   const offset = Math.max(0, params.offset ?? 0);
 
-  const countRow = getDb().prepare(`SELECT COUNT(*) as count FROM repository_items ${where}`).get(...args) as { count: number };
+  const countRow = getDb().prepare(`SELECT COUNT(*) as count FROM catalog_releases ${where}`).get(...args) as {
+    count: number;
+  };
   const rows = getDb()
-    .prepare(`SELECT * FROM repository_items ${where} ORDER BY id DESC LIMIT ? OFFSET ?`)
+    .prepare(`SELECT * FROM catalog_releases ${where} ORDER BY id DESC LIMIT ? OFFSET ?`)
     .all(...args, limit, offset) as Record<string, unknown>[];
 
-  return {
-    items: rows.map(mapItemRow),
-    total: Number(countRow.count),
-  };
-}
+  const releaseIds = rows.map((r) => Number(r.id));
+  const filesMap = loadFilesByReleaseIds(releaseIds);
 
-function mapItemRow(row: Record<string, unknown>): RepositoryItemRecord {
+  const facets: CatalogFacets = {
+    tags: listDistinctJsonFacet('release_tags_json'),
+    genres: listDistinctJsonFacet('genres_json'),
+    regions: listDistinctJsonFacet('regions_json'),
+    languages: listDistinctJsonFacet('languages_json'),
+    sources: listDistinctJsonFacet('sources_json'),
+  };
+
   return {
-    id: Number(row.id),
-    remoteUrl: String(row.remote_url),
-    downloadUrl: String(row.download_url),
-    remotePath: String(row.remote_path),
-    localPath: String(row.local_path),
-    filename: String(row.filename),
-    systemName: String(row.system_name),
-    releaseType: String(row.release_type),
-    title: String(row.title),
-    fileSizeBytes: Number(row.file_size_bytes),
-    publishedAt: row.published_at ? String(row.published_at) : null,
-    status: String(row.status) as ItemStatus,
-    errorMessage: row.error_message ? String(row.error_message) : null,
-    lastRunId: row.last_run_id !== null ? Number(row.last_run_id) : null,
-    discoveredAt: String(row.discovered_at),
-    downloadedAt: row.downloaded_at ? String(row.downloaded_at) : null,
+    items: rows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || [])),
+    total: Number(countRow.count),
+    facets,
   };
 }
 
@@ -713,9 +1207,9 @@ export function getCatalogTotalsAndSystems(): {
       COUNT(*) as total_items,
       SUM(CASE WHEN status = 'downloaded' THEN 1 ELSE 0 END) as downloaded_items,
       SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_items,
-      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_items,
-      COALESCE(SUM(CASE WHEN status IN ('downloaded', 'skipped') THEN file_size_bytes ELSE 0 END), 0) as total_bytes
-    FROM repository_items
+      SUM(CASE WHEN status IN ('failed', 'partial') THEN 1 ELSE 0 END) as failed_items,
+      COALESCE(SUM(CASE WHEN status IN ('downloaded', 'skipped', 'partial') THEN file_size_bytes ELSE 0 END), 0) as total_bytes
+    FROM catalog_releases
   `).get() as Record<string, unknown>;
 
   const runsRow = getDb().prepare('SELECT COUNT(*) as count FROM sync_runs').get() as { count: number };
@@ -726,9 +1220,9 @@ export function getCatalogTotalsAndSystems(): {
       COUNT(*) as total_items,
       SUM(CASE WHEN status = 'downloaded' THEN 1 ELSE 0 END) as downloaded_items,
       SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_items,
-      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_items,
-      COALESCE(SUM(CASE WHEN status IN ('downloaded', 'skipped') THEN file_size_bytes ELSE 0 END), 0) as total_bytes
-    FROM repository_items
+      SUM(CASE WHEN status IN ('failed', 'partial') THEN 1 ELSE 0 END) as failed_items,
+      COALESCE(SUM(CASE WHEN status IN ('downloaded', 'skipped', 'partial') THEN file_size_bytes ELSE 0 END), 0) as total_bytes
+    FROM catalog_releases
     GROUP BY system_name
     ORDER BY total_items DESC, system_name ASC
   `).all() as Record<string, unknown>[];
@@ -830,26 +1324,55 @@ export function deleteRepositoryItemsByIds(ids: number[]): RepositoryItemRecord[
 
   const placeholders = validIds.map(() => '?').join(',');
   const rows = getDb()
-    .prepare(`SELECT * FROM repository_items WHERE id IN (${placeholders})`)
+    .prepare(`SELECT * FROM catalog_releases WHERE id IN (${placeholders})`)
     .all(...validIds) as Record<string, unknown>[];
-  const items = rows.map(mapItemRow);
+  const filesMap = loadFilesByReleaseIds(validIds);
+  const items = rows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || []));
 
-  getDb().prepare(`DELETE FROM repository_items WHERE id IN (${placeholders})`).run(...validIds);
+  getDb().prepare(`DELETE FROM catalog_releases WHERE id IN (${placeholders})`).run(...validIds);
   return items;
 }
 
 export function deleteRepositoryItemsByLocalPaths(absPaths: string[]): number {
   let deleted = 0;
+  const affectedReleaseIds = new Set<number>();
+
   const tx = getDb().transaction(() => {
     for (const target of absPaths) {
       const normalized = path.resolve(target);
       const prefix = normalized.endsWith(path.sep) ? normalized : normalized + path.sep;
-      const info = getDb()
-        .prepare('DELETE FROM repository_items WHERE local_path = ? OR local_path LIKE ?')
+
+      const fileRows = getDb()
+        .prepare('SELECT id, release_id FROM catalog_release_files WHERE local_path = ? OR local_path LIKE ?')
+        .all(normalized, `${prefix}%`) as { id: number; release_id: number }[];
+
+      for (const fr of fileRows) {
+        affectedReleaseIds.add(Number(fr.release_id));
+      }
+
+      const fileInfo = getDb()
+        .prepare('DELETE FROM catalog_release_files WHERE local_path = ? OR local_path LIKE ?')
         .run(normalized, `${prefix}%`);
-      deleted += info.changes;
+
+      const relInfo = getDb()
+        .prepare('DELETE FROM catalog_releases WHERE local_path = ? OR local_path LIKE ?')
+        .run(normalized, `${prefix}%`);
+
+      deleted += Math.max(fileInfo.changes, relInfo.changes);
+    }
+
+    for (const releaseId of affectedReleaseIds) {
+      const remaining = getDb()
+        .prepare('SELECT COUNT(*) as count FROM catalog_release_files WHERE release_id = ?')
+        .get(releaseId) as { count: number };
+      if (remaining.count === 0) {
+        getDb().prepare('DELETE FROM catalog_releases WHERE id = ?').run(releaseId);
+      } else {
+        recomputeReleaseRollup(releaseId);
+      }
     }
   });
+
   tx();
   return deleted;
 }

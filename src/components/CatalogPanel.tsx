@@ -1,35 +1,55 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertCircle,
   CheckCircle2,
   ChevronRight,
   FileArchive,
   Folder,
+  Gamepad2,
+  LayoutGrid,
+  List,
   RefreshCw,
   RotateCcw,
   Search,
   SkipForward,
   Trash2,
+  X,
   XCircle,
 } from 'lucide-react';
-import type { FsTreeNode, RepositoryItemRecord, ServiceStatusSnapshot } from '../types';
+import type { CatalogFacets, FsTreeNode, RepositoryItemRecord, ServiceStatusSnapshot } from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
+import { GameDetailDrawer } from './GameDetailDrawer';
 
 interface CatalogPanelProps {
   status: ServiceStatusSnapshot;
-  onRetryItem: (itemId: number) => Promise<void>;
+  onRetryItem: (itemId: number, fileId?: number) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
 }
 
 export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPanelProps) {
   const [viewMode, setViewMode] = useState<'catalog' | 'filesystem'>('catalog');
+  const [catalogLayout, setCatalogLayout] = useState<'table' | 'grid'>('table');
   const [search, setSearch] = useState('');
   const [systemFilter, setSystemFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [tagFilter, setTagFilter] = useState('all');
+  const [genreFilter, setGenreFilter] = useState('all');
+  const [regionFilter, setRegionFilter] = useState('all');
+  const [languageFilter, setLanguageFilter] = useState('all');
   const [items, setItems] = useState<RepositoryItemRecord[]>([]);
+  const [facets, setFacets] = useState<CatalogFacets>({
+    tags: [],
+    genres: [],
+    regions: [],
+    languages: [],
+    sources: [],
+  });
   const [totalItems, setTotalItems] = useState(0);
   const [loading, setLoading] = useState(true);
   const [retryingId, setRetryingId] = useState<number | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [failedCovers, setFailedCovers] = useState<Set<number>>(new Set());
+  const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
 
   // Selection state for Indexed Catalog (filtered items)
   const [selectedCatalogIds, setSelectedCatalogIds] = useState<Set<number>>(new Set());
@@ -50,6 +70,10 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
         search,
         system: systemFilter,
         status: statusFilter,
+        tag: tagFilter,
+        genre: genreFilter,
+        region: regionFilter,
+        language: languageFilter,
         limit: '150',
         offset: '0',
       });
@@ -59,6 +83,16 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
         const nextItems = (data.items || []) as RepositoryItemRecord[];
         setItems(nextItems);
         setTotalItems(data.total || 0);
+        if (data.facets) {
+          setFacets({
+            tags: Array.isArray(data.facets.tags) ? data.facets.tags : [],
+            genres: Array.isArray(data.facets.genres) ? data.facets.genres : [],
+            regions: Array.isArray(data.facets.regions) ? data.facets.regions : [],
+            languages: Array.isArray(data.facets.languages) ? data.facets.languages : [],
+            sources: Array.isArray(data.facets.sources) ? data.facets.sources : [],
+          });
+        }
+        setFailedCovers(new Set());
         // Keep selection scoped strictly to visible/filtered items
         const visibleIds = new Set(nextItems.map((i) => i.id));
         setSelectedCatalogIds((prev) => {
@@ -73,7 +107,7 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
     } finally {
       setLoading(false);
     }
-  }, [search, systemFilter, statusFilter]);
+  }, [search, systemFilter, statusFilter, tagFilter, genreFilter, regionFilter, languageFilter]);
 
   const loadFsTree = useCallback(async (subpath: string) => {
     setFsLoading(true);
@@ -124,11 +158,47 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
     setConfirmFsBulk(false);
   }, [filteredFsNodes]);
 
-  const handleRetry = async (id: number) => {
+  const openDetailItem = async (item: RepositoryItemRecord) => {
+    setActiveDetailItem(item);
+    try {
+      const res = await fetch(`/api/items/${item.id}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.item) {
+          const fresh = data.item as RepositoryItemRecord;
+          setActiveDetailItem((current) => (current?.id === fresh.id ? fresh : current));
+          setItems((prev) => prev.map((row) => (row.id === fresh.id ? fresh : row)));
+        }
+      }
+    } catch {
+      // Keep optimistic cached item open on transient error
+    }
+  };
+
+  const handleItemUpdated = (updated: RepositoryItemRecord) => {
+    setActiveDetailItem(updated);
+    setItems((prev) => prev.map((row) => (row.id === updated.id ? updated : row)));
+    setFailedCovers((prev) => {
+      if (!prev.has(updated.id)) return prev;
+      const next = new Set(prev);
+      next.delete(updated.id);
+      return next;
+    });
+    void loadCatalog();
+  };
+
+  const handleRetry = async (id: number, fileId?: number) => {
     setRetryingId(id);
     try {
-      await onRetryItem(id);
+      await onRetryItem(id, fileId);
       await loadCatalog();
+      if (activeDetailItem?.id === id) {
+        const res = await fetch(`/api/items/${id}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.item) setActiveDetailItem(data.item as RepositoryItemRecord);
+        }
+      }
     } finally {
       setRetryingId(null);
     }
@@ -146,6 +216,9 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
       if (res.ok) {
         setSelectedCatalogIds(new Set());
         setConfirmCatalogBulk(false);
+        if (activeDetailItem && ids.includes(activeDetailItem.id)) {
+          setActiveDetailItem(null);
+        }
         await Promise.all([loadCatalog(), onRefreshStatus()]);
       }
     } finally {
@@ -212,77 +285,102 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
     });
   };
 
+  const hasActiveFilters =
+    search.trim() !== '' ||
+    systemFilter !== 'all' ||
+    statusFilter !== 'all' ||
+    tagFilter !== 'all' ||
+    genreFilter !== 'all' ||
+    regionFilter !== 'all' ||
+    languageFilter !== 'all';
+
+  const clearCatalogFilters = () => {
+    setSearch('');
+    setSystemFilter('all');
+    setStatusFilter('all');
+    setTagFilter('all');
+    setGenreFilter('all');
+    setRegionFilter('all');
+    setLanguageFilter('all');
+  };
+
   const breadcrumbs = fsPath ? fsPath.split('/').filter(Boolean) : [];
 
   return (
     <div className="space-y-5">
       {/* Toolbar */}
       <div className="border border-crt-border bg-crt-surface rounded-md p-4 space-y-3">
-        <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
-          <div className="flex items-center gap-1 p-1 bg-crt-bg border border-crt-border rounded-md self-start">
-            <button
-              type="button"
-              onClick={() => setViewMode('catalog')}
-              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
-                viewMode === 'catalog'
-                  ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
-                  : 'text-crt-muted hover:text-crt-text border border-transparent'
-              }`}
-            >
-              Indexed Catalog ({totalItems})
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('filesystem')}
-              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
-                viewMode === 'filesystem'
-                  ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
-                  : 'text-crt-muted hover:text-crt-text border border-transparent'
-              }`}
-            >
-              Local Disk Tree
-            </button>
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1 p-1 bg-crt-bg border border-crt-border rounded-md self-start">
+              <button
+                type="button"
+                onClick={() => setViewMode('catalog')}
+                className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                  viewMode === 'catalog'
+                    ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
+                    : 'text-crt-muted hover:text-crt-text border border-transparent'
+                }`}
+              >
+                Indexed Catalog ({totalItems})
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('filesystem')}
+                className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                  viewMode === 'filesystem'
+                    ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
+                    : 'text-crt-muted hover:text-crt-text border border-transparent'
+                }`}
+              >
+                Local Disk Tree
+              </button>
+            </div>
+
+            {viewMode === 'catalog' && (
+              <div className="flex items-center gap-1 p-1 bg-crt-bg border border-crt-border rounded-md self-start">
+                <button
+                  type="button"
+                  onClick={() => setCatalogLayout('table')}
+                  aria-label="Table view"
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                    catalogLayout === 'table'
+                      ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
+                      : 'text-crt-muted hover:text-crt-text border border-transparent'
+                  }`}
+                >
+                  <List className="h-3.5 w-3.5" />
+                  Table
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCatalogLayout('grid')}
+                  aria-label="Box-Art Grid view"
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                    catalogLayout === 'grid'
+                      ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
+                      : 'text-crt-muted hover:text-crt-text border border-transparent'
+                  }`}
+                >
+                  <LayoutGrid className="h-3.5 w-3.5" />
+                  Box-Art Grid
+                </button>
+              </div>
+            )}
           </div>
 
           {viewMode === 'catalog' ? (
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="relative">
-                <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search title, filename, path..."
-                  className="pl-8 pr-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-60"
-                />
-              </div>
-
-              <select
-                value={systemFilter}
-                onChange={(e) => setSystemFilter(e.target.value)}
-                aria-label="Filter by console system"
-                className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
-              >
-                <option value="all">All Systems ({status.systems.length})</option>
-                {status.systems.map((sys) => (
-                  <option key={sys.systemName} value={sys.systemName}>
-                    {sys.systemName} ({sys.totalItems})
-                  </option>
-                ))}
-              </select>
-
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                aria-label="Filter by transfer status"
-                className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
-              >
-                <option value="all">All Statuses</option>
-                <option value="downloaded">Downloaded</option>
-                <option value="skipped">Skipped (Exists)</option>
-                <option value="failed">Failed</option>
-              </select>
-
+            <div className="flex items-center gap-2 self-start lg:self-auto">
+              {hasActiveFilters && (
+                <button
+                  type="button"
+                  onClick={clearCatalogFilters}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors whitespace-nowrap"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Clear Filters
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => void loadCatalog()}
@@ -318,6 +416,105 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
             </div>
           )}
         </div>
+
+        {/* Catalog Filter Row */}
+        {viewMode === 'catalog' && (
+          <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-crt-border">
+            <div className="relative">
+              <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search title, publisher, file..."
+                className="pl-8 pr-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-60"
+              />
+            </div>
+
+            <select
+              value={systemFilter}
+              onChange={(e) => setSystemFilter(e.target.value)}
+              aria-label="Filter by console system"
+              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+            >
+              <option value="all">All Systems ({status.systems.length})</option>
+              {status.systems.map((sys) => (
+                <option key={sys.systemName} value={sys.systemName}>
+                  {sys.systemName} ({sys.totalItems})
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={tagFilter}
+              onChange={(e) => setTagFilter(e.target.value)}
+              aria-label="Filter by release type"
+              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+            >
+              <option value="all">All Types ({facets.tags.length})</option>
+              {facets.tags.map((tag) => (
+                <option key={tag} value={tag}>
+                  {tag}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={genreFilter}
+              onChange={(e) => setGenreFilter(e.target.value)}
+              aria-label="Filter by genre"
+              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+            >
+              <option value="all">All Genres ({facets.genres.length})</option>
+              {facets.genres.map((genre) => (
+                <option key={genre} value={genre}>
+                  {genre}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={regionFilter}
+              onChange={(e) => setRegionFilter(e.target.value)}
+              aria-label="Filter by region"
+              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+            >
+              <option value="all">All Regions ({facets.regions.length})</option>
+              {facets.regions.map((region) => (
+                <option key={region} value={region}>
+                  {region}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={languageFilter}
+              onChange={(e) => setLanguageFilter(e.target.value)}
+              aria-label="Filter by language"
+              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+            >
+              <option value="all">All Languages ({facets.languages.length})</option>
+              {facets.languages.map((lang) => (
+                <option key={lang} value={lang}>
+                  {lang}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              aria-label="Filter by transfer status"
+              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+            >
+              <option value="all">All Statuses</option>
+              <option value="downloaded">Downloaded</option>
+              <option value="skipped">Skipped (Exists)</option>
+              <option value="partial">Partial</option>
+              <option value="failed">Failed</option>
+            </select>
+          </div>
+        )}
 
         {/* Contextual Bulk Selection Bar (Indexed Catalog) */}
         {viewMode === 'catalog' && selectedCatalogIds.size > 0 && (
@@ -424,7 +621,7 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
           {loading ? (
             <div className="p-6 space-y-3">
               {[0, 1, 2, 3, 4].map((row) => (
-                <div key={row} className="h-9 bg-crt-bg border border-crt-border rounded animate-pulse" />
+                <div key={row} className="h-10 bg-crt-bg border border-crt-border rounded animate-pulse" />
               ))}
             </div>
           ) : items.length === 0 ? (
@@ -435,7 +632,7 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
                 Run an Incremental Sync from the Sync tab to crawl retrogametalk.com/repo and mirror releases locally.
               </p>
             </div>
-          ) : (
+          ) : catalogLayout === 'table' ? (
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
@@ -461,43 +658,85 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
                   {items.map((item) => {
                     const checked = selectedCatalogIds.has(item.id);
                     const isDeletingThis = deletingKey === `item-${item.id}`;
+                    const showCoverThumb = Boolean(item.coverLocalPath) && !failedCovers.has(item.id);
+                    const assetVersion = item.metadata?.fetchedAt
+                      ? `&v=${encodeURIComponent(item.metadata.fetchedAt)}`
+                      : '';
+                    const subMeta = [
+                      item.genres.length > 0 ? item.genres.join(', ') : null,
+                      item.regions.length > 0 ? item.regions.join(', ') : null,
+                      item.releaseYear,
+                      `${item.filesCount} file${item.filesCount === 1 ? '' : 's'}`,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ');
+                    const tagsDisplay =
+                      item.releaseTags.length > 0 ? item.releaseTags.join(' · ') : item.releaseType;
+
                     return (
                       <tr
                         key={item.id}
-                        className={`h-10 transition-colors ${
+                        onClick={() => void openDetailItem(item)}
+                        className={`cursor-pointer transition-colors ${
                           checked ? 'bg-crt-phosphor/5' : 'hover:bg-crt-elevated'
                         }`}
                       >
-                        <td className="pl-4 pr-2">
+                        <td className="pl-4 pr-2 py-2" onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"
                             checked={checked}
                             onChange={() => toggleCatalogItem(item.id)}
-                            aria-label={`Select ${item.filename}`}
+                            aria-label={`Select ${item.title}`}
                             className="accent-crt-phosphor cursor-pointer"
                           />
                         </td>
-                        <td className="px-3 font-mono text-crt-text whitespace-nowrap">
+                        <td className="px-3 py-2 font-mono text-crt-text whitespace-nowrap">
                           {item.systemName}
                         </td>
-                        <td className="px-3 max-w-md">
-                          <div className="font-medium text-crt-text truncate">{item.title}</div>
-                          <div className="font-mono text-[11px] text-crt-muted truncate">
-                            {item.remotePath}
-                          </div>
-                          {item.errorMessage && (
-                            <div className="font-mono text-[11px] text-crt-crimson truncate">
-                              {item.errorMessage}
+                        <td className="px-3 py-2 max-w-md">
+                          <div className="flex items-center gap-3 min-w-0">
+                            {showCoverThumb ? (
+                              <img
+                                src={`/api/items/${item.id}/asset?kind=cover${assetVersion}`}
+                                alt={`${item.title} cover`}
+                                loading="lazy"
+                                onError={() =>
+                                  setFailedCovers((prev) => {
+                                    const next = new Set(prev);
+                                    next.add(item.id);
+                                    return next;
+                                  })
+                                }
+                                className="w-8 h-10 object-cover rounded border border-crt-border bg-crt-bg shrink-0"
+                              />
+                            ) : (
+                              <div className="w-8 h-10 rounded border border-crt-border bg-crt-bg flex items-center justify-center shrink-0">
+                                <Gamepad2 className="h-3.5 w-3.5 text-crt-border-strong" />
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <div className="font-medium text-crt-text truncate">{item.title}</div>
+                              {subMeta && (
+                                <div className="text-[11px] text-crt-muted truncate">{subMeta}</div>
+                              )}
+                              <div className="font-mono text-[11px] text-crt-muted/80 truncate">
+                                {item.remotePath}
+                              </div>
+                              {item.errorMessage && (
+                                <div className="font-mono text-[11px] text-crt-crimson truncate">
+                                  {item.errorMessage}
+                                </div>
+                              )}
                             </div>
-                          )}
+                          </div>
                         </td>
-                        <td className="px-3 font-mono text-crt-muted whitespace-nowrap">
-                          {item.releaseType}
+                        <td className="px-3 py-2 font-mono text-crt-muted max-w-xs">
+                          <span className="line-clamp-2">{tagsDisplay}</span>
                         </td>
-                        <td className="px-3 font-mono text-right text-crt-text tabular-nums whitespace-nowrap">
+                        <td className="px-3 py-2 font-mono text-right text-crt-text tabular-nums whitespace-nowrap">
                           {formatBytes(item.fileSizeBytes)}
                         </td>
-                        <td className="px-3 font-mono whitespace-nowrap">
+                        <td className="px-3 py-2 font-mono whitespace-nowrap">
                           <span
                             className={`inline-flex items-center gap-1.5 ${
                               item.status === 'downloaded'
@@ -512,12 +751,16 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
                             {item.status === 'downloaded' && <CheckCircle2 className="h-3.5 w-3.5" />}
                             {item.status === 'skipped' && <SkipForward className="h-3.5 w-3.5" />}
                             {item.status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
+                            {item.status === 'partial' && <AlertCircle className="h-3.5 w-3.5" />}
                             {item.status}
                           </span>
                         </td>
-                        <td className="px-4 text-right whitespace-nowrap">
+                        <td
+                          className="px-4 py-2 text-right whitespace-nowrap"
+                          onClick={(e) => e.stopPropagation()}
+                        >
                           <div className="inline-flex items-center justify-end gap-2">
-                            {item.status === 'failed' ? (
+                            {item.status === 'failed' || item.status === 'partial' ? (
                               <button
                                 type="button"
                                 disabled={retryingId === item.id || Boolean(status.activeRun)}
@@ -536,8 +779,8 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
                               type="button"
                               disabled={isDeletingThis}
                               onClick={() => void handleDeleteCatalogItems([item.id])}
-                              aria-label={`Delete ${item.filename}`}
-                              title="Delete item and local mirrored file"
+                              aria-label={`Delete ${item.title}`}
+                              title="Delete release and local mirrored files"
                               className="p-1.5 border border-crt-border hover:border-crt-crimson text-crt-muted hover:text-crt-crimson rounded transition-colors disabled:opacity-50"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
@@ -549,6 +792,134 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
                   })}
                 </tbody>
               </table>
+            </div>
+          ) : (
+            <div>
+              {/* Grid Header Bar */}
+              <div className="px-4 py-2.5 border-b border-crt-border bg-crt-bg flex items-center justify-between text-xs font-mono text-crt-muted">
+                <label className="inline-flex items-center gap-2 cursor-pointer text-crt-text">
+                  <input
+                    type="checkbox"
+                    checked={allCatalogSelected}
+                    onChange={toggleAllCatalog}
+                    aria-label="Select all filtered catalog items"
+                    className="accent-crt-phosphor cursor-pointer"
+                  />
+                  <span>Select all visible ({items.length})</span>
+                </label>
+                <span>Click any release to inspect artwork, specs &amp; ROMs</span>
+              </div>
+
+              {/* Box-Art Grid */}
+              <div className="p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                {items.map((item) => {
+                  const checked = selectedCatalogIds.has(item.id);
+                  const showCover = Boolean(item.coverLocalPath) && !failedCovers.has(item.id);
+                  const assetVersion = item.metadata?.fetchedAt
+                    ? `&v=${encodeURIComponent(item.metadata.fetchedAt)}`
+                    : '';
+                  const subline = [
+                    item.systemName,
+                    item.releaseYear,
+                    item.regions.length > 0 ? item.regions.join('/') : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ');
+                  const tagsDisplay =
+                    item.releaseTags.length > 0 ? item.releaseTags.join(' · ') : item.releaseType;
+
+                  return (
+                    <div
+                      key={item.id}
+                      onClick={() => void openDetailItem(item)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          void openDetailItem(item);
+                        }
+                      }}
+                      className={`group relative border rounded-md overflow-hidden bg-crt-bg cursor-pointer transition-colors flex flex-col text-left focus:outline-none focus:border-crt-phosphor ${
+                        checked
+                          ? 'border-crt-phosphor bg-crt-phosphor/5'
+                          : 'border-crt-border hover:border-crt-border-strong'
+                      }`}
+                    >
+                      {/* Cover Art Container */}
+                      <div className="relative aspect-[3/4] bg-crt-surface border-b border-crt-border overflow-hidden">
+                        {showCover ? (
+                          <img
+                            src={`/api/items/${item.id}/asset?kind=cover${assetVersion}`}
+                            alt={`${item.title} cover art`}
+                            loading="lazy"
+                            onError={() =>
+                              setFailedCovers((prev) => {
+                                const next = new Set(prev);
+                                next.add(item.id);
+                                return next;
+                              })
+                            }
+                            className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-200"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex flex-col items-center justify-center p-4 text-center space-y-2">
+                            <Gamepad2 className="h-8 w-8 text-crt-border-strong" />
+                            <span className="font-mono text-[11px] text-crt-muted">{item.systemName}</span>
+                          </div>
+                        )}
+
+                        <div
+                          className="absolute top-2 left-2 z-10 p-1 rounded bg-crt-bg/85 border border-crt-border"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleCatalogItem(item.id)}
+                            aria-label={`Select ${item.title}`}
+                            className="accent-crt-phosphor cursor-pointer block"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Card Body */}
+                      <div className="p-3 flex-1 flex flex-col justify-between gap-2">
+                        <div className="space-y-1">
+                          <h3 className="font-display text-sm font-semibold text-crt-text leading-snug line-clamp-2 group-hover:text-crt-phosphor transition-colors">
+                            {item.title}
+                          </h3>
+                          <p className="font-mono text-[11px] text-crt-muted truncate">{subline}</p>
+                          <p className="font-mono text-[11px] text-crt-phosphor/90 truncate">{tagsDisplay}</p>
+                        </div>
+
+                        <div className="pt-2 border-t border-crt-border flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
+                          <span className="text-crt-text truncate">
+                            {formatBytes(item.fileSizeBytes)} · {item.filesCount}f
+                          </span>
+                          <span
+                            className={`inline-flex items-center gap-1 shrink-0 ${
+                              item.status === 'downloaded'
+                                ? 'text-crt-phosphor'
+                                : item.status === 'skipped'
+                                  ? 'text-crt-muted'
+                                  : item.status === 'failed'
+                                    ? 'text-crt-crimson'
+                                    : 'text-crt-amber'
+                            }`}
+                          >
+                            {item.status === 'downloaded' && <CheckCircle2 className="h-3 w-3" />}
+                            {item.status === 'skipped' && <SkipForward className="h-3 w-3" />}
+                            {item.status === 'failed' && <XCircle className="h-3 w-3" />}
+                            {item.status === 'partial' && <AlertCircle className="h-3 w-3" />}
+                            {item.status}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>
@@ -674,6 +1045,18 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
           )}
         </div>
       )}
+
+      {/* Slide-Over Game Detail Drawer */}
+      <GameDetailDrawer
+        item={activeDetailItem}
+        activeRun={Boolean(status.activeRun)}
+        onClose={() => setActiveDetailItem(null)}
+        onItemUpdated={handleItemUpdated}
+        onRetryItem={handleRetry}
+        onDeleteItem={async (id) => {
+          await handleDeleteCatalogItems([id]);
+        }}
+      />
     </div>
   );
 }

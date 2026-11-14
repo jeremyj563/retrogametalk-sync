@@ -8,23 +8,28 @@ import {
   appendActivityLog,
   clearActivityLogs,
   clearSyncRuns,
+  countSiblingItemsInDir,
   createSyncRun,
   deleteRepositoryItemsByIds,
   deleteRepositoryItemsByLocalPaths,
   getCatalogTotalsAndSystems,
   getDataDir,
   getInternalConfig,
+  getReleaseFileById,
   getRepositoryItemById,
   getRepositoryItemByRemoteUrl,
   listSyncRuns,
   releaseDistributedLock,
   saveDiscoveredSystems,
   setWatermark,
+  updateCatalogReleaseMetadata,
   updateConfig,
   updateSyncRun,
-  upsertRepositoryItem,
+  upsertCatalogRelease,
+  upsertReleaseFile,
 } from './db.ts';
 import { AdaptiveRateLimiter } from './rateLimiter.ts';
+import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import {
   type DiscoveredRelease,
   type LoggerFn,
@@ -37,6 +42,9 @@ import type {
   ConfigUpdateInput,
   FsTreeNode,
   LogLevel,
+  ReleaseFileRecord,
+  ReleaseMetadata,
+  RepositoryItemRecord,
   RunMode,
   RunTrigger,
   ScraperConfigInternal,
@@ -104,6 +112,30 @@ export class ScraperOrchestrator extends EventEmitter {
       }
       return targetUrl;
     }
+  }
+
+  private resolveReleaseDir(item: RepositoryItemRecord, root: string): string | null {
+    if (item.localPath) {
+      const candidate = path.resolve(item.localPath);
+      if (candidate.startsWith(root + path.sep) && candidate !== root) {
+        try {
+          if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+            return path.dirname(candidate);
+          }
+        } catch {
+          // Use candidate path directly
+        }
+        return candidate;
+      }
+    }
+    const firstFile = item.files.find((f) => Boolean(f.localPath));
+    if (firstFile?.localPath) {
+      const dir = path.dirname(path.resolve(firstFile.localPath));
+      if (dir.startsWith(root + path.sep) && dir !== root) {
+        return dir;
+      }
+    }
+    return null;
   }
 
   reconfigureScheduler(config?: ScraperConfigInternal): void {
@@ -197,7 +229,10 @@ export class ScraperOrchestrator extends EventEmitter {
           entry.name === 'scraper.db' ||
           entry.name === 'scraper.db-wal' ||
           entry.name === 'scraper.db-shm' ||
-          entry.name === 'cookies.json'
+          entry.name === 'cookies.json' ||
+          entry.name === 'metadata.json' ||
+          entry.name === 'screenshots' ||
+          /^cover\.(jpg|jpeg|png|webp|gif)$/i.test(entry.name)
         ) {
           continue;
         }
@@ -314,20 +349,46 @@ export class ScraperOrchestrator extends EventEmitter {
     let filesRemoved = 0;
 
     for (const item of removedItems) {
-      if (!item.localPath) continue;
-      const target = path.resolve(item.localPath);
-      if (target.startsWith(root + path.sep) && fs.existsSync(target)) {
+      for (const file of item.files) {
+        if (!file.localPath) continue;
+        const target = path.resolve(file.localPath);
+        if (target.startsWith(root + path.sep) && fs.existsSync(target)) {
+          try {
+            fs.rmSync(target, { recursive: true, force: true });
+            filesRemoved += 1;
+          } catch {
+            // Ignore filesystem removal error if already gone
+          }
+        }
+      }
+
+      const releaseDir = this.resolveReleaseDir(item, root);
+      if (
+        releaseDir &&
+        releaseDir.startsWith(root + path.sep) &&
+        releaseDir !== root &&
+        countSiblingItemsInDir(releaseDir) === 0
+      ) {
         try {
-          fs.rmSync(target, { recursive: true, force: true });
-          filesRemoved += 1;
+          fs.rmSync(path.join(releaseDir, 'metadata.json'), { force: true });
+          fs.rmSync(path.join(releaseDir, 'screenshots'), { recursive: true, force: true });
+          for (const ext of ['.jpg', '.jpeg', '.png', '.webp', '.gif']) {
+            fs.rmSync(path.join(releaseDir, `cover${ext}`), { force: true });
+          }
+          if (fs.existsSync(releaseDir) && fs.readdirSync(releaseDir).length === 0) {
+            fs.rmdirSync(releaseDir);
+          }
         } catch {
-          // Ignore filesystem removal error if already gone
+          // Non-fatal cleanup
         }
       }
     }
 
     if (removedItems.length > 0) {
-      this.log('info', `Deleted ${removedItems.length} catalog item(s) (${filesRemoved} file(s) removed from disk)`);
+      this.log(
+        'info',
+        `Deleted ${removedItems.length} catalog release(s) (${filesRemoved} file(s) removed from disk)`,
+      );
       this.emitStatus();
     }
 
@@ -335,6 +396,170 @@ export class ScraperOrchestrator extends EventEmitter {
       deletedCount: removedItems.length,
       filesRemoved,
     };
+  }
+
+  resolveItemAssetFile(
+    itemId: number,
+    kind: 'cover' | 'screenshot',
+    index = 0,
+  ): { absPath: string; filename: string } | null {
+    const item = getRepositoryItemById(itemId);
+    if (!item) return null;
+    const cfg = getInternalConfig();
+    const root = path.resolve(cfg.downloadDir);
+    const releaseDir = this.resolveReleaseDir(item, root);
+    if (!releaseDir || (!releaseDir.startsWith(root + path.sep) && releaseDir !== root)) return null;
+
+    if (kind === 'cover') {
+      const candidates: string[] = [];
+      if (item.coverLocalPath) candidates.push(path.resolve(item.coverLocalPath));
+      if (item.metadata?.coverLocalRelPath) {
+        candidates.push(path.resolve(releaseDir, item.metadata.coverLocalRelPath));
+      }
+      for (const ext of ['.jpg', '.png', '.webp', '.gif']) {
+        candidates.push(path.join(releaseDir, `cover${ext}`));
+      }
+      for (const candidate of candidates) {
+        if (candidate.startsWith(releaseDir + path.sep) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return { absPath: candidate, filename: path.basename(candidate) };
+        }
+      }
+      return null;
+    }
+
+    const relShots = item.metadata?.screenshotLocalRelPaths || [];
+    if (index >= 0 && index < relShots.length) {
+      const candidate = path.resolve(releaseDir, relShots[index]);
+      if (candidate.startsWith(releaseDir + path.sep) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        return { absPath: candidate, filename: path.basename(candidate) };
+      }
+    }
+
+    const shotsDir = path.join(releaseDir, 'screenshots');
+    if (fs.existsSync(shotsDir)) {
+      const files = fs
+        .readdirSync(shotsDir)
+        .filter((f) => !f.startsWith('.') && !f.endsWith('.part'))
+        .sort();
+      if (index >= 0 && index < files.length) {
+        const candidate = path.join(shotsDir, files[index]);
+        return { absPath: candidate, filename: files[index] };
+      }
+    }
+    return null;
+  }
+
+  resolveItemRomFile(itemId: number, fileId?: number): { absPath: string; filename: string } | null {
+    const item = getRepositoryItemById(itemId);
+    if (!item) return null;
+    const cfg = getInternalConfig();
+    const root = path.resolve(cfg.downloadDir);
+
+    let targetFile: ReleaseFileRecord | null = null;
+    if (fileId !== undefined && Number.isInteger(fileId) && fileId > 0) {
+      targetFile = item.files.find((f) => f.id === fileId) || null;
+      if (!targetFile) {
+        const direct = getReleaseFileById(fileId);
+        if (direct && direct.releaseId === item.id) {
+          targetFile = direct;
+        }
+      }
+    } else {
+      targetFile =
+        item.files.find(
+          (f) =>
+            (f.status === 'downloaded' || f.status === 'skipped') &&
+            f.localPath &&
+            fs.existsSync(path.resolve(f.localPath)) &&
+            fs.statSync(path.resolve(f.localPath)).isFile(),
+        ) ||
+        item.files.find(
+          (f) =>
+            f.localPath &&
+            fs.existsSync(path.resolve(f.localPath)) &&
+            fs.statSync(path.resolve(f.localPath)).isFile(),
+        ) ||
+        null;
+    }
+
+    if (!targetFile || !targetFile.localPath) return null;
+    const absPath = path.resolve(targetFile.localPath);
+    if (!absPath.startsWith(root + path.sep)) return null;
+    if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) return null;
+    return { absPath, filename: targetFile.filename || path.basename(absPath) };
+  }
+
+  async fetchItemMetadata(itemId: number): Promise<RepositoryItemRecord> {
+    const item = getRepositoryItemById(itemId);
+    if (!item) {
+      throw new Error(`Catalog item #${itemId} not found`);
+    }
+    const pageUrl = item.remoteUrl.split('#')[0];
+    if (!pageUrl.startsWith('http')) {
+      throw new Error('Catalog item has no remote release URL');
+    }
+
+    const cfg = getInternalConfig();
+    const root = path.resolve(cfg.downloadDir);
+    const runLogger: LoggerFn = (level, msg, detail) => this.log(level, msg, detail ?? null);
+    if (cfg.username && cfg.password && !this.client.getAuthStatus(cfg).authenticated) {
+      await this.client.login(cfg, undefined, runLogger);
+    }
+
+    const pageData = await this.client.fetchPageHtml(pageUrl, cfg, undefined, runLogger);
+    if (pageData.status >= 400) {
+      throw new Error(`Failed to fetch release page (HTTP ${pageData.status})`);
+    }
+
+    const wpPostIdHint = item.wpPostId ?? this.client.extractWpPostIdHint(pageData.html);
+    const wpData = await this.client.fetchReleaseWpMetadata(
+      pageData.finalUrl,
+      wpPostIdHint,
+      cfg,
+      undefined,
+      runLogger,
+    );
+
+    const fileRoles = item.files.map((f) =>
+      classifyFileRole(f.filename, f.displayLabel, {
+        genres: wpData?.genres ?? item.genres,
+        languages: wpData?.languages ?? item.languages,
+        sources: wpData?.sources ?? item.sources,
+        title: wpData?.title ?? item.title,
+        systemName: item.systemName,
+      }),
+    );
+
+    const extractedMeta = this.client.extractReleaseMetadata(pageData.html, pageData.finalUrl, wpData, fileRoles);
+    const releaseDir =
+      this.resolveReleaseDir(item, root) ||
+      path.dirname(resolveMirroredPaths(cfg.baseUrl, pageData.finalUrl, cfg.downloadDir, 'probe.zip').localPath);
+
+    const mirrored = await this.client.mirrorReleaseAssets(
+      extractedMeta,
+      releaseDir,
+      cfg,
+      undefined,
+      runLogger,
+    );
+
+    const updated = updateCatalogReleaseMetadata(
+      item.id,
+      mirrored.metadata,
+      mirrored.coverAbsPath,
+      mirrored.screenshotAbsPaths,
+    );
+    if (!updated) {
+      throw new Error(`Catalog item #${itemId} could not be updated`);
+    }
+
+    this.log(
+      'info',
+      `Mirrored metadata & artwork for ${updated.title}`,
+      `${mirrored.coverAbsPath ? 'cover + ' : ''}${mirrored.screenshotAbsPaths.length} screenshots`,
+    );
+    this.emitStatus();
+    return updated;
   }
 
   deleteFsEntries(relativePaths: string[]): { deletedCount: number; catalogRowsRemoved: number } {
@@ -441,75 +666,163 @@ export class ScraperOrchestrator extends EventEmitter {
     return run;
   }
 
-  async retryItem(itemId: number): Promise<SyncRunRecord> {
+  async retryItem(itemId: number, fileId?: number): Promise<SyncRunRecord> {
     const item = getRepositoryItemById(itemId);
     if (!item) {
-      throw new Error(`Repository item #${itemId} not found`);
+      throw new Error(`Catalog release #${itemId} not found`);
     }
     if (this.activeRun) {
       throw new Error(`Sync run #${this.activeRun.id} is already in progress`);
     }
 
+    let filesToRetry: ReleaseFileRecord[] = [];
+    if (fileId !== undefined && Number.isInteger(fileId) && fileId > 0) {
+      const targetFile = item.files.find((f) => f.id === fileId);
+      if (!targetFile) {
+        throw new Error(`File #${fileId} does not belong to catalog release #${itemId}`);
+      }
+      filesToRetry = [targetFile];
+    } else {
+      filesToRetry = item.files.filter(
+        (f) => f.status === 'failed' || !f.localPath || !fs.existsSync(f.localPath),
+      );
+      if (filesToRetry.length === 0) {
+        filesToRetry = item.files;
+      }
+    }
+
     const cfg = getInternalConfig();
+    const root = path.resolve(cfg.downloadDir);
     const run = createSyncRun('retry', 'incremental');
     this.activeRun = run;
     this.abortController = new AbortController();
-    this.currentPhase = `Retrying ${item.filename}`;
+    this.currentPhase =
+      filesToRetry.length === 1
+        ? `Retrying ${filesToRetry[0].filename}`
+        : `Retrying ${item.title} (${filesToRetry.length} files)`;
     this.emitStatus();
 
     void (async () => {
       const signal = this.abortController!.signal;
       const runLogger: LoggerFn = (level, msg, detail) => this.log(level, msg, detail ?? null, run.id);
+      let downloaded = 0;
+      let skipped = 0;
+      let failed = 0;
+      let bytes = 0;
+
       try {
         if (cfg.username && cfg.password) {
           await this.client.login(cfg, signal, runLogger);
         }
 
         const pageUrl = item.remoteUrl.split('#')[0];
-        let release: DiscoveredRelease = {
-          remoteUrl: item.remoteUrl,
-          pageUrl,
-          downloadUrl: item.downloadUrl,
-          remotePath: item.remotePath,
-          filename: item.filename,
-          systemName: item.systemName,
-          releaseType: item.releaseType,
-          title: item.title,
-          publishedAt: item.publishedAt,
-        };
+        let freshDownloads: DiscoveredRelease[] = [];
 
-        // Re-resolve fresh nonce + download.php key from the release page when retrying
-        if (pageUrl.startsWith('http') && item.remoteUrl.includes('#')) {
+        if (pageUrl.startsWith('http')) {
           const pageData = await this.client.fetchPageHtml(pageUrl, cfg, signal, runLogger);
-          const fresh = await this.client.extractDynamicReleaseDownloads(
+          const wpPostIdHint = item.wpPostId ?? this.client.extractWpPostIdHint(pageData.html);
+          const wpData = await this.client.fetchReleaseWpMetadata(
+            pageData.finalUrl,
+            wpPostIdHint,
+            cfg,
+            signal,
+            runLogger,
+          );
+          const dynamic = await this.client.extractDynamicReleaseDownloads(
             pageData.html,
             pageData.finalUrl,
             cfg,
             signal,
             runLogger,
           );
-          const matched = fresh.find((f) => f.filename === item.filename) || fresh[0];
-          if (matched) {
-            release = matched;
+          const linked = this.client.extractLinksFromHtml(pageData.html, pageData.finalUrl, cfg).downloads;
+          freshDownloads = [...dynamic, ...linked];
+
+          const allRoleInputs = freshDownloads.length > 0 ? freshDownloads : item.files;
+          const fileRoles = allRoleInputs.map((f) =>
+            classifyFileRole(f.filename, f.displayLabel || f.filename, {
+              genres: wpData?.genres ?? item.genres,
+              languages: wpData?.languages ?? item.languages,
+              sources: wpData?.sources ?? item.sources,
+              title: wpData?.title ?? item.title,
+              systemName: item.systemName,
+            }),
+          );
+
+          const freshMeta = this.client.extractReleaseMetadata(
+            pageData.html,
+            pageData.finalUrl,
+            wpData,
+            fileRoles,
+          );
+          const releaseDir = this.resolveReleaseDir(item, root);
+          if (releaseDir) {
+            const mirrored = await this.client.mirrorReleaseAssets(
+              freshMeta,
+              releaseDir,
+              cfg,
+              signal,
+              runLogger,
+            );
+            updateCatalogReleaseMetadata(
+              item.id,
+              mirrored.metadata,
+              mirrored.coverAbsPath,
+              mirrored.screenshotAbsPaths,
+            );
           }
         }
 
-        const outcome = await this.downloadSingleRelease(release, cfg, run.id, signal, runLogger);
+        for (const targetFile of filesToRetry) {
+          if (signal.aborted) break;
+          const matched =
+            freshDownloads.find((f) => f.filename === targetFile.filename) ||
+            freshDownloads.find((f) => f.remoteUrl === targetFile.remoteUrl) ||
+            (filesToRetry.length === 1 ? freshDownloads[0] : undefined);
+
+          const release: DiscoveredRelease = matched || {
+            remoteUrl: targetFile.remoteUrl,
+            pageUrl,
+            downloadUrl: targetFile.downloadUrl,
+            remotePath: targetFile.remotePath,
+            filename: targetFile.filename,
+            displayLabel: targetFile.displayLabel,
+            systemName: item.systemName,
+            releaseType: targetFile.fileRole,
+            title: item.title,
+            publishedAt: item.publishedAt,
+          };
+
+          const outcome = await this.downloadReleaseFile(
+            item.id,
+            release,
+            cfg,
+            run.id,
+            signal,
+            runLogger,
+            getRepositoryItemById(item.id) || item,
+          );
+          if (outcome.downloaded) downloaded += 1;
+          if (outcome.skipped) skipped += 1;
+          if (outcome.failed) failed += 1;
+          bytes += outcome.bytes;
+        }
+
         updateSyncRun(run.id, {
-          status: 'completed',
+          status: signal.aborted ? 'stopped' : 'completed',
           finishedAt: new Date().toISOString(),
-          newFound: 1,
-          downloadedCount: outcome.downloaded ? 1 : 0,
-          skippedCount: outcome.skipped ? 1 : 0,
-          failedCount: outcome.failed ? 1 : 0,
-          bytesDownloaded: outcome.bytes,
+          newFound: filesToRetry.length,
+          downloadedCount: downloaded,
+          skippedCount: skipped,
+          failedCount: failed,
+          bytesDownloaded: bytes,
           avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
         });
       } catch (err) {
         updateSyncRun(run.id, {
           status: signal.aborted ? 'stopped' : 'failed',
           finishedAt: new Date().toISOString(),
-          failedCount: 1,
+          failedCount: Math.max(1, failed),
           errorSummary: err instanceof Error ? err.message : String(err),
         });
       } finally {
@@ -570,39 +883,149 @@ export class ScraperOrchestrator extends EventEmitter {
 
       const visitedPages = new Set<string>();
       const visitedReleasePages = new Set<string>();
-      const processedReleaseUrls = new Set<string>();
+      const processedFileUrls = new Set<string>();
 
       const indexQueue: string[] = [cfg.baseUrl];
       const watermarkMs = cfg.lastWatermarkAt ? Date.parse(cfg.lastWatermarkAt) : null;
 
-      const handleReleaseList = async (releases: DiscoveredRelease[]) => {
-        for (const release of releases) {
-          if (signal.aborted) break;
-          if (processedReleaseUrls.has(release.remoteUrl)) continue;
-          processedReleaseUrls.add(release.remoteUrl);
-          newFound += 1;
+      const processDiscoveredReleasePage = async (
+        pageUrl: string,
+        rawReleases: DiscoveredRelease[],
+        preloadedMeta?: ReleaseMetadata,
+      ) => {
+        if (signal.aborted || rawReleases.length === 0) return;
 
-          if (release.publishedAt) {
-            const relMs = Date.parse(release.publishedAt);
+        // Deduplicate downloads within this release page by filename & remoteUrl
+        const uniqueReleases: DiscoveredRelease[] = [];
+        const seenKeys = new Set<string>();
+        for (const rel of rawReleases) {
+          const key = rel.filename.toLowerCase();
+          if (seenKeys.has(key) || processedFileUrls.has(rel.remoteUrl)) continue;
+          seenKeys.add(key);
+          uniqueReleases.push(rel);
+        }
+        if (uniqueReleases.length === 0) return;
+
+        const canonicalPageUrl = pageUrl.split('#')[0];
+        const sampleRel = uniqueReleases[0];
+        const mirroredProbe = resolveMirroredPaths(
+          cfg.baseUrl,
+          canonicalPageUrl,
+          cfg.downloadDir,
+          sampleRel.filename,
+        );
+        const releaseLocalDir = path.dirname(mirroredProbe.localPath);
+        const releaseRemoteDir = path.posix.dirname(mirroredProbe.remotePath);
+        const systemName = sampleRel.systemName || mirroredProbe.systemName;
+
+        for (const rel of uniqueReleases) {
+          if (rel.publishedAt) {
+            const relMs = Date.parse(rel.publishedAt);
             if (!Number.isNaN(relMs) && (!newestReleaseIso || relMs > Date.parse(newestReleaseIso))) {
               newestReleaseIso = new Date(relMs).toISOString();
             }
           }
+        }
 
-          if (run.mode === 'dry_run') {
-            const expectedLocal = path.resolve(cfg.downloadDir, release.remotePath);
+        if (run.mode === 'dry_run') {
+          for (const rel of uniqueReleases) {
+            if (signal.aborted) break;
+            processedFileUrls.add(rel.remoteUrl);
+            newFound += 1;
+            const expectedLocal = path.resolve(cfg.downloadDir, rel.remotePath);
             const alreadyExists = fs.existsSync(expectedLocal) && fs.statSync(expectedLocal).size > 0;
             if (alreadyExists) {
               skippedCount += 1;
             } else {
-              runLogger('info', `[Dry Run] Would download ${release.remotePath}`, release.downloadUrl);
+              runLogger(
+                'info',
+                `[Dry Run] Would download ${rel.remotePath}`,
+                rel.displayLabel && rel.displayLabel !== rel.filename
+                  ? `${rel.displayLabel} · ${rel.downloadUrl}`
+                  : rel.downloadUrl,
+              );
             }
             persistCounters();
-            continue;
           }
+          return;
+        }
 
-          // Immediately stream/dedupe while the ajax.php download key is fresh
-          const outcome = await this.downloadSingleRelease(release, cfg, run.id, signal, runLogger);
+        // Reconcile releaseTags using all discovered files on the page + WP taxonomy metadata
+        let effectiveMeta = preloadedMeta;
+        if (effectiveMeta) {
+          const fileRoles = uniqueReleases.map((r) =>
+            classifyFileRole(r.filename, r.displayLabel || r.filename, {
+              genres: effectiveMeta!.genres,
+              languages: effectiveMeta!.languages,
+              sources: effectiveMeta!.sources,
+              title: effectiveMeta!.title,
+              systemName,
+            }),
+          );
+          effectiveMeta = {
+            ...effectiveMeta,
+            releaseTags: deriveReleaseTags(
+              {
+                genres: effectiveMeta.genres,
+                languages: effectiveMeta.languages,
+                sources: effectiveMeta.sources,
+                systemName: effectiveMeta.consoleName || systemName,
+              },
+              fileRoles,
+            ),
+          };
+        }
+
+        let parent = upsertCatalogRelease({
+          remoteUrl: canonicalPageUrl,
+          remotePath: releaseRemoteDir,
+          localPath: releaseLocalDir,
+          systemName,
+          title: effectiveMeta?.title || sampleRel.title || path.basename(releaseRemoteDir),
+          publishedAt: uniqueReleases.find((r) => r.publishedAt)?.publishedAt ?? null,
+          status: 'downloading',
+          lastRunId: run.id,
+          metadata: effectiveMeta ?? null,
+        });
+
+        // Mirror cover art, screenshots, and metadata.json once per release page
+        if (effectiveMeta) {
+          try {
+            const mirroredAssets = await this.client.mirrorReleaseAssets(
+              effectiveMeta,
+              releaseLocalDir,
+              cfg,
+              signal,
+              runLogger,
+            );
+            parent =
+              updateCatalogReleaseMetadata(
+                parent.id,
+                mirroredAssets.metadata,
+                mirroredAssets.coverAbsPath,
+                mirroredAssets.screenshotAbsPaths,
+              ) || parent;
+          } catch (err) {
+            if (signal.aborted) throw err;
+            runLogger('warn', `Metadata/artwork sync incomplete for ${parent.title}`, String(err));
+          }
+        }
+
+        // Stream or deduplicate all `n` archive files belonging to this release page
+        for (const rel of uniqueReleases) {
+          if (signal.aborted) break;
+          processedFileUrls.add(rel.remoteUrl);
+          newFound += 1;
+
+          const outcome = await this.downloadReleaseFile(
+            parent.id,
+            rel,
+            cfg,
+            run.id,
+            signal,
+            runLogger,
+            parent,
+          );
           if (outcome.downloaded) downloadedCount += 1;
           if (outcome.skipped) skippedCount += 1;
           if (outcome.failed) failedCount += 1;
@@ -642,7 +1065,7 @@ export class ScraperOrchestrator extends EventEmitter {
           saveDiscoveredSystems(extracted.systems);
         }
 
-        // If this page itself has an ACF/DLC download widget, extract and process directly
+        // If this page itself has an ACF/DLC download widget, extract & group all downloads on it
         const inlineDynamic = await this.client.extractDynamicReleaseDownloads(
           pageData.html,
           pageData.finalUrl,
@@ -651,10 +1074,43 @@ export class ScraperOrchestrator extends EventEmitter {
           runLogger,
         );
         if (inlineDynamic.length > 0) {
-          await handleReleaseList(inlineDynamic);
+          const wpPostIdHint = this.client.extractWpPostIdHint(pageData.html);
+          const wpData = await this.client.fetchReleaseWpMetadata(
+            pageData.finalUrl,
+            wpPostIdHint,
+            cfg,
+            signal,
+            runLogger,
+          );
+          const inlineRoles = inlineDynamic.map((r) =>
+            classifyFileRole(r.filename, r.displayLabel || r.filename, {
+              genres: wpData?.genres,
+              languages: wpData?.languages,
+              sources: wpData?.sources,
+              title: wpData?.title || r.title,
+              systemName: r.systemName,
+            }),
+          );
+          const inlineMeta = this.client.extractReleaseMetadata(
+            pageData.html,
+            pageData.finalUrl,
+            wpData,
+            inlineRoles,
+          );
+          await processDiscoveredReleasePage(pageData.finalUrl, inlineDynamic, inlineMeta);
         }
+
         if (extracted.downloads.length > 0) {
-          await handleReleaseList(extracted.downloads);
+          const groupedByPage = new Map<string, DiscoveredRelease[]>();
+          for (const rel of extracted.downloads) {
+            const key = (rel.pageUrl || rel.remoteUrl).split('#')[0];
+            const list = groupedByPage.get(key) || [];
+            list.push(rel);
+            groupedByPage.set(key, list);
+          }
+          for (const [groupPageUrl, groupFiles] of groupedByPage.entries()) {
+            await processDiscoveredReleasePage(groupPageUrl, groupFiles);
+          }
         }
 
         // Process discovered release detail pages on this index page
@@ -674,18 +1130,18 @@ export class ScraperOrchestrator extends EventEmitter {
             }
           }
 
-          // Check if we already have a downloaded/skipped record for this release page in incremental mode
-          const existingDir = resolveMirroredPaths(cfg.baseUrl, relPageUrl, cfg.downloadDir, 'probe.zip');
-          const relFolder = path.dirname(existingDir.localPath);
-          const folderHasFiles =
-            run.mode === 'incremental' &&
-            fs.existsSync(relFolder) &&
-            fs.readdirSync(relFolder).some((n) => !n.startsWith('.') && !n.endsWith('.part'));
-
-          if (folderHasFiles) {
-            const existingByPrefix = getRepositoryItemByRemoteUrl(relPageUrl);
-            if (existingByPrefix?.status === 'downloaded') {
-              skippedCount += 1;
+          // Skip inspecting release detail page in incremental mode only if we already indexed
+          // its grouped metadata AND every child archive file exists cleanly on disk
+          if (run.mode === 'incremental') {
+            const existingRelease = getRepositoryItemByRemoteUrl(relPageUrl);
+            const allFilesOnDisk =
+              Boolean(existingRelease) &&
+              existingRelease!.hasMetadata &&
+              existingRelease!.files.length > 0 &&
+              (existingRelease!.status === 'downloaded' || existingRelease!.status === 'skipped') &&
+              existingRelease!.files.every((f) => fs.existsSync(f.localPath) && fs.statSync(f.localPath).size > 0);
+            if (allFilesOnDisk) {
+              skippedCount += existingRelease!.files.length;
               continue;
             }
           }
@@ -700,6 +1156,14 @@ export class ScraperOrchestrator extends EventEmitter {
             pagesCrawled += 1;
             if (relPage.status >= 400) continue;
 
+            const wpPostIdHint = this.client.extractWpPostIdHint(relPage.html);
+            const wpData = await this.client.fetchReleaseWpMetadata(
+              relPage.finalUrl,
+              wpPostIdHint,
+              cfg,
+              signal,
+              runLogger,
+            );
             const dynamicReleases = await this.client.extractDynamicReleaseDownloads(
               relPage.html,
               relPage.finalUrl,
@@ -708,10 +1172,35 @@ export class ScraperOrchestrator extends EventEmitter {
               runLogger,
             );
             const relExtracted = this.client.extractLinksFromHtml(relPage.html, relPage.finalUrl, cfg);
-            const combined = [...dynamicReleases, ...relExtracted.downloads];
+
+            // Merge dynamic ACF downloads first, then any additional direct archive links
+            const combinedMap = new Map<string, DiscoveredRelease>();
+            for (const d of [...dynamicReleases, ...relExtracted.downloads]) {
+              const key = d.filename.toLowerCase();
+              if (!combinedMap.has(key)) {
+                combinedMap.set(key, d);
+              }
+            }
+            const combined = Array.from(combinedMap.values());
+
+            const fileRoles = combined.map((r) =>
+              classifyFileRole(r.filename, r.displayLabel || r.filename, {
+                genres: wpData?.genres,
+                languages: wpData?.languages,
+                sources: wpData?.sources,
+                title: wpData?.title || r.title,
+                systemName: r.systemName,
+              }),
+            );
+            const releaseMeta = this.client.extractReleaseMetadata(
+              relPage.html,
+              relPage.finalUrl,
+              wpData,
+              fileRoles,
+            );
 
             if (combined.length > 0) {
-              await handleReleaseList(combined);
+              await processDiscoveredReleasePage(relPage.finalUrl, combined, releaseMeta);
             }
           } catch (err) {
             if (signal.aborted) break;
@@ -783,12 +1272,14 @@ export class ScraperOrchestrator extends EventEmitter {
     }
   }
 
-  private async downloadSingleRelease(
+  private async downloadReleaseFile(
+    releaseId: number,
     release: DiscoveredRelease,
     cfg: ScraperConfigInternal,
     runId: number,
     signal: AbortSignal,
     runLogger: LoggerFn,
+    parentContext?: RepositoryItemRecord,
   ): Promise<{ downloaded: boolean; skipped: boolean; failed: boolean; bytes: number }> {
     const mirrored = resolveMirroredPaths(
       cfg.baseUrl,
@@ -796,28 +1287,37 @@ export class ScraperOrchestrator extends EventEmitter {
       cfg.downloadDir,
       release.filename,
     );
+    const remotePath = release.remotePath || mirrored.remotePath;
+    const expectedLocalPath = path.resolve(cfg.downloadDir, remotePath);
+    const displayLabel = release.displayLabel || release.filename;
+    const fileRole = classifyFileRole(release.filename, displayLabel, {
+      genres: parentContext?.genres,
+      languages: parentContext?.languages,
+      sources: parentContext?.sources,
+      title: parentContext?.title || release.title,
+      systemName: parentContext?.systemName || release.systemName,
+    });
 
-    const record = upsertRepositoryItem({
+    const initial = upsertReleaseFile({
+      releaseId,
       remoteUrl: release.remoteUrl,
       downloadUrl: release.downloadUrl,
-      remotePath: release.remotePath || mirrored.remotePath,
-      localPath: path.resolve(cfg.downloadDir, release.remotePath || mirrored.remotePath),
+      remotePath,
+      localPath: expectedLocalPath,
       filename: release.filename,
-      systemName: release.systemName,
-      releaseType: release.releaseType,
-      title: release.title,
-      publishedAt: release.publishedAt,
+      displayLabel,
+      fileRole,
       status: 'downloading',
       lastRunId: runId,
     });
 
     this.currentPhase = `Downloading ${release.systemName} / ${release.filename}`;
     this.activeTransfer = {
-      itemId: record.id,
+      itemId: releaseId,
       filename: release.filename,
       systemName: release.systemName,
       remoteUrl: release.remoteUrl,
-      localPath: record.localPath,
+      localPath: initial.file.localPath,
       bytesReceived: 0,
       totalBytes: null,
       bytesPerSec: 0,
@@ -826,7 +1326,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
     try {
       const res = await this.client.downloadFileAtomic(
-        release,
+        { ...release, remotePath },
         cfg,
         signal,
         (progress) => {
@@ -843,17 +1343,16 @@ export class ScraperOrchestrator extends EventEmitter {
       this.activeTransfer = null;
 
       if (res.outcome === 'skipped') {
-        upsertRepositoryItem({
+        upsertReleaseFile({
+          releaseId,
           remoteUrl: release.remoteUrl,
           downloadUrl: release.downloadUrl,
           remotePath: res.remotePath,
           localPath: res.localPath,
           filename: res.filename,
-          systemName: release.systemName,
-          releaseType: release.releaseType,
-          title: release.title,
+          displayLabel,
+          fileRole,
           fileSizeBytes: res.bytes,
-          publishedAt: release.publishedAt,
           status: 'skipped',
           errorMessage: null,
           lastRunId: runId,
@@ -862,17 +1361,16 @@ export class ScraperOrchestrator extends EventEmitter {
         return { downloaded: false, skipped: true, failed: false, bytes: 0 };
       }
 
-      upsertRepositoryItem({
+      upsertReleaseFile({
+        releaseId,
         remoteUrl: release.remoteUrl,
         downloadUrl: release.downloadUrl,
         remotePath: res.remotePath,
         localPath: res.localPath,
         filename: res.filename,
-        systemName: release.systemName,
-        releaseType: release.releaseType,
-        title: release.title,
+        displayLabel,
+        fileRole,
         fileSizeBytes: res.bytes,
-        publishedAt: release.publishedAt,
         status: 'downloaded',
         errorMessage: null,
         lastRunId: runId,
@@ -883,16 +1381,15 @@ export class ScraperOrchestrator extends EventEmitter {
     } catch (err) {
       this.activeTransfer = null;
       const errMsg = err instanceof Error ? err.message : String(err);
-      upsertRepositoryItem({
+      upsertReleaseFile({
+        releaseId,
         remoteUrl: release.remoteUrl,
         downloadUrl: release.downloadUrl,
-        remotePath: release.remotePath,
-        localPath: record.localPath,
+        remotePath,
+        localPath: initial.file.localPath,
         filename: release.filename,
-        systemName: release.systemName,
-        releaseType: release.releaseType,
-        title: release.title,
-        publishedAt: release.publishedAt,
+        displayLabel,
+        fileRole,
         status: 'failed',
         errorMessage: errMsg,
         lastRunId: runId,
@@ -912,13 +1409,13 @@ export class ScraperOrchestrator extends EventEmitter {
       '# HELP rgt_active_run Whether a scrape sync run is currently active (1=running, 0=idle)',
       '# TYPE rgt_active_run gauge',
       `rgt_active_run{pod="${snap.podId}"} ${snap.activeRun ? 1 : 0}`,
-      '# HELP rgt_items_downloaded_total Total repository items mirrored to local disk',
+      '# HELP rgt_items_downloaded_total Total repository releases mirrored to local disk',
       '# TYPE rgt_items_downloaded_total gauge',
       `rgt_items_downloaded_total ${snap.totals.downloadedItems}`,
-      '# HELP rgt_items_skipped_total Total repository items skipped by filename deduplication',
+      '# HELP rgt_items_skipped_total Total repository releases skipped by filename deduplication',
       '# TYPE rgt_items_skipped_total gauge',
       `rgt_items_skipped_total ${snap.totals.skippedItems}`,
-      '# HELP rgt_items_failed_total Total repository items currently in failed state',
+      '# HELP rgt_items_failed_total Total repository releases currently in failed/partial state',
       '# TYPE rgt_items_failed_total gauge',
       `rgt_items_failed_total ${snap.totals.failedItems}`,
       '# HELP rgt_bytes_mirrored_total Total bytes stored in local repository mirror',

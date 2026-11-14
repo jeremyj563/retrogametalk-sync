@@ -5,12 +5,16 @@ import { load as loadHtml } from 'cheerio';
 import { CookieJar } from 'tough-cookie';
 import { getCookieJarPath } from './db.ts';
 import type { AdaptiveRateLimiter } from './rateLimiter.ts';
+import { classifyFileRole, decodeHtmlEntities, deriveReleaseTags } from './releaseTags.ts';
 import type {
   AuthSessionStatus,
   AuthTestResult,
   LogLevel,
+  ReleaseMetadata,
   ScraperConfigInternal,
 } from './types.ts';
+
+export { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 
 const ARCHIVE_EXTENSIONS = new Set([
   '.zip', '.7z', '.rar', '.tar', '.gz', '.bz2', '.xz',
@@ -47,10 +51,29 @@ export interface DiscoveredRelease {
   downloadUrl: string;
   remotePath: string;
   filename: string;
+  displayLabel?: string;
   systemName: string;
   releaseType: string;
   title: string;
   publishedAt: string | null;
+  metadata?: ReleaseMetadata;
+}
+
+export interface WpPostMetadata {
+  wpPostId: number;
+  wpPostType: string;
+  title: string | null;
+  originalTitle: string | null;
+  publisher: string | null;
+  developer: string | null;
+  releaseYear: string | null;
+  genres: string[];
+  regions: string[];
+  languages: string[];
+  sources: string[];
+  formats: string[];
+  descriptionHtml: string;
+  downloadHints: { filename: string; fileSize: string }[];
 }
 
 export interface DownloadProgress {
@@ -177,20 +200,7 @@ function parseContentDispositionFilename(headerVal: string | null): string | nul
 }
 
 function inferReleaseType(text: string, urlStr: string): string {
-  const combined = `${text} ${urlStr}`.toLowerCase();
-  if (combined.includes('translation') || combined.includes('english') || combined.includes('t-en')) {
-    return 'translation';
-  }
-  if (combined.includes('hack') || combined.includes('romhack') || combined.includes('redux') || combined.includes('msu')) {
-    return 'hack';
-  }
-  if (combined.includes('port') || combined.includes('homebrew')) {
-    return 'port';
-  }
-  if (combined.includes('patch') || /\.(ips|bps|ups|xdelta)(\?|$)/i.test(urlStr)) {
-    return 'patch';
-  }
-  return 'rom';
+  return classifyFileRole(urlStr, text);
 }
 
 function isDownloadCandidateUrl(url: URL, anchorText: string, hasDownloadAttr: boolean): boolean {
@@ -214,6 +224,7 @@ function isDownloadCandidateUrl(url: URL, anchorText: string, hasDownloadAttr: b
 export class RetroGameTalkClient {
   private jar: CookieJar;
   private rateLimiter: AdaptiveRateLimiter;
+  private wpTypesCache: Map<string, string> | null = null;
   private authStatus: AuthSessionStatus = {
     configured: false,
     authenticated: false,
@@ -670,12 +681,16 @@ export class RetroGameTalkClient {
           fallbackFilename,
         );
 
+        const cleanLabel = anchorText && anchorText.toLowerCase() !== 'download'
+          ? anchorText
+          : mirrored.filename;
         downloads.push({
           remoteUrl: hrefStr,
           pageUrl: current.toString(),
           downloadUrl: hrefStr,
           remotePath: mirrored.remotePath,
           filename: mirrored.filename,
+          displayLabel: cleanLabel,
           systemName: resolved.searchParams.get('platform')
             ? sanitizePathSegment(resolved.searchParams.get('platform')!)
             : mirrored.systemName,
@@ -814,8 +829,9 @@ export class RetroGameTalkClient {
         }
         const filenameAttr = ajax$(a).siblings('[data-filename]').attr('data-filename');
         const paramFile = dlUrl.searchParams.get('file');
+        const anchorText = ajax$(a).text().replace(/\s+/g, ' ').trim();
         const filename = sanitizePathSegment(
-          filenameAttr || paramFile || ajax$(a).text().trim() || `${pageTitle}.zip`,
+          filenameAttr || paramFile || anchorText || `${pageTitle}.zip`,
         );
 
         const mirrored = resolveMirroredPaths(config.baseUrl, pageUrl, config.downloadDir, filename);
@@ -828,8 +844,9 @@ export class RetroGameTalkClient {
           downloadUrl: dlUrl.toString(),
           remotePath: mirrored.remotePath,
           filename: mirrored.filename,
+          displayLabel: anchorText && !/^download$/i.test(anchorText) ? anchorText : mirrored.filename,
           systemName: platformParam ? sanitizePathSegment(platformParam) : mirrored.systemName,
-          releaseType: inferReleaseType(`${pageTitle} ${filename}`, pageUrl),
+          releaseType: inferReleaseType(`${pageTitle} ${anchorText}`, filename),
           title: pageTitle || mirrored.filename,
           publishedAt: pageTime,
         });
@@ -872,8 +889,9 @@ export class RetroGameTalkClient {
         if (!dlHref.startsWith('http')) continue;
 
         const dlUrl = new URL(dlHref);
+        const btnLabel = btn.text().replace(/\s+/g, ' ').trim();
         const filename = sanitizePathSegment(
-          dlUrl.searchParams.get('file') || btn.text().trim() || `row-${row}.zip`,
+          dlUrl.searchParams.get('file') || btnLabel || `row-${row}.zip`,
         );
         const mirrored = resolveMirroredPaths(config.baseUrl, pageUrl, config.downloadDir, filename);
         results.push({
@@ -882,9 +900,10 @@ export class RetroGameTalkClient {
           downloadUrl: dlUrl.toString(),
           remotePath: mirrored.remotePath,
           filename: mirrored.filename,
+          displayLabel: btnLabel || mirrored.filename,
           systemName: mirrored.systemName,
-          releaseType: inferReleaseType(`${pageTitle} ${filename}`, pageUrl),
-          title: `${pageTitle} · ${filename}`,
+          releaseType: inferReleaseType(`${pageTitle} ${btnLabel}`, filename),
+          title: pageTitle || mirrored.filename,
           publishedAt: pageTime,
         });
       }
@@ -1082,5 +1101,549 @@ export class RetroGameTalkClient {
       await fs.promises.unlink(partPath).catch(() => undefined);
       throw err;
     }
+  }
+
+  private async getWpRestTypes(
+    config: ScraperConfigInternal,
+    signal?: AbortSignal,
+    log?: LoggerFn,
+  ): Promise<Map<string, string>> {
+    if (this.wpTypesCache) return this.wpTypesCache;
+    const map = new Map<string, string>();
+    try {
+      const typesUrl = new URL('wp-json/wp/v2/types', config.baseUrl).toString();
+      const { response } = await this.fetchWithRedirects(
+        typesUrl,
+        config,
+        { method: 'GET', headers: { Accept: 'application/json' } },
+        signal,
+        log,
+      );
+      if (response.ok) {
+        const json = (await response.json()) as Record<string, { slug?: string; rest_base?: string }>;
+        for (const [key, def] of Object.entries(json)) {
+          if (def?.rest_base) {
+            map.set(key.toLowerCase(), def.rest_base);
+            map.set(def.rest_base.toLowerCase(), def.rest_base);
+            if (def.slug) map.set(def.slug.toLowerCase(), def.rest_base);
+          }
+        }
+      } else {
+        await response.body?.cancel().catch(() => undefined);
+      }
+    } catch (err) {
+      if (signal?.aborted) throw err;
+    }
+    this.wpTypesCache = map;
+    return map;
+  }
+
+  /**
+   * Queries RetroGameTalk's WordPress REST API (`wp/v2/<postType>?slug=...&_embed`)
+   * for authoritative taxonomies (genre, language, source, region, developer, publisher, format)
+   * and ACF fields (`game_name`, `download_links`).
+   */
+  async fetchReleaseWpMetadata(
+    pageUrl: string,
+    wpPostIdHint: number | null | undefined,
+    config: ScraperConfigInternal,
+    signal?: AbortSignal,
+    log?: LoggerFn,
+  ): Promise<WpPostMetadata | null> {
+    try {
+      const base = new URL(config.baseUrl);
+      const target = new URL(pageUrl);
+      if (!isSameRootDomain(target.hostname, base.hostname)) return null;
+
+      const baseSegs = base.pathname.split('/').filter(Boolean);
+      const targetSegs = target.pathname.split('/').filter(Boolean);
+      const relSegs = targetSegs.slice(
+        baseSegs.every((s, i) => targetSegs[i]?.toLowerCase() === s.toLowerCase()) ? baseSegs.length : 0,
+      );
+      if (relSegs.length === 0) return null;
+
+      const typeMap = await this.getWpRestTypes(config, signal, log);
+      const systemSeg = relSegs[0].toLowerCase();
+      const slug = relSegs[relSegs.length - 1];
+      const restBase = typeMap.get(systemSeg) || (relSegs.length === 1 ? 'pages' : null);
+      if (!restBase) return null;
+
+      const endpoint =
+        wpPostIdHint && wpPostIdHint > 0
+          ? new URL(`wp-json/wp/v2/${encodeURIComponent(restBase)}/${wpPostIdHint}?_embed`, config.baseUrl).toString()
+          : new URL(
+              `wp-json/wp/v2/${encodeURIComponent(restBase)}?slug=${encodeURIComponent(slug)}&_embed`,
+              config.baseUrl,
+            ).toString();
+
+      const { response } = await this.fetchWithRedirects(
+        endpoint,
+        config,
+        { method: 'GET', headers: { Accept: 'application/json' } },
+        signal,
+        log,
+      );
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        return null;
+      }
+
+      const raw = (await response.json()) as Record<string, unknown> | Record<string, unknown>[];
+      const post = Array.isArray(raw) ? raw[0] : raw;
+      if (!post || typeof post !== 'object' || !post.id) return null;
+
+      const acf = (post.acf && typeof post.acf === 'object' ? post.acf : {}) as Record<string, unknown>;
+      const titleRendered =
+        post.title && typeof post.title === 'object' && 'rendered' in post.title
+          ? decodeHtmlEntities(String((post.title as { rendered?: string }).rendered || ''))
+          : '';
+      const acfGameName = typeof acf.game_name === 'string' ? acf.game_name.trim() : '';
+
+      const genres = new Set<string>();
+      const regions = new Set<string>();
+      const languages = new Set<string>();
+      const sources = new Set<string>();
+      const formats = new Set<string>();
+      const publishers = new Set<string>();
+      const developers = new Set<string>();
+      let releaseYear: string | null = null;
+
+      const embedded = post._embedded as { 'wp:term'?: unknown[] } | undefined;
+      const termGroups = Array.isArray(embedded?.['wp:term']) ? embedded!['wp:term']! : [];
+      for (const group of termGroups) {
+        if (!Array.isArray(group)) continue;
+        for (const term of group) {
+          if (!term || typeof term !== 'object') continue;
+          const t = term as { taxonomy?: string; name?: string };
+          const tax = String(t.taxonomy || '').toLowerCase();
+          const name = decodeHtmlEntities(String(t.name || '').trim());
+          if (!name) continue;
+          if (tax === 'genre') genres.add(name);
+          else if (tax === 'region') regions.add(name);
+          else if (tax === 'language') languages.add(name);
+          else if (tax === 'source') sources.add(name);
+          else if (tax === 'format') formats.add(name);
+          else if (tax === 'publisher') publishers.add(name);
+          else if (tax === 'developer') developers.add(name);
+          else if (tax === 'release-year' && !releaseYear) releaseYear = name;
+        }
+      }
+
+      const downloadHints: { filename: string; fileSize: string }[] = [];
+      if (Array.isArray(acf.download_links)) {
+        for (const entry of acf.download_links) {
+          if (entry && typeof entry === 'object') {
+            const e = entry as { file_name?: string; file_size?: string };
+            if (e.file_name) {
+              downloadHints.push({
+                filename: String(e.file_name),
+                fileSize: String(e.file_size || ''),
+              });
+            }
+          }
+        }
+      }
+
+      const contentRendered =
+        post.content && typeof post.content === 'object' && 'rendered' in post.content
+          ? String((post.content as { rendered?: string }).rendered || '')
+          : '';
+
+      return {
+        wpPostId: Number(post.id),
+        wpPostType: String(post.type || restBase),
+        title: acfGameName || titleRendered || null,
+        originalTitle: typeof acf.original_title === 'string' && acf.original_title.trim() ? acf.original_title.trim() : null,
+        publisher: publishers.size > 0 ? Array.from(publishers).join(', ') : null,
+        developer: developers.size > 0 ? Array.from(developers).join(', ') : null,
+        releaseYear,
+        genres: Array.from(genres),
+        regions: Array.from(regions),
+        languages: Array.from(languages),
+        sources: Array.from(sources),
+        formats: Array.from(formats),
+        descriptionHtml: contentRendered,
+        downloadHints,
+      };
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      return null;
+    }
+  }
+
+  private sanitizeDescriptionHtml(rawHtml: string): { descriptionHtml: string; descriptionText: string } {
+    if (!rawHtml.trim()) return { descriptionHtml: '', descriptionText: '' };
+    const $ = loadHtml(`<div id="__desc_root">${rawHtml}</div>`);
+    const root = $('#__desc_root');
+    root.find('h2').each((_, h2) => {
+      if ($(h2).text().toLowerCase().includes('game description')) {
+        $(h2).remove();
+      }
+    });
+    root.find('script, style, iframe, object, embed, form, input, button').remove();
+    root.find('*').each((_, node) => {
+      const attribs = (node as unknown as { attribs?: Record<string, string> }).attribs;
+      if (!attribs) return;
+      for (const attr of Object.keys(attribs)) {
+        const lower = attr.toLowerCase();
+        if (lower.startsWith('on')) {
+          $(node).removeAttr(attr);
+        } else if (
+          (lower === 'href' || lower === 'src') &&
+          attribs[attr]?.trim().toLowerCase().startsWith('javascript:')
+        ) {
+          $(node).removeAttr(attr);
+        }
+      }
+      if (node.tagName === 'a') {
+        $(node).attr('target', '_blank');
+        $(node).attr('rel', 'noopener noreferrer');
+      }
+    });
+
+    return {
+      descriptionHtml: (root.html() || '').trim(),
+      descriptionText: root.text().replace(/\s+/g, ' ').trim(),
+    };
+  }
+
+  extractWpPostIdHint(html: string): number | null {
+    const $ = loadHtml(html);
+    const acfId = Number($('#acf-content-wrapper[data-id]').first().attr('data-id'));
+    if (Number.isInteger(acfId) && acfId > 0) return acfId;
+    const dlcId = Number($('.dlc-button[data-id]').first().attr('data-id'));
+    if (Number.isInteger(dlcId) && dlcId > 0) return dlcId;
+    const bodyMatch = html.match(/\bpostid-(\d+)\b/);
+    if (bodyMatch?.[1]) {
+      const id = Number(bodyMatch[1]);
+      if (Number.isInteger(id) && id > 0) return id;
+    }
+    return null;
+  }
+
+  /**
+   * Extract structured metadata, cover art URL, full-res screenshot URLs, and sanitized description
+   * from a RetroGameTalk release detail page, enriched with WP REST API taxonomies when available.
+   */
+  extractReleaseMetadata(
+    html: string,
+    pageUrl: string,
+    wpData?: WpPostMetadata | null,
+    fileRoles: string[] = [],
+  ): ReleaseMetadata {
+    const $ = loadHtml(html);
+
+    const htmlTitle =
+      $('.rgt-title-name').first().text().trim() ||
+      $('h1.entry-title').first().text().trim() ||
+      $('h1').first().text().trim();
+
+    const title = wpData?.title || htmlTitle || 'Untitled Release';
+
+    const subtitleRaw = $('.rgt-title-sub').first().text().replace(/\s+/g, ' ').trim();
+    const subtitle = subtitleRaw || null;
+
+    let publisher: string | null = wpData?.publisher || null;
+    let releaseYear: string | null = wpData?.releaseYear || null;
+    if (subtitle) {
+      const parts = subtitle.split('·').map((s) => s.trim()).filter(Boolean);
+      if (parts.length >= 2) {
+        if (!publisher) publisher = parts[0] || null;
+        if (!releaseYear && /^\d{4}$/.test(parts[parts.length - 1])) {
+          releaseYear = parts[parts.length - 1];
+        }
+      } else if (parts.length === 1) {
+        if (!releaseYear && /^\d{4}$/.test(parts[0])) releaseYear = parts[0];
+        else if (!publisher) publisher = parts[0];
+      }
+    }
+
+    let downloadsCount: string | null = null;
+    let releasedAgo: string | null = null;
+    let updatedDate: string | null = null;
+    $('.rgt-title-stats > div').each((_, div) => {
+      const label = $(div).find('dt').first().text().trim().toLowerCase();
+      const val = $(div).find('dd').first().text().replace(/\s+/g, ' ').trim();
+      if (!val) return;
+      if (label.includes('download')) downloadsCount = val;
+      else if (label.includes('release')) releasedAgo = val;
+      else if (label.includes('update')) updatedDate = val;
+    });
+
+    const specs: { label: string; value: string }[] = [];
+    let consoleName: string | null = null;
+    let genres: string[] = [...(wpData?.genres || [])];
+    let regions: string[] = [...(wpData?.regions || [])];
+    let languages: string[] = [...(wpData?.languages || [])];
+    let sources: string[] = [...(wpData?.sources || [])];
+    let formats: string[] = [...(wpData?.formats || [])];
+    let developer: string | null = wpData?.developer || null;
+
+    $('table.rom-info tbody tr').each((_, tr) => {
+      const label = $(tr).find('th').first().text().replace(/\s+/g, ' ').trim();
+      const td = $(tr).find('td').first();
+      const value = td.text().replace(/\s+/g, ' ').trim();
+      if (!label || !value) return;
+      specs.push({ label, value });
+
+      const linkValues = td
+        .find('a')
+        .map((__, a) => $(a).text().replace(/\s+/g, ' ').trim())
+        .get()
+        .filter(Boolean);
+      const splitValues =
+        linkValues.length > 0
+          ? linkValues
+          : value
+              .split(',')
+              .map((v) => v.trim())
+              .filter(Boolean);
+
+      const lower = label.toLowerCase();
+      if (lower.includes('console') || lower.includes('platform') || lower.includes('system')) {
+        consoleName = value;
+      } else if (lower.includes('genre')) {
+        genres = Array.from(new Set([...genres, ...splitValues]));
+      } else if (lower.includes('region')) {
+        regions = Array.from(new Set([...regions, ...splitValues]));
+      } else if (lower.includes('language')) {
+        languages = Array.from(new Set([...languages, ...splitValues]));
+      } else if (lower.includes('source')) {
+        sources = Array.from(new Set([...sources, ...splitValues]));
+      } else if (lower.includes('format')) {
+        formats = Array.from(new Set([...formats, ...splitValues]));
+      } else if (lower.includes('developer') && !developer) {
+        developer = value;
+      } else if (lower.includes('publisher') && !publisher) {
+        publisher = value;
+      } else if ((lower === 'year' || lower.includes('release year')) && !releaseYear) {
+        releaseYear = value;
+      }
+    });
+
+    // Cover art URL
+    let coverUrl: string | null = null;
+    const rawCover =
+      $('.rgt-cover a.rgt-cover-zoom').first().attr('href') ||
+      $('.rgt-cover img').first().attr('src') ||
+      $('.post-thumbnail img').first().attr('src') ||
+      $('article.rgt-game img.wp-post-image').first().attr('src');
+    if (rawCover) {
+      try {
+        coverUrl = new URL(rawCover, pageUrl).toString();
+      } catch {
+        coverUrl = null;
+      }
+    }
+
+    // Full-resolution screenshot URLs
+    const shotSet = new Set<string>();
+    $('#lightgallery .game-box-layout, .rgt-shots .game-box-layout').each((_, el) => {
+      const raw =
+        $(el).attr('data-src') ||
+        $(el).find('a[itemprop="screenshot"], a').first().attr('href') ||
+        $(el).find('img').first().attr('src');
+      if (!raw) return;
+      try {
+        shotSet.add(new URL(raw, pageUrl).toString());
+      } catch {
+        // Ignore invalid screenshot URL
+      }
+    });
+
+    // Description HTML sanitization (prefer HTML #custom-description, fallback to WP content.rendered)
+    const descNode = $('#custom-description').first().length
+      ? $('#custom-description').first()
+      : $('.game-description').first();
+    const rawDescHtml = (descNode.length ? descNode.html() : '') || wpData?.descriptionHtml || '';
+    const { descriptionHtml, descriptionText } = this.sanitizeDescriptionHtml(rawDescHtml);
+
+    const wpPostId = wpData?.wpPostId ?? this.extractWpPostIdHint(html);
+    const releaseTags = deriveReleaseTags(
+      { genres, languages, sources, systemName: consoleName },
+      fileRoles,
+    );
+
+    return {
+      wpPostId,
+      wpPostType: wpData?.wpPostType ?? null,
+      title,
+      subtitle,
+      consoleName,
+      publisher,
+      developer,
+      releaseYear,
+      genres,
+      regions,
+      languages,
+      sources,
+      formats,
+      releaseTags,
+      downloadsCount,
+      releasedAgo,
+      updatedDate,
+      specs,
+      descriptionHtml,
+      descriptionText,
+      coverUrl,
+      coverLocalRelPath: null,
+      screenshotUrls: Array.from(shotSet),
+      screenshotLocalRelPaths: [],
+      sourcePageUrl: pageUrl,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  private getSafeImageExtension(urlStr: string, contentType = ''): string {
+    const ct = contentType.toLowerCase();
+    if (ct.includes('image/png')) return '.png';
+    if (ct.includes('image/webp')) return '.webp';
+    if (ct.includes('image/gif')) return '.gif';
+    if (ct.includes('image/jpeg') || ct.includes('image/jpg')) return '.jpg';
+
+    try {
+      const ext = path.extname(new URL(urlStr).pathname).toLowerCase();
+      if (['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext)) {
+        return ext === '.jpeg' ? '.jpg' : ext;
+      }
+    } catch {
+      // Default to .jpg
+    }
+    return '.jpg';
+  }
+
+  private async downloadAssetIfMissing(
+    assetUrl: string,
+    targetBasePathWithoutExt: string,
+    refererUrl: string,
+    config: ScraperConfigInternal,
+    signal?: AbortSignal,
+    log?: LoggerFn,
+  ): Promise<string | null> {
+    // Check if any valid image extension already exists on disk
+    for (const ext of ['.jpg', '.png', '.webp', '.gif']) {
+      const candidate = `${targetBasePathWithoutExt}${ext}`;
+      if (fs.existsSync(candidate) && fs.statSync(candidate).size > 0) {
+        return candidate;
+      }
+    }
+
+    try {
+      const { response } = await this.fetchWithRedirects(
+        assetUrl,
+        config,
+        {
+          method: 'GET',
+          headers: {
+            Accept: 'image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5',
+            Referer: refererUrl,
+          },
+        },
+        signal,
+        log,
+      );
+
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        return null;
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.toLowerCase().includes('text/html')) {
+        await response.body?.cancel().catch(() => undefined);
+        return null;
+      }
+
+      const ext = this.getSafeImageExtension(assetUrl, contentType);
+      const finalPath = `${targetBasePathWithoutExt}${ext}`;
+      const partPath = `${finalPath}.part`;
+
+      fs.mkdirSync(path.dirname(finalPath), { recursive: true });
+      const buf = Buffer.from(await response.arrayBuffer());
+      if (buf.length === 0) return null;
+
+      await fs.promises.writeFile(partPath, buf);
+      await fs.promises.rename(partPath, finalPath);
+      return finalPath;
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      log?.('warn', `Failed to mirror artwork ${assetUrl}`, err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }
+
+  async mirrorReleaseAssets(
+    metadata: ReleaseMetadata,
+    releaseDir: string,
+    config: ScraperConfigInternal,
+    signal?: AbortSignal,
+    log?: LoggerFn,
+  ): Promise<{ metadata: ReleaseMetadata; coverAbsPath: string | null; screenshotAbsPaths: string[] }> {
+    const resolvedRoot = path.resolve(config.downloadDir);
+    const resolvedReleaseDir = path.resolve(releaseDir);
+    if (!resolvedReleaseDir.startsWith(resolvedRoot + path.sep) && resolvedReleaseDir !== resolvedRoot) {
+      throw new Error(`Unsafe metadata directory rejected: ${releaseDir}`);
+    }
+
+    fs.mkdirSync(resolvedReleaseDir, { recursive: true });
+
+    let coverAbsPath: string | null = null;
+    let coverLocalRelPath: string | null = null;
+    if (metadata.coverUrl) {
+      coverAbsPath = await this.downloadAssetIfMissing(
+        metadata.coverUrl,
+        path.join(resolvedReleaseDir, 'cover'),
+        metadata.sourcePageUrl,
+        config,
+        signal,
+        log,
+      );
+      if (coverAbsPath) {
+        coverLocalRelPath = path.relative(resolvedReleaseDir, coverAbsPath).split(path.sep).join('/');
+      }
+    }
+
+    const screenshotAbsPaths: string[] = [];
+    const screenshotLocalRelPaths: string[] = [];
+    if (metadata.screenshotUrls.length > 0) {
+      const shotsDir = path.join(resolvedReleaseDir, 'screenshots');
+      for (let i = 0; i < metadata.screenshotUrls.length; i += 1) {
+        if (signal?.aborted) break;
+        const shotUrl = metadata.screenshotUrls[i];
+        const indexName = String(i + 1).padStart(2, '0');
+        const shotAbs = await this.downloadAssetIfMissing(
+          shotUrl,
+          path.join(shotsDir, indexName),
+          metadata.sourcePageUrl,
+          config,
+          signal,
+          log,
+        );
+        if (shotAbs) {
+          screenshotAbsPaths.push(shotAbs);
+          screenshotLocalRelPaths.push(path.relative(resolvedReleaseDir, shotAbs).split(path.sep).join('/'));
+        }
+      }
+    }
+
+    const enriched: ReleaseMetadata = {
+      ...metadata,
+      coverLocalRelPath,
+      screenshotLocalRelPaths,
+      fetchedAt: new Date().toISOString(),
+    };
+
+    try {
+      const metaPath = path.join(resolvedReleaseDir, 'metadata.json');
+      await fs.promises.writeFile(metaPath, JSON.stringify(enriched, null, 2), 'utf8');
+    } catch {
+      // Non-fatal if metadata sidecar write fails
+    }
+
+    return {
+      metadata: enriched,
+      coverAbsPath,
+      screenshotAbsPaths,
+    };
   }
 }

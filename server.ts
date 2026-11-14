@@ -4,6 +4,7 @@ import path from 'node:path';
 import express from 'express';
 import {
   getPublicConfig,
+  getRepositoryItemById,
   initDb,
   listActivityLogs,
   listSyncRuns,
@@ -125,16 +126,85 @@ async function bootstrap() {
     res.json({ ok: true });
   });
 
-  // Repository catalog & retry
+  // Repository catalog, metadata, local assets, download & retry
   app.get('/api/items', (req, res) => {
     const result = queryRepositoryItems({
       search: typeof req.query.search === 'string' ? req.query.search : undefined,
       system: typeof req.query.system === 'string' ? req.query.system : undefined,
       status: typeof req.query.status === 'string' ? req.query.status : undefined,
+      tag: typeof req.query.tag === 'string' ? req.query.tag : undefined,
+      genre: typeof req.query.genre === 'string' ? req.query.genre : undefined,
+      region: typeof req.query.region === 'string' ? req.query.region : undefined,
+      language: typeof req.query.language === 'string' ? req.query.language : undefined,
       limit: Number(req.query.limit || 50),
       offset: Number(req.query.offset || 0),
     });
     res.json(result);
+  });
+
+  app.get('/api/items/:id', (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    const item = getRepositoryItemById(itemId);
+    if (!item) {
+      res.status(404).json({ error: 'Catalog item not found' });
+      return;
+    }
+    res.json({ item });
+  });
+
+  app.get('/api/items/:id/asset', (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    const kind = req.query.kind === 'screenshot' ? 'screenshot' : 'cover';
+    const index = Number(req.query.index || 0);
+    const asset = orchestrator.resolveItemAssetFile(itemId, kind, Number.isNaN(index) ? 0 : index);
+    if (!asset) {
+      res.status(404).json({ error: 'Artwork asset not found locally' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.sendFile(asset.absPath);
+  });
+
+  app.get('/api/items/:id/download', (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    const rawFileId = req.query.fileId;
+    const fileId = rawFileId !== undefined ? Number(rawFileId) : undefined;
+    if (fileId !== undefined && (!Number.isInteger(fileId) || fileId <= 0)) {
+      res.status(400).json({ error: 'Invalid fileId' });
+      return;
+    }
+    const rom = orchestrator.resolveItemRomFile(itemId, fileId);
+    if (!rom) {
+      res.status(404).json({ error: 'Mirrored ROM archive not found on disk' });
+      return;
+    }
+    res.download(rom.absPath, rom.filename);
+  });
+
+  app.post('/api/items/:id/metadata', async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    try {
+      const item = await orchestrator.fetchItemMetadata(itemId);
+      res.json({ item });
+    } catch (err) {
+      res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   app.post('/api/items/:id/retry', async (req, res) => {
@@ -143,8 +213,14 @@ async function bootstrap() {
       res.status(400).json({ error: 'Invalid item ID' });
       return;
     }
+    const rawFileId = req.query.fileId ?? req.body?.fileId;
+    const fileId = rawFileId !== undefined ? Number(rawFileId) : undefined;
+    if (fileId !== undefined && (!Number.isInteger(fileId) || fileId <= 0)) {
+      res.status(400).json({ error: 'Invalid fileId' });
+      return;
+    }
     try {
-      const run = await orchestrator.retryItem(itemId);
+      const run = await orchestrator.retryItem(itemId, fileId);
       res.status(202).json({ run });
     } catch (err) {
       res.status(409).json({ error: err instanceof Error ? err.message : String(err) });
