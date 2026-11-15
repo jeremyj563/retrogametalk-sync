@@ -524,14 +524,15 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
     });
   };
 
-  const hasActiveFilters =
-    search.trim() !== '' ||
-    systemFilter !== 'all' ||
-    statusFilter !== 'all' ||
-    tagFilter !== 'all' ||
-    genreFilter !== 'all' ||
-    regionFilter !== 'all' ||
-    languageFilter !== 'all';
+  const activeFilterCount =
+    (search.trim() !== '' ? 1 : 0) +
+    (systemFilter !== 'all' ? 1 : 0) +
+    (statusFilter !== 'all' ? 1 : 0) +
+    (tagFilter !== 'all' ? 1 : 0) +
+    (genreFilter !== 'all' ? 1 : 0) +
+    (regionFilter !== 'all' ? 1 : 0) +
+    (languageFilter !== 'all' ? 1 : 0);
+  const hasActiveFilters = activeFilterCount > 0;
 
   const clearCatalogFilters = () => {
     setSearch('');
@@ -610,16 +611,6 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
 
           {viewMode === 'catalog' ? (
             <div className="flex items-center gap-2 self-start lg:self-auto">
-              {hasActiveFilters && (
-                <button
-                  type="button"
-                  onClick={clearCatalogFilters}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors whitespace-nowrap"
-                >
-                  <X className="h-3.5 w-3.5" />
-                  Clear Filters
-                </button>
-              )}
               <button
                 type="button"
                 onClick={() => void loadCatalog()}
@@ -632,14 +623,26 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
           ) : (
             <div className="flex flex-wrap items-center gap-3">
               <div className="relative">
-                <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2" />
+                <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="text"
                   value={fsSearch}
                   onChange={(e) => setFsSearch(e.target.value)}
                   placeholder="Filter current folder..."
-                  className="pl-8 pr-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-56"
+                  className={`pl-8 ${fsSearch ? 'pr-7' : 'pr-3'} py-1.5 text-xs bg-crt-bg border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-56 ${
+                    fsSearch.trim() ? 'border-crt-phosphor/60' : 'border-crt-border'
+                  }`}
                 />
+                {fsSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setFsSearch('')}
+                    aria-label="Clear folder filter"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-crt-muted hover:text-crt-text p-0.5 rounded"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </div>
               <span className="text-xs font-mono text-crt-muted truncate max-w-xs">
                 Root: {status.storage.downloadDir}
@@ -660,21 +663,35 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
         {viewMode === 'catalog' && (
           <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-crt-border">
             <div className="relative">
-              <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2" />
+              <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search title, publisher, file..."
-                className="pl-8 pr-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-60"
+                className={`pl-8 ${search ? 'pr-7' : 'pr-3'} py-1.5 text-xs bg-crt-bg border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-60 ${
+                  search.trim() ? 'border-crt-phosphor/60' : 'border-crt-border'
+                }`}
               />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch('')}
+                  aria-label="Clear search query"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-crt-muted hover:text-crt-text p-0.5 rounded"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
             </div>
 
             <select
               value={systemFilter}
               onChange={(e) => setSystemFilter(e.target.value)}
               aria-label="Filter by console system"
-              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
+                systemFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
+              }`}
             >
               <option value="all">All Systems ({status.systems.length})</option>
               {systemFilter !== 'all' && !status.systems.some((sys) => sys.systemName === systemFilter) && (
@@ -691,7 +708,9 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               value={tagFilter}
               onChange={(e) => setTagFilter(e.target.value)}
               aria-label="Filter by release type"
-              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
+                tagFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
+              }`}
             >
               <option value="all">All Types ({facets.tags.length})</option>
               {tagFilter !== 'all' && !facets.tags.includes(tagFilter) && (
@@ -708,7 +727,9 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               value={genreFilter}
               onChange={(e) => setGenreFilter(e.target.value)}
               aria-label="Filter by genre"
-              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
+                genreFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
+              }`}
             >
               <option value="all">All Genres ({facets.genres.length})</option>
               {genreFilter !== 'all' && !facets.genres.includes(genreFilter) && (
@@ -725,7 +746,9 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               value={regionFilter}
               onChange={(e) => setRegionFilter(e.target.value)}
               aria-label="Filter by region"
-              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
+                regionFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
+              }`}
             >
               <option value="all">All Regions ({facets.regions.length})</option>
               {regionFilter !== 'all' && !facets.regions.includes(regionFilter) && (
@@ -742,7 +765,9 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               value={languageFilter}
               onChange={(e) => setLanguageFilter(e.target.value)}
               aria-label="Filter by language"
-              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
+                languageFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
+              }`}
             >
               <option value="all">All Languages ({facets.languages.length})</option>
               {languageFilter !== 'all' && !facets.languages.includes(languageFilter) && (
@@ -759,7 +784,9 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
               aria-label="Filter by transfer status"
-              className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
+                statusFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
+              }`}
             >
               <option value="all">All Statuses</option>
               <option value="downloaded">Downloaded</option>
@@ -767,6 +794,20 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               <option value="partial">Partial</option>
               <option value="failed">Failed</option>
             </select>
+
+            <button
+              type="button"
+              disabled={!hasActiveFilters}
+              onClick={clearCatalogFilters}
+              className={`sm:ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
+                hasActiveFilters
+                  ? 'border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20'
+                  : 'border-crt-border bg-crt-bg text-crt-muted opacity-50 cursor-not-allowed'
+              }`}
+            >
+              <X className="h-3.5 w-3.5" />
+              {hasActiveFilters ? `Clear All Filters (${activeFilterCount})` : 'Clear All Filters'}
+            </button>
           </div>
         )}
 
@@ -879,12 +920,30 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               ))}
             </div>
           ) : items.length === 0 ? (
-            <div className="p-12 text-center space-y-2">
+            <div className="p-12 text-center space-y-3">
               <FileArchive className="h-6 w-6 text-crt-muted mx-auto" />
-              <p className="text-sm font-medium text-crt-text">No mirrored repository items match your filter</p>
-              <p className="text-xs text-crt-muted max-w-md mx-auto">
-                Run an Incremental Sync from the Sync tab to crawl retrogametalk.com/repo and mirror releases locally.
+              <p className="text-sm font-medium text-crt-text">
+                {hasActiveFilters
+                  ? 'No catalog releases match your active filters'
+                  : 'No mirrored repository items yet'}
               </p>
+              <p className="text-xs text-crt-muted max-w-md mx-auto">
+                {hasActiveFilters
+                  ? 'Adjust or reset your active search and dropdown filters to display all indexed releases.'
+                  : 'Run an Incremental Sync from the Sync tab to crawl retrogametalk.com/repo and mirror releases locally.'}
+              </p>
+              {hasActiveFilters && (
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={clearCatalogFilters}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    Clear All Filters ({activeFilterCount})
+                  </button>
+                </div>
+              )}
             </div>
           ) : catalogLayout === 'table' ? (
             <div className="overflow-x-auto">
@@ -1227,7 +1286,7 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               ))}
             </div>
           ) : filteredFsNodes.length === 0 ? (
-            <div className="p-12 text-center space-y-2">
+            <div className="p-12 text-center space-y-3">
               <Folder className="h-6 w-6 text-crt-muted mx-auto" />
               <p className="text-sm font-medium text-crt-text">
                 {fsNodes.length === 0 ? 'Directory is empty' : 'No files or folders match your filter'}
@@ -1235,8 +1294,20 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               <p className="text-xs text-crt-muted">
                 {fsNodes.length === 0
                   ? 'Downloaded ROMs, hacks, translations, and ports will appear here mirroring the exact remote hierarchy.'
-                  : 'Try clearing the folder filter input above.'}
+                  : 'Clear the folder filter input to view all entries in this directory.'}
               </p>
+              {fsNodes.length > 0 && fsSearch && (
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setFsSearch('')}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    Clear Folder Filter
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div className="divide-y divide-crt-border">
