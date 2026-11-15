@@ -93,6 +93,14 @@ export class ScraperOrchestrator extends EventEmitter {
     this.emit('status', this.getStatusSnapshot());
   }
 
+  private emitCatalogUpdated(reason: string, itemId?: number): void {
+    this.emit('catalog_updated', {
+      reason,
+      itemId: itemId ?? null,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   private formatRelativePhasePath(targetUrl: string, baseUrl: string): string {
     try {
       const target = new URL(targetUrl);
@@ -411,6 +419,7 @@ export class ScraperOrchestrator extends EventEmitter {
         'info',
         `Deleted ${removedItems.length} catalog release(s) (${filesRemoved} file(s) removed from disk)`,
       );
+      this.emitCatalogUpdated('items_deleted');
       this.emitStatus();
     }
 
@@ -580,6 +589,7 @@ export class ScraperOrchestrator extends EventEmitter {
       `Mirrored metadata & artwork for ${updated.title}`,
       `${mirrored.coverAbsPath ? 'cover + ' : ''}${mirrored.screenshotAbsPaths.length} screenshots`,
     );
+    this.emitCatalogUpdated('metadata_updated', updated.id);
     this.emitStatus();
     return updated;
   }
@@ -611,6 +621,7 @@ export class ScraperOrchestrator extends EventEmitter {
         'info',
         `Deleted ${deletedAbsPaths.length} filesystem entry/entries (${catalogRowsRemoved} catalog record(s) removed)`,
       );
+      this.emitCatalogUpdated('fs_deleted');
       this.emitStatus();
     }
 
@@ -1054,6 +1065,7 @@ export class ScraperOrchestrator extends EventEmitter {
           lastRunId: run.id,
           metadata: effectiveMeta ?? null,
         });
+        this.emitCatalogUpdated('release_discovered', parent.id);
 
         // Mirror cover art, screenshots, and metadata.json once per release page
         if (effectiveMeta) {
@@ -1072,6 +1084,7 @@ export class ScraperOrchestrator extends EventEmitter {
                 mirroredAssets.coverAbsPath,
                 mirroredAssets.screenshotAbsPaths,
               ) || parent;
+            this.emitCatalogUpdated('metadata_mirrored', parent.id);
           } catch (err) {
             if (signal.aborted) throw err;
             runLogger('warn', `Metadata/artwork sync incomplete for ${parent.title}`, String(err));
@@ -1419,6 +1432,7 @@ export class ScraperOrchestrator extends EventEmitter {
       totalBytes: null,
       bytesPerSec: 0,
     };
+    this.emitCatalogUpdated('file_downloading', releaseId);
     this.emitStatus();
 
     try {
@@ -1455,6 +1469,7 @@ export class ScraperOrchestrator extends EventEmitter {
           lastRunId: runId,
         });
         runLogger('info', `Skipped existing file: ${res.remotePath}`);
+        this.emitCatalogUpdated('file_skipped', releaseId);
         return { downloaded: false, skipped: true, failed: false, bytes: 0 };
       }
 
@@ -1474,6 +1489,7 @@ export class ScraperOrchestrator extends EventEmitter {
         downloadedAt: new Date().toISOString(),
       });
       runLogger('download', `Mirrored ${res.remotePath}`, `${res.bytes} bytes`);
+      this.emitCatalogUpdated('file_downloaded', releaseId);
       return { downloaded: true, skipped: false, failed: false, bytes: res.bytes };
     } catch (err) {
       this.activeTransfer = null;
@@ -1494,6 +1510,7 @@ export class ScraperOrchestrator extends EventEmitter {
       if (!signal.aborted) {
         runLogger('error', `Failed ${release.filename}: ${errMsg}`, release.downloadUrl);
       }
+      this.emitCatalogUpdated('file_failed', releaseId);
       return { downloaded: false, skipped: false, failed: true, bytes: 0 };
     }
   }
