@@ -24,6 +24,7 @@ import type {
   SyncRunRecord,
 } from './types';
 import { formatBytes, formatCountdown } from './utils/format';
+import { readJsonSafely } from './utils/http';
 
 export default function App() {
   const [section, setSection] = useState<NavSection>('monitor');
@@ -146,9 +147,9 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode }),
       });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.error || `Failed to start run (HTTP ${res.status})`);
+      const parsed = await readJsonSafely<{ run?: SyncRunRecord; error?: string }>(res);
+      if (!parsed.ok) {
+        throw new Error(parsed.errorMessage || `Failed to start run (HTTP ${res.status})`);
       }
       await loadInitialData();
     } catch (err) {
@@ -165,10 +166,10 @@ export default function App() {
     setErrorBanner(null);
     try {
       const res = await fetch('/api/runs/stop', { method: 'POST' });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
+      const parsed = await readJsonSafely<{ error?: string }>(res);
+      if (!parsed.ok) {
         setStopRequested(false);
-        throw new Error(d.error || `Failed to stop run (HTTP ${res.status})`);
+        throw new Error(parsed.errorMessage || `Failed to stop run (HTTP ${res.status})`);
       }
     } catch (err) {
       setStopRequested(false);
@@ -181,9 +182,9 @@ export default function App() {
   const handleClearLogs = async (level: 'all' | LogLevel) => {
     setErrorBanner(null);
     const res = await fetch(`/api/logs?level=${encodeURIComponent(level)}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({}));
-      setErrorBanner(d.error || `Failed to clear logs (HTTP ${res.status})`);
+    const parsed = await readJsonSafely<{ error?: string }>(res);
+    if (!parsed.ok) {
+      setErrorBanner(parsed.errorMessage || `Failed to clear logs (HTTP ${res.status})`);
       return;
     }
     setLogs((prev) => (level === 'all' ? [] : prev.filter((l) => l.level !== level)));
@@ -192,9 +193,9 @@ export default function App() {
   const handleClearRuns = async () => {
     setErrorBanner(null);
     const res = await fetch('/api/runs', { method: 'DELETE' });
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({}));
-      setErrorBanner(d.error || `Failed to clear sync runs (HTTP ${res.status})`);
+    const parsed = await readJsonSafely<{ error?: string }>(res);
+    if (!parsed.ok) {
+      setErrorBanner(parsed.errorMessage || `Failed to clear sync runs (HTTP ${res.status})`);
       return;
     }
     setRuns((prev) => prev.filter((r) => r.status === 'running'));
@@ -203,9 +204,9 @@ export default function App() {
   const handleRetryItem = async (itemId: number, fileId?: number) => {
     const qs = fileId ? `?fileId=${encodeURIComponent(String(fileId))}` : '';
     const res = await fetch(`/api/items/${itemId}/retry${qs}`, { method: 'POST' });
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({}));
-      setErrorBanner(d.error || `Retry failed (HTTP ${res.status})`);
+    const parsed = await readJsonSafely<{ error?: string }>(res);
+    if (!parsed.ok) {
+      setErrorBanner(parsed.errorMessage || `Retry failed (HTTP ${res.status})`);
     }
   };
 
@@ -215,12 +216,11 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     });
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({}));
-      throw new Error(d.error || `Save failed (HTTP ${res.status})`);
+    const parsed = await readJsonSafely<{ config?: ScraperConfigPublic; error?: string }>(res);
+    if (!parsed.ok || !parsed.data?.config) {
+      throw new Error(parsed.errorMessage || `Save failed (HTTP ${res.status})`);
     }
-    const data = await res.json();
-    setConfig(data.config);
+    setConfig(parsed.data.config);
     await loadInitialData();
   };
 

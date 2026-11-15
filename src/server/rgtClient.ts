@@ -261,12 +261,92 @@ export class RetroGameTalkClient {
     }
   }
 
+  private getSafeCookieCount(urlStr: string): number {
+    try {
+      return this.jar.getCookiesSync(urlStr).length;
+    } catch {
+      return 0;
+    }
+  }
+
+  private validateHttpUrlOrExplain(raw: string, fieldLabel: string): URL {
+    const trimmed = (raw || '').trim();
+    if (!trimmed) {
+      throw new Error(`${fieldLabel} is missing. Enter a full URL starting with https:// or http://.`);
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      throw new Error(`Invalid ${fieldLabel} ("${trimmed}"): enter a valid URL starting with https:// or http://.`);
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`Invalid ${fieldLabel} ("${trimmed}"): protocol must be http:// or https://.`);
+    }
+    if (!parsed.hostname) {
+      throw new Error(`Invalid ${fieldLabel} ("${trimmed}"): hostname is missing.`);
+    }
+    return parsed;
+  }
+
+  private isNonRetryableNetworkError(err: unknown): boolean {
+    const anyErr = err as { code?: string; cause?: { code?: string } } | null;
+    const code = String(anyErr?.cause?.code || anyErr?.code || '');
+    return (
+      code === 'ENOTFOUND' ||
+      code === 'ECONNREFUSED' ||
+      code === 'ERR_INVALID_URL' ||
+      code === 'ERR_TLS_CERT_ALTNAME_INVALID' ||
+      code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+      code.startsWith('CERT_')
+    );
+  }
+
+  private formatNetworkError(err: unknown, targetUrl: string): string {
+    const anyErr = err as { name?: string; message?: string; code?: string; cause?: { code?: string; message?: string; hostname?: string } } | null;
+    const code = String(anyErr?.cause?.code || anyErr?.code || '');
+    const causeMsg = String(anyErr?.cause?.message || anyErr?.message || err || '');
+    let host = targetUrl;
+    try {
+      host = new URL(targetUrl).host || targetUrl;
+    } catch {
+      // Keep raw targetUrl
+    }
+
+    if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+      return `Cannot resolve hostname "${anyErr?.cause?.hostname || host}" — verify the URL spelling and DNS/network access.`;
+    }
+    if (code === 'ECONNREFUSED') {
+      return `Connection refused by "${host}" — the target server appears to be down or unreachable on that port.`;
+    }
+    if (anyErr?.name === 'TimeoutError' || code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT') {
+      return `Connection to "${host}" timed out — server may be down, firewalled, or unreachable.`;
+    }
+    if (code === 'ECONNRESET' || code === 'UND_ERR_SOCKET') {
+      return `Connection reset by "${host}" before a response was received.`;
+    }
+    if (code.startsWith('CERT_') || code.startsWith('ERR_TLS_') || code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE') {
+      return `TLS/SSL certificate error connecting to "${host}": ${causeMsg}`;
+    }
+    return causeMsg || `Network error connecting to "${host}"`;
+  }
+
+  private isCloudflareChallenge(status: number, headers: Headers, body: string): boolean {
+    if (headers.get('cf-mitigated')?.toLowerCase() === 'challenge') return true;
+    if (status === 403 || status === 503) {
+      const lower = body.slice(0, 4000).toLowerCase();
+      if (lower.includes('<title>just a moment...</title>') || lower.includes('challenges.cloudflare.com')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   getAuthStatus(config: ScraperConfigInternal): AuthSessionStatus {
-    const cookies = this.jar.getCookiesSync(config.baseUrl);
     return {
       ...this.authStatus,
       configured: Boolean(config.username && config.password),
-      cookieCount: cookies.length,
+      cookieCount: this.getSafeCookieCount(config.baseUrl),
     };
   }
 
@@ -287,13 +367,20 @@ export class RetroGameTalkClient {
       const started = performance.now();
       let cookieHeader = await this.jar.getCookieString(currentUrl);
       // Also forward root-domain cookies if a download subdomain (e.g. squall/rinoa.retrogametalk.com) needs them
-      if (!cookieHeader && isSameRootDomain(new URL(currentUrl).hostname, new URL(config.baseUrl).hostname)) {
-        cookieHeader = await this.jar.getCookieString(config.baseUrl);
+      try {
+        if (!cookieHeader && isSameRootDomain(new URL(currentUrl).hostname, new URL(config.baseUrl).hostname)) {
+          cookieHeader = await this.jar.getCookieString(config.baseUrl);
+        }
+      } catch {
+        // Ignore invalid baseUrl during fallback cookie lookup
       }
 
       const headers = new Headers(init.headers || {});
       headers.set('User-Agent', config.userAgent);
       headers.set('Accept', headers.get('Accept') || 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
+      if (!headers.has('Accept-Language')) {
+        headers.set('Accept-Language', 'en-US,en;q=0.9');
+      }
       if (cookieHeader) {
         headers.set('Cookie', cookieHeader);
       }
@@ -313,11 +400,14 @@ export class RetroGameTalkClient {
         const latency = performance.now() - started;
         if (signal?.aborted) throw err;
         this.rateLimiter.recordError(latency);
+        if (this.isNonRetryableNetworkError(err)) {
+          throw err;
+        }
         attempt += 1;
         if (attempt > config.maxRetries) {
           throw err;
         }
-        log?.('warn', `Network retry (${attempt}/${config.maxRetries}) for ${currentUrl}`, String(err));
+        log?.('warn', `Network retry (${attempt}/${config.maxRetries}) for ${currentUrl}`, this.formatNetworkError(err, currentUrl));
         continue;
       }
 
@@ -350,7 +440,7 @@ export class RetroGameTalkClient {
           `Attempt ${attempt}/${config.maxRetries}${retryAfterSec ? ` · Retry-After: ${retryAfterSec}s` : ''}`,
         );
         if (attempt > config.maxRetries) {
-          throw new Error(`Exceeded max retries (${config.maxRetries}) after HTTP ${res.status}`);
+          throw new Error(`Exceeded max retries (${config.maxRetries}) after HTTP ${res.status} from ${new URL(currentUrl).hostname}`);
         }
         continue;
       }
@@ -376,7 +466,7 @@ export class RetroGameTalkClient {
         this.rateLimiter.recordError(latency);
         attempt += 1;
         if (attempt > config.maxRetries) {
-          throw new Error(`Upstream HTTP ${res.status} at ${currentUrl}`);
+          throw new Error(`Target server error HTTP ${res.status} at ${currentUrl}`);
         }
         log?.('warn', `Server HTTP ${res.status}; retrying (${attempt}/${config.maxRetries})`, currentUrl);
         continue;
@@ -392,34 +482,158 @@ export class RetroGameTalkClient {
     signal?: AbortSignal,
     log?: LoggerFn,
   ): Promise<{ authenticated: boolean; statusCode: number; message: string }> {
-    if (!config.username || !config.password) {
+    const username = (config.username || '').trim();
+    const password = config.password || '';
+
+    if (!username && !password) {
+      const msg = 'Credentials missing: enter both Repository Username and Repository Password.';
       this.authStatus = {
         configured: false,
         authenticated: false,
-        cookieCount: this.jar.getCookiesSync(config.baseUrl).length,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
         lastCheckedAt: new Date().toISOString(),
-        lastMessage: 'No repository credentials configured; proceeding anonymously.',
+        lastMessage: msg,
       };
-      return {
+      return { authenticated: false, statusCode: 0, message: msg };
+    }
+    if (!username) {
+      const msg = 'Repository Username is missing. Enter a valid username.';
+      this.authStatus = {
+        configured: false,
         authenticated: false,
-        statusCode: 0,
-        message: 'No repository credentials configured.',
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastCheckedAt: new Date().toISOString(),
+        lastMessage: msg,
       };
+      return { authenticated: false, statusCode: 0, message: msg };
+    }
+    if (!password) {
+      const msg = `Repository Password is missing for user "${username}".`;
+      this.authStatus = {
+        configured: false,
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastCheckedAt: new Date().toISOString(),
+        lastMessage: msg,
+      };
+      return { authenticated: false, statusCode: 0, message: msg };
+    }
+
+    try {
+      this.validateHttpUrlOrExplain(config.loginUrl, 'Login Endpoint URL');
+      this.validateHttpUrlOrExplain(config.baseUrl, 'Repository Base URL');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.authStatus = {
+        configured: true,
+        authenticated: false,
+        cookieCount: 0,
+        lastCheckedAt: new Date().toISOString(),
+        lastMessage: msg,
+      };
+      return { authenticated: false, statusCode: 0, message: msg };
     }
 
     log?.('info', `Authenticating XenForo + Repo gate at ${config.loginUrl}`);
 
-    // Step 1: GET the login form (for XenForo /login/ or /login/login, fetch CSRF cookie + _xfToken)
-    const formUrl = config.loginUrl.endsWith('/login/login')
-      ? config.loginUrl.replace(/\/login\/login$/, '/login/')
-      : config.loginUrl;
+    // Step 1: GET the configured Login Endpoint URL directly first so configured paths (e.g. /login/login) are honored and reported accurately
+    let formPage: { response: Response; finalUrl: string; latencyMs: number };
+    try {
+      formPage = await this.fetchWithRedirects(config.loginUrl, config, { method: 'GET' }, signal, log);
+    } catch (err) {
+      const msg = `Cannot reach Login Endpoint URL (${config.loginUrl}): ${this.formatNetworkError(err, config.loginUrl)}`;
+      this.authStatus = {
+        configured: true,
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastCheckedAt: new Date().toISOString(),
+        lastMessage: msg,
+      };
+      log?.('error', msg);
+      return { authenticated: false, statusCode: 0, message: msg };
+    }
 
-    const formPage = await this.fetchWithRedirects(formUrl, config, { method: 'GET' }, signal, log);
-    const html = await formPage.response.text();
+    let html = await formPage.response.text();
+    if (this.isCloudflareChallenge(formPage.response.status, formPage.response.headers, html)) {
+      const msg = `Blocked by Cloudflare bot protection (HTTP ${formPage.response.status}) at Login Endpoint URL (${formPage.finalUrl}). Cloudflare is requiring an interactive JS/Turnstile browser challenge for this server IP, so automated login cannot complete from this host.`;
+      this.authStatus = {
+        configured: true,
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastCheckedAt: new Date().toISOString(),
+        lastMessage: msg,
+      };
+      log?.('warn', msg);
+      return { authenticated: false, statusCode: formPage.response.status, message: msg };
+    }
+
+    // Optional XenForo fallback: if GET /login/login returns 404/405 or no form, try parent /login/ to fetch CSRF _xfToken
+    if (
+      config.loginUrl.endsWith('/login/login') &&
+      (formPage.response.status === 404 ||
+        formPage.response.status === 405 ||
+        (formPage.response.ok && loadHtml(html)('input[type="password"]').length === 0))
+    ) {
+      const parentFormUrl = config.loginUrl.replace(/\/login\/login$/, '/login/');
+      try {
+        const fallbackPage = await this.fetchWithRedirects(parentFormUrl, config, { method: 'GET' }, signal, log);
+        const fallbackHtml = await fallbackPage.response.text();
+        if (this.isCloudflareChallenge(fallbackPage.response.status, fallbackPage.response.headers, fallbackHtml)) {
+          const msg = `Blocked by Cloudflare bot protection (HTTP ${fallbackPage.response.status}) at Login Endpoint URL (${fallbackPage.finalUrl}). Cloudflare is requiring an interactive JS/Turnstile browser challenge for this server IP.`;
+          this.authStatus = {
+            configured: true,
+            authenticated: false,
+            cookieCount: this.getSafeCookieCount(config.baseUrl),
+            lastCheckedAt: new Date().toISOString(),
+            lastMessage: msg,
+          };
+          log?.('warn', msg);
+          return { authenticated: false, statusCode: fallbackPage.response.status, message: msg };
+        }
+        if (fallbackPage.response.ok && loadHtml(fallbackHtml)('input[type="password"]').length > 0) {
+          formPage = fallbackPage;
+          html = fallbackHtml;
+        }
+      } catch {
+        // Keep original response error reporting below
+      }
+    }
+
+    if (formPage.response.status >= 400) {
+      const msg = `Login Endpoint URL returned HTTP ${formPage.response.status} (${formPage.finalUrl}). Check that the Login Endpoint URL is correct.`;
+      this.authStatus = {
+        configured: true,
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastCheckedAt: new Date().toISOString(),
+        lastMessage: msg,
+      };
+      log?.('warn', msg);
+      return { authenticated: false, statusCode: formPage.response.status, message: msg };
+    }
+
     const $ = loadHtml(html);
-
     const passwordInput = $('input[type="password"]').first();
     const form = passwordInput.closest('form');
+
+    if (form.length === 0 || passwordInput.length === 0) {
+      const preCookies = await this.jar.getCookies(config.baseUrl);
+      const alreadySignedIn = preCookies.some(
+        (c) => c.key === 'xf_user' || c.key.startsWith('wordpress_logged_in_'),
+      );
+      if (!alreadySignedIn) {
+        const msg = `No login form found at Login Endpoint URL (${formPage.finalUrl}). Verify the Login Endpoint URL points to the login page.`;
+        this.authStatus = {
+          configured: true,
+          authenticated: false,
+          cookieCount: preCookies.length,
+          lastCheckedAt: new Date().toISOString(),
+          lastMessage: msg,
+        };
+        log?.('warn', msg);
+        return { authenticated: false, statusCode: formPage.response.status, message: msg };
+      }
+    }
 
     let actionUrl = config.loginUrl;
     const params = new URLSearchParams();
@@ -448,48 +662,95 @@ export class RetroGameTalkClient {
         .attr('name') || 'login';
       const passField = passwordInput.attr('name') || 'password';
 
-      params.set(userField, config.username);
-      params.set(passField, config.password);
+      params.set(userField, username);
+      params.set(passField, password);
       params.set('remember', '1');
       if (params.has('_xfRedirect')) {
         params.set('_xfRedirect', config.baseUrl);
       }
     } else {
-      // Direct fallback payload
-      params.set('login', config.username);
-      params.set('username', config.username);
-      params.set('password', config.password);
+      params.set('login', username);
+      params.set('username', username);
+      params.set('password', password);
       params.set('remember', '1');
     }
 
-    const postRes = await this.fetchWithRedirects(
-      actionUrl,
-      config,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Referer: formPage.finalUrl,
-          Origin: new URL(formPage.finalUrl).origin,
+    let postRes: { response: Response; finalUrl: string; latencyMs: number };
+    try {
+      postRes = await this.fetchWithRedirects(
+        actionUrl,
+        config,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Referer: formPage.finalUrl,
+            Origin: new URL(formPage.finalUrl).origin,
+          },
+          body: params.toString(),
         },
-        body: params.toString(),
-      },
-      signal,
-      log,
-    );
+        signal,
+        log,
+      );
+    } catch (err) {
+      const msg = `Failed submitting credentials to "${actionUrl}": ${this.formatNetworkError(err, actionUrl)}`;
+      this.authStatus = {
+        configured: true,
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastCheckedAt: new Date().toISOString(),
+        lastMessage: msg,
+      };
+      log?.('error', msg);
+      return { authenticated: false, statusCode: 0, message: msg };
+    }
 
     const postBody = await postRes.response.text();
+    if (this.isCloudflareChallenge(postRes.response.status, postRes.response.headers, postBody)) {
+      const msg = `Login request blocked by Cloudflare challenge (HTTP ${postRes.response.status}) at ${postRes.finalUrl}. Cloudflare is requiring an interactive JS/Turnstile browser challenge for this server IP.`;
+      this.authStatus = {
+        configured: true,
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastCheckedAt: new Date().toISOString(),
+        lastMessage: msg,
+      };
+      log?.('warn', msg);
+      return { authenticated: false, statusCode: postRes.response.status, message: msg };
+    }
 
-    // Step 2: Touch config.baseUrl (/repo/) so WordPress rgt_gate primes PHPSESSID cleanly
+    const post$ = loadHtml(postBody);
+    const blockError = post$('.blockMessage--error, .blockMessage, #login_error, .errorPanel, .message--error, .formRow--error')
+      .first()
+      .text()
+      .replace(/\s+/g, ' ')
+      .trim();
+    const stillOnLoginForm = post$('input[type="password"]').length > 0;
+    const preRepoCookies = await this.jar.getCookies(config.baseUrl);
+    const hasSessionCookieBeforeRepo = preRepoCookies.some(
+      (c) => c.key === 'xf_user' || c.key.startsWith('wordpress_logged_in_'),
+    );
+
+    const loginRejectedInPost =
+      Boolean(blockError) ||
+      postRes.response.status >= 400 ||
+      (stillOnLoginForm && !hasSessionCookieBeforeRepo);
+
+    // Step 2: Touch config.baseUrl (/repo/) so WordPress rgt_gate primes PHPSESSID cleanly,
+    // only when the login POST response didn't already reject the submission.
     let repoReached = false;
     let repoTitle = '';
-    if (postRes.response.ok || postRes.finalUrl.includes('/repo')) {
+    if (!loginRejectedInPost && (postRes.response.ok || postRes.finalUrl.includes('/repo'))) {
       try {
         const repoCheck = await this.fetchWithRedirects(config.baseUrl, config, { method: 'GET' }, signal, log);
         const repoHtml = await repoCheck.response.text();
         const repo$ = loadHtml(repoHtml);
         repoTitle = repo$('title').first().text().trim();
-        repoReached = repoCheck.response.ok && !repoCheck.finalUrl.includes('/login') && repo$('input[name="login"]').length === 0;
+        repoReached =
+          repoCheck.response.ok &&
+          !repoCheck.finalUrl.includes('/login') &&
+          repo$('input[name="login"]').length === 0 &&
+          repo$('input[type="password"]').length === 0;
       } catch {
         repoReached = false;
       }
@@ -497,15 +758,22 @@ export class RetroGameTalkClient {
 
     const cookies = await this.jar.getCookies(config.baseUrl);
     const hasXfUser = cookies.some((c) => c.key === 'xf_user' || c.key.startsWith('wordpress_logged_in_'));
-    const post$ = loadHtml(postBody);
-    const blockError = post$('.blockMessage--error, #login_error').text().trim();
-    const authenticated = hasXfUser || repoReached;
+    const authenticated = !loginRejectedInPost && (hasXfUser || repoReached);
 
-    const message = authenticated
-      ? `Authenticated as ${config.username} (${cookies.length} cookies${repoTitle ? ` · "${repoTitle}"` : ''})`
-      : blockError
-        ? `Login rejected: ${blockError}`
-        : `HTTP ${postRes.response.status}; authentication did not yield an active xf_user/repo session`;
+    let message: string;
+    if (authenticated) {
+      message = `Authenticated as ${username} (${cookies.length} cookies${repoTitle ? ` · "${repoTitle}"` : ''})`;
+    } else if (blockError) {
+      message = `Login rejected: ${blockError}`;
+    } else if (postRes.response.status === 401 || postRes.response.status === 403) {
+      message = `Login rejected (HTTP ${postRes.response.status}) at ${postRes.finalUrl}: invalid credentials or access denied.`;
+    } else if (postRes.response.status >= 400) {
+      message = `Login Endpoint URL returned HTTP ${postRes.response.status} at ${postRes.finalUrl}. Check that the Login Endpoint URL is valid.`;
+    } else if (stillOnLoginForm) {
+      message = `Invalid username or password: server returned the login form without establishing an authenticated session.`;
+    } else {
+      message = `Authentication failed (HTTP ${postRes.response.status}): no active session cookie returned from ${postRes.finalUrl}.`;
+    }
 
     this.authStatus = {
       configured: true,
@@ -525,33 +793,133 @@ export class RetroGameTalkClient {
 
   async testAuthAndDiscovery(config: ScraperConfigInternal, signal?: AbortSignal): Promise<AuthTestResult> {
     const started = performance.now();
+    // Use bounded retries/timeout during interactive test probes so dead servers/bad URLs fail fast with real diagnostics
+    const probeConfig: ScraperConfigInternal = {
+      ...config,
+      maxRetries: Math.min(config.maxRetries, 1),
+      requestTimeoutMs: Math.min(config.requestTimeoutMs, 12000),
+    };
+
     try {
+      this.validateHttpUrlOrExplain(probeConfig.baseUrl, 'Repository Base URL');
+
+      const username = (probeConfig.username || '').trim();
+      const password = probeConfig.password || '';
       let authMessage = 'Anonymous repository probe';
       let authenticated = false;
 
-      if (config.username && config.password) {
-        const loginRes = await this.login(config, signal);
+      if (username || password) {
+        this.validateHttpUrlOrExplain(probeConfig.loginUrl, 'Login Endpoint URL');
+        const loginRes = await this.login(probeConfig, signal);
         authenticated = loginRes.authenticated;
         authMessage = loginRes.message;
+
+        if (!authenticated) {
+          return {
+            success: false,
+            statusCode: loginRes.statusCode || null,
+            authenticated: false,
+            cookieCount: this.getSafeCookieCount(probeConfig.baseUrl),
+            discoveredSystems: [],
+            sampleReleaseUrls: [],
+            message: loginRes.message,
+            latencyMs: Math.round(performance.now() - started),
+          };
+        }
       }
 
-      const repoRes = await this.fetchWithRedirects(config.baseUrl, config, { method: 'GET' }, signal);
+      let repoRes: { response: Response; finalUrl: string; latencyMs: number };
+      try {
+        repoRes = await this.fetchWithRedirects(probeConfig.baseUrl, probeConfig, { method: 'GET' }, signal);
+      } catch (err) {
+        return {
+          success: false,
+          statusCode: null,
+          authenticated,
+          cookieCount: this.getSafeCookieCount(probeConfig.baseUrl),
+          discoveredSystems: [],
+          sampleReleaseUrls: [],
+          message: `Cannot reach Repository Base URL (${probeConfig.baseUrl}): ${this.formatNetworkError(err, probeConfig.baseUrl)}`,
+          latencyMs: Math.round(performance.now() - started),
+        };
+      }
+
       const html = await repoRes.response.text();
+      const cookiesCount = this.getSafeCookieCount(probeConfig.baseUrl);
+      const latencyMs = Math.round(performance.now() - started);
+
+      if (this.isCloudflareChallenge(repoRes.response.status, repoRes.response.headers, html)) {
+        return {
+          success: false,
+          statusCode: repoRes.response.status,
+          authenticated,
+          cookieCount: cookiesCount,
+          discoveredSystems: [],
+          sampleReleaseUrls: [],
+          message: `Blocked by Cloudflare bot protection (HTTP ${repoRes.response.status}) at Repository Base URL (${repoRes.finalUrl}).`,
+          latencyMs,
+        };
+      }
+
+      if (repoRes.response.status >= 400) {
+        return {
+          success: false,
+          statusCode: repoRes.response.status,
+          authenticated,
+          cookieCount: cookiesCount,
+          discoveredSystems: [],
+          sampleReleaseUrls: [],
+          message: `Repository Base URL returned HTTP ${repoRes.response.status} at ${repoRes.finalUrl}. Verify the Repository Base URL is correct.`,
+          latencyMs,
+        };
+      }
+
+      const redirectedToLogin =
+        repoRes.finalUrl.includes('/login') ||
+        repoRes.finalUrl.includes('wp-login.php') ||
+        loadHtml(html)('input[type="password"]').length > 0;
+
+      if (redirectedToLogin) {
+        const reason = !username && !password
+          ? `Credentials missing: enter both Repository Username and Repository Password (target redirected to ${repoRes.finalUrl}).`
+          : `Access rejected: Repository Base URL redirected back to login (${repoRes.finalUrl}). Check your credentials and Login Endpoint URL.`;
+        return {
+          success: false,
+          statusCode: repoRes.response.status,
+          authenticated: false,
+          cookieCount: cookiesCount,
+          discoveredSystems: [],
+          sampleReleaseUrls: [],
+          message: reason,
+          latencyMs,
+        };
+      }
+
       const { systems, releasePages, downloads } = this.extractLinksFromHtml(
         html,
         repoRes.finalUrl,
-        { ...config, systemFilter: '' },
+        { ...probeConfig, systemFilter: '' },
       );
 
-      const cookies = await this.jar.getCookies(config.baseUrl);
-      const latencyMs = Math.round(performance.now() - started);
       const sortedSystems = [...systems].sort((a, b) => a.localeCompare(b));
+      if (!username && !password && sortedSystems.length === 0 && releasePages.length === 0) {
+        return {
+          success: false,
+          statusCode: repoRes.response.status,
+          authenticated: false,
+          cookieCount: cookiesCount,
+          discoveredSystems: [],
+          sampleReleaseUrls: [],
+          message: `Credentials missing (username and password are empty) and no consoles were discovered at ${repoRes.finalUrl}.`,
+          latencyMs,
+        };
+      }
 
       return {
-        success: repoRes.response.ok && !repoRes.finalUrl.includes('/login'),
+        success: true,
         statusCode: repoRes.response.status,
         authenticated,
-        cookieCount: cookies.length,
+        cookieCount: cookiesCount,
         discoveredSystems: sortedSystems,
         sampleReleaseUrls: [...releasePages.slice(0, 8), ...downloads.slice(0, 4).map((d) => d.remoteUrl)],
         message: `${authMessage} · Repo HTTP ${repoRes.response.status} (${sortedSystems.length} systems, ${releasePages.length} release pages found on index)`,
@@ -562,7 +930,7 @@ export class RetroGameTalkClient {
         success: false,
         statusCode: null,
         authenticated: false,
-        cookieCount: this.jar.getCookiesSync(config.baseUrl).length,
+        cookieCount: this.getSafeCookieCount(probeConfig.baseUrl),
         discoveredSystems: [],
         sampleReleaseUrls: [],
         message: err instanceof Error ? err.message : String(err),

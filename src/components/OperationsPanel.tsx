@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import type { AuthTestResult, ScraperConfigPublic, ServiceStatusSnapshot } from '../types';
 import { formatBytes } from '../utils/format';
+import { readJsonSafely } from '../utils/http';
 
 interface OperationsPanelProps {
   config: ScraperConfigPublic;
@@ -136,8 +137,21 @@ export function OperationsPanel({
       // Save any typed credentials/URLs prior to testing unless locked by env
       await onSaveConfig(buildSavePayload());
       const res = await fetch('/api/auth/test', { method: 'POST' });
-      const data = (await res.json()) as AuthTestResult;
-      setAuthResult(data);
+      const parsed = await readJsonSafely<AuthTestResult>(res);
+      if (parsed.data && typeof parsed.data.message === 'string') {
+        setAuthResult(parsed.data);
+      } else {
+        setAuthResult({
+          success: false,
+          statusCode: parsed.status || null,
+          authenticated: false,
+          cookieCount: 0,
+          discoveredSystems: [],
+          sampleReleaseUrls: [],
+          message: parsed.errorMessage || `Auth probe failed (HTTP ${res.status})`,
+          latencyMs: 0,
+        });
+      }
       await onRefreshConfig();
     } catch (err) {
       setAuthResult({
@@ -193,6 +207,11 @@ export function OperationsPanel({
               onChange={(e) => setBaseUrl(e.target.value)}
               className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             />
+            {config.envOverrides.includes('RGT_BASE_URL') && (
+              <p className="text-[11px] font-mono text-crt-amber">
+                Loaded from RGT_BASE_URL environment variable (read-only).
+              </p>
+            )}
           </div>
 
           <div className="space-y-1.5">
@@ -204,6 +223,11 @@ export function OperationsPanel({
               onChange={(e) => setLoginUrl(e.target.value)}
               className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             />
+            {config.envOverrides.includes('RGT_LOGIN_URL') && (
+              <p className="text-[11px] font-mono text-crt-amber">
+                Loaded from RGT_LOGIN_URL environment variable (read-only).
+              </p>
+            )}
           </div>
 
           <div className="space-y-1.5">
@@ -310,16 +334,16 @@ export function OperationsPanel({
                 : 'border-crt-crimson/40 bg-crt-crimson/5 text-crt-text'
             }`}
           >
-            <div className="flex items-center justify-between gap-2">
-              <span className="inline-flex items-center gap-2 font-semibold">
+            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+              <span className="inline-flex items-start gap-2 font-semibold break-words min-w-0">
                 {authResult.success ? (
-                  <CheckCircle2 className="h-4 w-4 text-crt-phosphor" />
+                  <CheckCircle2 className="h-4 w-4 text-crt-phosphor shrink-0 mt-0.5" />
                 ) : (
-                  <XCircle className="h-4 w-4 text-crt-crimson" />
+                  <XCircle className="h-4 w-4 text-crt-crimson shrink-0 mt-0.5" />
                 )}
-                {authResult.message}
+                <span className="break-words">{authResult.message}</span>
               </span>
-              <span className="text-crt-muted tabular-nums">
+              <span className="text-crt-muted tabular-nums shrink-0">
                 {authResult.latencyMs}ms · {authResult.cookieCount} cookies
               </span>
             </div>
