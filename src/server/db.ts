@@ -22,8 +22,10 @@ import type {
   SystemBreakdown,
 } from './types.ts';
 
-const DATA_DIR = path.resolve(process.env.DATA_DIR || '/run/repo');
-const DEFAULT_DOWNLOAD_DIR = path.resolve(process.env.DOWNLOAD_DIR || path.join(DATA_DIR, 'repository'));
+const DATA_DIR = path.resolve(process.env.DATA_DIR || '/run/repo/.rgt-data');
+const DEFAULT_DOWNLOAD_DIR = path.resolve(
+  process.env.DOWNLOAD_DIR || (process.env.DATA_DIR ? path.join(DATA_DIR, 'repository') : '/run/repo'),
+);
 const DB_PATH = path.join(DATA_DIR, 'scraper.db');
 const KEY_PATH = path.join(DATA_DIR, '.keyfile');
 
@@ -86,25 +88,55 @@ function decryptSecret(payload: string): string {
   }
 }
 
-export function initDb(): Database.Database {
-  if (db) return db;
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+function migrateLegacyDataDirOnce(): void {
+  if (DATA_DIR !== '/run/repo/.rgt-data' || fs.existsSync(DB_PATH)) {
+    return;
+  }
 
-  // Migrate existing workspace ./data state once when moving to default /run/repo
-  const legacyDataDir = path.resolve('./data');
-  if (
-    DATA_DIR === '/run/repo' &&
-    legacyDataDir !== DATA_DIR &&
-    !fs.existsSync(DB_PATH) &&
-    fs.existsSync(path.join(legacyDataDir, 'scraper.db'))
-  ) {
-    try {
-      fs.cpSync(legacyDataDir, DATA_DIR, { recursive: true, force: false });
-    } catch {
-      // Proceed with clean database initialization if legacy migration cannot copy
+  const candidates = ['/app/data', '/run/repo', path.resolve('./data')]
+    .map((p) => path.resolve(p))
+    .filter((p) => p !== DATA_DIR && fs.existsSync(p));
+
+  let bestDir: string | null = null;
+  let bestMtimeMs = -1;
+
+  for (const dir of candidates) {
+    for (const marker of ['scraper.db-wal', 'scraper.db', 'cookies.json']) {
+      const markerPath = path.join(dir, marker);
+      if (!fs.existsSync(markerPath)) continue;
+      try {
+        const st = fs.statSync(markerPath);
+        if (st.mtimeMs > bestMtimeMs) {
+          bestMtimeMs = st.mtimeMs;
+          bestDir = dir;
+        }
+      } catch {
+        // Ignore unreadable candidate marker
+      }
     }
   }
 
+  if (!bestDir) return;
+
+  for (const filename of ['scraper.db', 'scraper.db-wal', 'scraper.db-shm', 'cookies.json', '.keyfile']) {
+    const src = path.join(bestDir, filename);
+    const dst = path.join(DATA_DIR, filename);
+    if (!fs.existsSync(src) || fs.existsSync(dst)) continue;
+    try {
+      fs.copyFileSync(src, dst);
+      if (filename === 'cookies.json' || filename === '.keyfile') {
+        fs.chmodSync(dst, 0o600);
+      }
+    } catch {
+      // Proceed cleanly if individual legacy state file cannot be copied
+    }
+  }
+}
+
+export function initDb(): Database.Database {
+  if (db) return db;
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  migrateLegacyDataDirOnce();
   fs.mkdirSync(DEFAULT_DOWNLOAD_DIR, { recursive: true });
 
   db = new Database(DB_PATH);
@@ -271,8 +303,11 @@ export function initDb(): Database.Database {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     );
-    const legacyDownloadDir = path.resolve('./data/repository');
-    if (DATA_DIR === '/run/repo' && path.resolve(existing.download_dir) === legacyDownloadDir) {
+    const legacyDownloadDirs = new Set([
+      path.resolve('./data/repository'),
+      path.resolve('/app/data/repository'),
+    ]);
+    if (DATA_DIR === '/run/repo/.rgt-data' && legacyDownloadDirs.has(path.resolve(existing.download_dir))) {
       db.prepare('UPDATE scraper_config SET download_dir = ? WHERE id = 1').run(DEFAULT_DOWNLOAD_DIR);
     }
   }
@@ -490,6 +525,18 @@ function validateHttpUrl(raw: string, fieldLabel: string): string {
   return parsed.toString();
 }
 
+function normalizeComparableUrl(raw: string): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    const cleanPath = parsed.pathname.replace(/\/+$/, '') || '/';
+    return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${cleanPath}${parsed.search}`;
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
+}
+
 export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
   const current = getDb().prepare('SELECT * FROM scraper_config WHERE id = 1').get() as Record<string, unknown>;
   const now = new Date().toISOString();
@@ -512,12 +559,26 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     ? (input.password === '' ? '' : encryptSecret(input.password))
     : String(current.password_enc || '');
 
-  const currentPasswordPlain = decryptSecret(String(current.password_enc || ''));
-  const authCredentialsChanged =
-    nextBaseUrl !== String(current.base_url).trim() ||
-    nextLoginUrl !== String(current.login_url).trim() ||
-    nextUsername !== String(current.username || '').trim() ||
-    (input.password !== undefined && input.password !== currentPasswordPlain);
+  const effectiveCurrentBaseUrl = process.env.RGT_BASE_URL || String(current.base_url || '');
+  const effectiveCurrentLoginUrl = process.env.RGT_LOGIN_URL || String(current.login_url || '');
+  const effectiveCurrentUsername = process.env.RGT_USERNAME || String(current.username || '');
+  const currentPasswordPlain = process.env.RGT_PASSWORD || decryptSecret(String(current.password_enc || ''));
+
+  const baseChanged =
+    !process.env.RGT_BASE_URL &&
+    normalizeComparableUrl(nextBaseUrl) !== normalizeComparableUrl(effectiveCurrentBaseUrl);
+  const loginChanged =
+    !process.env.RGT_LOGIN_URL &&
+    normalizeComparableUrl(nextLoginUrl) !== normalizeComparableUrl(effectiveCurrentLoginUrl);
+  const usernameChanged =
+    !process.env.RGT_USERNAME &&
+    nextUsername !== effectiveCurrentUsername.trim();
+  const passwordChanged =
+    !process.env.RGT_PASSWORD &&
+    input.password !== undefined &&
+    input.password !== currentPasswordPlain;
+
+  const authCredentialsChanged = baseChanged || loginChanged || usernameChanged || passwordChanged;
 
   const minDelay = Math.max(250, Math.min(30000, Number(input.minDelayMs ?? current.min_delay_ms)));
   const maxDelay = Math.max(minDelay, Math.min(300000, Number(input.maxDelayMs ?? current.max_delay_ms)));
@@ -1195,6 +1256,13 @@ export function getReleaseFileById(fileId: number): ReleaseFileRecord | null {
     | Record<string, unknown>
     | undefined;
   return row ? mapFileRow(row) : null;
+}
+
+export function getExistingReleaseLocalPaths(): Set<string> {
+  const rows = getDb()
+    .prepare('SELECT local_path FROM catalog_releases WHERE local_path IS NOT NULL AND local_path != \'\'')
+    .all() as { local_path: string }[];
+  return new Set(rows.map((r) => path.resolve(String(r.local_path))));
 }
 
 export function countSiblingItemsInDir(dirPath: string): number {

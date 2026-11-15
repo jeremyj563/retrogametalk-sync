@@ -15,6 +15,7 @@ import {
   deleteRepositoryItemsByLocalPaths,
   getCatalogTotalsAndSystems,
   getDataDir,
+  getExistingReleaseLocalPaths,
   getInternalConfig,
   getLastAuthenticatedAt,
   getReleaseFileById,
@@ -141,8 +142,226 @@ export class ScraperOrchestrator extends EventEmitter {
       backoffMultiplier: cfg.backoffMultiplier,
     });
     this.client = new RetroGameTalkClient(this.rateLimiter);
-    this.client.setPersistedLastAuthenticatedAt(getLastAuthenticatedAt());
-    this.reconfigureScheduler(cfg);
+
+    let persistedAuthAt = getLastAuthenticatedAt();
+    const hydrated = this.client.hydratePersistedSession(cfg, persistedAuthAt);
+    if (hydrated.restoredActiveCookies && !persistedAuthAt) {
+      persistedAuthAt = recordSuccessfulLogin();
+      this.client.setPersistedLastAuthenticatedAt(persistedAuthAt);
+    }
+
+    const reconciled = this.reconcileDiskCatalog(cfg);
+    const refreshedCfg = reconciled.releasesImported > 0 ? getInternalConfig() : cfg;
+    const { totals } = getCatalogTotalsAndSystems();
+    const authSnap = this.client.getAuthStatus(refreshedCfg, persistedAuthAt);
+    const authLabel = authSnap.authenticated
+      ? 'Active'
+      : authSnap.hasCompletedLogin
+        ? 'Standby'
+        : authSnap.configured
+          ? 'Unverified'
+          : 'Unset';
+
+    console.log(
+      `[${new Date().toISOString()}] [STARTUP] [INFO] Persistence initialized — DATA_DIR="${getDataDir()}", DOWNLOAD_DIR="${refreshedCfg.downloadDir}", auth=${authLabel} (hasCompletedLogin=${authSnap.hasCompletedLogin}, cookies=[${hydrated.cookieNames}]), discoveredSystems=${refreshedCfg.discoveredSystems.length}, catalogReleases=${totals.totalCatalogItems} (reconciledFromDisk=${reconciled.releasesImported})`,
+    );
+
+    this.reconfigureScheduler(refreshedCfg);
+  }
+
+  private reconcileDiskCatalog(cfg: ScraperConfigInternal): { releasesImported: number; filesImported: number } {
+    const root = path.resolve(cfg.downloadDir);
+    if (!fs.existsSync(root)) {
+      return { releasesImported: 0, filesImported: 0 };
+    }
+
+    const existingLocalPaths = getExistingReleaseLocalPaths();
+    const baseWithSlash = (() => {
+      try {
+        const u = new URL(cfg.baseUrl);
+        if (!u.pathname.endsWith('/')) u.pathname += '/';
+        return u.toString();
+      } catch {
+        return cfg.baseUrl.endsWith('/') ? cfg.baseUrl : `${cfg.baseUrl}/`;
+      }
+    })();
+
+    let sysEntries: fs.Dirent[];
+    try {
+      sysEntries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      return { releasesImported: 0, filesImported: 0 };
+    }
+
+    let releasesImported = 0;
+    let filesImported = 0;
+    const reconciledSystems = new Set<string>();
+
+    for (const sysEntry of sysEntries) {
+      if (!sysEntry.isDirectory() || sysEntry.name.startsWith('.') || sysEntry.name === 'screenshots') {
+        continue;
+      }
+
+      const systemName = sysEntry.name;
+      const sysAbs = path.join(root, systemName);
+      let relEntries: fs.Dirent[];
+      try {
+        relEntries = fs.readdirSync(sysAbs, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+
+      for (const relEntry of relEntries) {
+        if (!relEntry.isDirectory() || relEntry.name.startsWith('.') || relEntry.name === 'screenshots') {
+          continue;
+        }
+
+        const releaseSlug = relEntry.name;
+        const absReleaseDir = path.resolve(sysAbs, releaseSlug);
+        if (existingLocalPaths.has(absReleaseDir)) {
+          continue;
+        }
+
+        try {
+          let meta: ReleaseMetadata | null = null;
+          const metaPath = path.join(absReleaseDir, 'metadata.json');
+          if (fs.existsSync(metaPath)) {
+            try {
+              meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as ReleaseMetadata;
+            } catch {
+              meta = null;
+            }
+          }
+
+          let coverLocalPath: string | null = null;
+          const coverCandidates: string[] = [];
+          if (meta?.coverLocalRelPath) {
+            coverCandidates.push(path.resolve(absReleaseDir, meta.coverLocalRelPath));
+          }
+          for (const ext of ['.jpg', '.jpeg', '.png', '.webp', '.gif']) {
+            coverCandidates.push(path.join(absReleaseDir, `cover${ext}`));
+          }
+          for (const candidate of coverCandidates) {
+            if (
+              candidate.startsWith(absReleaseDir + path.sep) &&
+              fs.existsSync(candidate) &&
+              fs.statSync(candidate).isFile()
+            ) {
+              coverLocalPath = candidate;
+              break;
+            }
+          }
+
+          const screenshotLocalPaths: string[] = [];
+          const shotsDir = path.join(absReleaseDir, 'screenshots');
+          if (fs.existsSync(shotsDir) && fs.statSync(shotsDir).isDirectory()) {
+            const shotFiles = fs
+              .readdirSync(shotsDir)
+              .filter((f) => !f.startsWith('.') && !f.endsWith('.part'))
+              .sort();
+            for (const sf of shotFiles) {
+              const absShot = path.join(shotsDir, sf);
+              if (fs.statSync(absShot).isFile()) {
+                screenshotLocalPaths.push(absShot);
+              }
+            }
+          }
+
+          const releaseFiles = fs
+            .readdirSync(absReleaseDir, { withFileTypes: true })
+            .filter(
+              (de) =>
+                de.isFile() &&
+                !de.name.startsWith('.') &&
+                !de.name.endsWith('.part') &&
+                de.name !== 'metadata.json' &&
+                de.name !== 'scraper.db' &&
+                de.name !== 'scraper.db-wal' &&
+                de.name !== 'scraper.db-shm' &&
+                de.name !== 'cookies.json' &&
+                !/^cover\.(jpg|jpeg|png|webp|gif)$/i.test(de.name),
+            )
+            .map((de) => de.name)
+            .sort((a, b) => a.localeCompare(b));
+
+          if (releaseFiles.length === 0 && !meta) {
+            continue;
+          }
+
+          const remotePath = `${systemName}/${releaseSlug}`;
+          const remoteUrl =
+            meta?.sourcePageUrl && /^https?:\/\//i.test(meta.sourcePageUrl)
+              ? meta.sourcePageUrl.split('#')[0]
+              : new URL(
+                  `${encodeURIComponent(systemName)}/${encodeURIComponent(releaseSlug)}/`,
+                  baseWithSlash,
+                ).toString();
+
+          const parent = upsertCatalogRelease({
+            remoteUrl,
+            remotePath,
+            localPath: absReleaseDir,
+            systemName,
+            title: meta?.title || releaseSlug,
+            publishedAt: null,
+            status: releaseFiles.length > 0 ? 'downloaded' : 'queued',
+            metadata: meta,
+            coverLocalPath,
+            screenshotLocalPaths,
+          });
+          existingLocalPaths.add(absReleaseDir);
+          releasesImported += 1;
+
+          if (systemName !== 'uncategorized' && systemName !== 'root') {
+            reconciledSystems.add(systemName);
+          }
+
+          for (const filename of releaseFiles) {
+            const absFile = path.join(absReleaseDir, filename);
+            let sizeBytes = 0;
+            let mtimeIso = new Date().toISOString();
+            try {
+              const st = fs.statSync(absFile);
+              sizeBytes = st.size;
+              mtimeIso = st.mtime.toISOString();
+            } catch {
+              continue;
+            }
+
+            const fileRemoteUrl = `${remoteUrl}#${encodeURIComponent(filename)}`;
+            upsertReleaseFile({
+              releaseId: parent.id,
+              remoteUrl: fileRemoteUrl,
+              downloadUrl: fileRemoteUrl,
+              remotePath: `${remotePath}/${filename}`,
+              localPath: absFile,
+              filename,
+              displayLabel: filename,
+              fileSizeBytes: sizeBytes,
+              status: 'downloaded',
+              downloadedAt: mtimeIso,
+            });
+            filesImported += 1;
+          }
+        } catch {
+          // Skip malformed on-disk directory without blocking startup
+        }
+      }
+    }
+
+    if (reconciledSystems.size > 0) {
+      saveDiscoveredSystems(Array.from(reconciledSystems));
+    }
+
+    if (releasesImported > 0) {
+      this.log(
+        'info',
+        `Reconciled ${releasesImported} existing release(s) (${filesImported} file(s)) from local disk into catalog`,
+        root,
+      );
+    }
+
+    return { releasesImported, filesImported };
   }
 
   private log(level: LogLevel, message: string, detail: string | null = null, runId: number | null = null): void {
