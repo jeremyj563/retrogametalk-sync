@@ -15,10 +15,12 @@ import {
   getCatalogTotalsAndSystems,
   getDataDir,
   getInternalConfig,
+  getLastAuthenticatedAt,
   getReleaseFileById,
   getRepositoryItemById,
   getRepositoryItemByRemoteUrl,
   listSyncRuns,
+  recordSuccessfulLogin,
   releaseDistributedLock,
   saveDiscoveredSystems,
   setWatermark,
@@ -78,6 +80,7 @@ export class ScraperOrchestrator extends EventEmitter {
       backoffMultiplier: cfg.backoffMultiplier,
     });
     this.client = new RetroGameTalkClient(this.rateLimiter);
+    this.client.setPersistedLastAuthenticatedAt(getLastAuthenticatedAt());
     this.reconfigureScheduler(cfg);
   }
 
@@ -156,6 +159,16 @@ export class ScraperOrchestrator extends EventEmitter {
       try {
         this.cronJob = new Cron(cfg.cronSchedule, () => {
           if (!this.shuttingDown && !this.activeRun) {
+            const latestCfg = getInternalConfig();
+            const auth = this.client.getAuthStatus(latestCfg, getLastAuthenticatedAt());
+            if (!auth.hasCompletedLogin) {
+              this.log(
+                'warn',
+                'Scheduled sync skipped: app has not completed an authenticated login yet',
+                'Verify credentials in Operations first',
+              );
+              return;
+            }
             void this.startRun('scheduled', 'incremental');
           }
         });
@@ -175,7 +188,12 @@ export class ScraperOrchestrator extends EventEmitter {
   }
 
   updateConfiguration(input: ConfigUpdateInput): ScraperConfigPublic {
+    const prevAuthAt = getLastAuthenticatedAt();
     const updated = updateConfig(input);
+    const nextAuthAt = getLastAuthenticatedAt();
+    if (prevAuthAt && !nextAuthAt) {
+      this.client.resetAuthSession(true);
+    }
     this.reconfigureScheduler(getInternalConfig());
     this.log('info', 'Service configuration saved');
     this.emitStatus();
@@ -186,6 +204,10 @@ export class ScraperOrchestrator extends EventEmitter {
     const cfg = getInternalConfig();
     this.log('info', `Running connection & authentication probe against ${cfg.baseUrl}`);
     const result = await this.client.testAuthAndDiscovery(cfg);
+    if (result.authenticated) {
+      const ts = recordSuccessfulLogin();
+      this.client.setPersistedLastAuthenticatedAt(ts);
+    }
     if (result.discoveredSystems.length > 0) {
       saveDiscoveredSystems(result.discoveredSystems);
     }
@@ -629,11 +651,20 @@ export class ScraperOrchestrator extends EventEmitter {
       cronSchedule: cfg.cronSchedule,
       lastWatermarkAt: cfg.lastWatermarkAt,
       rateLimiter: this.rateLimiter.getTelemetry(),
-      auth: this.client.getAuthStatus(cfg),
+      auth: this.client.getAuthStatus(cfg, getLastAuthenticatedAt()),
       storage: this.getStorageStats(cfg.downloadDir),
       totals,
       systems,
     };
+  }
+
+  private assertCanRunSync(cfg: ScraperConfigInternal): void {
+    const auth = this.client.getAuthStatus(cfg, getLastAuthenticatedAt());
+    if (!auth.hasCompletedLogin) {
+      throw new Error(
+        'Login required: verify RetroGameTalk credentials via "Test Login & Discover Consoles" in Operations before running a sync.',
+      );
+    }
   }
 
   async startRun(trigger: RunTrigger, mode: RunMode): Promise<SyncRunRecord> {
@@ -642,6 +673,8 @@ export class ScraperOrchestrator extends EventEmitter {
     }
 
     const cfg = getInternalConfig();
+    this.assertCanRunSync(cfg);
+
     const lockKey = cfg.systemFilter
       ? `sync:${cfg.systemFilter.toLowerCase()}`
       : 'sync:global';
@@ -692,6 +725,7 @@ export class ScraperOrchestrator extends EventEmitter {
     }
 
     const cfg = getInternalConfig();
+    this.assertCanRunSync(cfg);
     const root = path.resolve(cfg.downloadDir);
     const run = createSyncRun('retry', 'incremental');
     this.activeRun = run;
@@ -711,8 +745,16 @@ export class ScraperOrchestrator extends EventEmitter {
       let bytes = 0;
 
       try {
-        if (cfg.username && cfg.password) {
-          await this.client.login(cfg, signal, runLogger);
+        if (!cfg.username || !cfg.password) {
+          throw new Error('Credentials missing: configure Repository Username and Password before retrying downloads.');
+        }
+        if (!this.client.getAuthStatus(cfg, getLastAuthenticatedAt()).authenticated) {
+          const loginRes = await this.client.login(cfg, signal, runLogger);
+          if (!loginRes.authenticated) {
+            throw new Error(loginRes.message);
+          }
+          const ts = recordSuccessfulLogin();
+          this.client.setPersistedLastAuthenticatedAt(ts);
         }
 
         const pageUrl = item.remoteUrl.split('#')[0];
@@ -720,6 +762,9 @@ export class ScraperOrchestrator extends EventEmitter {
 
         if (pageUrl.startsWith('http')) {
           const pageData = await this.client.fetchPageHtml(pageUrl, cfg, signal, runLogger);
+          if (pageData.status >= 400) {
+            throw new Error(`HTTP ${pageData.status} fetching release page ${pageData.finalUrl}`);
+          }
           const wpPostIdHint = item.wpPostId ?? this.client.extractWpPostIdHint(pageData.html);
           const wpData = await this.client.fetchReleaseWpMetadata(
             pageData.finalUrl,
@@ -808,6 +853,10 @@ export class ScraperOrchestrator extends EventEmitter {
           bytes += outcome.bytes;
         }
 
+        if (!signal.aborted && failed > 0 && downloaded === 0 && skipped === 0) {
+          throw new Error(`Retry failed for all ${failed} file(s)`);
+        }
+
         updateSyncRun(run.id, {
           status: signal.aborted ? 'stopped' : 'completed',
           finishedAt: new Date().toISOString(),
@@ -819,12 +868,20 @@ export class ScraperOrchestrator extends EventEmitter {
           avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
         });
       } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         updateSyncRun(run.id, {
           status: signal.aborted ? 'stopped' : 'failed',
           finishedAt: new Date().toISOString(),
+          newFound: filesToRetry.length,
+          downloadedCount: downloaded,
+          skippedCount: skipped,
           failedCount: Math.max(1, failed),
-          errorSummary: err instanceof Error ? err.message : String(err),
+          bytesDownloaded: bytes,
+          errorSummary: msg,
         });
+        if (!signal.aborted) {
+          runLogger('error', `Retry run #${run.id} failed: ${msg}`);
+        }
       } finally {
         this.activeTransfer = null;
         this.activeRun = null;
@@ -852,6 +909,8 @@ export class ScraperOrchestrator extends EventEmitter {
     const startRateHits = this.rateLimiter.getTelemetry().rateLimitHits;
 
     let pagesCrawled = 0;
+    let successfulPages = 0;
+    let lastCrawlError: string | null = null;
     let newFound = 0;
     let downloadedCount = 0;
     let skippedCount = 0;
@@ -875,10 +934,18 @@ export class ScraperOrchestrator extends EventEmitter {
     };
 
     try {
-      if (cfg.username && cfg.password) {
+      if (!cfg.username || !cfg.password) {
+        throw new Error('Credentials missing: configure Repository Username and Repository Password before syncing.');
+      }
+      if (!this.client.getAuthStatus(cfg, getLastAuthenticatedAt()).authenticated) {
         this.currentPhase = 'Authenticating with retrogametalk.com';
         this.emitStatus();
-        await this.client.login(cfg, signal, runLogger);
+        const loginRes = await this.client.login(cfg, signal, runLogger);
+        if (!loginRes.authenticated) {
+          throw new Error(loginRes.message);
+        }
+        const ts = recordSuccessfulLogin();
+        this.client.setPersistedLastAuthenticatedAt(ts);
       }
 
       const visitedPages = new Set<string>();
@@ -1050,15 +1117,33 @@ export class ScraperOrchestrator extends EventEmitter {
           pageData = await this.client.fetchPageHtml(pageUrl, cfg, signal, runLogger);
         } catch (err) {
           if (signal.aborted) break;
-          runLogger('warn', `Failed to scan ${pageUrl}`, err instanceof Error ? err.message : String(err));
+          const errMsg = err instanceof Error ? err.message : String(err);
+          lastCrawlError = errMsg;
+          if (
+            pageUrl === cfg.baseUrl ||
+            /Cloudflare|Authentication|Re-authentication/i.test(errMsg)
+          ) {
+            throw err;
+          }
+          runLogger('warn', `Failed to scan ${pageUrl}: ${errMsg}`);
           continue;
         }
 
         pagesCrawled += 1;
         if (pageData.status >= 400) {
-          runLogger('warn', `HTTP ${pageData.status} on ${pageUrl}`);
+          const httpErr = `HTTP ${pageData.status} on ${pageData.finalUrl}`;
+          lastCrawlError = httpErr;
+          if (
+            pageUrl === cfg.baseUrl ||
+            pageData.status === 401 ||
+            pageData.status === 403
+          ) {
+            throw new Error(httpErr);
+          }
+          runLogger('warn', httpErr);
           continue;
         }
+        successfulPages += 1;
 
         const extracted = this.client.extractLinksFromHtml(pageData.html, pageData.finalUrl, cfg);
         if (extracted.systems.length > 0) {
@@ -1204,7 +1289,11 @@ export class ScraperOrchestrator extends EventEmitter {
             }
           } catch (err) {
             if (signal.aborted) break;
-            runLogger('warn', `Error inspecting ${relPageUrl}`, err instanceof Error ? err.message : String(err));
+            const errMsg = err instanceof Error ? err.message : String(err);
+            if (/Cloudflare|Authentication|Re-authentication/i.test(errMsg)) {
+              throw err;
+            }
+            runLogger('warn', `Error inspecting ${relPageUrl}`, errMsg);
           }
         }
 
@@ -1221,8 +1310,16 @@ export class ScraperOrchestrator extends EventEmitter {
         persistCounters();
       }
 
-      if (!signal.aborted && run.mode !== 'dry_run') {
-        setWatermark(newestReleaseIso || new Date().toISOString());
+      if (!signal.aborted) {
+        if (successfulPages === 0) {
+          throw new Error(lastCrawlError || 'Sync failed: no repository pages could be fetched.');
+        }
+        if (failedCount > 0 && downloadedCount === 0 && skippedCount === 0) {
+          throw new Error(`Sync failed: all ${failedCount} file download(s) failed`);
+        }
+        if (run.mode !== 'dry_run') {
+          setWatermark(newestReleaseIso || new Date().toISOString());
+        }
       }
 
       const finalStatus = signal.aborted ? 'stopped' : 'completed';

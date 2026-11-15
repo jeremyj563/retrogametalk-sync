@@ -220,6 +220,8 @@ export interface SystemBreakdown {
 export interface AuthSessionStatus {
   configured: boolean;
   authenticated: boolean;
+  hasCompletedLogin: boolean;
+  lastAuthenticatedAt: string | null;
   cookieCount: number;
   lastCheckedAt: string | null;
   lastMessage: string | null;

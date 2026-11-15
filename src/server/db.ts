@@ -137,6 +137,7 @@ export function initDb(): Database.Database {
       system_filter TEXT NOT NULL DEFAULT '',
       discovered_systems_json TEXT NOT NULL DEFAULT '[]',
       last_watermark_at TEXT,
+      last_authenticated_at TEXT,
       updated_at TEXT NOT NULL
     );
 
@@ -275,6 +276,9 @@ export function initDb(): Database.Database {
   const cols = db.prepare('PRAGMA table_info(scraper_config)').all() as { name: string }[];
   if (!cols.some((c) => c.name === 'discovered_systems_json')) {
     db.prepare(`ALTER TABLE scraper_config ADD COLUMN discovered_systems_json TEXT NOT NULL DEFAULT '[]'`).run();
+  }
+  if (!cols.some((c) => c.name === 'last_authenticated_at')) {
+    db.prepare(`ALTER TABLE scraper_config ADD COLUMN last_authenticated_at TEXT`).run();
   }
 
   // Cleanly reset legacy flat catalog index so the next sync imports grouped release entries + WP tags
@@ -499,9 +503,17 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
 
   fs.mkdirSync(nextDownloadDir, { recursive: true });
 
+  const nextUsername = (input.username ?? String(current.username)).trim();
   const nextPasswordEnc = input.password !== undefined
     ? (input.password === '' ? '' : encryptSecret(input.password))
     : String(current.password_enc || '');
+
+  const currentPasswordPlain = decryptSecret(String(current.password_enc || ''));
+  const authCredentialsChanged =
+    nextBaseUrl !== String(current.base_url).trim() ||
+    nextLoginUrl !== String(current.login_url).trim() ||
+    nextUsername !== String(current.username || '').trim() ||
+    (input.password !== undefined && input.password !== currentPasswordPlain);
 
   const minDelay = Math.max(250, Math.min(30000, Number(input.minDelayMs ?? current.min_delay_ms)));
   const maxDelay = Math.max(minDelay, Math.min(300000, Number(input.maxDelayMs ?? current.max_delay_ms)));
@@ -525,12 +537,13 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       request_timeout_ms = ?,
       user_agent = ?,
       system_filter = ?,
+      last_authenticated_at = ?,
       updated_at = ?
     WHERE id = 1
   `).run(
     nextBaseUrl,
     nextLoginUrl,
-    (input.username ?? String(current.username)).trim(),
+    nextUsername,
     nextPasswordEnc,
     nextDownloadDir,
     (input.cronSchedule ?? String(current.cron_schedule)).trim(),
@@ -544,10 +557,32 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     Math.max(5000, Math.min(180000, Number(input.requestTimeoutMs ?? current.request_timeout_ms))),
     (input.userAgent ?? String(current.user_agent)).trim(),
     (input.systemFilter ?? String(current.system_filter)).trim(),
+    authCredentialsChanged ? null : (current.last_authenticated_at ? String(current.last_authenticated_at) : null),
     now,
   );
 
   return getPublicConfig();
+}
+
+export function getLastAuthenticatedAt(): string | null {
+  const row = getDb().prepare('SELECT last_authenticated_at FROM scraper_config WHERE id = 1').get() as
+    | { last_authenticated_at: string | null }
+    | undefined;
+  return row?.last_authenticated_at ? String(row.last_authenticated_at) : null;
+}
+
+export function recordSuccessfulLogin(isoTimestamp = new Date().toISOString()): string {
+  getDb().prepare('UPDATE scraper_config SET last_authenticated_at = ?, updated_at = ? WHERE id = 1').run(
+    isoTimestamp,
+    isoTimestamp,
+  );
+  return isoTimestamp;
+}
+
+export function clearLoginHistory(): void {
+  getDb().prepare('UPDATE scraper_config SET last_authenticated_at = NULL, updated_at = ? WHERE id = 1').run(
+    new Date().toISOString(),
+  );
 }
 
 export function setWatermark(isoTimestamp: string): void {

@@ -231,6 +231,8 @@ export default function App() {
     { id: 'operations', label: 'Operations', icon: ServerCog },
   ];
 
+  const syncAllowed = Boolean(status?.auth.hasCompletedLogin);
+
   return (
     <div className={`min-h-screen crt-canvas text-crt-text flex flex-col ${scanlinesEnabled ? 'crt-scanlines' : ''}`}>
       {/* Top Header Bar */}
@@ -250,27 +252,30 @@ export default function App() {
         {/* Sync Mode Selector + Reserved-Width Run/Stop Action */}
         <div className="flex items-center gap-3 shrink-0 ml-auto">
           <div className="flex items-center gap-0.5 p-0.5 bg-crt-bg border border-crt-border rounded-md shrink-0">
-            {(
-              [
-                { id: 'dry_run', label: 'Dry Run' },
-                { id: 'incremental', label: 'Incremental Sync' },
-                { id: 'full', label: 'Full Sync' },
-              ] as const
-            ).map((m) => (
-              <button
-                key={m.id}
-                type="button"
-                disabled={Boolean(status?.activeRun)}
-                onClick={() => setSelectedMode(m.id)}
-                className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
-                  selectedMode === m.id
-                    ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
-                    : 'text-crt-muted hover:text-crt-text border border-transparent'
-                } disabled:opacity-50`}
-              >
-                {m.label}
-              </button>
-            ))}
+            {(['dry_run', 'incremental', 'full'] as const).map((id) => {
+              const label =
+                id === 'dry_run'
+                  ? 'Dry Run'
+                  : id === 'incremental'
+                    ? 'Incremental Sync'
+                    : 'Full Sync';
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  disabled={Boolean(status?.activeRun) || !syncAllowed}
+                  title={!syncAllowed ? 'Verify login in Operations before running a sync' : undefined}
+                  onClick={() => setSelectedMode(id)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
+                    selectedMode === id
+                      ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
+                      : 'text-crt-muted hover:text-crt-text border border-transparent'
+                  } disabled:opacity-45 disabled:cursor-not-allowed`}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
 
           <div className="w-[172px] flex justify-end shrink-0">
@@ -291,9 +296,14 @@ export default function App() {
             ) : (
               <button
                 type="button"
-                disabled={actionPending || !status}
+                disabled={actionPending || !status || !syncAllowed}
+                title={
+                  !syncAllowed
+                    ? 'Login required: test and verify credentials in Operations before syncing'
+                    : undefined
+                }
                 onClick={() => void handleStartRun(selectedMode)}
-                className="inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-60"
+                className="inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 <Play className="h-3.5 w-3.5 fill-current" />
                 {selectedMode === 'dry_run'
@@ -338,16 +348,40 @@ export default function App() {
             {/* Real Daemon & Storage Readout */}
             {status && (
               <div className="hidden lg:block border-t border-crt-border pt-4 space-y-3 text-xs font-mono">
-                <div className="flex items-center justify-between text-crt-muted">
-                  <span>Stream Link</span>
+                <div
+                  className="flex items-center justify-between text-crt-muted"
+                  title="Local browser SSE telemetry stream to this app backend (independent of RetroGameTalk login)"
+                >
+                  <span>UI Event Stream</span>
                   <span className={sseConnected ? 'text-crt-phosphor' : 'text-crt-amber'}>
-                    {sseConnected ? 'Connected' : 'Reconnecting'}
+                    {sseConnected ? 'Live' : 'Reconnecting'}
                   </span>
                 </div>
-                <div className="flex items-center justify-between text-crt-muted">
+                <div
+                  className="flex items-center justify-between text-crt-muted"
+                  title={status.auth.lastMessage || undefined}
+                >
                   <span>Auth Session</span>
-                  <span className={status.auth.authenticated ? 'text-crt-phosphor' : 'text-crt-muted'}>
-                    {status.auth.authenticated ? 'Active' : status.auth.configured ? 'Standby' : 'Unset'}
+                  <span
+                    className={
+                      status.auth.authenticated
+                        ? 'text-crt-phosphor'
+                        : status.auth.lastCheckedAt
+                          ? 'text-crt-crimson'
+                          : status.auth.configured
+                            ? 'text-crt-amber'
+                            : 'text-crt-muted'
+                    }
+                  >
+                    {status.auth.authenticated
+                      ? 'Active'
+                      : status.auth.lastCheckedAt
+                        ? 'Failed'
+                        : status.auth.hasCompletedLogin
+                          ? 'Standby'
+                          : status.auth.configured
+                            ? 'Unverified'
+                            : 'Unset'}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-crt-muted">
