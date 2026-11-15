@@ -83,7 +83,7 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
                 Continuous Cron Scheduler
               </h2>
               <p className="text-xs text-crt-muted">
-                Runs incremental checks automatically to mirror new releases since the previous watermark.
+                Runs incremental delta checks automatically to mirror releases created or updated on RGT since the cutoff watermark (defaults to last 24h on first run).
               </p>
             </div>
           </div>
@@ -143,9 +143,12 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
           </div>
         </div>
 
-        <div className="pt-2 text-xs font-mono text-crt-muted flex flex-wrap gap-x-6 gap-y-1">
+        <div className="pt-2 text-xs font-mono text-crt-muted tabular-nums flex flex-wrap gap-x-6 gap-y-1">
           <span>Next Scheduled Run: {formatDateTime(status.nextScheduledRunAt)}</span>
-          <span>Last Watermark: {formatDateTime(config.lastWatermarkAt)}</span>
+          <span>
+            Incremental Cutoff:{' '}
+            {config.lastWatermarkAt ? formatDateTime(config.lastWatermarkAt) : 'Last 24h (auto default)'}
+          </span>
         </div>
       </section>
 

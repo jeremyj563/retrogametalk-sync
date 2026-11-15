@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   Activity,
+  AlertTriangle,
   Clock,
   FolderTree,
   HardDrive,
@@ -37,6 +38,7 @@ export default function App() {
   const [sseConnected, setSseConnected] = useState(false);
   const [actionPending, setActionPending] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
+  const [confirmingFullSync, setConfirmingFullSync] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [catalogRevision, setCatalogRevision] = useState(0);
 
@@ -78,7 +80,13 @@ export default function App() {
       try {
         const nextStatus = JSON.parse((ev as MessageEvent).data) as ServiceStatusSnapshot;
         setStatus(nextStatus);
+        setConfig((prev) =>
+          prev && prev.lastWatermarkAt !== nextStatus.lastWatermarkAt
+            ? { ...prev, lastWatermarkAt: nextStatus.lastWatermarkAt }
+            : prev,
+        );
         if (nextStatus.activeRun) {
+          setConfirmingFullSync(false);
           setRuns((prev) => {
             const idx = prev.findIndex((r) => r.id === nextStatus.activeRun!.id);
             if (idx === -1) return [nextStatus.activeRun!, ...prev];
@@ -153,6 +161,7 @@ export default function App() {
   }, [loadInitialData]);
 
   const handleStartRun = async (mode: RunMode) => {
+    setConfirmingFullSync(false);
     setActionPending(true);
     setStopRequested(false);
     setErrorBanner(null);
@@ -247,6 +256,18 @@ export default function App() {
   ];
 
   const syncAllowed = Boolean(status?.auth.hasCompletedLogin);
+  const filteredConsoleSlugs = (config?.systemFilter || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const fullSyncScopeSummary =
+    filteredConsoleSlugs.length > 0
+      ? `${filteredConsoleSlugs.length} selected console${filteredConsoleSlugs.length === 1 ? '' : 's'} (${filteredConsoleSlugs.slice(0, 4).join(', ')}${filteredConsoleSlugs.length > 4 ? `, +${filteredConsoleSlugs.length - 4} more` : ''})`
+      : config && config.discoveredSystems.length > 0
+        ? `all ${config.discoveredSystems.length} discovered consoles`
+        : 'all repository consoles';
+  const showFullSyncConfirm =
+    confirmingFullSync && selectedMode === 'full' && !status?.activeRun && syncAllowed;
 
   return (
     <div className={`min-h-screen crt-canvas text-crt-text flex flex-col ${scanlinesEnabled ? 'crt-scanlines' : ''}`}>
@@ -280,7 +301,10 @@ export default function App() {
                   type="button"
                   disabled={Boolean(status?.activeRun) || !syncAllowed}
                   title={!syncAllowed ? 'Verify login in Operations before running a sync' : undefined}
-                  onClick={() => setSelectedMode(id)}
+                  onClick={() => {
+                    setSelectedMode(id);
+                    if (id !== 'full') setConfirmingFullSync(false);
+                  }}
                   className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
                     selectedMode === id
                       ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
@@ -323,7 +347,13 @@ export default function App() {
                     ? 'Login required: test and verify credentials in Operations before syncing'
                     : undefined
                 }
-                onClick={() => void handleStartRun(selectedMode)}
+                onClick={() => {
+                  if (selectedMode === 'full') {
+                    setConfirmingFullSync((prev) => !prev);
+                  } else {
+                    void handleStartRun(selectedMode);
+                  }
+                }}
                 className="inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 <Play className="h-3.5 w-3.5 fill-current" />
@@ -337,6 +367,38 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Inline Uncapped Full Sync Confirmation Strip */}
+      {showFullSyncConfirm && (
+        <div className="border-b border-crt-amber/40 bg-crt-elevated px-4 lg:px-6 py-3 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3 text-xs text-crt-text min-w-0">
+            <AlertTriangle className="h-4 w-4 text-crt-amber shrink-0" />
+            <span>
+              <strong className="font-semibold text-crt-amber">Confirm Uncapped Full Sync:</strong>{' '}
+              This run will crawl and mirror every release across {fullSyncScopeSummary} with no page limit. Reserve Full Sync for initial repository stand-up and use Incremental Sync for daily updates.
+            </span>
+          </div>
+          <div className="flex items-center gap-2.5 shrink-0 ml-auto">
+            <button
+              type="button"
+              disabled={actionPending}
+              onClick={() => setConfirmingFullSync(false)}
+              className="px-3 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={actionPending}
+              onClick={() => void handleStartRun('full')}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+            >
+              <Play className="h-3 w-3 fill-current" />
+              Confirm Full Sync
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Workspace: Sidebar + Content Viewport */}
       <div className="flex-1 flex flex-col lg:flex-row">
@@ -495,9 +557,11 @@ export default function App() {
             <>
               {section === 'monitor' && (
                 <OverviewPanel
+                  config={config}
                   status={status}
                   runs={runs}
                   logs={logs}
+                  onSaveConfig={handleSaveConfig}
                   onClearLogs={handleClearLogs}
                   onClearRuns={handleClearRuns}
                   onNavigateToOperations={() => setSection('operations')}

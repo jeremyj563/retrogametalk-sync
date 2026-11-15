@@ -13,6 +13,7 @@ import {
 import type {
   ActivityLogRecord,
   LogLevel,
+  ScraperConfigPublic,
   ServiceStatusSnapshot,
   SyncRunRecord,
 } from '../types';
@@ -25,24 +26,39 @@ import {
 } from '../utils/format';
 
 interface OverviewPanelProps {
+  config: ScraperConfigPublic;
   status: ServiceStatusSnapshot;
   runs: SyncRunRecord[];
   logs: ActivityLogRecord[];
+  onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
   onClearLogs: (level: 'all' | LogLevel) => Promise<void>;
   onClearRuns: () => Promise<void>;
   onNavigateToOperations: () => void;
 }
 
+function toLocalDateTimeInputValue(date: Date): string {
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 export function OverviewPanel({
+  config,
   status,
   runs,
   logs,
+  onSaveConfig,
   onClearLogs,
   onClearRuns,
   onNavigateToOperations,
 }: OverviewPanelProps) {
   const [logFilter, setLogFilter] = useState<'all' | LogLevel>('all');
   const [autoScroll, setAutoScroll] = useState(true);
+  const [editingCutoff, setEditingCutoff] = useState(false);
+  const [cutoffLocalInput, setCutoffLocalInput] = useState('');
+  const [cutoffSaving, setCutoffSaving] = useState(false);
+  const [cutoffError, setCutoffError] = useState<string | null>(null);
+  const [cutoffSavedNotice, setCutoffSavedNotice] = useState<string | null>(null);
   const [, setTick] = useState(0);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -77,6 +93,72 @@ export function OverviewPanel({
       ...delaySeries.map((s) => Math.max(s.delayMs, s.latencyMs)),
     );
   }, [delaySeries, status.rateLimiter.baseDelayMs]);
+
+  const activeWatermark = status.lastWatermarkAt ?? config.lastWatermarkAt;
+
+  const resolvedCutoffPreviewIso = useMemo(() => {
+    if (!cutoffLocalInput.trim()) return null;
+    const ms = Date.parse(cutoffLocalInput);
+    if (Number.isNaN(ms)) return null;
+    return new Date(ms).toISOString();
+  }, [cutoffLocalInput]);
+
+  const handleToggleCutoffEditor = () => {
+    if (editingCutoff) {
+      setEditingCutoff(false);
+      setCutoffError(null);
+      return;
+    }
+    const baseDate = activeWatermark
+      ? new Date(activeWatermark)
+      : new Date(Date.now() - 24 * 60 * 60 * 1000);
+    setCutoffLocalInput(toLocalDateTimeInputValue(baseDate));
+    setCutoffError(null);
+    setCutoffSavedNotice(null);
+    setEditingCutoff(true);
+  };
+
+  const applyCutoffPresetHoursAgo = (hoursAgo: number) => {
+    const target = new Date(Date.now() - hoursAgo * 60 * 60 * 1000);
+    setCutoffLocalInput(toLocalDateTimeInputValue(target));
+    setCutoffError(null);
+  };
+
+  const handleSaveCutoff = async () => {
+    const parsedMs = Date.parse(cutoffLocalInput);
+    if (!cutoffLocalInput.trim() || Number.isNaN(parsedMs)) {
+      setCutoffError('Enter a valid cutoff date and time.');
+      return;
+    }
+    setCutoffSaving(true);
+    setCutoffError(null);
+    try {
+      const iso = new Date(parsedMs).toISOString();
+      await onSaveConfig({ lastWatermarkAt: iso });
+      setEditingCutoff(false);
+      setCutoffSavedNotice('Cutoff updated');
+      setTimeout(() => setCutoffSavedNotice(null), 3500);
+    } catch (err) {
+      setCutoffError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCutoffSaving(false);
+    }
+  };
+
+  const handleResetCutoffDefault = async () => {
+    setCutoffSaving(true);
+    setCutoffError(null);
+    try {
+      await onSaveConfig({ lastWatermarkAt: null });
+      setEditingCutoff(false);
+      setCutoffSavedNotice('Reset to 24h default');
+      setTimeout(() => setCutoffSavedNotice(null), 3500);
+    } catch (err) {
+      setCutoffError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCutoffSaving(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -130,7 +212,32 @@ export function OverviewPanel({
               <span aria-hidden="true">·</span>
               <span>Next Cron: {formatCountdown(status.nextScheduledRunAt)}</span>
               <span aria-hidden="true">·</span>
-              <span>Watermark: {formatDateTime(status.lastWatermarkAt)}</span>
+              <span>
+                Incremental Cutoff:{' '}
+                <span className="text-crt-text tabular-nums">
+                  {activeWatermark ? formatDateTime(activeWatermark) : 'Last 24h (auto default)'}
+                </span>
+              </span>
+              <span aria-hidden="true">·</span>
+              <button
+                type="button"
+                disabled={Boolean(status.activeRun)}
+                onClick={handleToggleCutoffEditor}
+                title={
+                  status.activeRun
+                    ? 'Stop or wait for the active sync run before changing cutoff'
+                    : 'View or manually override Incremental Sync cutoff timestamp'
+                }
+                className="text-crt-phosphor hover:underline disabled:opacity-45 disabled:no-underline disabled:cursor-not-allowed whitespace-nowrap shrink-0"
+              >
+                {editingCutoff ? 'Close Cutoff' : 'Edit Cutoff'}
+              </button>
+              {cutoffSavedNotice && !editingCutoff && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-crt-phosphor">{cutoffSavedNotice}</span>
+                </>
+              )}
             </div>
             <h1 className="font-display text-xl font-semibold tracking-tight text-crt-text truncate">
               {status.currentPhase}
@@ -167,6 +274,91 @@ export function OverviewPanel({
             )}
           </div>
         </div>
+
+        {/* Inline Incremental Cutoff Timestamp Editor (Single-Elevation Hairline Divider) */}
+        {editingCutoff && !status.activeRun && (
+          <div className="mt-4 pt-4 border-t border-crt-border space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="text-crt-muted">
+                Incremental Sync and Dry Run only inspect releases created or updated in RetroGameTalk after this cutoff.
+              </span>
+              <span className="font-mono text-crt-muted tabular-nums">
+                UTC: {resolvedCutoffPreviewIso ?? '—'}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="datetime-local"
+                  aria-label="Incremental cutoff date and time"
+                  value={cutoffLocalInput}
+                  disabled={cutoffSaving}
+                  onChange={(e) => {
+                    setCutoffLocalInput(e.target.value);
+                    setCutoffError(null);
+                  }}
+                  className="px-3 py-1.5 text-xs font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-50"
+                />
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[
+                    { label: '24h Ago', hours: 24 },
+                    { label: '7d Ago', hours: 24 * 7 },
+                    { label: '30d Ago', hours: 24 * 30 },
+                    { label: 'Now', hours: 0 },
+                  ].map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      disabled={cutoffSaving}
+                      onClick={() => applyCutoffPresetHoursAgo(preset.hours)}
+                      className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+
+                  <button
+                    type="button"
+                    disabled={cutoffSaving || !activeWatermark}
+                    onClick={() => void handleResetCutoffDefault()}
+                    title="Clear stored watermark so Incremental Sync uses the rolling 24-hour default lookback"
+                    className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-amber hover:text-crt-amber text-crt-muted rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Reset Default
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0 ml-auto">
+                <button
+                  type="button"
+                  disabled={cutoffSaving}
+                  onClick={() => {
+                    setEditingCutoff(false);
+                    setCutoffError(null);
+                  }}
+                  className="px-3 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={cutoffSaving || !resolvedCutoffPreviewIso}
+                  onClick={() => void handleSaveCutoff()}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+                >
+                  {cutoffSaving ? 'Saving...' : 'Save Cutoff'}
+                </button>
+              </div>
+            </div>
+
+            {cutoffError && (
+              <p className="text-xs font-mono text-crt-crimson">{cutoffError}</p>
+            )}
+          </div>
+        )}
       </section>
 
       {/* 4-Column KPI Strip */}
@@ -316,7 +508,7 @@ export function OverviewPanel({
                 Recent Synchronization Runs
               </h2>
               <p className="text-xs text-crt-muted">
-                Incremental scheduled sweeps and manual runs
+                Incremental delta checks, dry runs, and full archive mirrors
               </p>
             </div>
             <div className="flex items-center gap-3 shrink-0">
@@ -341,7 +533,7 @@ export function OverviewPanel({
               <Clock className="h-5 w-5 text-crt-muted" />
               <p className="text-sm text-crt-text font-medium">No sync runs recorded yet</p>
               <p className="text-xs text-crt-muted max-w-sm">
-                Select Dry Run or Incremental Sync in the top header bar to preview or mirror releases.
+                Select Dry Run, Incremental Sync, or Full Sync in the top header bar to preview or mirror releases.
               </p>
             </div>
           ) : (

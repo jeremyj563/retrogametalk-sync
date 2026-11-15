@@ -20,7 +20,6 @@ import {
   getLastAuthenticatedAt,
   getReleaseFileById,
   getRepositoryItemById,
-  getRepositoryItemByRemoteUrl,
   listSyncRuns,
   recordSuccessfulLogin,
   releaseDistributedLock,
@@ -38,6 +37,7 @@ import {
   type DiscoveredRelease,
   type LoggerFn,
   RetroGameTalkClient,
+  type WpPostMetadata,
   resolveMirroredPaths,
 } from './rgtClient.ts';
 import type {
@@ -59,7 +59,6 @@ import type {
 } from './types.ts';
 
 const POD_ID = process.env.HOSTNAME || os.hostname() || 'rgt-sync-pod';
-const MAX_CRAWL_PAGES_PER_RUN = 300;
 
 let cachedLocalGitFallback: { version: string; gitSha: string } | null = null;
 
@@ -303,7 +302,8 @@ export class ScraperOrchestrator extends EventEmitter {
             localPath: absReleaseDir,
             systemName,
             title: meta?.title || releaseSlug,
-            publishedAt: null,
+            publishedAt: meta?.publishedAt ?? null,
+            remoteUpdatedAt: meta?.remoteUpdatedAt ?? null,
             status: releaseFiles.length > 0 ? 'downloaded' : 'queued',
             metadata: meta,
             coverLocalPath,
@@ -483,7 +483,16 @@ export class ScraperOrchestrator extends EventEmitter {
       this.client.resetAuthSession(true);
     }
     this.reconfigureScheduler(getInternalConfig());
-    this.log('info', 'Service configuration saved');
+    if (input.lastWatermarkAt !== undefined) {
+      this.log(
+        'info',
+        updated.lastWatermarkAt
+          ? `Incremental cutoff watermark updated to ${updated.lastWatermarkAt}`
+          : 'Incremental cutoff watermark cleared (using default 24h lookback)',
+      );
+    } else {
+      this.log('info', 'Service configuration saved');
+    }
     this.emitStatus();
     return updated;
   }
@@ -1208,7 +1217,16 @@ export class ScraperOrchestrator extends EventEmitter {
     let skippedCount = 0;
     let failedCount = 0;
     let bytesDownloaded = 0;
-    let newestReleaseIso: string | null = cfg.lastWatermarkAt;
+    let newestReleaseIso: string | null = null;
+
+    const recordObservedTimestamp = (raw: string | null | undefined) => {
+      if (!raw) return;
+      const ms = Date.parse(raw);
+      if (Number.isNaN(ms)) return;
+      if (!newestReleaseIso || ms > Date.parse(newestReleaseIso)) {
+        newestReleaseIso = new Date(ms).toISOString();
+      }
+    };
 
     const persistCounters = () => {
       const rl = this.rateLimiter.getTelemetry();
@@ -1240,12 +1258,39 @@ export class ScraperOrchestrator extends EventEmitter {
         this.client.setPersistedLastAuthenticatedAt(ts);
       }
 
+      const runStartedAt = new Date().toISOString();
+      const isDeltaMode = run.mode === 'incremental' || run.mode === 'dry_run';
+      const usingDefaultLookback = !cfg.lastWatermarkAt;
+      const effectiveCutoffIso = isDeltaMode
+        ? (cfg.lastWatermarkAt || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+        : null;
+      const cutoffMs = effectiveCutoffIso ? Date.parse(effectiveCutoffIso) : null;
+
+      if (isDeltaMode && effectiveCutoffIso) {
+        runLogger(
+          'info',
+          `${run.mode === 'dry_run' ? 'Dry Run' : 'Incremental'} cutoff active: ${effectiveCutoffIso}`,
+          usingDefaultLookback
+            ? 'Default 24h lookback (no prior watermark)'
+            : 'Syncing releases created or updated since cutoff',
+        );
+      } else {
+        runLogger('info', 'Full Sync mode active: uncapped mirror of every release in target scope');
+      }
+
       const visitedPages = new Set<string>();
       const visitedReleasePages = new Set<string>();
       const processedFileUrls = new Set<string>();
 
-      const indexQueue: string[] = [cfg.baseUrl];
-      const watermarkMs = cfg.lastWatermarkAt ? Date.parse(cfg.lastWatermarkAt) : null;
+      const baseWithSlash = (() => {
+        try {
+          const u = new URL(cfg.baseUrl);
+          if (!u.pathname.endsWith('/')) u.pathname += '/';
+          return u.toString();
+        } catch {
+          return cfg.baseUrl.endsWith('/') ? cfg.baseUrl : `${cfg.baseUrl}/`;
+        }
+      })();
 
       const processDiscoveredReleasePage = async (
         pageUrl: string,
@@ -1277,13 +1322,10 @@ export class ScraperOrchestrator extends EventEmitter {
         const releaseRemoteDir = path.posix.dirname(mirroredProbe.remotePath);
         const systemName = sampleRel.systemName || mirroredProbe.systemName;
 
+        recordObservedTimestamp(preloadedMeta?.publishedAt);
+        recordObservedTimestamp(preloadedMeta?.remoteUpdatedAt);
         for (const rel of uniqueReleases) {
-          if (rel.publishedAt) {
-            const relMs = Date.parse(rel.publishedAt);
-            if (!Number.isNaN(relMs) && (!newestReleaseIso || relMs > Date.parse(newestReleaseIso))) {
-              newestReleaseIso = new Date(relMs).toISOString();
-            }
-          }
+          recordObservedTimestamp(rel.publishedAt);
         }
 
         if (run.mode === 'dry_run') {
@@ -1341,7 +1383,8 @@ export class ScraperOrchestrator extends EventEmitter {
           localPath: releaseLocalDir,
           systemName,
           title: effectiveMeta?.title || sampleRel.title || path.basename(releaseRemoteDir),
-          publishedAt: uniqueReleases.find((r) => r.publishedAt)?.publishedAt ?? null,
+          publishedAt: effectiveMeta?.publishedAt ?? uniqueReleases.find((r) => r.publishedAt)?.publishedAt ?? null,
+          remoteUpdatedAt: effectiveMeta?.remoteUpdatedAt ?? null,
           status: 'downloading',
           lastRunId: run.id,
           metadata: effectiveMeta ?? null,
@@ -1372,7 +1415,7 @@ export class ScraperOrchestrator extends EventEmitter {
           }
         }
 
-        // Stream or deduplicate all `n` archive files belonging to this release page
+        // Stream or deduplicate all archive files belonging to this release page
         for (const rel of uniqueReleases) {
           if (signal.aborted) break;
           processedFileUrls.add(rel.remoteUrl);
@@ -1395,73 +1438,71 @@ export class ScraperOrchestrator extends EventEmitter {
         }
       };
 
-      // Crawl index/system/pagination pages & inspect release detail pages as discovered
-      while (indexQueue.length > 0 && pagesCrawled < MAX_CRAWL_PAGES_PER_RUN) {
-        if (signal.aborted) break;
+      const inspectAndProcessReleasePage = async (
+        relPageUrl: string,
+        preloadedWpData?: WpPostMetadata | null,
+        enforceCutoffMs?: number | null,
+      ): Promise<{ newerThanCutoff: boolean }> => {
+        const canonicalRelUrl = relPageUrl.split('#')[0];
+        if (visitedReleasePages.has(canonicalRelUrl)) {
+          return { newerThanCutoff: false };
+        }
+        visitedReleasePages.add(canonicalRelUrl);
 
-        const pageUrl = indexQueue.shift()!;
-        if (visitedPages.has(pageUrl)) continue;
-        visitedPages.add(pageUrl);
-
-        this.currentPhase = `Scanning index (${pagesCrawled + 1}/${MAX_CRAWL_PAGES_PER_RUN}): ${this.formatRelativePhasePath(pageUrl, cfg.baseUrl)}`;
-        this.emitStatus();
-
-        let pageData: { html: string; finalUrl: string; status: number };
         try {
-          pageData = await this.client.fetchPageHtml(pageUrl, cfg, signal, runLogger);
-        } catch (err) {
-          if (signal.aborted) break;
-          const errMsg = err instanceof Error ? err.message : String(err);
-          lastCrawlError = errMsg;
-          if (
-            pageUrl === cfg.baseUrl ||
-            /Cloudflare|Authentication|Re-authentication/i.test(errMsg)
-          ) {
-            throw err;
+          const relPage = await this.client.fetchPageHtml(canonicalRelUrl, cfg, signal, runLogger);
+          pagesCrawled += 1;
+          if (relPage.status >= 400) {
+            persistCounters();
+            return { newerThanCutoff: false };
           }
-          runLogger('warn', `Failed to scan ${pageUrl}: ${errMsg}`);
-          continue;
-        }
+          successfulPages += 1;
 
-        pagesCrawled += 1;
-        if (pageData.status >= 400) {
-          const httpErr = `HTTP ${pageData.status} on ${pageData.finalUrl}`;
-          lastCrawlError = httpErr;
-          if (
-            pageUrl === cfg.baseUrl ||
-            pageData.status === 401 ||
-            pageData.status === 403
-          ) {
-            throw new Error(httpErr);
+          const wpData =
+            preloadedWpData !== undefined
+              ? preloadedWpData
+              : await this.client.fetchReleaseWpMetadata(
+                  relPage.finalUrl,
+                  this.client.extractWpPostIdHint(relPage.html),
+                  cfg,
+                  signal,
+                  runLogger,
+                );
+
+          // In delta fallback mode, verify RGT creation/modification timestamp BEFORE resolving download nonces
+          const prelimMeta = this.client.extractReleaseMetadata(relPage.html, relPage.finalUrl, wpData, []);
+          if (enforceCutoffMs !== null && enforceCutoffMs !== undefined) {
+            const pubMs = prelimMeta.publishedAt ? Date.parse(prelimMeta.publishedAt) : NaN;
+            const updMs = prelimMeta.remoteUpdatedAt ? Date.parse(prelimMeta.remoteUpdatedAt) : NaN;
+            const latestMs = Math.max(
+              Number.isNaN(pubMs) ? -Infinity : pubMs,
+              Number.isNaN(updMs) ? -Infinity : updMs,
+            );
+            if (!Number.isFinite(latestMs) || latestMs <= enforceCutoffMs) {
+              persistCounters();
+              return { newerThanCutoff: false };
+            }
           }
-          runLogger('warn', httpErr);
-          continue;
-        }
-        successfulPages += 1;
 
-        const extracted = this.client.extractLinksFromHtml(pageData.html, pageData.finalUrl, cfg);
-        if (extracted.systems.length > 0) {
-          saveDiscoveredSystems(extracted.systems);
-        }
-
-        // If this page itself has an ACF/DLC download widget, extract & group all downloads on it
-        const inlineDynamic = await this.client.extractDynamicReleaseDownloads(
-          pageData.html,
-          pageData.finalUrl,
-          cfg,
-          signal,
-          runLogger,
-        );
-        if (inlineDynamic.length > 0) {
-          const wpPostIdHint = this.client.extractWpPostIdHint(pageData.html);
-          const wpData = await this.client.fetchReleaseWpMetadata(
-            pageData.finalUrl,
-            wpPostIdHint,
+          const dynamicReleases = await this.client.extractDynamicReleaseDownloads(
+            relPage.html,
+            relPage.finalUrl,
             cfg,
             signal,
             runLogger,
           );
-          const inlineRoles = inlineDynamic.map((r) =>
+          const relExtracted = this.client.extractLinksFromHtml(relPage.html, relPage.finalUrl, cfg);
+
+          const combinedMap = new Map<string, DiscoveredRelease>();
+          for (const d of [...dynamicReleases, ...relExtracted.downloads]) {
+            const key = d.filename.toLowerCase();
+            if (!combinedMap.has(key)) {
+              combinedMap.set(key, d);
+            }
+          }
+          const combined = Array.from(combinedMap.values());
+
+          const fileRoles = combined.map((r) =>
             classifyFileRole(r.filename, r.displayLabel || r.filename, {
               genres: wpData?.genres,
               languages: wpData?.languages,
@@ -1470,99 +1511,114 @@ export class ScraperOrchestrator extends EventEmitter {
               systemName: r.systemName,
             }),
           );
-          const inlineMeta = this.client.extractReleaseMetadata(
-            pageData.html,
-            pageData.finalUrl,
+          const releaseMeta = this.client.extractReleaseMetadata(
+            relPage.html,
+            relPage.finalUrl,
             wpData,
-            inlineRoles,
+            fileRoles,
           );
-          await processDiscoveredReleasePage(pageData.finalUrl, inlineDynamic, inlineMeta);
+
+          if (combined.length > 0) {
+            await processDiscoveredReleasePage(relPage.finalUrl, combined, releaseMeta);
+          } else {
+            persistCounters();
+          }
+
+          return { newerThanCutoff: true };
+        } catch (err) {
+          if (signal.aborted) throw err;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          if (/Cloudflare|Authentication|Re-authentication/i.test(errMsg)) {
+            throw err;
+          }
+          runLogger('warn', `Error inspecting ${canonicalRelUrl}`, errMsg);
+          return { newerThanCutoff: false };
         }
+      };
 
-        if (extracted.downloads.length > 0) {
-          const groupedByPage = new Map<string, DiscoveredRelease[]>();
-          for (const rel of extracted.downloads) {
-            const key = (rel.pageUrl || rel.remoteUrl).split('#')[0];
-            const list = groupedByPage.get(key) || [];
-            list.push(rel);
-            groupedByPage.set(key, list);
-          }
-          for (const [groupPageUrl, groupFiles] of groupedByPage.entries()) {
-            await processDiscoveredReleasePage(groupPageUrl, groupFiles);
-          }
-        }
+      const crawlHtmlScope = async (
+        seedUrls: string[],
+        scopeSystemSlug: string | null,
+        preloadedFirstPage?: { url: string; html: string; finalUrl: string },
+      ) => {
+        const scopedCfg: ScraperConfigInternal = scopeSystemSlug
+          ? { ...cfg, systemFilter: scopeSystemSlug }
+          : cfg;
+        const queue = [...seedUrls];
 
-        // Process discovered release detail pages on this index page
-        let allReleasesOlderAndIndexed =
-          extracted.releasePages.length > 0 && run.mode === 'incremental' && watermarkMs !== null;
+        while (queue.length > 0) {
+          if (signal.aborted) break;
+          const pageUrl = queue.shift()!;
+          if (visitedPages.has(pageUrl)) continue;
+          visitedPages.add(pageUrl);
 
-        for (const relPageUrl of extracted.releasePages) {
-          if (signal.aborted || pagesCrawled >= MAX_CRAWL_PAGES_PER_RUN) break;
-          if (visitedReleasePages.has(relPageUrl)) continue;
-          visitedReleasePages.add(relPageUrl);
-
-          const relTimeStr = extracted.releaseTimes.get(relPageUrl);
-          if (relTimeStr && watermarkMs !== null) {
-            const relMs = Date.parse(relTimeStr);
-            if (!Number.isNaN(relMs) && relMs > watermarkMs) {
-              allReleasesOlderAndIndexed = false;
-            }
-          }
-
-          // Skip inspecting release detail page in incremental mode only if we already indexed
-          // its grouped metadata AND every child archive file exists cleanly on disk
-          if (run.mode === 'incremental') {
-            const existingRelease = getRepositoryItemByRemoteUrl(relPageUrl);
-            const allFilesOnDisk =
-              Boolean(existingRelease) &&
-              existingRelease!.hasMetadata &&
-              existingRelease!.files.length > 0 &&
-              (existingRelease!.status === 'downloaded' || existingRelease!.status === 'skipped') &&
-              existingRelease!.files.every((f) => fs.existsSync(f.localPath) && fs.statSync(f.localPath).size > 0);
-            if (allFilesOnDisk) {
-              skippedCount += existingRelease!.files.length;
+          let pageData: { html: string; finalUrl: string; status: number };
+          if (preloadedFirstPage && preloadedFirstPage.url === pageUrl) {
+            pageData = {
+              html: preloadedFirstPage.html,
+              finalUrl: preloadedFirstPage.finalUrl,
+              status: 200,
+            };
+          } else {
+            this.currentPhase = `Scanning page (${pagesCrawled + 1}): ${this.formatRelativePhasePath(pageUrl, cfg.baseUrl)}`;
+            this.emitStatus();
+            try {
+              pageData = await this.client.fetchPageHtml(pageUrl, cfg, signal, runLogger);
+            } catch (err) {
+              if (signal.aborted) break;
+              const errMsg = err instanceof Error ? err.message : String(err);
+              lastCrawlError = errMsg;
+              if (
+                pageUrl === cfg.baseUrl ||
+                /Cloudflare|Authentication|Re-authentication/i.test(errMsg)
+              ) {
+                throw err;
+              }
+              runLogger('warn', `Failed to scan ${pageUrl}: ${errMsg}`);
               continue;
             }
+
+            pagesCrawled += 1;
+            if (pageData.status >= 400) {
+              const httpErr = `HTTP ${pageData.status} on ${pageData.finalUrl}`;
+              lastCrawlError = httpErr;
+              if (
+                pageUrl === cfg.baseUrl ||
+                pageData.status === 401 ||
+                pageData.status === 403
+              ) {
+                throw new Error(httpErr);
+              }
+              runLogger('warn', httpErr);
+              continue;
+            }
+            successfulPages += 1;
           }
 
-          allReleasesOlderAndIndexed = false;
+          visitedPages.add(pageData.finalUrl);
+          const extracted = this.client.extractLinksFromHtml(pageData.html, pageData.finalUrl, scopedCfg);
+          if (extracted.systems.length > 0) {
+            saveDiscoveredSystems(extracted.systems);
+          }
 
-          this.currentPhase = `Inspecting release (${pagesCrawled + 1}/${MAX_CRAWL_PAGES_PER_RUN}): ${this.formatRelativePhasePath(relPageUrl, cfg.baseUrl)}`;
-          this.emitStatus();
-
-          try {
-            const relPage = await this.client.fetchPageHtml(relPageUrl, cfg, signal, runLogger);
-            pagesCrawled += 1;
-            if (relPage.status >= 400) continue;
-
-            const wpPostIdHint = this.client.extractWpPostIdHint(relPage.html);
+          // Inline ACF/DLC download widgets on the page itself
+          const inlineDynamic = await this.client.extractDynamicReleaseDownloads(
+            pageData.html,
+            pageData.finalUrl,
+            scopedCfg,
+            signal,
+            runLogger,
+          );
+          if (inlineDynamic.length > 0) {
+            const wpPostIdHint = this.client.extractWpPostIdHint(pageData.html);
             const wpData = await this.client.fetchReleaseWpMetadata(
-              relPage.finalUrl,
+              pageData.finalUrl,
               wpPostIdHint,
               cfg,
               signal,
               runLogger,
             );
-            const dynamicReleases = await this.client.extractDynamicReleaseDownloads(
-              relPage.html,
-              relPage.finalUrl,
-              cfg,
-              signal,
-              runLogger,
-            );
-            const relExtracted = this.client.extractLinksFromHtml(relPage.html, relPage.finalUrl, cfg);
-
-            // Merge dynamic ACF downloads first, then any additional direct archive links
-            const combinedMap = new Map<string, DiscoveredRelease>();
-            for (const d of [...dynamicReleases, ...relExtracted.downloads]) {
-              const key = d.filename.toLowerCase();
-              if (!combinedMap.has(key)) {
-                combinedMap.set(key, d);
-              }
-            }
-            const combined = Array.from(combinedMap.values());
-
-            const fileRoles = combined.map((r) =>
+            const inlineRoles = inlineDynamic.map((r) =>
               classifyFileRole(r.filename, r.displayLabel || r.filename, {
                 genres: wpData?.genres,
                 languages: wpData?.languages,
@@ -1571,37 +1627,195 @@ export class ScraperOrchestrator extends EventEmitter {
                 systemName: r.systemName,
               }),
             );
-            const releaseMeta = this.client.extractReleaseMetadata(
-              relPage.html,
-              relPage.finalUrl,
+            const inlineMeta = this.client.extractReleaseMetadata(
+              pageData.html,
+              pageData.finalUrl,
               wpData,
-              fileRoles,
+              inlineRoles,
             );
-
-            if (combined.length > 0) {
-              await processDiscoveredReleasePage(relPage.finalUrl, combined, releaseMeta);
+            const inlineLatestMs = Math.max(
+              inlineMeta.publishedAt ? Date.parse(inlineMeta.publishedAt) : -Infinity,
+              inlineMeta.remoteUpdatedAt ? Date.parse(inlineMeta.remoteUpdatedAt) : -Infinity,
+            );
+            if (cutoffMs === null || (Number.isFinite(inlineLatestMs) && inlineLatestMs > cutoffMs)) {
+              await processDiscoveredReleasePage(pageData.finalUrl, inlineDynamic, inlineMeta);
             }
-          } catch (err) {
+          }
+
+          if (extracted.downloads.length > 0) {
+            const groupedByPage = new Map<string, DiscoveredRelease[]>();
+            for (const rel of extracted.downloads) {
+              if (cutoffMs !== null) {
+                const relMs = rel.publishedAt ? Date.parse(rel.publishedAt) : NaN;
+                if (Number.isNaN(relMs) || relMs <= cutoffMs) {
+                  continue;
+                }
+              }
+              const key = (rel.pageUrl || rel.remoteUrl).split('#')[0];
+              const list = groupedByPage.get(key) || [];
+              list.push(rel);
+              groupedByPage.set(key, list);
+            }
+            for (const [groupPageUrl, groupFiles] of groupedByPage.entries()) {
+              await processDiscoveredReleasePage(groupPageUrl, groupFiles);
+            }
+          }
+
+          let foundNewerReleaseOnPage = false;
+          for (const relPageUrl of extracted.releasePages) {
             if (signal.aborted) break;
-            const errMsg = err instanceof Error ? err.message : String(err);
-            if (/Cloudflare|Authentication|Re-authentication/i.test(errMsg)) {
-              throw err;
+            if (cutoffMs !== null) {
+              const cardTimeStr = extracted.releaseTimes.get(relPageUrl);
+              if (cardTimeStr) {
+                const cardMs = Date.parse(cardTimeStr);
+                if (!Number.isNaN(cardMs) && cardMs <= cutoffMs) {
+                  continue;
+                }
+              }
             }
-            runLogger('warn', `Error inspecting ${relPageUrl}`, errMsg);
+
+            this.currentPhase = `${isDeltaMode ? 'Inspecting delta candidate' : 'Full Sync inspecting'}: ${this.formatRelativePhasePath(relPageUrl, cfg.baseUrl)}`;
+            this.emitStatus();
+
+            const res = await inspectAndProcessReleasePage(relPageUrl, undefined, cutoffMs);
+            if (res.newerThanCutoff) {
+              foundNewerReleaseOnPage = true;
+            }
           }
+
+          const shouldFollowPagination =
+            cutoffMs === null ||
+            extracted.releasePages.length === 0 ||
+            foundNewerReleaseOnPage;
+
+          if (shouldFollowPagination) {
+            for (const sub of extracted.subPages) {
+              if (!visitedPages.has(sub)) {
+                queue.push(sub);
+              }
+            }
+          } else {
+            runLogger('info', `Reached cutoff boundary on ${pageUrl}; stopping older pagination`);
+          }
+
+          persistCounters();
+        }
+      };
+
+      // Resolve target console slugs (either user's Console Filter or all discovered RGT consoles)
+      const explicitFilters = cfg.systemFilter
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+
+      let targetSystems: string[] = [];
+      let preloadedRootPage: { url: string; html: string; finalUrl: string } | undefined;
+
+      if (explicitFilters.length > 0) {
+        targetSystems = explicitFilters;
+      } else {
+        this.currentPhase = `Scanning repository index: ${this.formatRelativePhasePath(cfg.baseUrl, cfg.baseUrl)}`;
+        this.emitStatus();
+        const rootPage = await this.client.fetchPageHtml(cfg.baseUrl, cfg, signal, runLogger);
+        pagesCrawled += 1;
+        if (rootPage.status >= 400) {
+          throw new Error(`HTTP ${rootPage.status} on ${rootPage.finalUrl}`);
+        }
+        successfulPages += 1;
+        preloadedRootPage = { url: cfg.baseUrl, html: rootPage.html, finalUrl: rootPage.finalUrl };
+
+        const rootExtracted = this.client.extractLinksFromHtml(
+          rootPage.html,
+          rootPage.finalUrl,
+          { ...cfg, systemFilter: '' },
+        );
+        if (rootExtracted.systems.length > 0) {
+          saveDiscoveredSystems(rootExtracted.systems);
         }
 
-        if (!allReleasesOlderAndIndexed) {
-          for (const sub of extracted.subPages) {
-            if (!visitedPages.has(sub)) {
-              indexQueue.push(sub);
-            }
-          }
-        } else {
-          runLogger('info', `Reached watermark boundary on ${pageUrl}; stopping older pagination`);
+        targetSystems = Array.from(
+          new Set(
+            [...getInternalConfig().discoveredSystems, ...rootExtracted.systems]
+              .map((s) => s.trim().toLowerCase())
+              .filter(Boolean),
+          ),
+        ).sort((a, b) => a.localeCompare(b));
+      }
+
+      if (targetSystems.length === 0) {
+        await crawlHtmlScope([cfg.baseUrl], null, preloadedRootPage);
+      } else {
+        if (preloadedRootPage) {
+          visitedPages.add(preloadedRootPage.url);
+          visitedPages.add(preloadedRootPage.finalUrl);
         }
 
-        persistCounters();
+        for (let sysIdx = 0; sysIdx < targetSystems.length; sysIdx += 1) {
+          if (signal.aborted) break;
+          const systemSlug = targetSystems[sysIdx];
+          const scopeLabel = `${sysIdx + 1}/${targetSystems.length}`;
+
+          this.currentPhase = isDeltaMode
+            ? `Checking ${systemSlug} (${scopeLabel}) since ${effectiveCutoffIso!.slice(0, 16).replace('T', ' ')} UTC`
+            : `Full Sync (${scopeLabel}): enumerating ${systemSlug}`;
+          this.emitStatus();
+
+          const wpRes = await this.client.listConsoleReleasesViaWpRest(systemSlug, cfg, {
+            modifiedAfterIso: effectiveCutoffIso,
+            signal,
+            log: runLogger,
+            onPageFetched: (wpPage, wpTotalPages) => {
+              pagesCrawled += 1;
+              successfulPages += 1;
+              this.currentPhase = isDeltaMode
+                ? `Checking ${systemSlug} (${scopeLabel}) · WP page ${wpPage}/${wpTotalPages}`
+                : `Full Sync (${scopeLabel}): ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`;
+              persistCounters();
+            },
+          });
+
+          if (wpRes.supported) {
+            if (isDeltaMode) {
+              if (wpRes.posts.length > 0) {
+                runLogger(
+                  'info',
+                  `Found ${wpRes.posts.length} new/updated release(s) in ${systemSlug} since cutoff`,
+                );
+              }
+              for (let pIdx = 0; pIdx < wpRes.posts.length; pIdx += 1) {
+                if (signal.aborted) break;
+                const post = wpRes.posts[pIdx];
+                if (!post.link) continue;
+                recordObservedTimestamp(post.dateGmt);
+                recordObservedTimestamp(post.modifiedGmt);
+                this.currentPhase = `${run.mode === 'dry_run' ? 'Dry Run' : 'Incremental'} · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
+                this.emitStatus();
+                await inspectAndProcessReleasePage(post.link, post, cutoffMs);
+              }
+            } else if (wpRes.posts.length > 0) {
+              runLogger('info', `Full Sync mirroring ${wpRes.posts.length} release(s) in ${systemSlug}`);
+              for (let pIdx = 0; pIdx < wpRes.posts.length; pIdx += 1) {
+                if (signal.aborted) break;
+                const post = wpRes.posts[pIdx];
+                if (!post.link) continue;
+                recordObservedTimestamp(post.dateGmt);
+                recordObservedTimestamp(post.modifiedGmt);
+                this.currentPhase = `Full Sync · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
+                this.emitStatus();
+                await inspectAndProcessReleasePage(post.link, post, null);
+              }
+            } else {
+              // Console CPT returned 0 posts; verify HTML listing in Full Sync in case of static links
+              const consoleHtmlUrl = new URL(`${encodeURIComponent(systemSlug)}/`, baseWithSlash).toString();
+              await crawlHtmlScope([consoleHtmlUrl], systemSlug);
+            }
+          } else {
+            const consoleHtmlUrl = new URL(`${encodeURIComponent(systemSlug)}/`, baseWithSlash).toString();
+            await crawlHtmlScope([consoleHtmlUrl], systemSlug);
+          }
+
+          persistCounters();
+        }
       }
 
       if (!signal.aborted) {
@@ -1612,7 +1826,14 @@ export class ScraperOrchestrator extends EventEmitter {
           throw new Error(`Sync failed: all ${failedCount} file download(s) failed`);
         }
         if (run.mode !== 'dry_run') {
-          setWatermark(newestReleaseIso || new Date().toISOString());
+          const runStartMs = Date.parse(runStartedAt);
+          const newestObsMs = newestReleaseIso ? Date.parse(newestReleaseIso) : NaN;
+          const nextWatermarkIso =
+            !Number.isNaN(newestObsMs) && newestObsMs > runStartMs
+              ? new Date(newestObsMs).toISOString()
+              : runStartedAt;
+          setWatermark(nextWatermarkIso);
+          runLogger('info', `Advanced incremental cutoff watermark to ${nextWatermarkIso}`);
         }
       }
 

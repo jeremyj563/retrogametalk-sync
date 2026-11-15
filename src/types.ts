@@ -66,6 +66,8 @@ export interface ReleaseMetadata {
   downloadsCount: string | null;
   releasedAgo: string | null;
   updatedDate: string | null;
+  publishedAt?: string | null;
+  remoteUpdatedAt?: string | null;
   specs: { label: string; value: string }[];
   descriptionHtml: string;
   descriptionText: string;
@@ -116,6 +118,7 @@ export interface RepositoryItemRecord {
   title: string;
   fileSizeBytes: number;
   publishedAt: string | null;
+  remoteUpdatedAt: string | null;
   status: ItemStatus;
   errorMessage: string | null;
   lastRunId: number | null;

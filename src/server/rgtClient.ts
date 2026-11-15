@@ -76,6 +76,9 @@ export interface DiscoveredRelease {
 export interface WpPostMetadata {
   wpPostId: number;
   wpPostType: string;
+  link: string | null;
+  dateGmt: string | null;
+  modifiedGmt: string | null;
   title: string | null;
   originalTitle: string | null;
   publisher: string | null;
@@ -246,12 +249,46 @@ function logAuthContainer(level: 'INFO' | 'WARN' | 'ERROR', message: string): vo
   }
 }
 
+function normalizeWpGmtIso(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.startsWith('0000-00-00')) return null;
+  const withTz = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)
+    ? trimmed
+    : `${trimmed.replace(' ', 'T')}Z`;
+  const ms = Date.parse(withTz);
+  if (Number.isNaN(ms)) return null;
+  return new Date(ms).toISOString();
+}
+
+function normalizeIsoTimestamp(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.startsWith('0000-00-00')) return null;
+  const ms = Date.parse(trimmed);
+  if (Number.isNaN(ms)) return null;
+  return new Date(ms).toISOString();
+}
+
+function ensureTrailingSlash(urlStr: string): string {
+  try {
+    const u = new URL(urlStr);
+    if (!u.pathname.endsWith('/')) {
+      u.pathname += '/';
+    }
+    return u.toString();
+  } catch {
+    return urlStr.endsWith('/') ? urlStr : `${urlStr}/`;
+  }
+}
+
 export class RetroGameTalkClient {
   private jar: CookieJar;
   private httpClient: Impit;
   private activeBrowserProfile: Browser = 'chrome142';
   private rateLimiter: AdaptiveRateLimiter;
   private wpTypesCache: Map<string, string> | null = null;
+  private wpTypesCacheBaseUrl: string | null = null;
   private authStatus: AuthSessionStatus = {
     configured: false,
     authenticated: false,
@@ -1894,9 +1931,14 @@ export class RetroGameTalkClient {
         return;
       }
 
-      const containerTime =
-        $(el).closest('article, tr, li, .post, .entry').find('time[datetime]').first().attr('datetime') ||
-        pageTime;
+      const cardContainer = $(el).closest('article, tr, li, .post, .entry, .rgt-card, .game-card');
+      const cardTimeEl = cardContainer.find('time[datetime]').first();
+      const cardSpecificTime =
+        cardContainer.attr('data-modified') ||
+        cardTimeEl.attr('data-modified') ||
+        cardTimeEl.attr('datetime') ||
+        null;
+      const containerTime = cardSpecificTime || pageTime;
 
       if (isDownloadCandidateUrl(resolved, anchorText, hasDownloadAttr)) {
         const hrefStr = resolved.toString();
@@ -1942,8 +1984,8 @@ export class RetroGameTalkClient {
 
       if (isUnderRepo && resolved.pathname !== current.pathname) {
         const cleanUrl = `${resolved.origin}${resolved.pathname}`;
-        if (containerTime) {
-          releaseTimes.set(cleanUrl, containerTime);
+        if (cardSpecificTime) {
+          releaseTimes.set(cleanUrl, cardSpecificTime);
         }
 
         // Pagination or top-level system directory (/repo/page/2/, /repo/nes-roms/, /repo/nes-roms/page/2/)
@@ -1996,8 +2038,9 @@ export class RetroGameTalkClient {
       null;
 
     // Parse cdrData script config if present
-    let ajaxUrl = new URL('wp-content/plugins/cdr-main/public/ajax.php', config.baseUrl).toString();
-    let nonceUrl = new URL('wp-admin/admin-ajax.php?action=cdr_nonce', config.baseUrl).toString();
+    const repoBase = ensureTrailingSlash(config.baseUrl);
+    let ajaxUrl = new URL('wp-content/plugins/cdr-main/public/ajax.php', repoBase).toString();
+    let nonceUrl = new URL('wp-admin/admin-ajax.php?action=cdr_nonce', repoBase).toString();
     const extraScript = $('#cdr-download-script-js-extra').html() || '';
     const cdrMatch = extraScript.match(/var\s+cdrData\s*=\s*(\{[^;]+\})/);
     if (cdrMatch?.[1]) {
@@ -2406,10 +2449,23 @@ export class RetroGameTalkClient {
     signal?: AbortSignal,
     log?: LoggerFn,
   ): Promise<Map<string, string>> {
-    if (this.wpTypesCache) return this.wpTypesCache;
+    const normalizedBase = config.baseUrl.trim().replace(/\/+$/, '');
+    if (this.wpTypesCache && this.wpTypesCacheBaseUrl === normalizedBase) {
+      return this.wpTypesCache;
+    }
     const map = new Map<string, string>();
+    const registerAlias = (alias: string, restBase: string) => {
+      const clean = alias.trim().toLowerCase();
+      if (!clean) return;
+      if (!map.has(clean)) map.set(clean, restBase);
+      const hyphenated = clean.replace(/_/g, '-');
+      if (!map.has(hyphenated)) map.set(hyphenated, restBase);
+      const underscored = clean.replace(/-/g, '_');
+      if (!map.has(underscored)) map.set(underscored, restBase);
+    };
+
     try {
-      const typesUrl = new URL('wp-json/wp/v2/types', config.baseUrl).toString();
+      const typesUrl = new URL('wp-json/wp/v2/types', ensureTrailingSlash(config.baseUrl)).toString();
       const { response } = await this.fetchWithRedirects(
         typesUrl,
         config,
@@ -2424,6 +2480,9 @@ export class RetroGameTalkClient {
             map.set(key.toLowerCase(), def.rest_base);
             map.set(def.rest_base.toLowerCase(), def.rest_base);
             if (def.slug) map.set(def.slug.toLowerCase(), def.rest_base);
+            registerAlias(key, def.rest_base);
+            registerAlias(def.rest_base, def.rest_base);
+            if (def.slug) registerAlias(def.slug, def.rest_base);
           }
         }
       } else {
@@ -2432,8 +2491,287 @@ export class RetroGameTalkClient {
     } catch (err) {
       if (signal?.aborted) throw err;
     }
-    this.wpTypesCache = map;
+
+    if (map.size > 0) {
+      this.wpTypesCache = map;
+      this.wpTypesCacheBaseUrl = normalizedBase;
+    }
     return map;
+  }
+
+  private parseWpPostObject(post: Record<string, unknown>, fallbackRestBase: string): WpPostMetadata | null {
+    if (!post || typeof post !== 'object' || !post.id) return null;
+
+    const acf = (post.acf && typeof post.acf === 'object' ? post.acf : {}) as Record<string, unknown>;
+    const titleRendered =
+      post.title && typeof post.title === 'object' && 'rendered' in post.title
+        ? decodeHtmlEntities(String((post.title as { rendered?: string }).rendered || ''))
+        : '';
+    const acfGameName = typeof acf.game_name === 'string' ? acf.game_name.trim() : '';
+
+    const genres = new Set<string>();
+    const regions = new Set<string>();
+    const languages = new Set<string>();
+    const sources = new Set<string>();
+    const formats = new Set<string>();
+    const publishers = new Set<string>();
+    const developers = new Set<string>();
+    let releaseYear: string | null = null;
+
+    const embedded = post._embedded as { 'wp:term'?: unknown[] } | undefined;
+    const termGroups = Array.isArray(embedded?.['wp:term']) ? embedded!['wp:term']! : [];
+    for (const group of termGroups) {
+      if (!Array.isArray(group)) continue;
+      for (const term of group) {
+        if (!term || typeof term !== 'object') continue;
+        const t = term as { taxonomy?: string; name?: string };
+        const tax = String(t.taxonomy || '').toLowerCase();
+        const name = decodeHtmlEntities(String(t.name || '').trim());
+        if (!name) continue;
+        if (tax === 'genre') genres.add(name);
+        else if (tax === 'region') regions.add(name);
+        else if (tax === 'language') languages.add(name);
+        else if (tax === 'source') sources.add(name);
+        else if (tax === 'format') formats.add(name);
+        else if (tax === 'publisher') publishers.add(name);
+        else if (tax === 'developer') developers.add(name);
+        else if (tax === 'release-year' && !releaseYear) releaseYear = name;
+      }
+    }
+
+    const downloadHints: { filename: string; fileSize: string }[] = [];
+    if (Array.isArray(acf.download_links)) {
+      for (const entry of acf.download_links) {
+        if (entry && typeof entry === 'object') {
+          const e = entry as { file_name?: string; file_size?: string };
+          if (e.file_name) {
+            downloadHints.push({
+              filename: String(e.file_name),
+              fileSize: String(e.file_size || ''),
+            });
+          }
+        }
+      }
+    }
+
+    const contentRendered =
+      post.content && typeof post.content === 'object' && 'rendered' in post.content
+        ? String((post.content as { rendered?: string }).rendered || '')
+        : '';
+
+    const rawLink = typeof post.link === 'string' && post.link.trim() ? post.link.trim().split('#')[0] : null;
+    const dateGmt = normalizeWpGmtIso(post.date_gmt) ?? normalizeIsoTimestamp(post.date);
+    const modifiedGmt = normalizeWpGmtIso(post.modified_gmt) ?? normalizeIsoTimestamp(post.modified) ?? dateGmt;
+
+    return {
+      wpPostId: Number(post.id),
+      wpPostType: String(post.type || fallbackRestBase),
+      link: rawLink,
+      dateGmt,
+      modifiedGmt,
+      title: acfGameName || titleRendered || null,
+      originalTitle:
+        typeof acf.original_title === 'string' && acf.original_title.trim() ? acf.original_title.trim() : null,
+      publisher: publishers.size > 0 ? Array.from(publishers).join(', ') : null,
+      developer: developers.size > 0 ? Array.from(developers).join(', ') : null,
+      releaseYear,
+      genres: Array.from(genres),
+      regions: Array.from(regions),
+      languages: Array.from(languages),
+      sources: Array.from(sources),
+      formats: Array.from(formats),
+      descriptionHtml: contentRendered,
+      downloadHints,
+    };
+  }
+
+  /**
+   * Lists releases for a console via RetroGameTalk's WordPress REST API (`wp-json/wp/v2/<rest_base>`).
+   * Supports both uncapped Full Sync pagination and timestamp-gated Incremental Sync (`modified_after`).
+   */
+  async listConsoleReleasesViaWpRest(
+    systemSlug: string,
+    config: ScraperConfigInternal,
+    options: {
+      modifiedAfterIso?: string | null;
+      signal?: AbortSignal;
+      log?: LoggerFn;
+      onPageFetched?: (page: number, totalPages: number) => void;
+    } = {},
+  ): Promise<{ supported: boolean; posts: WpPostMetadata[] }> {
+    const { modifiedAfterIso, signal, log, onPageFetched } = options;
+    const typeMap = await this.getWpRestTypes(config, signal, log);
+    const cleanSlug = systemSlug.trim().toLowerCase();
+    if (!cleanSlug) return { supported: false, posts: [] };
+
+    const restBase =
+      typeMap.get(cleanSlug) ||
+      typeMap.get(cleanSlug.replace(/-/g, '_')) ||
+      typeMap.get(cleanSlug.replace(/_/g, '-')) ||
+      null;
+
+    // Built-in core types ('posts', 'pages', 'media') are not console CPTs unless explicitly requested
+    if (!restBase || restBase === 'pages' || restBase === 'media' || restBase === 'blocks') {
+      return { supported: false, posts: [] };
+    }
+
+    const cutoffMs =
+      modifiedAfterIso && !Number.isNaN(Date.parse(modifiedAfterIso)) ? Date.parse(modifiedAfterIso) : null;
+    // Subtract 1s for WP's whole-second SQL date comparison, then enforce exact ms comparison in JS
+    const wpAfterParam =
+      cutoffMs !== null
+        ? new Date(Math.max(0, cutoffMs - 1000)).toISOString().replace(/\.\d{3}Z$/, 'Z')
+        : null;
+
+    let useModifiedAfterParam = wpAfterParam !== null;
+    let fallbackClientCutoffMode = false;
+    let fallbackOrderBy: 'modified' | 'date' = 'modified';
+    let reauthedOnce = false;
+
+    const collected: WpPostMetadata[] = [];
+    const seenIds = new Set<number>();
+    let page = 1;
+    let totalPages = 1;
+
+    while (page <= totalPages) {
+      if (signal?.aborted) break;
+
+      const params = new URLSearchParams({
+        per_page: '100',
+        _embed: '1',
+        page: String(page),
+      });
+      if (useModifiedAfterParam && wpAfterParam) {
+        params.set('modified_after', wpAfterParam);
+      } else if (fallbackClientCutoffMode) {
+        params.set('orderby', fallbackOrderBy);
+        params.set('order', 'desc');
+      }
+
+      const endpoint = new URL(
+        `wp-json/wp/v2/${encodeURIComponent(restBase)}?${params.toString()}`,
+        ensureTrailingSlash(config.baseUrl),
+      ).toString();
+
+      const { response, finalUrl } = await this.fetchWithRedirects(
+        endpoint,
+        config,
+        { method: 'GET', headers: { Accept: 'application/json' } },
+        signal,
+        log,
+      );
+
+      if (
+        !reauthedOnce &&
+        (response.status === 401 || finalUrl.includes('/login') || finalUrl.includes('wp-login.php')) &&
+        config.username &&
+        config.password
+      ) {
+        reauthedOnce = true;
+        await response.body?.cancel().catch(() => undefined);
+        const auth = await this.login(config, signal, log);
+        if (!auth.authenticated) {
+          throw new Error(`Re-authentication failed during WP REST scan: ${auth.message}`);
+        }
+        continue;
+      }
+
+      if (response.status === 400 && page === 1 && useModifiedAfterParam) {
+        await response.body?.cancel().catch(() => undefined);
+        useModifiedAfterParam = false;
+        fallbackClientCutoffMode = true;
+        continue;
+      }
+
+      if (response.status === 400 && page === 1 && fallbackClientCutoffMode && fallbackOrderBy === 'modified') {
+        await response.body?.cancel().catch(() => undefined);
+        fallbackOrderBy = 'date';
+        continue;
+      }
+
+      if (response.status === 400 && page > 1) {
+        await response.body?.cancel().catch(() => undefined);
+        break;
+      }
+
+      if (response.status === 404) {
+        await response.body?.cancel().catch(() => undefined);
+        if (page === 1) {
+          return { supported: false, posts: [] };
+        }
+        break;
+      }
+
+      if (!response.ok) {
+        const errBody = await response.text().catch(() => '');
+        if (this.isCloudflareChallenge(response.status, response.headers, errBody)) {
+          throw new Error(`Blocked by Cloudflare bot protection (HTTP ${response.status}) at ${finalUrl}`);
+        }
+        if (page === 1) {
+          return { supported: false, posts: [] };
+        }
+        break;
+      }
+
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('json')) {
+        await response.body?.cancel().catch(() => undefined);
+        if (page === 1) {
+          return { supported: false, posts: [] };
+        }
+        break;
+      }
+
+      const headerTotalPages = Number(response.headers.get('x-wp-totalpages') || '0');
+      if (Number.isFinite(headerTotalPages) && headerTotalPages >= 1) {
+        totalPages = headerTotalPages;
+      }
+
+      const rawList = (await response.json()) as unknown;
+      onPageFetched?.(page, totalPages);
+
+      if (!Array.isArray(rawList) || rawList.length === 0) {
+        break;
+      }
+
+      let anyNewerOnThisPage = false;
+      for (const entry of rawList) {
+        if (!entry || typeof entry !== 'object') continue;
+        const parsed = this.parseWpPostObject(entry as Record<string, unknown>, restBase);
+        if (!parsed || seenIds.has(parsed.wpPostId)) continue;
+
+        if (cutoffMs !== null) {
+          const createdMs = parsed.dateGmt ? Date.parse(parsed.dateGmt) : NaN;
+          const modifiedMs = parsed.modifiedGmt ? Date.parse(parsed.modifiedGmt) : NaN;
+          const latestMs = Math.max(
+            Number.isNaN(createdMs) ? -Infinity : createdMs,
+            Number.isNaN(modifiedMs) ? -Infinity : modifiedMs,
+          );
+          if (!Number.isFinite(latestMs) || latestMs <= cutoffMs) {
+            continue;
+          }
+          anyNewerOnThisPage = true;
+        }
+
+        seenIds.add(parsed.wpPostId);
+        collected.push(parsed);
+      }
+
+      if (fallbackClientCutoffMode && cutoffMs !== null && fallbackOrderBy === 'modified' && !anyNewerOnThisPage) {
+        break;
+      }
+
+      if (!response.headers.get('x-wp-totalpages')) {
+        if (rawList.length < 100) {
+          break;
+        }
+        totalPages = page + 1;
+      }
+
+      page += 1;
+    }
+
+    return { supported: true, posts: collected };
   }
 
   /**
@@ -2463,15 +2801,20 @@ export class RetroGameTalkClient {
       const typeMap = await this.getWpRestTypes(config, signal, log);
       const systemSeg = relSegs[0].toLowerCase();
       const slug = relSegs[relSegs.length - 1];
-      const restBase = typeMap.get(systemSeg) || (relSegs.length === 1 ? 'pages' : null);
+      const restBase =
+        typeMap.get(systemSeg) ||
+        typeMap.get(systemSeg.replace(/-/g, '_')) ||
+        typeMap.get(systemSeg.replace(/_/g, '-')) ||
+        (relSegs.length === 1 ? 'pages' : null);
       if (!restBase) return null;
 
+      const repoBase = ensureTrailingSlash(config.baseUrl);
       const endpoint =
         wpPostIdHint && wpPostIdHint > 0
-          ? new URL(`wp-json/wp/v2/${encodeURIComponent(restBase)}/${wpPostIdHint}?_embed`, config.baseUrl).toString()
+          ? new URL(`wp-json/wp/v2/${encodeURIComponent(restBase)}/${wpPostIdHint}?_embed`, repoBase).toString()
           : new URL(
               `wp-json/wp/v2/${encodeURIComponent(restBase)}?slug=${encodeURIComponent(slug)}&_embed`,
-              config.baseUrl,
+              repoBase,
             ).toString();
 
       const { response } = await this.fetchWithRedirects(
@@ -2490,79 +2833,7 @@ export class RetroGameTalkClient {
       const post = Array.isArray(raw) ? raw[0] : raw;
       if (!post || typeof post !== 'object' || !post.id) return null;
 
-      const acf = (post.acf && typeof post.acf === 'object' ? post.acf : {}) as Record<string, unknown>;
-      const titleRendered =
-        post.title && typeof post.title === 'object' && 'rendered' in post.title
-          ? decodeHtmlEntities(String((post.title as { rendered?: string }).rendered || ''))
-          : '';
-      const acfGameName = typeof acf.game_name === 'string' ? acf.game_name.trim() : '';
-
-      const genres = new Set<string>();
-      const regions = new Set<string>();
-      const languages = new Set<string>();
-      const sources = new Set<string>();
-      const formats = new Set<string>();
-      const publishers = new Set<string>();
-      const developers = new Set<string>();
-      let releaseYear: string | null = null;
-
-      const embedded = post._embedded as { 'wp:term'?: unknown[] } | undefined;
-      const termGroups = Array.isArray(embedded?.['wp:term']) ? embedded!['wp:term']! : [];
-      for (const group of termGroups) {
-        if (!Array.isArray(group)) continue;
-        for (const term of group) {
-          if (!term || typeof term !== 'object') continue;
-          const t = term as { taxonomy?: string; name?: string };
-          const tax = String(t.taxonomy || '').toLowerCase();
-          const name = decodeHtmlEntities(String(t.name || '').trim());
-          if (!name) continue;
-          if (tax === 'genre') genres.add(name);
-          else if (tax === 'region') regions.add(name);
-          else if (tax === 'language') languages.add(name);
-          else if (tax === 'source') sources.add(name);
-          else if (tax === 'format') formats.add(name);
-          else if (tax === 'publisher') publishers.add(name);
-          else if (tax === 'developer') developers.add(name);
-          else if (tax === 'release-year' && !releaseYear) releaseYear = name;
-        }
-      }
-
-      const downloadHints: { filename: string; fileSize: string }[] = [];
-      if (Array.isArray(acf.download_links)) {
-        for (const entry of acf.download_links) {
-          if (entry && typeof entry === 'object') {
-            const e = entry as { file_name?: string; file_size?: string };
-            if (e.file_name) {
-              downloadHints.push({
-                filename: String(e.file_name),
-                fileSize: String(e.file_size || ''),
-              });
-            }
-          }
-        }
-      }
-
-      const contentRendered =
-        post.content && typeof post.content === 'object' && 'rendered' in post.content
-          ? String((post.content as { rendered?: string }).rendered || '')
-          : '';
-
-      return {
-        wpPostId: Number(post.id),
-        wpPostType: String(post.type || restBase),
-        title: acfGameName || titleRendered || null,
-        originalTitle: typeof acf.original_title === 'string' && acf.original_title.trim() ? acf.original_title.trim() : null,
-        publisher: publishers.size > 0 ? Array.from(publishers).join(', ') : null,
-        developer: developers.size > 0 ? Array.from(developers).join(', ') : null,
-        releaseYear,
-        genres: Array.from(genres),
-        regions: Array.from(regions),
-        languages: Array.from(languages),
-        sources: Array.from(sources),
-        formats: Array.from(formats),
-        descriptionHtml: contentRendered,
-        downloadHints,
-      };
+      return this.parseWpPostObject(post, restBase);
     } catch (err) {
       if (signal?.aborted) throw err;
       return null;
@@ -2756,6 +3027,18 @@ export class RetroGameTalkClient {
     const rawDescHtml = (descNode.length ? descNode.html() : '') || wpData?.descriptionHtml || '';
     const { descriptionHtml, descriptionText } = this.sanitizeDescriptionHtml(rawDescHtml);
 
+    const htmlPublishedRaw =
+      $('meta[property="article:published_time"]').attr('content') ||
+      $('time[datetime]').first().attr('datetime') ||
+      null;
+    const htmlModifiedRaw =
+      $('meta[property="article:modified_time"]').attr('content') ||
+      $('time[datetime][data-modified]').first().attr('data-modified') ||
+      null;
+
+    const publishedAt = wpData?.dateGmt ?? normalizeIsoTimestamp(htmlPublishedRaw) ?? null;
+    const remoteUpdatedAt = wpData?.modifiedGmt ?? normalizeIsoTimestamp(htmlModifiedRaw) ?? publishedAt ?? null;
+
     const wpPostId = wpData?.wpPostId ?? this.extractWpPostIdHint(html);
     const releaseTags = deriveReleaseTags(
       { genres, languages, sources, systemName: consoleName },
@@ -2780,6 +3063,8 @@ export class RetroGameTalkClient {
       downloadsCount,
       releasedAgo,
       updatedDate,
+      publishedAt,
+      remoteUpdatedAt,
       specs,
       descriptionHtml,
       descriptionText,

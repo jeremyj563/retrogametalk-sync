@@ -204,6 +204,7 @@ export function initDb(): Database.Database {
       title TEXT NOT NULL,
       file_size_bytes INTEGER NOT NULL DEFAULT 0,
       published_at TEXT,
+      remote_updated_at TEXT,
       status TEXT NOT NULL DEFAULT 'queued',
       error_message TEXT,
       last_run_id INTEGER,
@@ -318,6 +319,11 @@ export function initDb(): Database.Database {
   }
   if (!cols.some((c) => c.name === 'last_authenticated_at')) {
     db.prepare(`ALTER TABLE scraper_config ADD COLUMN last_authenticated_at TEXT`).run();
+  }
+
+  const releaseCols = db.prepare('PRAGMA table_info(catalog_releases)').all() as { name: string }[];
+  if (!releaseCols.some((c) => c.name === 'remote_updated_at')) {
+    db.prepare(`ALTER TABLE catalog_releases ADD COLUMN remote_updated_at TEXT`).run();
   }
 
   // Cleanly reset legacy flat catalog index so the next sync imports grouped release entries + WP tags
@@ -580,6 +586,21 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
 
   const authCredentialsChanged = baseChanged || loginChanged || usernameChanged || passwordChanged;
 
+  let nextWatermarkAt: string | null = current.last_watermark_at ? String(current.last_watermark_at) : null;
+  if (input.lastWatermarkAt !== undefined) {
+    if (input.lastWatermarkAt === null || input.lastWatermarkAt.trim() === '') {
+      nextWatermarkAt = null;
+    } else {
+      const parsedMs = Date.parse(input.lastWatermarkAt.trim());
+      if (Number.isNaN(parsedMs)) {
+        throw new Error(
+          `Invalid Incremental Cutoff timestamp ("${input.lastWatermarkAt}"): enter a valid date and time.`,
+        );
+      }
+      nextWatermarkAt = new Date(parsedMs).toISOString();
+    }
+  }
+
   const minDelay = Math.max(250, Math.min(30000, Number(input.minDelayMs ?? current.min_delay_ms)));
   const maxDelay = Math.max(minDelay, Math.min(300000, Number(input.maxDelayMs ?? current.max_delay_ms)));
   const baseDelay = Math.max(minDelay, Math.min(maxDelay, Number(input.baseDelayMs ?? current.base_delay_ms)));
@@ -602,6 +623,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       request_timeout_ms = ?,
       user_agent = ?,
       system_filter = ?,
+      last_watermark_at = ?,
       last_authenticated_at = ?,
       updated_at = ?
     WHERE id = 1
@@ -622,6 +644,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     Math.max(5000, Math.min(180000, Number(input.requestTimeoutMs ?? current.request_timeout_ms))),
     (input.userAgent ?? String(current.user_agent)).trim(),
     (input.systemFilter ?? String(current.system_filter)).trim(),
+    nextWatermarkAt,
     authCredentialsChanged ? null : (current.last_authenticated_at ? String(current.last_authenticated_at) : null),
     now,
   );
@@ -805,7 +828,8 @@ function mapReleaseRow(row: Record<string, unknown>, files: ReleaseFileRecord[])
     releaseTags,
     title: String(row.title),
     fileSizeBytes: Number(row.file_size_bytes || 0),
-    publishedAt: row.published_at ? String(row.published_at) : null,
+    publishedAt: row.published_at ? String(row.published_at) : (parsedMeta?.publishedAt ?? null),
+    remoteUpdatedAt: row.remote_updated_at ? String(row.remote_updated_at) : (parsedMeta?.remoteUpdatedAt ?? null),
     status: String(row.status) as ItemStatus,
     errorMessage: row.error_message ? String(row.error_message) : null,
     lastRunId: row.last_run_id !== null ? Number(row.last_run_id) : null,
@@ -942,6 +966,7 @@ export function upsertCatalogRelease(input: {
   systemName: string;
   title: string;
   publishedAt?: string | null;
+  remoteUpdatedAt?: string | null;
   status?: ItemStatus;
   lastRunId?: number | null;
   metadata?: ReleaseMetadata | null;
@@ -964,6 +989,8 @@ export function upsertCatalogRelease(input: {
 
   const wpPostId = meta?.wpPostId ?? null;
   const wpPostType = meta?.wpPostType ?? null;
+  const effectivePublishedAt = input.publishedAt ?? meta?.publishedAt ?? null;
+  const effectiveRemoteUpdatedAt = input.remoteUpdatedAt ?? meta?.remoteUpdatedAt ?? null;
   const publisher = meta?.publisher ?? null;
   const developer = meta?.developer ?? null;
   const releaseYear = meta?.releaseYear ?? null;
@@ -979,12 +1006,12 @@ export function upsertCatalogRelease(input: {
   getDb().prepare(`
     INSERT INTO catalog_releases (
       remote_url, wp_post_id, wp_post_type, remote_path, local_path, system_name,
-      release_type, release_tags_json, title, published_at, status, last_run_id, discovered_at,
+      release_type, release_tags_json, title, published_at, remote_updated_at, status, last_run_id, discovered_at,
       publisher, developer, release_year, genres_json, regions_json, languages_json, sources_json,
       cover_local_path, screenshots_json, metadata_json
     ) VALUES (
       ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, COALESCE(?, '[]'), COALESCE(?, '[]'), COALESCE(?, '[]'), COALESCE(?, '[]'),
       ?, COALESCE(?, '[]'), ?
     )
@@ -996,6 +1023,7 @@ export function upsertCatalogRelease(input: {
       system_name = excluded.system_name,
       title = COALESCE(NULLIF(excluded.title, ''), catalog_releases.title),
       published_at = COALESCE(excluded.published_at, catalog_releases.published_at),
+      remote_updated_at = COALESCE(excluded.remote_updated_at, catalog_releases.remote_updated_at),
       last_run_id = COALESCE(excluded.last_run_id, catalog_releases.last_run_id),
       publisher = COALESCE(excluded.publisher, catalog_releases.publisher),
       developer = COALESCE(excluded.developer, catalog_releases.developer),
@@ -1017,7 +1045,8 @@ export function upsertCatalogRelease(input: {
     primaryType,
     tagsJson,
     input.title,
-    input.publishedAt ?? null,
+    effectivePublishedAt,
+    effectiveRemoteUpdatedAt,
     input.status ?? 'queued',
     input.lastRunId ?? null,
     now,
@@ -1179,6 +1208,8 @@ export function updateCatalogReleaseMetadata(
         wp_post_id = COALESCE(?, wp_post_id),
         wp_post_type = COALESCE(?, wp_post_type),
         title = COALESCE(NULLIF(?, ''), title),
+        published_at = COALESCE(?, published_at),
+        remote_updated_at = COALESCE(?, remote_updated_at),
         publisher = ?,
         developer = ?,
         release_year = ?,
@@ -1194,6 +1225,8 @@ export function updateCatalogReleaseMetadata(
       metadata.wpPostId ?? null,
       metadata.wpPostType ?? null,
       metadata.title,
+      metadata.publishedAt ?? null,
+      metadata.remoteUpdatedAt ?? null,
       metadata.publisher ?? null,
       metadata.developer ?? null,
       metadata.releaseYear ?? null,
