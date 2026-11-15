@@ -133,7 +133,7 @@ export function initDb(): Database.Database {
       max_retries INTEGER NOT NULL DEFAULT 5,
       max_concurrency INTEGER NOT NULL DEFAULT 1,
       request_timeout_ms INTEGER NOT NULL DEFAULT 30000,
-      user_agent TEXT NOT NULL DEFAULT 'Mozilla/5.0 (compatible; RetroGameTalkSync/1.0)',
+      user_agent TEXT NOT NULL DEFAULT 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       system_filter TEXT NOT NULL DEFAULT '',
       discovered_systems_json TEXT NOT NULL DEFAULT '[]',
       last_watermark_at TEXT,
@@ -251,7 +251,7 @@ export function initDb(): Database.Database {
       process.env.RGT_PASSWORD ? encryptSecret(process.env.RGT_PASSWORD) : '',
       DEFAULT_DOWNLOAD_DIR,
       process.env.CRON_SCHEDULE || '0 */6 * * *',
-      'Mozilla/5.0 (compatible; RetroGameTalkSync/1.0)',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       process.env.SCRAPER_SYSTEM_FILTER || '',
       now,
     );
@@ -259,12 +259,13 @@ export function initDb(): Database.Database {
     if (existing.base_url === 'https://retrogametalk.com/repository/') {
       db.prepare('UPDATE scraper_config SET base_url = ? WHERE id = 1').run('https://retrogametalk.com/repo/');
     }
-    if (
-      existing.login_url === 'https://retrogametalk.com/wp-login.php' ||
-      existing.login_url === 'https://retrogametalk.com/login/login'
-    ) {
+    if (existing.login_url === 'https://retrogametalk.com/wp-login.php') {
       db.prepare('UPDATE scraper_config SET login_url = ? WHERE id = 1').run('https://retrogametalk.com/login/');
     }
+    db.prepare('UPDATE scraper_config SET user_agent = ? WHERE id = 1 AND user_agent = ?').run(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (compatible; RetroGameTalkSync/1.0)',
+    );
     const legacyDownloadDir = path.resolve('./data/repository');
     if (DATA_DIR === '/run/repo' && path.resolve(existing.download_dir) === legacyDownloadDir) {
       db.prepare('UPDATE scraper_config SET download_dir = ? WHERE id = 1').run(DEFAULT_DOWNLOAD_DIR);
@@ -461,9 +462,36 @@ export function saveDiscoveredSystems(systems: string[]): string[] {
   return merged;
 }
 
+function validateHttpUrl(raw: string, fieldLabel: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new Error(`${fieldLabel} is required and cannot be empty.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`Invalid ${fieldLabel} ("${trimmed}"): enter a full URL starting with https:// or http://.`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Invalid ${fieldLabel} ("${trimmed}"): protocol must be http:// or https://.`);
+  }
+  if (!parsed.hostname) {
+    throw new Error(`Invalid ${fieldLabel} ("${trimmed}"): hostname is missing.`);
+  }
+  return parsed.toString();
+}
+
 export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
   const current = getDb().prepare('SELECT * FROM scraper_config WHERE id = 1').get() as Record<string, unknown>;
   const now = new Date().toISOString();
+
+  const nextBaseUrl = input.baseUrl !== undefined
+    ? validateHttpUrl(input.baseUrl, 'Repository Base URL')
+    : String(current.base_url).trim();
+  const nextLoginUrl = input.loginUrl !== undefined
+    ? validateHttpUrl(input.loginUrl, 'Login Endpoint URL')
+    : String(current.login_url).trim();
 
   const nextDownloadDir = input.downloadDir !== undefined
     ? path.resolve(input.downloadDir.trim() || DEFAULT_DOWNLOAD_DIR)
@@ -500,8 +528,8 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       updated_at = ?
     WHERE id = 1
   `).run(
-    (input.baseUrl ?? String(current.base_url)).trim(),
-    (input.loginUrl ?? String(current.login_url)).trim(),
+    nextBaseUrl,
+    nextLoginUrl,
     (input.username ?? String(current.username)).trim(),
     nextPasswordEnc,
     nextDownloadDir,

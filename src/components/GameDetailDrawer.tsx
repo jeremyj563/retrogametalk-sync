@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import type { RepositoryItemRecord } from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
+import { readJsonSafely } from '../utils/http';
 
 interface GameDetailDrawerProps {
   item: RepositoryItemRecord | null;
@@ -167,15 +168,15 @@ export function GameDetailDrawer({
     setMetaError(null);
     try {
       const res = await fetch(`/api/items/${item.id}/metadata`, { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) {
-        setMetaError(data.error || `Failed to mirror metadata (HTTP ${res.status})`);
+      const parsed = await readJsonSafely<{ item?: RepositoryItemRecord; error?: string }>(res);
+      if (!parsed.ok) {
+        setMetaError(parsed.errorMessage || `Failed to mirror metadata (HTTP ${res.status})`);
         return;
       }
-      if (data.item) {
+      if (parsed.data?.item) {
         setCoverFailed(false);
         setFailedScreenshots(new Set());
-        onItemUpdated(data.item as RepositoryItemRecord);
+        onItemUpdated(parsed.data.item);
       }
     } catch (err) {
       setMetaError(err instanceof Error ? err.message : String(err));

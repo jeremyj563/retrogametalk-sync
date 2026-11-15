@@ -299,8 +299,25 @@ async function bootstrap() {
   });
 
   app.post('/api/auth/test', async (_req, res) => {
-    const result = await orchestrator.testAuth();
-    res.status(result.success ? 200 : 502).json(result);
+    try {
+      const result = await orchestrator.testAuth();
+      res.status(200).json(result);
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        statusCode: null,
+        authenticated: false,
+        cookieCount: 0,
+        discoveredSystems: [],
+        sampleReleaseUrls: [],
+        message: err instanceof Error ? err.message : String(err),
+        latencyMs: 0,
+      });
+    }
+  });
+
+  app.use('/api', (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   });
 
   // Frontend mounting: Vite middleware in development, static dist/ in production
