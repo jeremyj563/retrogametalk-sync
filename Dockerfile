@@ -13,11 +13,11 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=3000
-ENV DATA_DIR=/run/repo
-ENV DOWNLOAD_DIR=/run/repo/repository
+ENV DATA_DIR=/app/data
+ENV DOWNLOAD_DIR=/run/repo
 
 RUN addgroup -S rgt && adduser -S rgt -G rgt \
-  && mkdir -p /run/repo/repository \
+  && mkdir -p $DOWNLOAD_DIR \
   && chown -R rgt:rgt /run/repo
 
 COPY --from=builder /app/package.json ./
