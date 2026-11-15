@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -22,11 +22,12 @@ import { GameDetailDrawer } from './GameDetailDrawer';
 
 interface CatalogPanelProps {
   status: ServiceStatusSnapshot;
+  catalogRevision?: number;
   onRetryItem: (itemId: number, fileId?: number) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
 }
 
-export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPanelProps) {
+export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefreshStatus }: CatalogPanelProps) {
   const [viewMode, setViewMode] = useState<'catalog' | 'filesystem'>('catalog');
   const [catalogLayout, setCatalogLayout] = useState<'table' | 'grid'>('table');
   const [search, setSearch] = useState('');
@@ -63,23 +64,36 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
   const [selectedFsPaths, setSelectedFsPaths] = useState<Set<string>>(new Set());
   const [confirmFsBulk, setConfirmFsBulk] = useState(false);
 
-  const loadCatalog = useCallback(async () => {
-    setLoading(true);
-    try {
-      const qs = new URLSearchParams({
-        search,
-        system: systemFilter,
-        status: statusFilter,
-        tag: tagFilter,
-        genre: genreFilter,
-        region: regionFilter,
-        language: languageFilter,
-        limit: '150',
-        offset: '0',
-      });
-      const res = await fetch(`/api/items?${qs.toString()}`);
-      if (res.ok) {
+  const catalogReqSeqRef = useRef(0);
+  const fsReqSeqRef = useRef(0);
+  const activeDetailIdRef = useRef<number | null>(null);
+  const lastHandledRevisionRef = useRef(catalogRevision);
+
+  useEffect(() => {
+    activeDetailIdRef.current = activeDetailItem?.id ?? null;
+  }, [activeDetailItem?.id]);
+
+  const loadCatalog = useCallback(
+    async (silent = false) => {
+      const reqId = ++catalogReqSeqRef.current;
+      if (!silent) setLoading(true);
+      try {
+        const qs = new URLSearchParams({
+          search,
+          system: systemFilter,
+          status: statusFilter,
+          tag: tagFilter,
+          genre: genreFilter,
+          region: regionFilter,
+          language: languageFilter,
+          limit: '150',
+          offset: '0',
+        });
+        const res = await fetch(`/api/items?${qs.toString()}`);
+        if (!res.ok || reqId !== catalogReqSeqRef.current) return;
         const data = await res.json();
+        if (reqId !== catalogReqSeqRef.current) return;
+
         const nextItems = (data.items || []) as RepositoryItemRecord[];
         setItems(nextItems);
         setTotalItems(data.total || 0);
@@ -92,47 +106,95 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
             sources: Array.isArray(data.facets.sources) ? data.facets.sources : [],
           });
         }
-        setFailedCovers(new Set());
+
+        if (!silent) {
+          setFailedCovers(new Set());
+          setConfirmCatalogBulk(false);
+        } else {
+          // Clear any cover-load error entry if an item now reports a mirrored cover
+          setFailedCovers((prev) => {
+            if (prev.size === 0) return prev;
+            const next = new Set(prev);
+            for (const item of nextItems) {
+              if (item.coverLocalPath) next.delete(item.id);
+            }
+            return next;
+          });
+        }
+
         // Keep selection scoped strictly to visible/filtered items
         const visibleIds = new Set(nextItems.map((i) => i.id));
         setSelectedCatalogIds((prev) => {
+          if (prev.size === 0) return prev;
           const pruned = new Set<number>();
           prev.forEach((id) => {
             if (visibleIds.has(id)) pruned.add(id);
           });
           return pruned;
         });
-        setConfirmCatalogBulk(false);
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [search, systemFilter, statusFilter, tagFilter, genreFilter, regionFilter, languageFilter]);
 
-  const loadFsTree = useCallback(async (subpath: string) => {
-    setFsLoading(true);
+        // Also live-update the open slide-over detail drawer if visible
+        const openId = activeDetailIdRef.current;
+        if (silent && openId !== null) {
+          const detailRes = await fetch(`/api/items/${openId}`);
+          if (detailRes.ok) {
+            const detailData = await detailRes.json();
+            if (detailData.item) {
+              setActiveDetailItem((current) =>
+                current?.id === openId ? (detailData.item as RepositoryItemRecord) : current,
+              );
+            }
+          }
+        }
+      } finally {
+        if (!silent && reqId === catalogReqSeqRef.current) {
+          setLoading(false);
+        }
+      }
+    },
+    [search, systemFilter, statusFilter, tagFilter, genreFilter, regionFilter, languageFilter],
+  );
+
+  const loadFsTree = useCallback(async (subpath: string, silent = false) => {
+    const reqId = ++fsReqSeqRef.current;
+    if (!silent) setFsLoading(true);
     try {
       const res = await fetch(`/api/fs/tree?path=${encodeURIComponent(subpath)}`);
-      if (res.ok) {
-        const data = await res.json();
-        const nextNodes = (data.nodes || []) as FsTreeNode[];
-        setFsPath(data.currentPath || '');
-        setFsNodes(nextNodes);
+      if (!res.ok || reqId !== fsReqSeqRef.current) return;
+      const data = await res.json();
+      if (reqId !== fsReqSeqRef.current) return;
+      const nextNodes = (data.nodes || []) as FsTreeNode[];
+      setFsPath(data.currentPath || '');
+      setFsNodes(nextNodes);
+      if (!silent) {
         setSelectedFsPaths(new Set());
         setConfirmFsBulk(false);
       }
     } finally {
-      setFsLoading(false);
+      if (!silent && reqId === fsReqSeqRef.current) {
+        setFsLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     if (viewMode === 'catalog') {
-      void loadCatalog();
+      void loadCatalog(false);
     } else {
-      void loadFsTree(fsPath);
+      void loadFsTree(fsPath, false);
     }
   }, [viewMode, loadCatalog, loadFsTree, fsPath]);
+
+  // Live background refresh whenever backend emits catalog_updated during sync
+  useEffect(() => {
+    if (catalogRevision === lastHandledRevisionRef.current) return;
+    lastHandledRevisionRef.current = catalogRevision;
+    if (viewMode === 'catalog') {
+      void loadCatalog(true);
+    } else {
+      void loadFsTree(fsPath, true);
+    }
+  }, [catalogRevision, viewMode, fsPath, loadCatalog, loadFsTree]);
 
   const filteredFsNodes = useMemo(() => {
     const q = fsSearch.trim().toLowerCase();

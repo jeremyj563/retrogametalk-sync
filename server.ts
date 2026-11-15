@@ -69,12 +69,14 @@ async function bootstrap() {
     const onStatus = (snap: unknown) => sendEvent('status', snap);
     const onLog = (entry: unknown) => sendEvent('log', entry);
     const onTransfer = (transfer: unknown) => sendEvent('transfer', transfer);
+    const onCatalogUpdated = (payload: unknown) => sendEvent('catalog_updated', payload);
     const onLogsCleared = (payload: unknown) => sendEvent('logs_cleared', payload);
     const onRunsCleared = (payload: unknown) => sendEvent('runs_cleared', payload);
 
     orchestrator.on('status', onStatus);
     orchestrator.on('log', onLog);
     orchestrator.on('transfer', onTransfer);
+    orchestrator.on('catalog_updated', onCatalogUpdated);
     orchestrator.on('logs_cleared', onLogsCleared);
     orchestrator.on('runs_cleared', onRunsCleared);
 
@@ -87,6 +89,7 @@ async function bootstrap() {
       orchestrator.off('status', onStatus);
       orchestrator.off('log', onLog);
       orchestrator.off('transfer', onTransfer);
+      orchestrator.off('catalog_updated', onCatalogUpdated);
       orchestrator.off('logs_cleared', onLogsCleared);
       orchestrator.off('runs_cleared', onRunsCleared);
     });

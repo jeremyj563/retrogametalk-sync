@@ -38,6 +38,7 @@ export default function App() {
   const [actionPending, setActionPending] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [catalogRevision, setCatalogRevision] = useState(0);
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -128,11 +129,25 @@ export default function App() {
       }
     });
 
+    let catalogBumpTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleCatalogRefresh = () => {
+      if (catalogBumpTimer) return;
+      catalogBumpTimer = setTimeout(() => {
+        catalogBumpTimer = null;
+        setCatalogRevision((rev) => rev + 1);
+      }, 250);
+    };
+
+    source.addEventListener('catalog_updated', () => {
+      scheduleCatalogRefresh();
+    });
+
     source.addEventListener('runs_cleared', () => {
       setRuns((prev) => prev.filter((r) => r.status === 'running'));
     });
 
     return () => {
+      if (catalogBumpTimer) clearTimeout(catalogBumpTimer);
       source.close();
     };
   }, [loadInitialData]);
@@ -471,6 +486,7 @@ export default function App() {
               {section === 'catalog' && (
                 <CatalogPanel
                   status={status}
+                  catalogRevision={catalogRevision}
                   onRetryItem={handleRetryItem}
                   onRefreshStatus={loadInitialData}
                 />

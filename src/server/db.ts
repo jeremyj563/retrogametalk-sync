@@ -1007,44 +1007,86 @@ export function upsertReleaseFile(input: {
       systemName: parent?.systemName,
     });
 
-  getDb().prepare(`
-    INSERT INTO catalog_release_files (
-      release_id, remote_url, download_url, remote_path, local_path, filename,
-      display_label, file_role, file_size_bytes, status, error_message,
-      last_run_id, discovered_at, downloaded_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(release_id, filename) DO UPDATE SET
-      remote_url = excluded.remote_url,
-      download_url = excluded.download_url,
-      remote_path = excluded.remote_path,
-      local_path = excluded.local_path,
-      display_label = excluded.display_label,
-      file_role = excluded.file_role,
-      file_size_bytes = CASE WHEN excluded.file_size_bytes > 0 THEN excluded.file_size_bytes ELSE catalog_release_files.file_size_bytes END,
-      status = excluded.status,
-      error_message = excluded.error_message,
-      last_run_id = COALESCE(excluded.last_run_id, catalog_release_files.last_run_id),
-      downloaded_at = COALESCE(excluded.downloaded_at, catalog_release_files.downloaded_at)
-  `).run(
-    input.releaseId,
-    input.remoteUrl,
-    input.downloadUrl,
-    input.remotePath,
-    input.localPath,
-    input.filename,
-    displayLabel,
-    fileRole,
-    input.fileSizeBytes ?? 0,
-    input.status,
-    input.errorMessage ?? null,
-    input.lastRunId ?? null,
-    now,
-    input.downloadedAt ?? null,
-  );
+  const conn = getDb();
+  const tx = conn.transaction(() => {
+    const byUrl = conn
+      .prepare('SELECT id FROM catalog_release_files WHERE remote_url = ?')
+      .get(input.remoteUrl) as { id: number } | undefined;
+    const byName = conn
+      .prepare('SELECT id FROM catalog_release_files WHERE release_id = ? AND filename = ?')
+      .get(input.releaseId, input.filename) as { id: number } | undefined;
 
-  const fileRow = getDb()
-    .prepare('SELECT * FROM catalog_release_files WHERE release_id = ? AND filename = ?')
-    .get(input.releaseId, input.filename) as Record<string, unknown>;
+    const targetId = byUrl?.id ?? byName?.id ?? null;
+    if (byUrl && byName && byUrl.id !== byName.id) {
+      conn.prepare('DELETE FROM catalog_release_files WHERE id = ?').run(byName.id);
+    }
+
+    if (targetId !== null) {
+      conn.prepare(`
+        UPDATE catalog_release_files SET
+          release_id = ?,
+          remote_url = ?,
+          download_url = ?,
+          remote_path = ?,
+          local_path = ?,
+          filename = ?,
+          display_label = ?,
+          file_role = ?,
+          file_size_bytes = CASE WHEN ? > 0 THEN ? ELSE file_size_bytes END,
+          status = ?,
+          error_message = ?,
+          last_run_id = COALESCE(?, last_run_id),
+          downloaded_at = COALESCE(?, downloaded_at)
+        WHERE id = ?
+      `).run(
+        input.releaseId,
+        input.remoteUrl,
+        input.downloadUrl,
+        input.remotePath,
+        input.localPath,
+        input.filename,
+        displayLabel,
+        fileRole,
+        input.fileSizeBytes ?? 0,
+        input.fileSizeBytes ?? 0,
+        input.status,
+        input.errorMessage ?? null,
+        input.lastRunId ?? null,
+        input.downloadedAt ?? null,
+        targetId,
+      );
+      return targetId;
+    }
+
+    const res = conn.prepare(`
+      INSERT INTO catalog_release_files (
+        release_id, remote_url, download_url, remote_path, local_path, filename,
+        display_label, file_role, file_size_bytes, status, error_message,
+        last_run_id, discovered_at, downloaded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.releaseId,
+      input.remoteUrl,
+      input.downloadUrl,
+      input.remotePath,
+      input.localPath,
+      input.filename,
+      displayLabel,
+      fileRole,
+      input.fileSizeBytes ?? 0,
+      input.status,
+      input.errorMessage ?? null,
+      input.lastRunId ?? null,
+      now,
+      input.downloadedAt ?? null,
+    );
+    return Number(res.lastInsertRowid);
+  });
+
+  const savedId = tx();
+  const fileRow = conn
+    .prepare('SELECT * FROM catalog_release_files WHERE id = ?')
+    .get(savedId) as Record<string, unknown>;
   const release = recomputeReleaseRollup(input.releaseId)!;
   return {
     file: mapFileRow(fileRow),
