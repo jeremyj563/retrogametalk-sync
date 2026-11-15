@@ -59,6 +59,31 @@ const IGNORED_REPO_PREFIXES = new Set([
   'category',
 ]);
 
+// RetroGameTalk permalink prefixes whose URL directory slug differs from their WP REST CPT rest_base
+const RGT_SLUG_ALIAS_GROUPS: string[][] = [
+  ['gameboy-roms', 'gb_roms', 'gb-roms'],
+  ['gameboy-color-roms', 'gbc_roms', 'gbc-roms'],
+  ['gamecube', 'gcn-iso', 'gcn_iso'],
+  ['psx2psp-eboots', 'psx2psp'],
+];
+
+function expandSystemFilterAliases(filters: string[]): Set<string> {
+  const expanded = new Set<string>();
+  for (const raw of filters) {
+    const clean = raw.trim().toLowerCase();
+    if (!clean) continue;
+    expanded.add(clean);
+    expanded.add(clean.replace(/_/g, '-'));
+    expanded.add(clean.replace(/-/g, '_'));
+    for (const group of RGT_SLUG_ALIAS_GROUPS) {
+      if (group.includes(clean)) {
+        for (const alias of group) expanded.add(alias);
+      }
+    }
+  }
+  return expanded;
+}
+
 export interface DiscoveredRelease {
   remoteUrl: string;
   pageUrl: string;
@@ -1898,10 +1923,12 @@ export class RetroGameTalkClient {
     const seenDownloads = new Set<string>();
     const releaseTimes = new Map<string, string>();
 
-    const systemFilters = config.systemFilter
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
+    const systemFilters = expandSystemFilterAliases(
+      config.systemFilter
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
+    );
 
     const pageTime =
       $('time[datetime]').first().attr('datetime') ||
@@ -1956,11 +1983,11 @@ export class RetroGameTalkClient {
           : 'uncategorized';
 
       if (
-        systemFilters.length > 0 &&
+        systemFilters.size > 0 &&
         (isUnderRepo || Boolean(paramPlatform)) &&
         relSegs.length > 0 &&
         firstSegLower !== 'page' &&
-        !systemFilters.includes(systemCandidate.toLowerCase())
+        !systemFilters.has(systemCandidate.toLowerCase())
       ) {
         return;
       }
@@ -2016,15 +2043,34 @@ export class RetroGameTalkClient {
         return;
       }
 
-      if (isUnderRepo && resolved.pathname !== current.pathname) {
-        const cleanUrl = `${resolved.origin}${resolved.pathname}`;
+      const hasPagingParam =
+        resolved.searchParams.has('paged') ||
+        resolved.searchParams.has('fwp_paged') ||
+        resolved.searchParams.has('page');
+
+      if (isUnderRepo && (resolved.pathname !== current.pathname || (hasPagingParam && resolved.href !== current.href))) {
+        const isPagination =
+          firstSegLower === 'page' ||
+          (relSegs.length >= 2 && relSegs[1].toLowerCase() === 'page') ||
+          hasPagingParam;
+
+        let cleanUrl = `${resolved.origin}${resolved.pathname}`;
+        if (hasPagingParam) {
+          const pagingParams = new URLSearchParams();
+          for (const key of ['paged', 'fwp_paged', 'page']) {
+            const val = resolved.searchParams.get(key);
+            if (val) pagingParams.set(key, val);
+          }
+          const qs = pagingParams.toString();
+          if (qs) cleanUrl = `${cleanUrl}?${qs}`;
+        }
+
         if (cardSpecificTime) {
           releaseTimes.set(cleanUrl, cardSpecificTime);
         }
 
         // Pagination or top-level system directory (/repo/page/2/, /repo/nes-roms/, /repo/nes-roms/page/2/)
-        const isPagination = firstSegLower === 'page' || (relSegs.length >= 2 && relSegs[1].toLowerCase() === 'page');
-        if (relSegs.length === 1 && firstSegLower !== 'page') {
+        if (relSegs.length === 1 && firstSegLower !== 'page' && !hasPagingParam) {
           systems.add(systemCandidate);
           subPages.add(cleanUrl);
         } else if (isPagination) {
@@ -2542,6 +2588,13 @@ export class RetroGameTalkClient {
       if (!map.has(hyphenated)) map.set(hyphenated, restBase);
       const underscored = clean.replace(/-/g, '_');
       if (!map.has(underscored)) map.set(underscored, restBase);
+      for (const group of RGT_SLUG_ALIAS_GROUPS) {
+        if (group.includes(clean)) {
+          for (const extra of group) {
+            if (!map.has(extra)) map.set(extra, restBase);
+          }
+        }
+      }
     };
 
     try {
@@ -2577,6 +2630,49 @@ export class RetroGameTalkClient {
       this.wpTypesCacheBaseUrl = normalizedBase;
     }
     return map;
+  }
+
+  private async resolveWpRestBaseForSystem(
+    systemSlug: string,
+    config: ScraperConfigInternal,
+    signal?: AbortSignal,
+    log?: LoggerFn,
+  ): Promise<string | null> {
+    const cleanSlug = systemSlug.trim().toLowerCase();
+    if (!cleanSlug) return null;
+
+    const typeMap = await this.getWpRestTypes(config, signal, log);
+    const direct =
+      typeMap.get(cleanSlug) ||
+      typeMap.get(cleanSlug.replace(/-/g, '_')) ||
+      typeMap.get(cleanSlug.replace(/_/g, '-')) ||
+      null;
+    if (direct) return direct;
+
+    // Fallback for any future RGT system whose permalink slug differs from its WP CPT slug:
+    // inspect the archive HTML body/card classes (e.g. post-type-archive-gb_roms, type-gb_roms)
+    // or alternate JSON link once and cache the mapping.
+    try {
+      const archiveUrl = new URL(`${encodeURIComponent(cleanSlug)}/`, ensureTrailingSlash(config.baseUrl)).toString();
+      const page = await this.fetchPageHtml(archiveUrl, config, signal, log);
+      if (page.status < 400 && page.html) {
+        const altMatch = page.html.match(/wp-json\/wp\/v2\/([a-z0-9_-]+)/i);
+        const bodyMatch = page.html.match(/post-type-archive-([a-z0-9_-]+)/i);
+        const typeCardMatch = page.html.match(/\btype-([a-z0-9_-]+)\b/i);
+        for (const candidate of [altMatch?.[1], bodyMatch?.[1], typeCardMatch?.[1]]) {
+          if (!candidate) continue;
+          const mapped = typeMap.get(candidate.toLowerCase());
+          if (mapped && mapped !== 'pages' && mapped !== 'posts' && mapped !== 'media' && mapped !== 'blocks') {
+            typeMap.set(cleanSlug, mapped);
+            return mapped;
+          }
+        }
+      }
+    } catch (err) {
+      if (signal?.aborted) throw err;
+    }
+
+    return null;
   }
 
   private parseWpPostObject(post: Record<string, unknown>, fallbackRestBase: string): WpPostMetadata | null {
@@ -2680,19 +2776,18 @@ export class RetroGameTalkClient {
     } = {},
   ): Promise<{ supported: boolean; posts: WpPostMetadata[] }> {
     const { modifiedAfterIso, signal, log, onPageFetched } = options;
-    const typeMap = await this.getWpRestTypes(config, signal, log);
     const cleanSlug = systemSlug.trim().toLowerCase();
     if (!cleanSlug) return { supported: false, posts: [] };
 
-    const restBase =
-      typeMap.get(cleanSlug) ||
-      typeMap.get(cleanSlug.replace(/-/g, '_')) ||
-      typeMap.get(cleanSlug.replace(/_/g, '-')) ||
-      null;
+    const restBase = await this.resolveWpRestBaseForSystem(cleanSlug, config, signal, log);
 
     // Built-in core types ('posts', 'pages', 'media') are not console CPTs unless explicitly requested
     if (!restBase || restBase === 'pages' || restBase === 'media' || restBase === 'blocks') {
       return { supported: false, posts: [] };
+    }
+
+    if (restBase.toLowerCase() !== cleanSlug) {
+      log?.('info', `Resolved ${cleanSlug} -> WordPress post type "${restBase}"`);
     }
 
     const cutoffMs =
@@ -2779,6 +2874,7 @@ export class RetroGameTalkClient {
         if (page === 1) {
           return { supported: false, posts: [] };
         }
+        log?.('warn', `WP REST pagination for ${restBase} stopped early at page ${page}/${totalPages} (HTTP 404)`);
         break;
       }
 
@@ -2790,6 +2886,7 @@ export class RetroGameTalkClient {
         if (page === 1) {
           return { supported: false, posts: [] };
         }
+        log?.('warn', `WP REST pagination for ${restBase} stopped early at page ${page}/${totalPages} (HTTP ${response.status})`);
         break;
       }
 
@@ -2799,6 +2896,7 @@ export class RetroGameTalkClient {
         if (page === 1) {
           return { supported: false, posts: [] };
         }
+        log?.('warn', `WP REST pagination for ${restBase} returned non-JSON at page ${page}/${totalPages}`);
         break;
       }
 
