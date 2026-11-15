@@ -129,6 +129,10 @@ resources: {}
   #   cpu: 1000m
   #   memory: 512Mi
 
+# Additional annotations to add to the StatefulSet Pod template (merged with metrics.prometheusScrape when enabled)
+podAnnotations: {}
+  # reloader.stakater.com/auto: "true"
+
 # Pod-level security context (matches non-root uid/gid 1000/100 in the Dockerfile)
 podSecurityContext: {}
   # fsGroup: 100

@@ -4,7 +4,7 @@ An always-on, containerized scraper and local repository mirror for `retrogameta
 
 ## Deploying with Helm
 
-A Helm chart is included at `helm/charts/retrogametalk-sync`. All configurable values (persistence, credentials, cron schedule, rate limits, ingress, probes, and console sharding) are documented inline in `helm/charts/retrogametalk-sync/values.yaml`.
+A Helm chart is included at `helm/charts/retrogametalk-sync`. All configurable values (persistence, credentials, cron schedule, rate limits, ingress, probes, `podAnnotations`, and console sharding) are documented inline in `helm/charts/retrogametalk-sync/values.yaml`.
 
 ### 1. Build the Container Image
 

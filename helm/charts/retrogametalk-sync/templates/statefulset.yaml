@@ -14,11 +14,18 @@ spec:
     metadata:
       labels:
         {{- include "retrogametalk-sync.selectorLabels" . | nindent 8 }}
-      {{- if .Values.metrics.prometheusScrape }}
+      {{- $podAnnotations := dict -}}
+      {{- if .Values.metrics.prometheusScrape -}}
+        {{- $_ := set $podAnnotations "prometheus.io/scrape" "true" -}}
+        {{- $_ := set $podAnnotations "prometheus.io/port" (.Values.scraper.port | toString) -}}
+        {{- $_ := set $podAnnotations "prometheus.io/path" "/metrics" -}}
+      {{- end -}}
+      {{- range $k, $v := .Values.podAnnotations -}}
+        {{- $_ := set $podAnnotations $k ($v | toString) -}}
+      {{- end -}}
+      {{- with $podAnnotations }}
       annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: {{ .Values.scraper.port | quote }}
-        prometheus.io/path: "/metrics"
+        {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
