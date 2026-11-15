@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - "v*.*.*"
+      - "*"
   pull_request:
     branches:
       - main
@@ -25,6 +25,27 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve version and git tag
+        id: version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            GIT_TAG="${{ github.ref_name }}"
+          else
+            GIT_TAG="$(git tag --points-at HEAD | head -n 1)"
+          fi
+
+          if [ -n "$GIT_TAG" ]; then
+            APP_VERSION="$GIT_TAG"
+          else
+            APP_VERSION="${{ github.head_ref || github.ref_name }}"
+          fi
+
+          echo "git_tag=${GIT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -44,6 +65,8 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
+            type=ref,event=tag
+            type=raw,value=${{ steps.version.outputs.git_tag || 'untagged' }},enable=${{ steps.version.outputs.git_tag != '' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
@@ -60,6 +83,7 @@ jobs:
           annotations: ${{ steps.meta.outputs.annotations }}
           build-args: |
             GIT_SHA=${{ github.sha }}
+            APP_VERSION=${{ steps.version.outputs.app_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

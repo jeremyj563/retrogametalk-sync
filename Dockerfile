@@ -12,8 +12,11 @@ FROM node:22-alpine AS runner
 WORKDIR /app
 
 ARG GIT_SHA=unknown
-LABEL org.opencontainers.image.revision="${GIT_SHA}"
+ARG APP_VERSION=dev
+LABEL org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.version="${APP_VERSION}"
 ENV GIT_SHA=${GIT_SHA}
+ENV APP_VERSION=${APP_VERSION}
 
 ENV NODE_ENV=production
 ENV PORT=3000

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -58,6 +59,66 @@ import type {
 
 const POD_ID = process.env.HOSTNAME || os.hostname() || 'rgt-sync-pod';
 const MAX_CRAWL_PAGES_PER_RUN = 300;
+
+let cachedLocalGitFallback: { version: string; gitSha: string } | null = null;
+
+function getLocalGitFallback(): { version: string; gitSha: string } {
+  if (cachedLocalGitFallback) return cachedLocalGitFallback;
+  let version = 'dev';
+  let gitSha = 'unknown';
+  try {
+    const tag = execFileSync('git', ['tag', '--points-at', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .find(Boolean);
+    if (tag) {
+      version = tag;
+    } else {
+      const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      if (branch && branch !== 'HEAD') {
+        version = branch;
+      }
+    }
+  } catch {
+    // No local git repository available (e.g. production container)
+  }
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (sha) {
+      gitSha = sha;
+    }
+  } catch {
+    // No local git repository available
+  }
+  cachedLocalGitFallback = { version, gitSha };
+  return cachedLocalGitFallback;
+}
+
+function resolveRuntimeBuildInfo(): { version: string; gitSha: string } {
+  const envVersion = (process.env.APP_VERSION || '').trim();
+  const envSha = (process.env.GIT_SHA || '').trim();
+  const fallback =
+    !envVersion || !envSha || envSha === 'unknown' ? getLocalGitFallback() : null;
+
+  return {
+    version: envVersion || fallback?.version || 'dev',
+    gitSha:
+      envSha && envSha !== 'unknown'
+        ? envSha
+        : fallback?.gitSha && fallback.gitSha !== 'unknown'
+          ? fallback.gitSha
+          : envSha || 'unknown',
+  };
+}
 
 export class ScraperOrchestrator extends EventEmitter {
   private rateLimiter: AdaptiveRateLimiter;
@@ -654,6 +715,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
     return {
       podId: POD_ID,
+      build: resolveRuntimeBuildInfo(),
       activeRun: this.activeRun,
       activeTransfer: this.activeTransfer,
       currentPhase: this.currentPhase,
