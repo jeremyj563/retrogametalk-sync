@@ -1,13 +1,3 @@
-FROM node:22-alpine AS builder
-WORKDIR /app
-
-RUN apk add --no-cache python3 make g++
-COPY package.json package-lock.json* ./
-RUN if [ -f package-lock.json ]; then npm ci --legacy-peer-deps; else npm install --legacy-peer-deps; fi
-
-COPY . .
-RUN npm run build
-
 FROM node:22-alpine AS runner
 WORKDIR /app
 
@@ -17,8 +7,8 @@ ENV DATA_DIR=/app/data
 ENV DOWNLOAD_DIR=/run/repo
 
 RUN addgroup -S rgt && adduser -S rgt -G rgt \
-  && mkdir -p $DOWNLOAD_DIR \
-  && chown -R rgt:rgt /run/repo
+  && mkdir -p $DOWNLOAD_DIR $DATA_DIR \
+  && chown -R rgt:rgt $DOWNLOAD_DIR $DATA_DIR
 
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
@@ -29,7 +19,7 @@ COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
 USER rgt
 EXPOSE 3000
-VOLUME ["/run/repo"]
+VOLUME ["/run/repo", "/app/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3000/healthz || exit 1
