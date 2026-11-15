@@ -133,7 +133,7 @@ export function initDb(): Database.Database {
       max_retries INTEGER NOT NULL DEFAULT 5,
       max_concurrency INTEGER NOT NULL DEFAULT 1,
       request_timeout_ms INTEGER NOT NULL DEFAULT 30000,
-      user_agent TEXT NOT NULL DEFAULT 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      user_agent TEXT NOT NULL DEFAULT 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
       system_filter TEXT NOT NULL DEFAULT '',
       discovered_systems_json TEXT NOT NULL DEFAULT '[]',
       last_watermark_at TEXT,
@@ -252,7 +252,7 @@ export function initDb(): Database.Database {
       process.env.RGT_PASSWORD ? encryptSecret(process.env.RGT_PASSWORD) : '',
       DEFAULT_DOWNLOAD_DIR,
       process.env.CRON_SCHEDULE || '0 */6 * * *',
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
       process.env.SCRAPER_SYSTEM_FILTER || '',
       now,
     );
@@ -264,11 +264,12 @@ export function initDb(): Database.Database {
       db.prepare('UPDATE scraper_config SET login_url = ? WHERE id = 1').run('https://retrogametalk.com/login/');
     }
     db.prepare(
-      'UPDATE scraper_config SET user_agent = ? WHERE id = 1 AND user_agent IN (?, ?)',
+      'UPDATE scraper_config SET user_agent = ? WHERE id = 1 AND user_agent IN (?, ?, ?)',
     ).run(
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
       'Mozilla/5.0 (compatible; RetroGameTalkSync/1.0)',
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     );
     const legacyDownloadDir = path.resolve('./data/repository');
     if (DATA_DIR === '/run/repo' && path.resolve(existing.download_dir) === legacyDownloadDir) {

@@ -1,8 +1,11 @@
+import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { load as loadHtml } from 'cheerio';
-import { type HttpMethod, Impit, type ImpitResponse } from 'impit';
+import { type Browser, type HttpMethod, Impit, type ImpitResponse } from 'impit';
 import { CookieJar } from 'tough-cookie';
 import { getCookieJarPath } from './db.ts';
 import type { AdaptiveRateLimiter } from './rateLimiter.ts';
@@ -22,6 +25,9 @@ const DEFAULT_BROWSER_USER_AGENTS = new Set([
   'Mozilla/5.0 (compatible; RetroGameTalkSync/1.0)',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:144.0) Gecko/20100101 Firefox/144.0',
 ]);
 
 const ARCHIVE_EXTENSIONS = new Set([
@@ -232,6 +238,7 @@ function isDownloadCandidateUrl(url: URL, anchorText: string, hasDownloadAttr: b
 export class RetroGameTalkClient {
   private jar: CookieJar;
   private httpClient: Impit;
+  private activeBrowserProfile: Browser = 'chrome142';
   private rateLimiter: AdaptiveRateLimiter;
   private wpTypesCache: Map<string, string> | null = null;
   private authStatus: AuthSessionStatus = {
@@ -248,7 +255,16 @@ export class RetroGameTalkClient {
     this.rateLimiter = rateLimiter;
     this.jar = this.loadCookieJar();
     this.httpClient = new Impit({
-      browser: 'chrome131',
+      browser: this.activeBrowserProfile,
+      followRedirects: false,
+    });
+  }
+
+  private switchBrowserProfile(profile: Browser): void {
+    if (this.activeBrowserProfile === profile) return;
+    this.activeBrowserProfile = profile;
+    this.httpClient = new Impit({
+      browser: profile,
       followRedirects: false,
     });
   }
@@ -464,7 +480,7 @@ export class RetroGameTalkClient {
 
       const headers = new Headers(init.headers || {});
       const trimmedUa = (config.userAgent || '').trim();
-      // Preserve impit's exact Chrome 131 User-Agent + Sec-CH-UA coherence unless a custom UA was explicitly configured
+      // Preserve impit's matched browser profile User-Agent + Sec-CH-UA coherence unless a custom UA was explicitly configured
       if (trimmedUa && !DEFAULT_BROWSER_USER_AGENTS.has(trimmedUa)) {
         headers.set('User-Agent', trimmedUa);
       }
@@ -630,9 +646,8 @@ export class RetroGameTalkClient {
     log?.('info', `Authenticating XenForo + Repo gate at ${config.loginUrl}`);
 
     // Step 1: Load the XenForo login form page to obtain xf_csrf cookie + _xfToken hidden field.
-    // When loginUrl points to XenForo's POST action (/login/login), real browsers visit GET /login/ first
-    // before submitting POST /login/login. We mirror that exact browser navigation order, and fall back
-    // to GET loginUrl if /login/ is not served (e.g. custom auth endpoints or mock servers).
+    // Note: commit b70de40 used chrome131 whose legacy JA4 TLS fingerprint triggers Cloudflare 403;
+    // we now use chrome142 (post-quantum MLKEM JA4) with automatic fallback to firefox144 and native curl.
     const trimmedLoginUrl = config.loginUrl.trim();
     const isXenForoPostEndpoint = /\/login\/login\/?$/i.test(trimmedLoginUrl);
     const parentFormUrl = isXenForoPostEndpoint
@@ -641,63 +656,107 @@ export class RetroGameTalkClient {
 
     let formPage: { response: ImpitResponse; finalUrl: string; latencyMs: number } | null = null;
     let html = '';
+    let lastCfChallengeStatus: number | null = null;
+    let lastCfRay: string | null = null;
 
-    if (parentFormUrl) {
-      try {
-        const candidatePage = await this.fetchWithRedirects(parentFormUrl, config, { method: 'GET' }, signal, log);
-        const candidateHtml = await candidatePage.response.text();
-        if (
-          !this.isCloudflareChallenge(candidatePage.response.status, candidatePage.response.headers, candidateHtml) &&
-          candidatePage.response.ok &&
-          (loadHtml(candidateHtml)('input[type="password"]').length > 0 ||
-            this.getSafeCookieCount(config.baseUrl) > 0)
-        ) {
-          formPage = candidatePage;
-          html = candidateHtml;
+    const tryLoadFormWithCurrentProfile = async (): Promise<
+      | { kind: 'ok'; page: { response: ImpitResponse; finalUrl: string; latencyMs: number }; html: string }
+      | { kind: 'cf'; status: number; cfRay: string | null }
+      | { kind: 'http_err'; page: { response: ImpitResponse; finalUrl: string; latencyMs: number }; html: string }
+      | { kind: 'net_err'; err: unknown }
+    > => {
+      if (parentFormUrl) {
+        try {
+          const candidatePage = await this.fetchWithRedirects(parentFormUrl, config, { method: 'GET' }, signal, log);
+          const candidateHtml = await candidatePage.response.text();
+          if (this.isCloudflareChallenge(candidatePage.response.status, candidatePage.response.headers, candidateHtml)) {
+            return {
+              kind: 'cf',
+              status: candidatePage.response.status,
+              cfRay: candidatePage.response.headers.get('cf-ray'),
+            };
+          }
+          if (
+            candidatePage.response.ok &&
+            (loadHtml(candidateHtml)('input[type="password"]').length > 0 ||
+              this.getSafeCookieCount(config.baseUrl) > 0)
+          ) {
+            return { kind: 'ok', page: candidatePage, html: candidateHtml };
+          }
+        } catch {
+          // Fall through to GET config.loginUrl directly so exact URL network errors are reported
         }
-      } catch {
-        // Fall through to GET config.loginUrl directly so exact URL network errors are reported
       }
-    }
 
-    if (!formPage) {
       try {
-        formPage = await this.fetchWithRedirects(config.loginUrl, config, { method: 'GET' }, signal, log);
+        const directPage = await this.fetchWithRedirects(config.loginUrl, config, { method: 'GET' }, signal, log);
+        const directHtml = await directPage.response.text();
+        if (this.isCloudflareChallenge(directPage.response.status, directPage.response.headers, directHtml)) {
+          return {
+            kind: 'cf',
+            status: directPage.response.status,
+            cfRay: directPage.response.headers.get('cf-ray'),
+          };
+        }
+        if (directPage.response.status >= 400) {
+          return { kind: 'http_err', page: directPage, html: directHtml };
+        }
+        return { kind: 'ok', page: directPage, html: directHtml };
       } catch (err) {
-        const msg = `Cannot reach Login Endpoint URL (${config.loginUrl}): ${this.formatNetworkError(err, config.loginUrl)}`;
-        this.setAuthState({
-          configured: true,
-          authenticated: false,
-          cookieCount: this.getSafeCookieCount(config.baseUrl),
-          lastMessage: msg,
-        });
-        return { authenticated: false, statusCode: 0, message: msg };
+        return { kind: 'net_err', err };
       }
+    };
 
-      html = await formPage.response.text();
-      if (this.isCloudflareChallenge(formPage.response.status, formPage.response.headers, html)) {
-        const cfRay = formPage.response.headers.get('cf-ray');
-        const msg = `Blocked by Cloudflare Managed Challenge (HTTP ${formPage.response.status}${cfRay ? ` · CF-Ray ${cfRay}` : ''}) at Login Endpoint URL (${config.loginUrl}). Cloudflare returned an interactive Turnstile/JS challenge page instead of the XenForo login form.`;
-        this.setAuthState({
-          configured: true,
-          authenticated: false,
-          cookieCount: this.getSafeCookieCount(config.baseUrl),
-          lastMessage: msg,
-        });
-        return { authenticated: false, statusCode: formPage.response.status, message: msg };
-      }
+    let loadAttempt = await tryLoadFormWithCurrentProfile();
+    if (loadAttempt.kind === 'cf') {
+      const alternateProfile: Browser = this.activeBrowserProfile === 'firefox144' ? 'chrome142' : 'firefox144';
+      this.switchBrowserProfile(alternateProfile);
+      loadAttempt = await tryLoadFormWithCurrentProfile();
     }
 
-    if (formPage.response.status >= 400) {
-      const msg = `Login Endpoint URL returned HTTP ${formPage.response.status} (${formPage.finalUrl}). Check that the Login Endpoint URL is correct.`;
+    if (loadAttempt.kind === 'net_err') {
+      const msg = `Cannot reach Login Endpoint URL (${config.loginUrl}): ${this.formatNetworkError(loadAttempt.err, config.loginUrl)}`;
       this.setAuthState({
         configured: true,
         authenticated: false,
         cookieCount: this.getSafeCookieCount(config.baseUrl),
         lastMessage: msg,
       });
-      return { authenticated: false, statusCode: formPage.response.status, message: msg };
+      return { authenticated: false, statusCode: 0, message: msg };
     }
+
+    if (loadAttempt.kind === 'cf') {
+      lastCfChallengeStatus = loadAttempt.status;
+      lastCfRay = loadAttempt.cfRay;
+      // Fallback to native curl (direct POST username & password, then CSRF form POST if needed)
+      const curlFallback = await this.tryCurlLoginFallback(config, username, password, parentFormUrl, signal, log);
+      if (curlFallback) {
+        return curlFallback;
+      }
+
+      const msg = `Blocked by Cloudflare Managed Challenge (HTTP ${lastCfChallengeStatus}${lastCfRay ? ` · CF-Ray ${lastCfRay}` : ''}) at Login Endpoint URL (${config.loginUrl}). Cloudflare returned an interactive Turnstile/JS challenge page instead of the XenForo login form.`;
+      this.setAuthState({
+        configured: true,
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastMessage: msg,
+      });
+      return { authenticated: false, statusCode: lastCfChallengeStatus, message: msg };
+    }
+
+    if (loadAttempt.kind === 'http_err') {
+      const msg = `Login Endpoint URL returned HTTP ${loadAttempt.page.response.status} (${loadAttempt.page.finalUrl}). Check that the Login Endpoint URL is correct.`;
+      this.setAuthState({
+        configured: true,
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastMessage: msg,
+      });
+      return { authenticated: false, statusCode: loadAttempt.page.response.status, message: msg };
+    }
+
+    formPage = loadAttempt.page;
+    html = loadAttempt.html;
 
     const $ = loadHtml(html);
     const passwordInput = $('input[type="password"]').first();
@@ -763,45 +822,7 @@ export class RetroGameTalkClient {
       return { authenticated: false, statusCode: formPage.response.status, message: msg };
     }
 
-    let actionUrl = config.loginUrl;
-    const params = new URLSearchParams();
-
-    if (form.length > 0) {
-      const rawAction = form.attr('action');
-      if (rawAction) {
-        actionUrl = new URL(rawAction, formPage.finalUrl).toString();
-      }
-      form.find('input').each((_, el) => {
-        const name = $(el).attr('name');
-        const type = ($(el).attr('type') || 'text').toLowerCase();
-        if (!name) return;
-        if (type === 'hidden') {
-          params.set(name, $(el).attr('value') || '');
-        } else if (type === 'submit' && !params.has(name)) {
-          params.set(name, $(el).attr('value') || 'Log in');
-        } else if (type === 'checkbox' && name.toLowerCase().includes('remember')) {
-          params.set(name, $(el).attr('value') || '1');
-        }
-      });
-
-      const userField = form
-        .find('input[name="login"], input[name="username"], input[name="log"], input[type="text"], input[type="email"]')
-        .first()
-        .attr('name') || 'login';
-      const passField = passwordInput.attr('name') || 'password';
-
-      params.set(userField, username);
-      params.set(passField, password);
-      params.set('remember', '1');
-      if (params.has('_xfRedirect')) {
-        params.set('_xfRedirect', config.baseUrl);
-      }
-    } else {
-      params.set('login', username);
-      params.set('username', username);
-      params.set('password', password);
-      params.set('remember', '1');
-    }
+    const { actionUrl, params } = this.buildLoginFormParams($, form, passwordInput, formPage.finalUrl, config, username, password);
 
     let postRes: { response: ImpitResponse; finalUrl: string; latencyMs: number };
     try {
@@ -833,7 +854,12 @@ export class RetroGameTalkClient {
 
     const postBody = await postRes.response.text();
     if (this.isCloudflareChallenge(postRes.response.status, postRes.response.headers, postBody)) {
-      const msg = `Login request blocked by Cloudflare challenge (HTTP ${postRes.response.status}) at ${postRes.finalUrl}. Cloudflare is requiring an interactive JS/Turnstile browser challenge for this server IP.`;
+      const curlFallback = await this.tryCurlLoginFallback(config, username, password, parentFormUrl, signal, log);
+      if (curlFallback) {
+        return curlFallback;
+      }
+      const cfRay = postRes.response.headers.get('cf-ray');
+      const msg = `Login request blocked by Cloudflare challenge (HTTP ${postRes.response.status}${cfRay ? ` · CF-Ray ${cfRay}` : ''}) at ${postRes.finalUrl}.`;
       this.setAuthState({
         configured: true,
         authenticated: false,
@@ -916,6 +942,416 @@ export class RetroGameTalkClient {
       statusCode: postRes.response.status,
       message,
     };
+  }
+
+  private buildLoginFormParams(
+    $: ReturnType<typeof loadHtml>,
+    form: ReturnType<ReturnType<typeof loadHtml>>,
+    passwordInput: ReturnType<ReturnType<typeof loadHtml>>,
+    formFinalUrl: string,
+    config: ScraperConfigInternal,
+    username: string,
+    password: string,
+  ): { actionUrl: string; params: URLSearchParams } {
+    const rawAction = form.attr('action');
+    const actionUrl = rawAction ? new URL(rawAction, formFinalUrl).href : config.loginUrl;
+    const params = new URLSearchParams();
+    let addedSubmit = false;
+
+    form.find('input').each((_, el) => {
+      const input = $(el);
+      if (input.is(':disabled')) return;
+      const name = input.attr('name');
+      if (!name) return;
+
+      const type = (input.attr('type') || 'text').toLowerCase();
+      if (type === 'button' || type === 'reset' || type === 'file' || type === 'image') {
+        return;
+      }
+      if (type === 'checkbox' || type === 'radio') {
+        // Leave XenForo anti-bot honeypot checkboxes unchecked/omitted unless checked by default in markup
+        if (input.attr('checked') !== undefined) {
+          params.set(name, input.attr('value') ?? '1');
+        }
+        return;
+      }
+      if (type === 'submit') {
+        if (!addedSubmit && input.attr('value') !== undefined) {
+          params.set(name, input.attr('value')!);
+          addedSubmit = true;
+        }
+        return;
+      }
+
+      // Hidden, text, password, email, etc. (preserves empty honeypot text fields like website_code="")
+      params.set(name, input.attr('value') ?? '');
+    });
+
+    const userField =
+      form
+        .find('input')
+        .filter((_, el) => {
+          const input = $(el);
+          if (input.is(':disabled')) return false;
+          const type = (input.attr('type') || 'text').toLowerCase();
+          if (type === 'checkbox' || type === 'radio' || type === 'hidden' || type === 'password' || type === 'submit') {
+            return false;
+          }
+          const n = (input.attr('name') || '').toLowerCase();
+          return n === 'login' || n === 'username' || n === 'user' || n === 'email' || n === 'log';
+        })
+        .first()
+        .attr('name') || 'login';
+    const passField = passwordInput.attr('name') || 'password';
+
+    params.set(userField, username);
+    params.set(passField, password);
+
+    if (form.find('input[name="remember"]').length > 0) {
+      params.set('remember', '1');
+    }
+    if (params.has('_xfRedirect')) {
+      params.set('_xfRedirect', config.baseUrl);
+    }
+
+    return { actionUrl, params };
+  }
+
+  private async tryCurlLoginFallback(
+    config: ScraperConfigInternal,
+    username: string,
+    password: string,
+    parentFormUrl: string | null,
+    signal?: AbortSignal,
+    log?: LoggerFn,
+  ): Promise<{ authenticated: boolean; statusCode: number; message: string } | null> {
+    const tmpId = crypto.randomUUID();
+    const cookieFile = path.join(os.tmpdir(), `rgt-curl-${tmpId}.cookies`);
+    const headerFile = path.join(os.tmpdir(), `rgt-curl-${tmpId}.headers`);
+
+    const escapeCurlCfg = (val: string): string =>
+      val.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+
+    const parseLastCurlHeaders = (rawHeaders: string): Headers => {
+      const headers = new Headers();
+      const blocks = rawHeaders
+        .split(/\r?\n\r?\n/)
+        .map((b) => b.trim())
+        .filter((b) => /^HTTP\//i.test(b));
+      const lastBlock = blocks[blocks.length - 1];
+      if (!lastBlock) return headers;
+      const lines = lastBlock.split(/\r?\n/).slice(1);
+      for (const line of lines) {
+        const colonIdx = line.indexOf(':');
+        if (colonIdx <= 0) continue;
+        const key = line.slice(0, colonIdx).trim();
+        const val = line.slice(colonIdx + 1).trim();
+        if (key.toLowerCase() === 'set-cookie') continue;
+        try {
+          headers.append(key, val);
+        } catch {
+          // Ignore invalid header lines
+        }
+      }
+      return headers;
+    };
+
+    const importNetscapeCookies = async (fallbackOriginUrl: string): Promise<void> => {
+      if (!fs.existsSync(cookieFile)) return;
+      const raw = fs.readFileSync(cookieFile, 'utf8');
+      let imported = 0;
+      const fallbackProto = new URL(fallbackOriginUrl).protocol.replace(':', '');
+
+      for (const rawLine of raw.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        let httpOnly = false;
+        let payload = line;
+        if (payload.startsWith('#HttpOnly_')) {
+          httpOnly = true;
+          payload = payload.slice('#HttpOnly_'.length);
+        } else if (payload.startsWith('#')) {
+          continue;
+        }
+
+        const parts = payload.split('\t');
+        if (parts.length < 7) continue;
+        const [rawDomain, includeSubdomains, cookiePath, secureFlag, expiresEpoch, name, ...valueParts] = parts;
+        if (!name) continue;
+        const value = valueParts.join('\t');
+        const cleanDomain = rawDomain.replace(/^\./, '');
+        if (!cleanDomain) continue;
+
+        const isSecure = secureFlag.toUpperCase() === 'TRUE';
+        const isSubdomainCookie =
+          includeSubdomains.toUpperCase() === 'TRUE' && !/^\d+\.\d+\.\d+\.\d+$/.test(cleanDomain);
+        const normalizedPath = cookiePath?.startsWith('/') ? cookiePath : '/';
+
+        let cookieStr = `${name}=${value}; Path=${normalizedPath}`;
+        if (isSubdomainCookie) {
+          cookieStr += `; Domain=${cleanDomain}`;
+        }
+        if (isSecure) {
+          cookieStr += '; Secure';
+        }
+        if (httpOnly) {
+          cookieStr += '; HttpOnly';
+        }
+        const expSec = Number(expiresEpoch);
+        if (Number.isFinite(expSec) && expSec > 0) {
+          cookieStr += `; Expires=${new Date(expSec * 1000).toUTCString()}`;
+        }
+
+        const scheme = isSecure ? 'https' : fallbackProto || 'https';
+        const originUrl = `${scheme}://${cleanDomain}${normalizedPath}`;
+        try {
+          await this.jar.setCookie(cookieStr, originUrl, { ignoreError: true });
+          imported += 1;
+        } catch {
+          // Ignore individual cookie parse issues
+        }
+      }
+
+      if (imported > 0) {
+        this.saveCookieJar();
+      }
+    };
+
+    const runCurl = async (
+      targetUrl: string,
+      postParams?: URLSearchParams,
+      referer?: string,
+    ): Promise<{ status: number; finalUrl: string; headers: Headers; body: string } | null> => {
+      if (signal?.aborted) {
+        throw new Error('Operation aborted');
+      }
+      fs.writeFileSync(headerFile, '', { mode: 0o600 });
+      const timeoutSec = Math.max(8, Math.min(30, Math.ceil((config.requestTimeoutMs || 15000) / 1000)));
+      const metaMarker = `\n__RGT_CURL_META_${tmpId}__:`;
+
+      const cfgLines: string[] = [
+        `url = "${escapeCurlCfg(targetUrl)}"`,
+        `dump-header = "${escapeCurlCfg(headerFile)}"`,
+        `cookie = "${escapeCurlCfg(cookieFile)}"`,
+        `cookie-jar = "${escapeCurlCfg(cookieFile)}"`,
+      ];
+      if (referer) {
+        cfgLines.push(`referer = "${escapeCurlCfg(referer)}"`);
+      }
+      if (postParams) {
+        cfgLines.push('header = "Content-Type: application/x-www-form-urlencoded"');
+        cfgLines.push(`data = "${escapeCurlCfg(postParams.toString())}"`);
+      }
+
+      return new Promise((resolve) => {
+        let child: ReturnType<typeof spawn>;
+        try {
+          child = spawn(
+            'curl',
+            [
+              '-sS',
+              '-L',
+              '--max-redirs',
+              '8',
+              '--max-time',
+              String(timeoutSec),
+              '-w',
+              `${metaMarker}%{http_code}\t%{url_effective}`,
+              '--config',
+              '-',
+            ],
+            { stdio: ['pipe', 'pipe', 'pipe'] },
+          );
+        } catch {
+          resolve(null);
+          return;
+        }
+
+        const stdoutChunks: Buffer[] = [];
+        let spawnFailed = false;
+        const onAbort = () => {
+          child.kill('SIGTERM');
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+
+        child.on('error', () => {
+          spawnFailed = true;
+          signal?.removeEventListener('abort', onAbort);
+          resolve(null);
+        });
+
+        child.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+        child.stdin?.on('error', () => undefined);
+        child.stdin?.end(`${cfgLines.join('\n')}\n`);
+
+        child.on('close', () => {
+          signal?.removeEventListener('abort', onAbort);
+          if (spawnFailed) return;
+
+          const fullOut = Buffer.concat(stdoutChunks).toString('utf8');
+          const markerIdx = fullOut.lastIndexOf(metaMarker);
+          if (markerIdx === -1) {
+            resolve(null);
+            return;
+          }
+
+          const body = fullOut.slice(0, markerIdx);
+          const metaPart = fullOut.slice(markerIdx + metaMarker.length).trim();
+          const [statusStr, effectiveUrl] = metaPart.split('\t');
+          const status = Number(statusStr) || 0;
+          if (status === 0) {
+            resolve(null);
+            return;
+          }
+
+          let rawHeaders = '';
+          try {
+            rawHeaders = fs.readFileSync(headerFile, 'utf8');
+          } catch {
+            rawHeaders = '';
+          }
+
+          resolve({
+            status,
+            finalUrl: effectiveUrl || targetUrl,
+            headers: parseLastCurlHeaders(rawHeaders),
+            body,
+          });
+        });
+      });
+    };
+
+    try {
+      fs.writeFileSync(cookieFile, '', { mode: 0o600 });
+
+      const hasSessionCookieInJar = async (): Promise<boolean> => {
+        const jarCookies = await this.jar.getCookies(config.baseUrl);
+        return jarCookies.some((c) => c.key === 'xf_user' || c.key.startsWith('wordpress_logged_in_'));
+      };
+
+      // Step A: Direct POST matching `curl -s -c cookies.txt -d 'username=...&password=...' <loginUrl>`
+      const directRes = await runCurl(
+        config.loginUrl,
+        new URLSearchParams({ username, password }),
+      );
+      if (!directRes) {
+        return null;
+      }
+
+      await importNetscapeCookies(config.loginUrl);
+      let finalLoginRes = directRes;
+
+      if (!(await hasSessionCookieInJar())) {
+        // Step B: If direct POST needed XenForo CSRF (_xfToken + login field), load form via curl and submit
+        const formUrlToFetch = parentFormUrl || config.loginUrl;
+        const formRes = await runCurl(formUrlToFetch);
+        if (formRes && !this.isCloudflareChallenge(formRes.status, formRes.headers, formRes.body)) {
+          await importNetscapeCookies(formRes.finalUrl);
+          const form$ = loadHtml(formRes.body);
+          const pwInput = form$('input[type="password"]').first();
+          const loginForm = pwInput.closest('form');
+          if (loginForm.length > 0 && pwInput.length > 0) {
+            const { actionUrl, params } = this.buildLoginFormParams(
+              form$,
+              loginForm,
+              pwInput,
+              formRes.finalUrl,
+              config,
+              username,
+              password,
+            );
+            const csrfPostRes = await runCurl(actionUrl, params, formRes.finalUrl);
+            if (csrfPostRes) {
+              await importNetscapeCookies(csrfPostRes.finalUrl);
+              finalLoginRes = csrfPostRes;
+            }
+          }
+        }
+      }
+
+      if (this.isCloudflareChallenge(finalLoginRes.status, finalLoginRes.headers, finalLoginRes.body)) {
+        return null;
+      }
+
+      const post$ = loadHtml(finalLoginRes.body);
+      const blockError = post$('.blockMessage--error, #login_error, .errorPanel, .message--error, .formRow--error')
+        .not('.u-noJsOnly, .blockMessage--important')
+        .filter((_, el) => post$(el).closest('noscript, template').length === 0)
+        .first()
+        .text()
+        .replace(/\s+/g, ' ')
+        .trim();
+      const stillOnLoginForm = post$('input[type="password"]').length > 0;
+      const hasSessionBeforeRepo = await hasSessionCookieInJar();
+      const loginRejected =
+        Boolean(blockError) ||
+        finalLoginRes.status >= 400 ||
+        (stillOnLoginForm && !hasSessionBeforeRepo);
+
+      let repoReached = false;
+      let repoTitle = '';
+      if (!loginRejected && (hasSessionBeforeRepo || finalLoginRes.status < 400)) {
+        const repoRes = await runCurl(config.baseUrl, undefined, finalLoginRes.finalUrl);
+        if (repoRes && !this.isCloudflareChallenge(repoRes.status, repoRes.headers, repoRes.body)) {
+          await importNetscapeCookies(repoRes.finalUrl);
+          const repo$ = loadHtml(repoRes.body);
+          repoTitle = repo$('title').first().text().trim();
+          repoReached =
+            repoRes.status >= 200 &&
+            repoRes.status < 400 &&
+            !repoRes.finalUrl.includes('/login') &&
+            repo$('input[name="login"]').length === 0 &&
+            repo$('input[type="password"]').length === 0;
+        }
+      }
+
+      const cookies = await this.jar.getCookies(config.baseUrl);
+      const hasXfUser = cookies.some((c) => c.key === 'xf_user' || c.key.startsWith('wordpress_logged_in_'));
+      const authenticated = !loginRejected && (hasXfUser || repoReached);
+
+      let message: string;
+      if (authenticated) {
+        message = `Authenticated as ${username} (${cookies.length} cookies${repoTitle ? ` · "${repoTitle}"` : ''})`;
+      } else if (blockError) {
+        message = `Login rejected: ${blockError}`;
+      } else if (finalLoginRes.status === 401 || finalLoginRes.status === 403) {
+        message = `Login rejected (HTTP ${finalLoginRes.status}) at ${finalLoginRes.finalUrl}: invalid credentials or access denied.`;
+      } else if (finalLoginRes.status >= 400) {
+        message = `Login Endpoint URL returned HTTP ${finalLoginRes.status} at ${finalLoginRes.finalUrl}. Check that the Login Endpoint URL is valid.`;
+      } else if (stillOnLoginForm) {
+        message = `Invalid username or password: server returned the login form without establishing an authenticated session.`;
+      } else {
+        message = `Authentication failed (HTTP ${finalLoginRes.status}): no active session cookie returned from ${finalLoginRes.finalUrl}.`;
+      }
+
+      this.setAuthState({
+        configured: true,
+        authenticated,
+        cookieCount: cookies.length,
+        lastMessage: message,
+      });
+
+      if (authenticated) {
+        log?.('info', message);
+      }
+
+      return {
+        authenticated,
+        statusCode: finalLoginRes.status,
+        message,
+      };
+    } finally {
+      try {
+        if (fs.existsSync(cookieFile)) fs.unlinkSync(cookieFile);
+      } catch {
+        // Ignore temp cleanup errors
+      }
+      try {
+        if (fs.existsSync(headerFile)) fs.unlinkSync(headerFile);
+      } catch {
+        // Ignore temp cleanup errors
+      }
+    }
   }
 
   async testAuthAndDiscovery(config: ScraperConfigInternal, signal?: AbortSignal): Promise<AuthTestResult> {
