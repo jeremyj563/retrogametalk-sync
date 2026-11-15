@@ -13,17 +13,22 @@ import {
   Search,
   SkipForward,
   Trash2,
+  Usb,
   X,
   XCircle,
 } from 'lucide-react';
-import type { CatalogFacets, FsTreeNode, RepositoryItemRecord, ServiceStatusSnapshot } from '../types';
+import type { CatalogFacets, FsTreeNode, RepositoryItemRecord, ScraperConfigPublic, ServiceStatusSnapshot } from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
+import { isFileSystemAccessSupported, pickSdCardRootDirectory, type SdDirectoryHandle } from '../utils/sdCardFs';
 import { GameDetailDrawer } from './GameDetailDrawer';
+import { SdCardExportModal } from './SdCardExportModal';
 
 interface CatalogPanelProps {
+  config: ScraperConfigPublic;
   status: ServiceStatusSnapshot;
   catalogRevision?: number;
   focusFailedSignal?: number;
+  onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
   onRetryItem: (itemId: number, fileId?: number) => Promise<void>;
   onRetryAllFailed: (options?: { system?: string; ids?: number[] }) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
@@ -131,9 +136,11 @@ let memoryFsSnapshot: {
 } | null = null;
 
 export function CatalogPanel({
+  config,
   status,
   catalogRevision = 0,
   focusFailedSignal = 0,
+  onSaveConfig,
   onRetryItem,
   onRetryAllFailed,
   onRefreshStatus,
@@ -180,6 +187,11 @@ export function CatalogPanel({
   const [selectedCatalogIds, setSelectedCatalogIds] = useState<Set<number>>(new Set());
   const [confirmCatalogBulk, setConfirmCatalogBulk] = useState(false);
 
+  // SD Card Export state
+  const [sdRootHandle, setSdRootHandle] = useState<SdDirectoryHandle | null>(null);
+  const [sdExportIds, setSdExportIds] = useState<number[] | null>(null);
+  const [sdMountNotice, setSdMountNotice] = useState<string | null>(null);
+
   // Local Disk Tree state + search filter + selection
   const [fsPath, setFsPath] = useState(() => memoryCatalogViewPrefs.fsPath);
   const [fsSearch, setFsSearch] = useState(() => memoryCatalogViewPrefs.fsSearch);
@@ -187,6 +199,27 @@ export function CatalogPanel({
   const [fsLoading, setFsLoading] = useState(false);
   const [selectedFsPaths, setSelectedFsPaths] = useState<Set<string>>(new Set());
   const [confirmFsBulk, setConfirmFsBulk] = useState(false);
+
+  const handleQuickMountSdCard = async () => {
+    setSdMountNotice(null);
+    const support = isFileSystemAccessSupported();
+    if (!support.supported) {
+      setSdMountNotice(support.reason || 'Folder picker not supported in this browser.');
+      return;
+    }
+    try {
+      const handle = await pickSdCardRootDirectory();
+      setSdRootHandle(handle);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      const msg = err instanceof Error ? err.message : String(err);
+      setSdMountNotice(
+        /cross origin|sub frame|user activation/i.test(msg)
+          ? 'Open the app directly in its own browser tab to mount an SD card folder.'
+          : msg,
+      );
+    }
+  };
 
   useEffect(() => {
     if (focusFailedSignal > lastConsumedFocusFailedSignal) {
@@ -717,6 +750,23 @@ export function CatalogPanel({
               )}
               <button
                 type="button"
+                onClick={() => void handleQuickMountSdCard()}
+                title={
+                  sdRootHandle
+                    ? `Mounted SD card folder: ${sdRootHandle.name} (click to switch)`
+                    : 'Mount a flash cart, ODE, or handheld SD card root folder'
+                }
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded transition-colors whitespace-nowrap shrink-0 ${
+                  sdRootHandle
+                    ? 'border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/15'
+                    : 'border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-text'
+                }`}
+              >
+                <Usb className="h-3.5 w-3.5" />
+                {sdRootHandle ? `SD: ${sdRootHandle.name}` : 'Mount SD Card'}
+              </button>
+              <button
+                type="button"
                 onClick={() => void loadCatalog()}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap shrink-0"
               >
@@ -988,6 +1038,16 @@ export function CatalogPanel({
               {selectedCatalogIds.size} item{selectedCatalogIds.size === 1 ? '' : 's'} selected
             </span>
             <div className="flex flex-wrap items-center gap-2">
+              {viewMode === 'catalog' && !confirmCatalogBulk && (
+                <button
+                  type="button"
+                  onClick={() => setSdExportIds(Array.from(selectedCatalogIds))}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Usb className="h-3.5 w-3.5" />
+                  Send to SD Card ({selectedCatalogIds.size})
+                </button>
+              )}
               {viewMode === 'failed' && !confirmCatalogBulk && (
                 <button
                   type="button"
@@ -1743,10 +1803,35 @@ export function CatalogPanel({
         onClose={() => setActiveDetailItem(null)}
         onItemUpdated={handleItemUpdated}
         onRetryItem={handleRetry}
+        onExportToSdCard={(id) => setSdExportIds([id])}
         onDeleteItem={async (id) => {
           await handleDeleteCatalogItems([id]);
         }}
       />
+
+      {/* SD Card Batch / Single Export Modal */}
+      <SdCardExportModal
+        open={Boolean(sdExportIds && sdExportIds.length > 0)}
+        itemIds={sdExportIds || []}
+        config={config}
+        sdRootHandle={sdRootHandle}
+        onMountSdHandle={(handle) => setSdRootHandle(handle)}
+        onSaveConfig={onSaveConfig}
+        onClose={() => setSdExportIds(null)}
+      />
+
+      {sdMountNotice && (
+        <div className="fixed bottom-4 right-4 z-40 max-w-md border border-crt-amber/60 bg-crt-surface px-4 py-3 rounded text-xs font-mono text-crt-amber shadow-lg flex items-center justify-between gap-3">
+          <span>{sdMountNotice}</span>
+          <button
+            type="button"
+            onClick={() => setSdMountNotice(null)}
+            className="text-crt-muted hover:text-crt-text shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
     </div>
   );
 }

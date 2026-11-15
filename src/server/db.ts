@@ -346,6 +346,20 @@ export function getInternalConfig(): ScraperConfigInternal {
     discoveredSystems = [];
   }
 
+  let deviceFolderMap: Record<string, string> = {};
+  try {
+    const parsedMap = JSON.parse(String(row.device_folder_map_json || '{}'));
+    if (parsedMap && typeof parsedMap === 'object' && !Array.isArray(parsedMap)) {
+      for (const [k, v] of Object.entries(parsedMap)) {
+        if (typeof v === 'string') {
+          deviceFolderMap[String(k)] = v;
+        }
+      }
+    }
+  } catch {
+    deviceFolderMap = {};
+  }
+
   return {
     baseUrl,
     loginUrl,
@@ -367,6 +381,11 @@ export function getInternalConfig(): ScraperConfigInternal {
     systemFilter,
     discoveredSystems,
     lastWatermarkAt: row.last_watermark_at ? String(row.last_watermark_at) : null,
+    romNamingTemplate: String(row.rom_naming_template || '{title}{regionParen}{tagBracket}'),
+    romSanitizeFat32: row.rom_sanitize_fat32 !== undefined ? Boolean(row.rom_sanitize_fat32) : true,
+    romMaxFilenameLen: Math.max(0, Number(row.rom_max_filename_len || 0)),
+    devicePreset: String(row.device_preset || 'everdrive'),
+    deviceFolderMap,
     updatedAt: String(row.updated_at),
     envOverrides,
   };
@@ -487,6 +506,35 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
   const maxDelay = Math.max(minDelay, Math.min(300000, Number(input.maxDelayMs ?? current.max_delay_ms)));
   const baseDelay = Math.max(minDelay, Math.min(maxDelay, Number(input.baseDelayMs ?? current.base_delay_ms)));
 
+  const nextRomNamingTemplate =
+    input.romNamingTemplate !== undefined
+      ? (input.romNamingTemplate.trim() || '{title}{regionParen}{tagBracket}')
+      : String(current.rom_naming_template || '{title}{regionParen}{tagBracket}');
+  const nextRomSanitizeFat32 =
+    input.romSanitizeFat32 !== undefined
+      ? (input.romSanitizeFat32 ? 1 : 0)
+      : Number(current.rom_sanitize_fat32 ?? 1);
+  const rawMaxLen = Number(input.romMaxFilenameLen ?? current.rom_max_filename_len ?? 0);
+  const nextRomMaxFilenameLen =
+    !Number.isFinite(rawMaxLen) || rawMaxLen <= 0 ? 0 : Math.max(24, Math.min(255, Math.round(rawMaxLen)));
+  const nextDevicePreset =
+    input.devicePreset !== undefined
+      ? (input.devicePreset.trim() || 'everdrive')
+      : String(current.device_preset || 'everdrive');
+
+  let nextDeviceFolderMapJson = String(current.device_folder_map_json || '{}');
+  if (input.deviceFolderMap !== undefined && input.deviceFolderMap && typeof input.deviceFolderMap === 'object') {
+    const cleanMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(input.deviceFolderMap)) {
+      const key = String(k).trim().toLowerCase();
+      const val = typeof v === 'string' ? v.trim().replace(/^\/+|\/+$/g, '') : '';
+      if (key && val) {
+        cleanMap[key] = val;
+      }
+    }
+    nextDeviceFolderMapJson = JSON.stringify(cleanMap);
+  }
+
   getDb().prepare(`
     UPDATE scraper_config SET
       base_url = ?,
@@ -506,6 +554,11 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       user_agent = ?,
       system_filter = ?,
       last_watermark_at = ?,
+      rom_naming_template = ?,
+      rom_sanitize_fat32 = ?,
+      rom_max_filename_len = ?,
+      device_preset = ?,
+      device_folder_map_json = ?,
       last_authenticated_at = ?,
       updated_at = ?
     WHERE id = 1
@@ -527,6 +580,11 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     (input.userAgent ?? String(current.user_agent)).trim(),
     (input.systemFilter ?? String(current.system_filter)).trim(),
     nextWatermarkAt,
+    nextRomNamingTemplate,
+    nextRomSanitizeFat32,
+    nextRomMaxFilenameLen,
+    nextDevicePreset,
+    nextDeviceFolderMapJson,
     authCredentialsChanged ? null : (current.last_authenticated_at ? String(current.last_authenticated_at) : null),
     now,
   );

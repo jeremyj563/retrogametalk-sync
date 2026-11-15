@@ -9,8 +9,11 @@ import {
   Save,
   Search,
   ShieldCheck,
+  Usb,
   XCircle,
 } from 'lucide-react';
+import { DEVICE_PRESETS, type DevicePresetId } from '../shared/devicePresets';
+import { formatPreparedRomName, ROM_NAMING_PRESETS } from '../shared/romNaming';
 import type { AuthTestResult, ScraperConfigPublic, ServiceStatusSnapshot } from '../types';
 import { formatBytes } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
@@ -36,6 +39,10 @@ export function OperationsPanel({
   const [downloadDir, setDownloadDir] = useState(config.downloadDir);
   const [systemFilter, setSystemFilter] = useState(config.systemFilter);
   const [consoleSearch, setConsoleSearch] = useState('');
+  const [romNamingTemplate, setRomNamingTemplate] = useState(config.romNamingTemplate);
+  const [romSanitizeFat32, setRomSanitizeFat32] = useState(config.romSanitizeFat32);
+  const [romMaxFilenameLen, setRomMaxFilenameLen] = useState(config.romMaxFilenameLen);
+  const [devicePreset, setDevicePreset] = useState(config.devicePreset || 'everdrive');
 
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
@@ -57,6 +64,10 @@ export function OperationsPanel({
     setPassword(config.password);
     setDownloadDir(config.downloadDir);
     setSystemFilter(config.systemFilter);
+    setRomNamingTemplate(config.romNamingTemplate);
+    setRomSanitizeFat32(config.romSanitizeFat32);
+    setRomMaxFilenameLen(config.romMaxFilenameLen);
+    setDevicePreset(config.devicePreset || 'everdrive');
   }, [config]);
 
   const selectedSystems = useMemo(() => {
@@ -111,7 +122,61 @@ export function OperationsPanel({
     ...(!passwordLockedByEnv ? { password } : {}),
     ...(!downloadDirLockedByEnv ? { downloadDir } : {}),
     ...(!filterLockedByEnv ? { systemFilter } : {}),
+    romNamingTemplate,
+    romSanitizeFat32,
+    romMaxFilenameLen,
+    devicePreset,
   });
+
+  const namingPreviews = useMemo(() => {
+    const cfg = { romNamingTemplate, romSanitizeFat32, romMaxFilenameLen };
+    return [
+      {
+        label: 'Retail ROM',
+        output: formatPreparedRomName(
+          {
+            title: 'Gimmick!',
+            systemName: 'nes-roms',
+            regions: ['Japan'],
+            fileRole: 'ROM',
+            innerFilename: 'Gimmick! (J).nes',
+          },
+          '.nes',
+          cfg,
+        ),
+      },
+      {
+        label: 'ROM Hack',
+        output: formatPreparedRomName(
+          {
+            title: 'Super Mario World: Return to Dinosaur Land',
+            systemName: 'snes-roms',
+            regions: ['USA'],
+            fileRole: 'Hack',
+            archiveFilename: 'SMW_Return_v1.42.7z',
+            innerFilename: 'smw_rtdl.sfc',
+          },
+          '.sfc',
+          cfg,
+        ),
+      },
+      {
+        label: 'Translation',
+        output: formatPreparedRomName(
+          {
+            title: 'Mother 3',
+            systemName: 'gba-roms',
+            regions: ['Japan'],
+            fileRole: 'English Translation',
+            displayLabel: 'Mother 3 English v1.3',
+            innerFilename: 'mother3_patched.gba',
+          },
+          '.gba',
+          cfg,
+        ),
+      },
+    ];
+  }, [romNamingTemplate, romSanitizeFat32, romMaxFilenameLen]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -456,6 +521,125 @@ export function OperationsPanel({
             placeholder="All systems (unfiltered)"
             className="w-full px-3 py-2 text-xs font-mono bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
           />
+        </div>
+      </section>
+
+      {/* Prepared ROM Naming & SD Card Device Export Defaults */}
+      <section className="border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
+          <div className="flex items-start gap-3">
+            <Usb className="h-5 w-5 text-crt-phosphor mt-0.5 shrink-0" />
+            <div>
+              <h2 className="font-display text-lg font-semibold text-crt-text">
+                Prepared ROM Naming &amp; SD Card Export
+              </h2>
+              <p className="text-xs text-crt-muted">
+                Controls how extracted ROMs are named for flash carts, ODEs, and handhelds while keeping raw archives untouched on disk.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <span className="block text-xs font-medium text-crt-text">Naming Presets</span>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+            {ROM_NAMING_PRESETS.map((preset) => {
+              const active = romNamingTemplate === preset.template;
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => setRomNamingTemplate(preset.template)}
+                  className={`p-3 text-left border rounded transition-colors space-y-1 ${
+                    active
+                      ? 'border-crt-phosphor bg-crt-phosphor/10'
+                      : 'border-crt-border bg-crt-bg hover:border-crt-border-strong'
+                  }`}
+                >
+                  <div className={`text-xs font-medium ${active ? 'text-crt-phosphor' : 'text-crt-text'}`}>
+                    {preset.label}
+                  </div>
+                  <div className="font-mono text-[11px] text-crt-muted truncate">
+                    {preset.exampleHack}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-5 items-start">
+          <div className="md:col-span-6 space-y-1.5">
+            <label className="block text-xs font-medium text-crt-text">
+              Filename Pattern Template
+            </label>
+            <input
+              type="text"
+              value={romNamingTemplate}
+              onChange={(e) => setRomNamingTemplate(e.target.value)}
+              placeholder="{title}{regionParen}{tagBracket}"
+              className="w-full px-3 py-2 text-xs font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+            />
+            <p className="text-[11px] font-mono text-crt-muted">
+              Tokens: {'{title}'}, {'{regionParen}'}, {'{tagBracket}'}, {'{role}'}, {'{version}'}, {'{origName}'}
+            </p>
+          </div>
+
+          <div className="md:col-span-3 space-y-1.5">
+            <label className="block text-xs font-medium text-crt-text">
+              Default SD Card Preset
+            </label>
+            <select
+              value={devicePreset}
+              onChange={(e) => setDevicePreset(e.target.value)}
+              className="w-full px-3 py-2 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+            >
+              {Object.values(DEVICE_PRESETS).map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.name}
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] text-crt-muted">
+              {DEVICE_PRESETS[devicePreset as DevicePresetId]?.description}
+            </p>
+          </div>
+
+          <div className="md:col-span-3 space-y-1.5">
+            <label className="block text-xs font-medium text-crt-text">
+              Max Filename Length (0 = unlimited)
+            </label>
+            <input
+              type="number"
+              min={0}
+              max={255}
+              value={romMaxFilenameLen}
+              onChange={(e) => setRomMaxFilenameLen(Math.max(0, Number(e.target.value) || 0))}
+              className="w-full px-3 py-2 text-xs font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+            />
+            <label className="inline-flex items-center gap-2 pt-1 text-xs text-crt-muted cursor-pointer">
+              <input
+                type="checkbox"
+                checked={romSanitizeFat32}
+                onChange={(e) => setRomSanitizeFat32(e.target.checked)}
+                className="accent-crt-phosphor"
+              />
+              <span>FAT32 / SD-safe characters</span>
+            </label>
+          </div>
+        </div>
+
+        {/* Live Output Preview */}
+        <div className="border border-crt-border bg-crt-bg rounded p-3.5 space-y-1.5">
+          <div className="text-[11px] font-mono text-crt-muted">Live Template Output Preview</div>
+          <div className="divide-y divide-crt-border text-xs font-mono">
+            {namingPreviews.map((p) => (
+              <div key={p.label} className="py-1.5 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-crt-muted">{p.label}</span>
+                <span className="text-crt-phosphor break-all">{p.output}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 

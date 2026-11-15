@@ -595,9 +595,11 @@ export default function App() {
               )}
               {section === 'catalog' && (
                 <CatalogPanel
+                  config={config}
                   status={status}
                   catalogRevision={catalogRevision}
                   focusFailedSignal={catalogFocusFailedTick}
+                  onSaveConfig={handleSaveConfig}
                   onRetryItem={handleRetryItem}
                   onRetryAllFailed={handleRetryAllFailed}
                   onRefreshStatus={loadInitialData}

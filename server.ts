@@ -11,7 +11,9 @@ import {
   listSyncRuns,
   queryRepositoryItems,
 } from './src/server/db.ts';
+import { streamCleanDiscZipToResponse, streamExtractedEntryToResponse } from './src/server/archiveService.ts';
 import { ScraperOrchestrator } from './src/server/orchestrator.ts';
+import { sanitizeFat32Filename } from './src/shared/romNaming.ts';
 import type { ConfigUpdateInput, RunMode } from './src/server/types.ts';
 
 const PORT = Number(process.env.PORT || 3000);
@@ -201,6 +203,171 @@ async function bootstrap() {
       return;
     }
     res.download(rom.absPath, rom.filename);
+  });
+
+  app.get('/api/items/:id/inspect', async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    const rawFileId = req.query.fileId;
+    const fileId = rawFileId !== undefined ? Number(rawFileId) : undefined;
+    if (fileId !== undefined && (!Number.isInteger(fileId) || fileId <= 0)) {
+      res.status(400).json({ error: 'Invalid fileId' });
+      return;
+    }
+    try {
+      const inspection = await orchestrator.inspectItemArchive(itemId, fileId);
+      if (!inspection) {
+        res.status(404).json({ error: 'Mirrored archive not found on disk' });
+        return;
+      }
+      res.json({ inspection });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post('/api/items/inspect-batch', async (req, res) => {
+    const rawIds: unknown[] = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const ids: number[] = Array.from(
+      new Set<number>(rawIds.map((v) => Number(v)).filter((id) => Number.isInteger(id) && id > 0)),
+    );
+    if (ids.length === 0) {
+      res.status(400).json({ error: 'Provide one or more valid catalog release IDs' });
+      return;
+    }
+
+    const results: {
+      itemId: number;
+      title: string;
+      systemName: string;
+      inspections: Awaited<ReturnType<typeof orchestrator.inspectItemArchive>>[];
+      error: string | null;
+    }[] = [];
+
+    for (const itemId of ids.slice(0, 100)) {
+      const item = getRepositoryItemById(itemId);
+      if (!item) {
+        results.push({ itemId, title: `#${itemId}`, systemName: '', inspections: [], error: 'Catalog item not found' });
+        continue;
+      }
+      const availableFiles = item.files.filter((f) => f.status === 'downloaded' || f.status === 'skipped');
+      if (availableFiles.length === 0) {
+        results.push({
+          itemId: item.id,
+          title: item.title,
+          systemName: item.systemName,
+          inspections: [],
+          error: 'No downloaded archive on disk yet',
+        });
+        continue;
+      }
+      const inspections = [];
+      let itemErr: string | null = null;
+      for (const file of availableFiles) {
+        try {
+          const insp = await orchestrator.inspectItemArchive(item.id, file.id);
+          if (insp) inspections.push(insp);
+        } catch (err) {
+          itemErr = err instanceof Error ? err.message : String(err);
+        }
+      }
+      results.push({
+        itemId: item.id,
+        title: item.title,
+        systemName: item.systemName,
+        inspections,
+        error: inspections.length === 0 ? (itemErr || 'Mirrored archive missing on disk') : null,
+      });
+    }
+
+    res.json({ results });
+  });
+
+  app.get('/api/items/:id/download-rom', async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    const rawFileId = req.query.fileId;
+    const fileId = rawFileId !== undefined ? Number(rawFileId) : undefined;
+    if (fileId !== undefined && (!Number.isInteger(fileId) || fileId <= 0)) {
+      res.status(400).json({ error: 'Invalid fileId' });
+      return;
+    }
+
+    try {
+      const ctx = orchestrator.resolveItemFileContext(itemId, fileId);
+      if (!ctx) {
+        res.status(404).json({ error: 'Mirrored ROM archive not found on disk' });
+        return;
+      }
+      const inspection = await orchestrator.inspectItemArchive(itemId, fileId);
+      if (!inspection || inspection.playableTargets.length === 0) {
+        res.status(404).json({
+          error: inspection?.patchOnly
+            ? 'Archive contains patch files only; download the raw archive instead.'
+            : 'No playable ROM files found inside archive.',
+        });
+        return;
+      }
+
+      const requestedTargetId = typeof req.query.targetId === 'string' ? req.query.targetId : undefined;
+      const target =
+        (requestedTargetId
+          ? inspection.playableTargets.find((t) => t.id === requestedTargetId || t.primaryEntry === requestedTargetId)
+          : undefined) || inspection.playableTargets[0];
+
+      const customName = typeof req.query.name === 'string' ? req.query.name.trim() : '';
+      const cleanName = customName
+        ? sanitizeFat32Filename(customName, ctx.cfg.romMaxFilenameLen)
+        : target.kind === 'disc_set'
+          ? target.suggestedArchiveName
+          : target.suggestedFilename;
+
+      if (target.kind === 'disc_set') {
+        await streamCleanDiscZipToResponse(ctx.absPath, target.entryPaths, cleanName, res);
+      } else {
+        await streamExtractedEntryToResponse(ctx.absPath, target.primaryEntry, cleanName, res, target.sizeBytes);
+      }
+    } catch (err) {
+      if (!res.headersSent) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  });
+
+  app.get('/api/items/:id/extract-entry', async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    const rawFileId = req.query.fileId;
+    const fileId = rawFileId !== undefined ? Number(rawFileId) : undefined;
+    const entry = typeof req.query.entry === 'string' ? req.query.entry : '';
+    const customName = typeof req.query.name === 'string' ? req.query.name.trim() : '';
+    if (!entry) {
+      res.status(400).json({ error: 'Missing entry path' });
+      return;
+    }
+
+    try {
+      const ctx = orchestrator.resolveItemFileContext(itemId, fileId);
+      if (!ctx) {
+        res.status(404).json({ error: 'Mirrored ROM archive not found on disk' });
+        return;
+      }
+      const outName = customName || path.posix.basename(entry);
+      await streamExtractedEntryToResponse(ctx.absPath, entry, outName, res);
+    } catch (err) {
+      if (!res.headersSent) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    }
   });
 
   app.post('/api/items/:id/metadata', async (req, res) => {

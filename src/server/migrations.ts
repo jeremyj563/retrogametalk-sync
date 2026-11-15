@@ -239,6 +239,28 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 5,
+    name: 'rom_export_naming_and_device_presets',
+    description: 'Add ROM naming template, FAT32 sanitization, and SD card device folder preset columns to scraper_config',
+    up: (db) => {
+      if (!tableHasColumn(db, 'scraper_config', 'rom_naming_template')) {
+        db.prepare(`ALTER TABLE scraper_config ADD COLUMN rom_naming_template TEXT NOT NULL DEFAULT '{title}{regionParen}{tagBracket}'`).run();
+      }
+      if (!tableHasColumn(db, 'scraper_config', 'rom_sanitize_fat32')) {
+        db.prepare(`ALTER TABLE scraper_config ADD COLUMN rom_sanitize_fat32 INTEGER NOT NULL DEFAULT 1`).run();
+      }
+      if (!tableHasColumn(db, 'scraper_config', 'rom_max_filename_len')) {
+        db.prepare(`ALTER TABLE scraper_config ADD COLUMN rom_max_filename_len INTEGER NOT NULL DEFAULT 0`).run();
+      }
+      if (!tableHasColumn(db, 'scraper_config', 'device_preset')) {
+        db.prepare(`ALTER TABLE scraper_config ADD COLUMN device_preset TEXT NOT NULL DEFAULT 'everdrive'`).run();
+      }
+      if (!tableHasColumn(db, 'scraper_config', 'device_folder_map_json')) {
+        db.prepare(`ALTER TABLE scraper_config ADD COLUMN device_folder_map_json TEXT NOT NULL DEFAULT '{}'`).run();
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

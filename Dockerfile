@@ -23,7 +23,7 @@ ENV PORT=3000
 ENV DATA_DIR=/run/repo/.rgt-data
 ENV DOWNLOAD_DIR=/run/repo
 
-RUN apk add --no-cache curl \
+RUN apk add --no-cache curl 7zip \
   && addgroup -S rgt && adduser -S rgt -G rgt \
   && mkdir -p $DOWNLOAD_DIR $DATA_DIR /app/data \
   && chown -R rgt:rgt $DOWNLOAD_DIR /app/data
@@ -33,6 +33,7 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.ts ./server.ts
 COPY --from=builder /app/src/server ./src/server
+COPY --from=builder /app/src/shared ./src/shared
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
 USER rgt
