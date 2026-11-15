@@ -277,3 +277,22 @@ export interface FsTreeNode {
   modifiedAt: string;
   childrenCount?: number;
 }
+
+export interface AppliedMigrationRecord {
+  version: number;
+  name: string;
+  description: string;
+  checksum: string;
+  appliedAt: string;
+  durationMs: number;
+}
+
+export interface DatabaseMigrationReport {
+  previousVersion: number;
+  currentVersion: number;
+  targetVersion: number;
+  backupPath: string | null;
+  appliedNow: AppliedMigrationRecord[];
+  history: AppliedMigrationRecord[];
+  rollbackWarning: string | null;
+}
