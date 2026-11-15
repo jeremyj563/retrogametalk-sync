@@ -235,6 +235,17 @@ function isDownloadCandidateUrl(url: URL, anchorText: string, hasDownloadAttr: b
   return false;
 }
 
+function logAuthContainer(level: 'INFO' | 'WARN' | 'ERROR', message: string): void {
+  const line = `[${new Date().toISOString()}] [AUTH] [${level}] ${message}`;
+  if (level === 'ERROR') {
+    console.error(line);
+  } else if (level === 'WARN') {
+    console.warn(line);
+  } else {
+    console.log(line);
+  }
+}
+
 export class RetroGameTalkClient {
   private jar: CookieJar;
   private httpClient: Impit;
@@ -297,6 +308,15 @@ export class RetroGameTalkClient {
       return this.jar.getCookiesSync(urlStr).length;
     } catch {
       return 0;
+    }
+  }
+
+  private getSafeCookieNames(urlStr: string): string {
+    try {
+      const names = this.jar.getCookiesSync(urlStr).map((c) => c.key);
+      return names.length > 0 ? names.join(', ') : 'none';
+    } catch {
+      return 'none';
     }
   }
 
@@ -600,6 +620,7 @@ export class RetroGameTalkClient {
 
     if (!username && !password) {
       const msg = 'Credentials missing: enter both Repository Username and Repository Password.';
+      logAuthContainer('WARN', `Login aborted before network request: ${msg}`);
       this.setAuthState({
         configured: false,
         authenticated: false,
@@ -610,6 +631,7 @@ export class RetroGameTalkClient {
     }
     if (!username) {
       const msg = 'Repository Username is missing. Enter a valid username.';
+      logAuthContainer('WARN', `Login aborted before network request: ${msg}`);
       this.setAuthState({
         configured: false,
         authenticated: false,
@@ -620,6 +642,7 @@ export class RetroGameTalkClient {
     }
     if (!password) {
       const msg = `Repository Password is missing for user "${username}".`;
+      logAuthContainer('WARN', `Login aborted before network request: ${msg}`);
       this.setAuthState({
         configured: false,
         authenticated: false,
@@ -634,6 +657,7 @@ export class RetroGameTalkClient {
       this.validateHttpUrlOrExplain(config.baseUrl, 'Repository Base URL');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      logAuthContainer('WARN', `Login aborted due to invalid URL configuration: ${msg}`);
       this.setAuthState({
         configured: true,
         authenticated: false,
@@ -644,6 +668,10 @@ export class RetroGameTalkClient {
     }
 
     log?.('info', `Authenticating XenForo + Repo gate at ${config.loginUrl}`);
+    logAuthContainer(
+      'INFO',
+      `Starting login flow — user="${username}", loginUrl="${config.loginUrl}", baseUrl="${config.baseUrl}", existingCookies=[${this.getSafeCookieNames(config.baseUrl)}]`,
+    );
 
     // Step 1: Load the XenForo login form page to obtain xf_csrf cookie + _xfToken hidden field.
     // Note: commit b70de40 used chrome131 whose legacy JA4 TLS fingerprint triggers Cloudflare 403;
@@ -659,21 +687,29 @@ export class RetroGameTalkClient {
     let lastCfChallengeStatus: number | null = null;
     let lastCfRay: string | null = null;
 
-    const tryLoadFormWithCurrentProfile = async (): Promise<
+    const tryLoadFormWithCurrentProfile = async (
+      approachLabel: string,
+    ): Promise<
       | { kind: 'ok'; page: { response: ImpitResponse; finalUrl: string; latencyMs: number }; html: string }
       | { kind: 'cf'; status: number; cfRay: string | null }
       | { kind: 'http_err'; page: { response: ImpitResponse; finalUrl: string; latencyMs: number }; html: string }
       | { kind: 'net_err'; err: unknown }
     > => {
       if (parentFormUrl) {
+        logAuthContainer('INFO', `${approachLabel}: Attempting login form GET ${parentFormUrl}`);
         try {
           const candidatePage = await this.fetchWithRedirects(parentFormUrl, config, { method: 'GET' }, signal, log);
           const candidateHtml = await candidatePage.response.text();
           if (this.isCloudflareChallenge(candidatePage.response.status, candidatePage.response.headers, candidateHtml)) {
+            const cfRay = candidatePage.response.headers.get('cf-ray');
+            logAuthContainer(
+              'WARN',
+              `${approachLabel}: FAILED on GET ${parentFormUrl} — blocked by Cloudflare challenge (HTTP ${candidatePage.response.status}${cfRay ? `, CF-Ray: ${cfRay}` : ''})`,
+            );
             return {
               kind: 'cf',
               status: candidatePage.response.status,
-              cfRay: candidatePage.response.headers.get('cf-ray'),
+              cfRay,
             };
           }
           if (
@@ -681,37 +717,73 @@ export class RetroGameTalkClient {
             (loadHtml(candidateHtml)('input[type="password"]').length > 0 ||
               this.getSafeCookieCount(config.baseUrl) > 0)
           ) {
+            logAuthContainer(
+              'INFO',
+              `${approachLabel}: Loaded login page ${candidatePage.finalUrl} (HTTP ${candidatePage.response.status}, ${Math.round(candidatePage.latencyMs)}ms, cookies=[${this.getSafeCookieNames(config.baseUrl)}])`,
+            );
             return { kind: 'ok', page: candidatePage, html: candidateHtml };
           }
-        } catch {
-          // Fall through to GET config.loginUrl directly so exact URL network errors are reported
+          logAuthContainer(
+            'INFO',
+            `${approachLabel}: GET ${parentFormUrl} returned HTTP ${candidatePage.response.status} without password form; falling back to GET ${config.loginUrl}`,
+          );
+        } catch (err) {
+          logAuthContainer(
+            'WARN',
+            `${approachLabel}: Network error on GET ${parentFormUrl} (${this.formatNetworkError(err, parentFormUrl)}); falling back to GET ${config.loginUrl}`,
+          );
         }
       }
 
+      logAuthContainer('INFO', `${approachLabel}: Attempting login endpoint GET ${config.loginUrl}`);
       try {
         const directPage = await this.fetchWithRedirects(config.loginUrl, config, { method: 'GET' }, signal, log);
         const directHtml = await directPage.response.text();
         if (this.isCloudflareChallenge(directPage.response.status, directPage.response.headers, directHtml)) {
+          const cfRay = directPage.response.headers.get('cf-ray');
+          logAuthContainer(
+            'WARN',
+            `${approachLabel}: FAILED on GET ${config.loginUrl} — blocked by Cloudflare challenge (HTTP ${directPage.response.status}${cfRay ? `, CF-Ray: ${cfRay}` : ''})`,
+          );
           return {
             kind: 'cf',
             status: directPage.response.status,
-            cfRay: directPage.response.headers.get('cf-ray'),
+            cfRay,
           };
         }
         if (directPage.response.status >= 400) {
+          logAuthContainer(
+            'WARN',
+            `${approachLabel}: FAILED on GET ${config.loginUrl} — HTTP ${directPage.response.status} (${directPage.finalUrl})`,
+          );
           return { kind: 'http_err', page: directPage, html: directHtml };
         }
+        logAuthContainer(
+          'INFO',
+          `${approachLabel}: Loaded login page ${directPage.finalUrl} (HTTP ${directPage.response.status}, ${Math.round(directPage.latencyMs)}ms, cookies=[${this.getSafeCookieNames(config.baseUrl)}])`,
+        );
         return { kind: 'ok', page: directPage, html: directHtml };
       } catch (err) {
+        logAuthContainer(
+          'ERROR',
+          `${approachLabel}: FAILED on GET ${config.loginUrl} — ${this.formatNetworkError(err, config.loginUrl)}`,
+        );
         return { kind: 'net_err', err };
       }
     };
 
-    let loadAttempt = await tryLoadFormWithCurrentProfile();
+    let activeImpitLabel = `Approach 1 [impit:${this.activeBrowserProfile}]`;
+    let loadAttempt = await tryLoadFormWithCurrentProfile(activeImpitLabel);
     if (loadAttempt.kind === 'cf') {
-      const alternateProfile: Browser = this.activeBrowserProfile === 'firefox144' ? 'chrome142' : 'firefox144';
+      const prevProfile = this.activeBrowserProfile;
+      const alternateProfile: Browser = prevProfile === 'firefox144' ? 'chrome142' : 'firefox144';
+      logAuthContainer(
+        'INFO',
+        `Switching impit TLS/HTTP2 browser profile from ${prevProfile} -> ${alternateProfile} after Cloudflare challenge`,
+      );
       this.switchBrowserProfile(alternateProfile);
-      loadAttempt = await tryLoadFormWithCurrentProfile();
+      activeImpitLabel = `Approach 2 [impit:${alternateProfile}]`;
+      loadAttempt = await tryLoadFormWithCurrentProfile(activeImpitLabel);
     }
 
     if (loadAttempt.kind === 'net_err') {
@@ -728,6 +800,10 @@ export class RetroGameTalkClient {
     if (loadAttempt.kind === 'cf') {
       lastCfChallengeStatus = loadAttempt.status;
       lastCfRay = loadAttempt.cfRay;
+      logAuthContainer(
+        'WARN',
+        `Both impit browser profiles were blocked by Cloudflare challenge; falling back to native curl`,
+      );
       // Fallback to native curl (direct POST username & password, then CSRF form POST if needed)
       const curlFallback = await this.tryCurlLoginFallback(config, username, password, parentFormUrl, signal, log);
       if (curlFallback) {
@@ -735,6 +811,10 @@ export class RetroGameTalkClient {
       }
 
       const msg = `Blocked by Cloudflare Managed Challenge (HTTP ${lastCfChallengeStatus}${lastCfRay ? ` · CF-Ray ${lastCfRay}` : ''}) at Login Endpoint URL (${config.loginUrl}). Cloudflare returned an interactive Turnstile/JS challenge page instead of the XenForo login form.`;
+      logAuthContainer(
+        'ERROR',
+        `All login approaches (impit:chrome142, impit:firefox144, curl:direct-post, curl:csrf-form) FAILED — ${msg}`,
+      );
       this.setAuthState({
         configured: true,
         authenticated: false,
@@ -769,6 +849,7 @@ export class RetroGameTalkClient {
       );
       if (!alreadySignedIn) {
         const msg = `No login form found at Login Endpoint URL (${formPage.finalUrl}). Verify the Login Endpoint URL points to the login page.`;
+        logAuthContainer('WARN', `${activeImpitLabel}: FAILED — ${msg}`);
         this.setAuthState({
           configured: true,
           authenticated: false,
@@ -777,6 +858,11 @@ export class RetroGameTalkClient {
         });
         return { authenticated: false, statusCode: formPage.response.status, message: msg };
       }
+
+      logAuthContainer(
+        'INFO',
+        `${activeImpitLabel}: Active session cookie already present (cookies=[${this.getSafeCookieNames(config.baseUrl)}]); verifying repository gate GET ${config.baseUrl}`,
+      );
 
       // Already have a valid session cookie (e.g. /login/ redirected away because user is already signed in)
       let repoTitle = '';
@@ -798,6 +884,10 @@ export class RetroGameTalkClient {
       if (repoOk) {
         const cookies = await this.jar.getCookies(config.baseUrl);
         const msg = `Authenticated as ${username} (${cookies.length} cookies${repoTitle ? ` · "${repoTitle}"` : ''})`;
+        logAuthContainer(
+          'INFO',
+          `${activeImpitLabel}: SUCCEEDED (reused active session cookie) — ${msg} (cookies=[${this.getSafeCookieNames(config.baseUrl)}])`,
+        );
         this.setAuthState({
           configured: true,
           authenticated: true,
@@ -813,6 +903,7 @@ export class RetroGameTalkClient {
       }
 
       const msg = `Session cookies present but Repository Base URL (${config.baseUrl}) could not be verified as authenticated.`;
+      logAuthContainer('WARN', `${activeImpitLabel}: FAILED — ${msg}`);
       this.setAuthState({
         configured: true,
         authenticated: false,
@@ -823,6 +914,10 @@ export class RetroGameTalkClient {
     }
 
     const { actionUrl, params } = this.buildLoginFormParams($, form, passwordInput, formPage.finalUrl, config, username, password);
+    logAuthContainer(
+      'INFO',
+      `${activeImpitLabel}: Submitting credentials POST ${actionUrl} (fields=[${Array.from(params.keys()).join(', ')}])`,
+    );
 
     let postRes: { response: ImpitResponse; finalUrl: string; latencyMs: number };
     try {
@@ -843,6 +938,7 @@ export class RetroGameTalkClient {
       );
     } catch (err) {
       const msg = `Failed submitting credentials to "${actionUrl}": ${this.formatNetworkError(err, actionUrl)}`;
+      logAuthContainer('ERROR', `${activeImpitLabel}: FAILED submitting POST — ${msg}`);
       this.setAuthState({
         configured: true,
         authenticated: false,
@@ -854,12 +950,17 @@ export class RetroGameTalkClient {
 
     const postBody = await postRes.response.text();
     if (this.isCloudflareChallenge(postRes.response.status, postRes.response.headers, postBody)) {
+      const cfRay = postRes.response.headers.get('cf-ray');
+      logAuthContainer(
+        'WARN',
+        `${activeImpitLabel}: FAILED on credential POST ${postRes.finalUrl} — blocked by Cloudflare challenge (HTTP ${postRes.response.status}${cfRay ? `, CF-Ray: ${cfRay}` : ''}); falling back to native curl`,
+      );
       const curlFallback = await this.tryCurlLoginFallback(config, username, password, parentFormUrl, signal, log);
       if (curlFallback) {
         return curlFallback;
       }
-      const cfRay = postRes.response.headers.get('cf-ray');
       const msg = `Login request blocked by Cloudflare challenge (HTTP ${postRes.response.status}${cfRay ? ` · CF-Ray ${cfRay}` : ''}) at ${postRes.finalUrl}.`;
+      logAuthContainer('ERROR', `All login approaches FAILED — ${msg}`);
       this.setAuthState({
         configured: true,
         authenticated: false,
@@ -893,6 +994,10 @@ export class RetroGameTalkClient {
     let repoReached = false;
     let repoTitle = '';
     if (!loginRejectedInPost && (postRes.response.ok || postRes.finalUrl.includes('/repo'))) {
+      logAuthContainer(
+        'INFO',
+        `${activeImpitLabel}: Credential POST returned HTTP ${postRes.response.status} (finalUrl=${postRes.finalUrl}, cookies=[${this.getSafeCookieNames(config.baseUrl)}]); priming repository gate GET ${config.baseUrl}`,
+      );
       try {
         const repoCheck = await this.fetchWithRedirects(config.baseUrl, config, { method: 'GET' }, signal, log);
         const repoHtml = await repoCheck.response.text();
@@ -915,16 +1020,26 @@ export class RetroGameTalkClient {
     let message: string;
     if (authenticated) {
       message = `Authenticated as ${username} (${cookies.length} cookies${repoTitle ? ` · "${repoTitle}"` : ''})`;
-    } else if (blockError) {
-      message = `Login rejected: ${blockError}`;
-    } else if (postRes.response.status === 401 || postRes.response.status === 403) {
-      message = `Login rejected (HTTP ${postRes.response.status}) at ${postRes.finalUrl}: invalid credentials or access denied.`;
-    } else if (postRes.response.status >= 400) {
-      message = `Login Endpoint URL returned HTTP ${postRes.response.status} at ${postRes.finalUrl}. Check that the Login Endpoint URL is valid.`;
-    } else if (stillOnLoginForm) {
-      message = `Invalid username or password: server returned the login form without establishing an authenticated session.`;
+      logAuthContainer(
+        'INFO',
+        `${activeImpitLabel}: SUCCEEDED — ${message} (cookies=[${this.getSafeCookieNames(config.baseUrl)}])`,
+      );
     } else {
-      message = `Authentication failed (HTTP ${postRes.response.status}): no active session cookie returned from ${postRes.finalUrl}.`;
+      if (blockError) {
+        message = `Login rejected: ${blockError}`;
+      } else if (postRes.response.status === 401 || postRes.response.status === 403) {
+        message = `Login rejected (HTTP ${postRes.response.status}) at ${postRes.finalUrl}: invalid credentials or access denied.`;
+      } else if (postRes.response.status >= 400) {
+        message = `Login Endpoint URL returned HTTP ${postRes.response.status} at ${postRes.finalUrl}. Check that the Login Endpoint URL is valid.`;
+      } else if (stillOnLoginForm) {
+        message = `Invalid username or password: server returned the login form without establishing an authenticated session.`;
+      } else {
+        message = `Authentication failed (HTTP ${postRes.response.status}): no active session cookie returned from ${postRes.finalUrl}.`;
+      }
+      logAuthContainer(
+        'WARN',
+        `${activeImpitLabel}: FAILED — ${message} (HTTP ${postRes.response.status}, finalUrl=${postRes.finalUrl}, cookies=[${this.getSafeCookieNames(config.baseUrl)}])`,
+      );
     }
 
     this.setAuthState({
@@ -1230,22 +1345,62 @@ export class RetroGameTalkClient {
       };
 
       // Step A: Direct POST matching `curl -s -c cookies.txt -d 'username=...&password=...' <loginUrl>`
+      let activeCurlLabel = 'Approach 3a [curl:direct-post]';
+      logAuthContainer(
+        'INFO',
+        `${activeCurlLabel}: Attempting native curl direct POST ${config.loginUrl} (fields=[username, password])`,
+      );
       const directRes = await runCurl(
         config.loginUrl,
         new URLSearchParams({ username, password }),
       );
       if (!directRes) {
+        logAuthContainer(
+          'ERROR',
+          `${activeCurlLabel}: FAILED — native curl binary unavailable, timed out, or failed to connect`,
+        );
         return null;
       }
 
       await importNetscapeCookies(config.loginUrl);
       let finalLoginRes = directRes;
 
-      if (!(await hasSessionCookieInJar())) {
+      if (await hasSessionCookieInJar()) {
+        logAuthContainer(
+          'INFO',
+          `${activeCurlLabel}: Session cookie acquired (HTTP ${directRes.status}, finalUrl=${directRes.finalUrl}, cookies=[${this.getSafeCookieNames(config.baseUrl)}])`,
+        );
+      } else {
+        const directCf = this.isCloudflareChallenge(directRes.status, directRes.headers, directRes.body);
+        const directCfRay = directRes.headers.get('cf-ray');
+        if (directCf) {
+          logAuthContainer(
+            'WARN',
+            `${activeCurlLabel}: FAILED — blocked by Cloudflare challenge (HTTP ${directRes.status}${directCfRay ? `, CF-Ray: ${directCfRay}` : ''}); trying Approach 3b [curl:csrf-form]`,
+          );
+        } else {
+          logAuthContainer(
+            'INFO',
+            `${activeCurlLabel}: Completed without session cookie (HTTP ${directRes.status}, finalUrl=${directRes.finalUrl}, cookies=[${this.getSafeCookieNames(config.baseUrl)}]); trying Approach 3b [curl:csrf-form]`,
+          );
+        }
+
         // Step B: If direct POST needed XenForo CSRF (_xfToken + login field), load form via curl and submit
+        activeCurlLabel = 'Approach 3b [curl:csrf-form]';
         const formUrlToFetch = parentFormUrl || config.loginUrl;
+        logAuthContainer('INFO', `${activeCurlLabel}: Requesting login form via curl GET ${formUrlToFetch}`);
         const formRes = await runCurl(formUrlToFetch);
-        if (formRes && !this.isCloudflareChallenge(formRes.status, formRes.headers, formRes.body)) {
+        if (!formRes) {
+          logAuthContainer('ERROR', `${activeCurlLabel}: FAILED — curl GET ${formUrlToFetch} returned no response`);
+          if (directCf) return null;
+        } else if (this.isCloudflareChallenge(formRes.status, formRes.headers, formRes.body)) {
+          const formCfRay = formRes.headers.get('cf-ray');
+          logAuthContainer(
+            'WARN',
+            `${activeCurlLabel}: FAILED on GET ${formUrlToFetch} — blocked by Cloudflare challenge (HTTP ${formRes.status}${formCfRay ? `, CF-Ray: ${formCfRay}` : ''})`,
+          );
+          return null;
+        } else {
           await importNetscapeCookies(formRes.finalUrl);
           const form$ = loadHtml(formRes.body);
           const pwInput = form$('input[type="password"]').first();
@@ -1260,16 +1415,32 @@ export class RetroGameTalkClient {
               username,
               password,
             );
+            logAuthContainer(
+              'INFO',
+              `${activeCurlLabel}: Loaded login form (HTTP ${formRes.status}, cookies=[${this.getSafeCookieNames(config.baseUrl)}]); submitting POST ${actionUrl} (fields=[${Array.from(params.keys()).join(', ')}])`,
+            );
             const csrfPostRes = await runCurl(actionUrl, params, formRes.finalUrl);
             if (csrfPostRes) {
               await importNetscapeCookies(csrfPostRes.finalUrl);
               finalLoginRes = csrfPostRes;
+            } else {
+              logAuthContainer('ERROR', `${activeCurlLabel}: FAILED — curl POST ${actionUrl} returned no response`);
             }
+          } else {
+            logAuthContainer(
+              'WARN',
+              `${activeCurlLabel}: No password form found at ${formRes.finalUrl} (HTTP ${formRes.status})`,
+            );
           }
         }
       }
 
       if (this.isCloudflareChallenge(finalLoginRes.status, finalLoginRes.headers, finalLoginRes.body)) {
+        const finalCfRay = finalLoginRes.headers.get('cf-ray');
+        logAuthContainer(
+          'WARN',
+          `${activeCurlLabel}: FAILED — blocked by Cloudflare challenge (HTTP ${finalLoginRes.status}${finalCfRay ? `, CF-Ray: ${finalCfRay}` : ''})`,
+        );
         return null;
       }
 
@@ -1291,6 +1462,7 @@ export class RetroGameTalkClient {
       let repoReached = false;
       let repoTitle = '';
       if (!loginRejected && (hasSessionBeforeRepo || finalLoginRes.status < 400)) {
+        logAuthContainer('INFO', `${activeCurlLabel}: Priming repository gate via curl GET ${config.baseUrl}`);
         const repoRes = await runCurl(config.baseUrl, undefined, finalLoginRes.finalUrl);
         if (repoRes && !this.isCloudflareChallenge(repoRes.status, repoRes.headers, repoRes.body)) {
           await importNetscapeCookies(repoRes.finalUrl);
@@ -1312,16 +1484,26 @@ export class RetroGameTalkClient {
       let message: string;
       if (authenticated) {
         message = `Authenticated as ${username} (${cookies.length} cookies${repoTitle ? ` · "${repoTitle}"` : ''})`;
-      } else if (blockError) {
-        message = `Login rejected: ${blockError}`;
-      } else if (finalLoginRes.status === 401 || finalLoginRes.status === 403) {
-        message = `Login rejected (HTTP ${finalLoginRes.status}) at ${finalLoginRes.finalUrl}: invalid credentials or access denied.`;
-      } else if (finalLoginRes.status >= 400) {
-        message = `Login Endpoint URL returned HTTP ${finalLoginRes.status} at ${finalLoginRes.finalUrl}. Check that the Login Endpoint URL is valid.`;
-      } else if (stillOnLoginForm) {
-        message = `Invalid username or password: server returned the login form without establishing an authenticated session.`;
+        logAuthContainer(
+          'INFO',
+          `${activeCurlLabel}: SUCCEEDED — ${message} (cookies=[${this.getSafeCookieNames(config.baseUrl)}])`,
+        );
       } else {
-        message = `Authentication failed (HTTP ${finalLoginRes.status}): no active session cookie returned from ${finalLoginRes.finalUrl}.`;
+        if (blockError) {
+          message = `Login rejected: ${blockError}`;
+        } else if (finalLoginRes.status === 401 || finalLoginRes.status === 403) {
+          message = `Login rejected (HTTP ${finalLoginRes.status}) at ${finalLoginRes.finalUrl}: invalid credentials or access denied.`;
+        } else if (finalLoginRes.status >= 400) {
+          message = `Login Endpoint URL returned HTTP ${finalLoginRes.status} at ${finalLoginRes.finalUrl}. Check that the Login Endpoint URL is valid.`;
+        } else if (stillOnLoginForm) {
+          message = `Invalid username or password: server returned the login form without establishing an authenticated session.`;
+        } else {
+          message = `Authentication failed (HTTP ${finalLoginRes.status}): no active session cookie returned from ${finalLoginRes.finalUrl}.`;
+        }
+        logAuthContainer(
+          'WARN',
+          `${activeCurlLabel}: FAILED — ${message} (HTTP ${finalLoginRes.status}, finalUrl=${finalLoginRes.finalUrl}, cookies=[${this.getSafeCookieNames(config.baseUrl)}])`,
+        );
       }
 
       this.setAuthState({
@@ -1363,11 +1545,16 @@ export class RetroGameTalkClient {
       requestTimeoutMs: Math.min(config.requestTimeoutMs, 12000),
     };
 
+    const username = (probeConfig.username || '').trim();
+    const password = probeConfig.password || '';
+    logAuthContainer(
+      'INFO',
+      `=== Test Login & Discover Consoles triggered (user="${username || '<anonymous>'}", loginUrl="${probeConfig.loginUrl}", baseUrl="${probeConfig.baseUrl}", cachedCookies=[${this.getSafeCookieNames(probeConfig.baseUrl)}]) ===`,
+    );
+
     try {
       this.validateHttpUrlOrExplain(probeConfig.baseUrl, 'Repository Base URL');
 
-      const username = (probeConfig.username || '').trim();
-      const password = probeConfig.password || '';
       let authMessage = 'Anonymous repository probe';
       let authenticated = false;
 
@@ -1378,6 +1565,11 @@ export class RetroGameTalkClient {
         authMessage = loginRes.message;
 
         if (!authenticated) {
+          const latencyMs = Math.round(performance.now() - started);
+          logAuthContainer(
+            'ERROR',
+            `=== Test Login & Discover Consoles FAILED during login (${latencyMs}ms): ${loginRes.message} ===`,
+          );
           return {
             success: false,
             statusCode: loginRes.statusCode || null,
@@ -1386,16 +1578,23 @@ export class RetroGameTalkClient {
             discoveredSystems: [],
             sampleReleaseUrls: [],
             message: loginRes.message,
-            latencyMs: Math.round(performance.now() - started),
+            latencyMs,
           };
         }
       }
+
+      logAuthContainer(
+        'INFO',
+        `Console discovery [impit:${this.activeBrowserProfile}]: Requesting repository index GET ${probeConfig.baseUrl} (cookies=[${this.getSafeCookieNames(probeConfig.baseUrl)}])`,
+      );
 
       let repoRes: { response: ImpitResponse; finalUrl: string; latencyMs: number };
       try {
         repoRes = await this.fetchWithRedirects(probeConfig.baseUrl, probeConfig, { method: 'GET' }, signal);
       } catch (err) {
         const msg = `Cannot reach Repository Base URL (${probeConfig.baseUrl}): ${this.formatNetworkError(err, probeConfig.baseUrl)}`;
+        const latencyMs = Math.round(performance.now() - started);
+        logAuthContainer('ERROR', `=== Test Login & Discover Consoles FAILED (${latencyMs}ms): ${msg} ===`);
         this.setAuthState({
           configured: Boolean(username && password),
           authenticated: false,
@@ -1410,7 +1609,7 @@ export class RetroGameTalkClient {
           discoveredSystems: [],
           sampleReleaseUrls: [],
           message: msg,
-          latencyMs: Math.round(performance.now() - started),
+          latencyMs,
         };
       }
 
@@ -1419,7 +1618,9 @@ export class RetroGameTalkClient {
       const latencyMs = Math.round(performance.now() - started);
 
       if (this.isCloudflareChallenge(repoRes.response.status, repoRes.response.headers, html)) {
-        const msg = `Blocked by Cloudflare bot protection (HTTP ${repoRes.response.status}) at Repository Base URL (${repoRes.finalUrl}).`;
+        const cfRay = repoRes.response.headers.get('cf-ray');
+        const msg = `Blocked by Cloudflare bot protection (HTTP ${repoRes.response.status}${cfRay ? ` · CF-Ray ${cfRay}` : ''}) at Repository Base URL (${repoRes.finalUrl}).`;
+        logAuthContainer('ERROR', `=== Test Login & Discover Consoles FAILED (${latencyMs}ms): ${msg} ===`);
         this.setAuthState({
           configured: Boolean(username && password),
           authenticated: false,
@@ -1440,6 +1641,7 @@ export class RetroGameTalkClient {
 
       if (repoRes.response.status >= 400) {
         const msg = `Repository Base URL returned HTTP ${repoRes.response.status} at ${repoRes.finalUrl}. Verify the Repository Base URL is correct.`;
+        logAuthContainer('ERROR', `=== Test Login & Discover Consoles FAILED (${latencyMs}ms): ${msg} ===`);
         this.setAuthState({
           configured: Boolean(username && password),
           authenticated: false,
@@ -1467,6 +1669,7 @@ export class RetroGameTalkClient {
         const reason = !username && !password
           ? `Credentials missing: enter both Repository Username and Repository Password (target redirected to ${repoRes.finalUrl}).`
           : `Access rejected: Repository Base URL redirected back to login (${repoRes.finalUrl}). Check your credentials and Login Endpoint URL.`;
+        logAuthContainer('ERROR', `=== Test Login & Discover Consoles FAILED (${latencyMs}ms): ${reason} ===`);
         this.setAuthState({
           configured: Boolean(username && password),
           authenticated: false,
@@ -1494,6 +1697,7 @@ export class RetroGameTalkClient {
       const sortedSystems = [...systems].sort((a, b) => a.localeCompare(b));
       if (!username && !password && sortedSystems.length === 0 && releasePages.length === 0) {
         const msg = `Credentials missing (username and password are empty) and no consoles were discovered at ${repoRes.finalUrl}.`;
+        logAuthContainer('WARN', `=== Test Login & Discover Consoles FAILED (${latencyMs}ms): ${msg} ===`);
         this.setAuthState({
           configured: false,
           authenticated: false,
@@ -1512,6 +1716,11 @@ export class RetroGameTalkClient {
         };
       }
 
+      logAuthContainer(
+        'INFO',
+        `=== Test Login & Discover Consoles SUCCEEDED (${latencyMs}ms): HTTP ${repoRes.response.status}, discovered ${sortedSystems.length} consoles, ${releasePages.length} sample releases, cookies=[${this.getSafeCookieNames(probeConfig.baseUrl)}] ===`,
+      );
+
       return {
         success: true,
         statusCode: repoRes.response.status,
@@ -1524,6 +1733,8 @@ export class RetroGameTalkClient {
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const latencyMs = Math.round(performance.now() - started);
+      logAuthContainer('ERROR', `=== Test Login & Discover Consoles FAILED (${latencyMs}ms): ${msg} ===`);
       this.setAuthState({
         configured: Boolean(probeConfig.username && probeConfig.password),
         authenticated: false,
@@ -1538,7 +1749,7 @@ export class RetroGameTalkClient {
         discoveredSystems: [],
         sampleReleaseUrls: [],
         message: msg,
-        latencyMs: Math.round(performance.now() - started),
+        latencyMs,
       };
     }
   }
