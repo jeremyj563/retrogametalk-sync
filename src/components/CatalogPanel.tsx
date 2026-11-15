@@ -27,26 +27,121 @@ interface CatalogPanelProps {
   onRefreshStatus: () => Promise<void>;
 }
 
+const CATALOG_VIEW_STORAGE_KEY = 'rgt_sync_catalog_view_v1';
+const VALID_STATUS_FILTERS = new Set(['all', 'downloaded', 'skipped', 'partial', 'failed']);
+
+interface CatalogViewPrefs {
+  viewMode: 'catalog' | 'filesystem';
+  catalogLayout: 'table' | 'grid';
+  search: string;
+  systemFilter: string;
+  statusFilter: string;
+  tagFilter: string;
+  genreFilter: string;
+  regionFilter: string;
+  languageFilter: string;
+  fsPath: string;
+  fsSearch: string;
+}
+
+const DEFAULT_CATALOG_VIEW_PREFS: CatalogViewPrefs = {
+  viewMode: 'catalog',
+  catalogLayout: 'table',
+  search: '',
+  systemFilter: 'all',
+  statusFilter: 'all',
+  tagFilter: 'all',
+  genreFilter: 'all',
+  regionFilter: 'all',
+  languageFilter: 'all',
+  fsPath: '',
+  fsSearch: '',
+};
+
+function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return { ...DEFAULT_CATALOG_VIEW_PREFS };
+    }
+    const raw = window.localStorage.getItem(CATALOG_VIEW_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_CATALOG_VIEW_PREFS };
+    const parsed = JSON.parse(raw) as Partial<CatalogViewPrefs>;
+    return {
+      viewMode: parsed.viewMode === 'filesystem' ? 'filesystem' : 'catalog',
+      catalogLayout: parsed.catalogLayout === 'grid' ? 'grid' : 'table',
+      search: typeof parsed.search === 'string' ? parsed.search : '',
+      systemFilter: typeof parsed.systemFilter === 'string' && parsed.systemFilter ? parsed.systemFilter : 'all',
+      statusFilter:
+        typeof parsed.statusFilter === 'string' && VALID_STATUS_FILTERS.has(parsed.statusFilter)
+          ? parsed.statusFilter
+          : 'all',
+      tagFilter: typeof parsed.tagFilter === 'string' && parsed.tagFilter ? parsed.tagFilter : 'all',
+      genreFilter: typeof parsed.genreFilter === 'string' && parsed.genreFilter ? parsed.genreFilter : 'all',
+      regionFilter: typeof parsed.regionFilter === 'string' && parsed.regionFilter ? parsed.regionFilter : 'all',
+      languageFilter:
+        typeof parsed.languageFilter === 'string' && parsed.languageFilter ? parsed.languageFilter : 'all',
+      fsPath: typeof parsed.fsPath === 'string' ? parsed.fsPath : '',
+      fsSearch: typeof parsed.fsSearch === 'string' ? parsed.fsSearch : '',
+    };
+  } catch {
+    return { ...DEFAULT_CATALOG_VIEW_PREFS };
+  }
+}
+
+function buildCatalogQueryKey(prefs: Pick<
+  CatalogViewPrefs,
+  'search' | 'systemFilter' | 'statusFilter' | 'tagFilter' | 'genreFilter' | 'regionFilter' | 'languageFilter'
+>): string {
+  return JSON.stringify([
+    prefs.search,
+    prefs.systemFilter,
+    prefs.statusFilter,
+    prefs.tagFilter,
+    prefs.genreFilter,
+    prefs.regionFilter,
+    prefs.languageFilter,
+  ]);
+}
+
+let memoryCatalogViewPrefs: CatalogViewPrefs = loadInitialCatalogViewPrefs();
+let memoryCatalogFacets: CatalogFacets = {
+  tags: [],
+  genres: [],
+  regions: [],
+  languages: [],
+  sources: [],
+};
+let memoryCatalogSnapshot: {
+  queryKey: string;
+  items: RepositoryItemRecord[];
+  totalItems: number;
+} | null = null;
+let memoryFsSnapshot: {
+  fsPath: string;
+  nodes: FsTreeNode[];
+} | null = null;
+
 export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefreshStatus }: CatalogPanelProps) {
-  const [viewMode, setViewMode] = useState<'catalog' | 'filesystem'>('catalog');
-  const [catalogLayout, setCatalogLayout] = useState<'table' | 'grid'>('table');
-  const [search, setSearch] = useState('');
-  const [systemFilter, setSystemFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [tagFilter, setTagFilter] = useState('all');
-  const [genreFilter, setGenreFilter] = useState('all');
-  const [regionFilter, setRegionFilter] = useState('all');
-  const [languageFilter, setLanguageFilter] = useState('all');
-  const [items, setItems] = useState<RepositoryItemRecord[]>([]);
-  const [facets, setFacets] = useState<CatalogFacets>({
-    tags: [],
-    genres: [],
-    regions: [],
-    languages: [],
-    sources: [],
-  });
-  const [totalItems, setTotalItems] = useState(0);
-  const [loading, setLoading] = useState(true);
+  const initialMatchedCatalog =
+    memoryCatalogSnapshot?.queryKey === buildCatalogQueryKey(memoryCatalogViewPrefs)
+      ? memoryCatalogSnapshot
+      : null;
+  const initialMatchedFs =
+    memoryFsSnapshot?.fsPath === memoryCatalogViewPrefs.fsPath ? memoryFsSnapshot : null;
+
+  const [viewMode, setViewMode] = useState<'catalog' | 'filesystem'>(() => memoryCatalogViewPrefs.viewMode);
+  const [catalogLayout, setCatalogLayout] = useState<'table' | 'grid'>(() => memoryCatalogViewPrefs.catalogLayout);
+  const [search, setSearch] = useState(() => memoryCatalogViewPrefs.search);
+  const [systemFilter, setSystemFilter] = useState(() => memoryCatalogViewPrefs.systemFilter);
+  const [statusFilter, setStatusFilter] = useState(() => memoryCatalogViewPrefs.statusFilter);
+  const [tagFilter, setTagFilter] = useState(() => memoryCatalogViewPrefs.tagFilter);
+  const [genreFilter, setGenreFilter] = useState(() => memoryCatalogViewPrefs.genreFilter);
+  const [regionFilter, setRegionFilter] = useState(() => memoryCatalogViewPrefs.regionFilter);
+  const [languageFilter, setLanguageFilter] = useState(() => memoryCatalogViewPrefs.languageFilter);
+  const [items, setItems] = useState<RepositoryItemRecord[]>(() => initialMatchedCatalog?.items ?? []);
+  const [facets, setFacets] = useState<CatalogFacets>(() => memoryCatalogFacets);
+  const [totalItems, setTotalItems] = useState(() => initialMatchedCatalog?.totalItems ?? 0);
+  const [loading, setLoading] = useState(() => !initialMatchedCatalog);
   const [retryingId, setRetryingId] = useState<number | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [failedCovers, setFailedCovers] = useState<Set<number>>(new Set());
@@ -57,12 +152,46 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
   const [confirmCatalogBulk, setConfirmCatalogBulk] = useState(false);
 
   // Local Disk Tree state + search filter + selection
-  const [fsPath, setFsPath] = useState('');
-  const [fsSearch, setFsSearch] = useState('');
-  const [fsNodes, setFsNodes] = useState<FsTreeNode[]>([]);
+  const [fsPath, setFsPath] = useState(() => memoryCatalogViewPrefs.fsPath);
+  const [fsSearch, setFsSearch] = useState(() => memoryCatalogViewPrefs.fsSearch);
+  const [fsNodes, setFsNodes] = useState<FsTreeNode[]>(() => initialMatchedFs?.nodes ?? []);
   const [fsLoading, setFsLoading] = useState(false);
   const [selectedFsPaths, setSelectedFsPaths] = useState<Set<string>>(new Set());
   const [confirmFsBulk, setConfirmFsBulk] = useState(false);
+
+  useEffect(() => {
+    const nextPrefs: CatalogViewPrefs = {
+      viewMode,
+      catalogLayout,
+      search,
+      systemFilter,
+      statusFilter,
+      tagFilter,
+      genreFilter,
+      regionFilter,
+      languageFilter,
+      fsPath,
+      fsSearch,
+    };
+    memoryCatalogViewPrefs = nextPrefs;
+    try {
+      window.localStorage?.setItem(CATALOG_VIEW_STORAGE_KEY, JSON.stringify(nextPrefs));
+    } catch {
+      // Ignore storage quota / sandbox restrictions; in-memory state still persists across tab navigation
+    }
+  }, [
+    viewMode,
+    catalogLayout,
+    search,
+    systemFilter,
+    statusFilter,
+    tagFilter,
+    genreFilter,
+    regionFilter,
+    languageFilter,
+    fsPath,
+    fsSearch,
+  ]);
 
   const catalogReqSeqRef = useRef(0);
   const fsReqSeqRef = useRef(0);
@@ -95,16 +224,32 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
         if (reqId !== catalogReqSeqRef.current) return;
 
         const nextItems = (data.items || []) as RepositoryItemRecord[];
+        const nextTotal = data.total || 0;
+        memoryCatalogSnapshot = {
+          queryKey: buildCatalogQueryKey({
+            search,
+            systemFilter,
+            statusFilter,
+            tagFilter,
+            genreFilter,
+            regionFilter,
+            languageFilter,
+          }),
+          items: nextItems,
+          totalItems: nextTotal,
+        };
         setItems(nextItems);
-        setTotalItems(data.total || 0);
+        setTotalItems(nextTotal);
         if (data.facets) {
-          setFacets({
+          const nextFacets: CatalogFacets = {
             tags: Array.isArray(data.facets.tags) ? data.facets.tags : [],
             genres: Array.isArray(data.facets.genres) ? data.facets.genres : [],
             regions: Array.isArray(data.facets.regions) ? data.facets.regions : [],
             languages: Array.isArray(data.facets.languages) ? data.facets.languages : [],
             sources: Array.isArray(data.facets.sources) ? data.facets.sources : [],
-          });
+          };
+          memoryCatalogFacets = nextFacets;
+          setFacets(nextFacets);
         }
 
         if (!silent) {
@@ -147,7 +292,7 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
           }
         }
       } finally {
-        if (!silent && reqId === catalogReqSeqRef.current) {
+        if (reqId === catalogReqSeqRef.current) {
           setLoading(false);
         }
       }
@@ -160,18 +305,26 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
     if (!silent) setFsLoading(true);
     try {
       const res = await fetch(`/api/fs/tree?path=${encodeURIComponent(subpath)}`);
-      if (!res.ok || reqId !== fsReqSeqRef.current) return;
+      if (!res.ok) {
+        if (subpath !== '' && reqId === fsReqSeqRef.current) {
+          setFsPath('');
+        }
+        return;
+      }
+      if (reqId !== fsReqSeqRef.current) return;
       const data = await res.json();
       if (reqId !== fsReqSeqRef.current) return;
       const nextNodes = (data.nodes || []) as FsTreeNode[];
-      setFsPath(data.currentPath || '');
+      const resolvedPath = data.currentPath || '';
+      memoryFsSnapshot = { fsPath: resolvedPath, nodes: nextNodes };
+      setFsPath(resolvedPath);
       setFsNodes(nextNodes);
       if (!silent) {
         setSelectedFsPaths(new Set());
         setConfirmFsBulk(false);
       }
     } finally {
-      if (!silent && reqId === fsReqSeqRef.current) {
+      if (reqId === fsReqSeqRef.current) {
         setFsLoading(false);
       }
     }
@@ -179,11 +332,35 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
 
   useEffect(() => {
     if (viewMode === 'catalog') {
-      void loadCatalog(false);
+      const hasCached =
+        memoryCatalogSnapshot?.queryKey ===
+        buildCatalogQueryKey({
+          search,
+          systemFilter,
+          statusFilter,
+          tagFilter,
+          genreFilter,
+          regionFilter,
+          languageFilter,
+        });
+      void loadCatalog(hasCached);
     } else {
-      void loadFsTree(fsPath, false);
+      const hasCachedFs = memoryFsSnapshot?.fsPath === fsPath;
+      void loadFsTree(fsPath, hasCachedFs);
     }
-  }, [viewMode, loadCatalog, loadFsTree, fsPath]);
+  }, [
+    viewMode,
+    loadCatalog,
+    loadFsTree,
+    fsPath,
+    search,
+    systemFilter,
+    statusFilter,
+    tagFilter,
+    genreFilter,
+    regionFilter,
+    languageFilter,
+  ]);
 
   // Live background refresh whenever backend emits catalog_updated during sync
   useEffect(() => {
@@ -500,6 +677,9 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
             >
               <option value="all">All Systems ({status.systems.length})</option>
+              {systemFilter !== 'all' && !status.systems.some((sys) => sys.systemName === systemFilter) && (
+                <option value={systemFilter}>{systemFilter}</option>
+              )}
               {status.systems.map((sys) => (
                 <option key={sys.systemName} value={sys.systemName}>
                   {sys.systemName} ({sys.totalItems})
@@ -514,6 +694,9 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
             >
               <option value="all">All Types ({facets.tags.length})</option>
+              {tagFilter !== 'all' && !facets.tags.includes(tagFilter) && (
+                <option value={tagFilter}>{tagFilter}</option>
+              )}
               {facets.tags.map((tag) => (
                 <option key={tag} value={tag}>
                   {tag}
@@ -528,6 +711,9 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
             >
               <option value="all">All Genres ({facets.genres.length})</option>
+              {genreFilter !== 'all' && !facets.genres.includes(genreFilter) && (
+                <option value={genreFilter}>{genreFilter}</option>
+              )}
               {facets.genres.map((genre) => (
                 <option key={genre} value={genre}>
                   {genre}
@@ -542,6 +728,9 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
             >
               <option value="all">All Regions ({facets.regions.length})</option>
+              {regionFilter !== 'all' && !facets.regions.includes(regionFilter) && (
+                <option value={regionFilter}>{regionFilter}</option>
+              )}
               {facets.regions.map((region) => (
                 <option key={region} value={region}>
                   {region}
@@ -556,6 +745,9 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               className="px-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
             >
               <option value="all">All Languages ({facets.languages.length})</option>
+              {languageFilter !== 'all' && !facets.languages.includes(languageFilter) && (
+                <option value={languageFilter}>{languageFilter}</option>
+              )}
               {facets.languages.map((lang) => (
                 <option key={lang} value={lang}>
                   {lang}
