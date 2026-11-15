@@ -8,9 +8,9 @@ replicaCount: 1
 
 image:
   # Container image repository built from the project Dockerfile
-  repository: retrogametalk-sync
+  repository: ghcr.io/jeremyj563/retrogametalk-sync
   # Image tag (defaults to Chart.AppVersion if empty)
-  tag: ""
+  tag: main
   pullPolicy: IfNotPresent
 
 # Optional imagePullSecrets for private container registries
@@ -34,22 +34,15 @@ service:
   annotations: {}
 
 ingress:
-  # Set to true to expose the CRT web control console via an Ingress controller
+  # Set to true to expose the web control console via an Ingress controller
   enabled: false
   className: ""
   annotations: {}
-    # kubernetes.io/ingress.class: nginx
-    # nginx.ingress.kubernetes.io/proxy-buffering: "off"  # Recommended for SSE /api/events
-    # nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
   hosts:
-    - host: rgt-sync.local
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []
-  #  - secretName: rgt-sync-tls
-  #    hosts:
-  #      - rgt-sync.local
+  - host: rgt-sync.local
+    paths:
+    - path: /
+      pathType: Prefix
 
 # Persistent storage for SQLite state (scraper.db, cookies.json) and mirrored ROM archives
 persistence:
@@ -59,7 +52,7 @@ persistence:
   # Use ReadWriteOnce for single-pod StatefulSet, or ReadWriteMany for shared multi-pod mirrors
   accessMode: ReadWriteOnce
   # Volume size for your mirrored repository archive
-  size: 250Gi
+  size: 50Gi
   # Optionally bind an already-provisioned PersistentVolumeClaim instead of creating one
   existingClaim: ""
   # Mount path inside the container
@@ -84,13 +77,13 @@ scraper:
   # HTTP server listening port inside the container
   port: 3000
   # SQLite database, keyfile, and cookie jar directory (inside persistence.mountPath)
-  dataDir: /run/repo
+  dataDir: /app/data
   # Mirrored local filesystem root where <system>/<release>/<file> directories are written
-  downloadDir: /run/repo/repository
+  downloadDir: /run/repo
   # Target RetroGameTalk repository index URL
-  baseUrl: "https://retrogametalk.com/repo/"
+  baseUrl: https://retrogametalk.com/repo
   # RetroGameTalk XenForo login URL
-  loginUrl: "https://retrogametalk.com/login/"
+  loginUrl: https://retrogametalk.com/login/login
   # Enable or pause automatic cron scheduling ("true" or "false"; empty uses UI/SQLite setting)
   scheduleEnabled: ""
   # 5-field cron schedule for incremental sync runs (empty uses UI/SQLite default "0 */6 * * *")
@@ -128,20 +121,20 @@ probes:
     failureThreshold: 3
 
 # Compute resource requests and limits
-resources:
-  requests:
-    cpu: 100m
-    memory: 256Mi
-  limits:
-    cpu: 1000m
-    memory: 512Mi
+resources: {}
+  # requests:
+  #   cpu: 100m
+  #   memory: 256Mi
+  # limits:
+  #   cpu: 1000m
+  #   memory: 512Mi
 
 # Pod-level security context (matches non-root uid/gid 1000/100 in the Dockerfile)
-podSecurityContext:
-  fsGroup: 100
+podSecurityContext: {}
+  # fsGroup: 100
 
-securityContext:
-  runAsNonRoot: true
+securityContext: {}
+  # runAsNonRoot: true
 
 nodeSelector: {}
 
