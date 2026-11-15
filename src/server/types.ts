@@ -229,6 +229,10 @@ export interface AuthSessionStatus {
 
 export interface ServiceStatusSnapshot {
   podId: string;
+  build: {
+    version: string;
+    gitSha: string;
+  };
   activeRun: SyncRunRecord | null;
   activeTransfer: ActiveTransferState | null;
   currentPhase: string;

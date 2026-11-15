@@ -438,8 +438,8 @@ export default function App() {
             )}
           </div>
 
-          {/* CRT Scanline Display Toggle */}
-          <div className="hidden lg:block border-t border-crt-border pt-4">
+          {/* CRT Scanline Display Toggle & Inconspicuous Build Footer */}
+          <div className="hidden lg:block border-t border-crt-border pt-4 space-y-2.5">
             <button
               type="button"
               onClick={() => setScanlinesEnabled((v) => !v)}
@@ -453,6 +453,20 @@ export default function App() {
                 {scanlinesEnabled ? 'ON' : 'OFF'}
               </span>
             </button>
+
+            {status?.build && (
+              <div
+                className="flex items-center justify-between gap-2 px-1 text-[11px] font-mono text-crt-muted/60 hover:text-crt-muted transition-colors"
+                title={`Version: ${status.build.version} · Revision: ${status.build.gitSha}`}
+              >
+                <span className="truncate">{status.build.version}</span>
+                <span className="tabular-nums shrink-0">
+                  {status.build.gitSha && status.build.gitSha !== 'unknown'
+                    ? status.build.gitSha.slice(0, 7)
+                    : 'local'}
+                </span>
+              </div>
+            )}
           </div>
         </aside>
 
@@ -511,6 +525,20 @@ export default function App() {
                   onSaveConfig={handleSaveConfig}
                   onRefreshConfig={loadInitialData}
                 />
+              )}
+
+              {status.build && (
+                <div
+                  className="lg:hidden mt-8 pt-3 border-t border-crt-border/50 flex items-center justify-between text-[11px] font-mono text-crt-muted/60"
+                  title={`Version: ${status.build.version} · Revision: ${status.build.gitSha}`}
+                >
+                  <span className="truncate">{status.build.version}</span>
+                  <span className="tabular-nums shrink-0">
+                    {status.build.gitSha && status.build.gitSha !== 'unknown'
+                      ? status.build.gitSha.slice(0, 7)
+                      : 'local'}
+                  </span>
+                </div>
               )}
             </>
           )}
