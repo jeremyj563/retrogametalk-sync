@@ -23,7 +23,8 @@ ENV PORT=3000
 ENV DATA_DIR=/app/data
 ENV DOWNLOAD_DIR=/run/repo
 
-RUN addgroup -S rgt && adduser -S rgt -G rgt \
+RUN apk add --no-cache curl \
+  && addgroup -S rgt && adduser -S rgt -G rgt \
   && mkdir -p $DOWNLOAD_DIR $DATA_DIR \
   && chown -R rgt:rgt $DOWNLOAD_DIR $DATA_DIR
 
