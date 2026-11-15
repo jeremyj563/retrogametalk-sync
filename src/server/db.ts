@@ -2,11 +2,13 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { LATEST_SCHEMA_VERSION, runDatabaseMigrations } from './migrations.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import type {
   ActivityLogRecord,
   CatalogFacets,
   ConfigUpdateInput,
+  DatabaseMigrationReport,
   FileItemStatus,
   ItemStatus,
   LogLevel,
@@ -31,6 +33,7 @@ const KEY_PATH = path.join(DATA_DIR, '.keyfile');
 
 let db: Database.Database | null = null;
 let cachedKey: Buffer | null = null;
+let lastMigrationReport: DatabaseMigrationReport | null = null;
 
 export function getDataDir(): string {
   return DATA_DIR;
@@ -144,130 +147,13 @@ export function initDb(): Database.Database {
   db.pragma('busy_timeout = 5000');
   db.pragma('foreign_keys = ON');
 
-  const hadLegacyItemsTable = Boolean(
-    db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'repository_items'`).get(),
-  );
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS scraper_config (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      base_url TEXT NOT NULL,
-      login_url TEXT NOT NULL,
-      username TEXT NOT NULL DEFAULT '',
-      password_enc TEXT NOT NULL DEFAULT '',
-      download_dir TEXT NOT NULL,
-      cron_schedule TEXT NOT NULL DEFAULT '0 */6 * * *',
-      schedule_enabled INTEGER NOT NULL DEFAULT 0,
-      base_delay_ms INTEGER NOT NULL DEFAULT 1500,
-      min_delay_ms INTEGER NOT NULL DEFAULT 750,
-      max_delay_ms INTEGER NOT NULL DEFAULT 60000,
-      backoff_multiplier REAL NOT NULL DEFAULT 2.0,
-      max_retries INTEGER NOT NULL DEFAULT 5,
-      max_concurrency INTEGER NOT NULL DEFAULT 1,
-      request_timeout_ms INTEGER NOT NULL DEFAULT 30000,
-      user_agent TEXT NOT NULL DEFAULT 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-      system_filter TEXT NOT NULL DEFAULT '',
-      discovered_systems_json TEXT NOT NULL DEFAULT '[]',
-      last_watermark_at TEXT,
-      last_authenticated_at TEXT,
-      updated_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS sync_runs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      trigger_type TEXT NOT NULL,
-      mode TEXT NOT NULL,
-      status TEXT NOT NULL,
-      started_at TEXT NOT NULL,
-      finished_at TEXT,
-      pages_crawled INTEGER NOT NULL DEFAULT 0,
-      new_found INTEGER NOT NULL DEFAULT 0,
-      downloaded_count INTEGER NOT NULL DEFAULT 0,
-      skipped_count INTEGER NOT NULL DEFAULT 0,
-      failed_count INTEGER NOT NULL DEFAULT 0,
-      bytes_downloaded INTEGER NOT NULL DEFAULT 0,
-      rate_limit_hits INTEGER NOT NULL DEFAULT 0,
-      avg_delay_ms INTEGER NOT NULL DEFAULT 0,
-      error_summary TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS catalog_releases (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      remote_url TEXT NOT NULL UNIQUE,
-      wp_post_id INTEGER,
-      wp_post_type TEXT,
-      remote_path TEXT NOT NULL,
-      local_path TEXT NOT NULL,
-      system_name TEXT NOT NULL,
-      release_type TEXT NOT NULL DEFAULT 'Retail ROM',
-      release_tags_json TEXT NOT NULL DEFAULT '[]',
-      title TEXT NOT NULL,
-      file_size_bytes INTEGER NOT NULL DEFAULT 0,
-      published_at TEXT,
-      remote_updated_at TEXT,
-      status TEXT NOT NULL DEFAULT 'queued',
-      error_message TEXT,
-      last_run_id INTEGER,
-      discovered_at TEXT NOT NULL,
-      downloaded_at TEXT,
-      publisher TEXT,
-      developer TEXT,
-      release_year TEXT,
-      genres_json TEXT NOT NULL DEFAULT '[]',
-      regions_json TEXT NOT NULL DEFAULT '[]',
-      languages_json TEXT NOT NULL DEFAULT '[]',
-      sources_json TEXT NOT NULL DEFAULT '[]',
-      cover_local_path TEXT,
-      screenshots_json TEXT NOT NULL DEFAULT '[]',
-      metadata_json TEXT
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_releases_system ON catalog_releases(system_name);
-    CREATE INDEX IF NOT EXISTS idx_releases_status ON catalog_releases(status);
-
-    CREATE TABLE IF NOT EXISTS catalog_release_files (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      release_id INTEGER NOT NULL REFERENCES catalog_releases(id) ON DELETE CASCADE,
-      remote_url TEXT NOT NULL UNIQUE,
-      download_url TEXT NOT NULL,
-      remote_path TEXT NOT NULL,
-      local_path TEXT NOT NULL,
-      filename TEXT NOT NULL,
-      display_label TEXT NOT NULL,
-      file_role TEXT NOT NULL DEFAULT 'ROM',
-      file_size_bytes INTEGER NOT NULL DEFAULT 0,
-      status TEXT NOT NULL,
-      error_message TEXT,
-      last_run_id INTEGER,
-      discovered_at TEXT NOT NULL,
-      downloaded_at TEXT,
-      UNIQUE(release_id, filename)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_release_files_release_id ON catalog_release_files(release_id);
-    CREATE INDEX IF NOT EXISTS idx_release_files_local_path ON catalog_release_files(local_path);
-
-    CREATE TABLE IF NOT EXISTS activity_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      run_id INTEGER,
-      level TEXT NOT NULL,
-      message TEXT NOT NULL,
-      detail TEXT,
-      created_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS distributed_locks (
-      lock_name TEXT PRIMARY KEY,
-      holder_id TEXT NOT NULL,
-      acquired_at TEXT NOT NULL,
-      expires_at TEXT NOT NULL
-    );
-  `);
+  lastMigrationReport = runDatabaseMigrations(db, {
+    dataDir: DATA_DIR,
+    defaultDownloadDir: DEFAULT_DOWNLOAD_DIR,
+  });
 
   const now = new Date().toISOString();
-  const existing = db.prepare('SELECT id, base_url, login_url, download_dir FROM scraper_config WHERE id = 1').get() as
-    | { id: number; base_url: string; login_url: string; download_dir: string }
-    | undefined;
+  const existing = db.prepare('SELECT id FROM scraper_config WHERE id = 1').get() as { id: number } | undefined;
   if (!existing) {
     db.prepare(`
       INSERT INTO scraper_config (
@@ -289,47 +175,24 @@ export function initDb(): Database.Database {
       process.env.SCRAPER_SYSTEM_FILTER || '',
       now,
     );
-  } else {
-    if (existing.base_url === 'https://retrogametalk.com/repository/') {
-      db.prepare('UPDATE scraper_config SET base_url = ? WHERE id = 1').run('https://retrogametalk.com/repo/');
-    }
-    if (existing.login_url === 'https://retrogametalk.com/wp-login.php') {
-      db.prepare('UPDATE scraper_config SET login_url = ? WHERE id = 1').run('https://retrogametalk.com/login/');
-    }
-    db.prepare(
-      'UPDATE scraper_config SET user_agent = ? WHERE id = 1 AND user_agent IN (?, ?, ?)',
-    ).run(
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-      'Mozilla/5.0 (compatible; RetroGameTalkSync/1.0)',
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  }
+
+  // Record migration summary in activity_logs whenever a new revision actually applied migrations
+  if (lastMigrationReport.appliedNow.length > 0) {
+    const appliedLabels = lastMigrationReport.appliedNow.map((m) => `v${m.version}:${m.name}`).join(', ');
+    db.prepare(`
+      INSERT INTO activity_logs (run_id, level, message, detail, created_at)
+      VALUES (NULL, 'info', ?, ?, ?)
+    `).run(
+      `Applied ${lastMigrationReport.appliedNow.length} SQLite schema migration(s): v${lastMigrationReport.previousVersion} → v${lastMigrationReport.currentVersion}`,
+      `${appliedLabels}${lastMigrationReport.backupPath ? ` · Snapshot: ${lastMigrationReport.backupPath}` : ''}`,
+      now,
     );
-    const legacyDownloadDirs = new Set([
-      path.resolve('./data/repository'),
-      path.resolve('/app/data/repository'),
-    ]);
-    if (DATA_DIR === '/run/repo/.rgt-data' && legacyDownloadDirs.has(path.resolve(existing.download_dir))) {
-      db.prepare('UPDATE scraper_config SET download_dir = ? WHERE id = 1').run(DEFAULT_DOWNLOAD_DIR);
-    }
-  }
-
-  const cols = db.prepare('PRAGMA table_info(scraper_config)').all() as { name: string }[];
-  if (!cols.some((c) => c.name === 'discovered_systems_json')) {
-    db.prepare(`ALTER TABLE scraper_config ADD COLUMN discovered_systems_json TEXT NOT NULL DEFAULT '[]'`).run();
-  }
-  if (!cols.some((c) => c.name === 'last_authenticated_at')) {
-    db.prepare(`ALTER TABLE scraper_config ADD COLUMN last_authenticated_at TEXT`).run();
-  }
-
-  const releaseCols = db.prepare('PRAGMA table_info(catalog_releases)').all() as { name: string }[];
-  if (!releaseCols.some((c) => c.name === 'remote_updated_at')) {
-    db.prepare(`ALTER TABLE catalog_releases ADD COLUMN remote_updated_at TEXT`).run();
-  }
-
-  // Cleanly reset legacy flat catalog index so the next sync imports grouped release entries + WP tags
-  if (hadLegacyItemsTable) {
-    db.prepare('DROP TABLE IF EXISTS repository_items').run();
-    db.prepare('UPDATE scraper_config SET last_watermark_at = NULL WHERE id = 1').run();
+  } else if (lastMigrationReport.rollbackWarning) {
+    db.prepare(`
+      INSERT INTO activity_logs (run_id, level, message, detail, created_at)
+      VALUES (NULL, 'warn', ?, NULL, ?)
+    `).run(lastMigrationReport.rollbackWarning, now);
   }
 
   // Recover any stale running jobs left behind by an abrupt container kill
@@ -357,6 +220,25 @@ export function initDb(): Database.Database {
   }
 
   return db;
+}
+
+export function getSchemaMigrationReport(): DatabaseMigrationReport {
+  if (!db) {
+    initDb();
+  }
+  if (lastMigrationReport) {
+    return lastMigrationReport;
+  }
+  const currentVersion = Number(getDb().pragma('user_version', { simple: true }) || 0);
+  return {
+    previousVersion: currentVersion,
+    currentVersion,
+    targetVersion: LATEST_SCHEMA_VERSION,
+    backupPath: null,
+    appliedNow: [],
+    history: [],
+    rollbackWarning: null,
+  };
 }
 
 function getDb(): Database.Database {

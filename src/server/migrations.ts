@@ -1,0 +1,482 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import type Database from 'better-sqlite3';
+import type { AppliedMigrationRecord, DatabaseMigrationReport } from './types.ts';
+
+export interface MigrationContext {
+  dataDir: string;
+  defaultDownloadDir: string;
+}
+
+export interface SchemaMigration {
+  version: number;
+  name: string;
+  description: string;
+  disableForeignKeys?: boolean;
+  up: (db: Database.Database, ctx: MigrationContext) => void;
+}
+
+const MAX_RETAINED_BACKUPS = 5;
+
+function logDbMigration(level: 'INFO' | 'WARN' | 'ERROR', message: string): void {
+  const line = `[${new Date().toISOString()}] [DB] [${level}] ${message}`;
+  if (level === 'ERROR') {
+    console.error(line);
+  } else if (level === 'WARN') {
+    console.warn(line);
+  } else {
+    console.log(line);
+  }
+}
+
+function tableHasColumn(db: Database.Database, tableName: string, columnName: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[];
+  return rows.some((row) => row.name === columnName);
+}
+
+function computeMigrationChecksum(migration: SchemaMigration): string {
+  return crypto
+    .createHash('sha256')
+    .update(`${migration.version}:${migration.name}:${migration.up.toString()}`)
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/**
+ * Ordered, append-only SQLite schema migrations.
+ * Add new schema changes by appending the next sequential integer version here.
+ */
+export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
+  {
+    version: 1,
+    name: 'initial_core_schema',
+    description: 'Create core config, sync runs, grouped catalog releases/files, activity logs, and distributed locks tables',
+    up: (db) => {
+      const hadLegacyItemsTable = Boolean(
+        db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'repository_items'`).get(),
+      );
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS scraper_config (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          base_url TEXT NOT NULL,
+          login_url TEXT NOT NULL,
+          username TEXT NOT NULL DEFAULT '',
+          password_enc TEXT NOT NULL DEFAULT '',
+          download_dir TEXT NOT NULL,
+          cron_schedule TEXT NOT NULL DEFAULT '0 */6 * * *',
+          schedule_enabled INTEGER NOT NULL DEFAULT 0,
+          base_delay_ms INTEGER NOT NULL DEFAULT 1500,
+          min_delay_ms INTEGER NOT NULL DEFAULT 750,
+          max_delay_ms INTEGER NOT NULL DEFAULT 60000,
+          backoff_multiplier REAL NOT NULL DEFAULT 2.0,
+          max_retries INTEGER NOT NULL DEFAULT 5,
+          max_concurrency INTEGER NOT NULL DEFAULT 1,
+          request_timeout_ms INTEGER NOT NULL DEFAULT 30000,
+          user_agent TEXT NOT NULL DEFAULT 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+          system_filter TEXT NOT NULL DEFAULT '',
+          discovered_systems_json TEXT NOT NULL DEFAULT '[]',
+          last_watermark_at TEXT,
+          last_authenticated_at TEXT,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sync_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          trigger_type TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          status TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          finished_at TEXT,
+          pages_crawled INTEGER NOT NULL DEFAULT 0,
+          new_found INTEGER NOT NULL DEFAULT 0,
+          downloaded_count INTEGER NOT NULL DEFAULT 0,
+          skipped_count INTEGER NOT NULL DEFAULT 0,
+          failed_count INTEGER NOT NULL DEFAULT 0,
+          bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+          rate_limit_hits INTEGER NOT NULL DEFAULT 0,
+          avg_delay_ms INTEGER NOT NULL DEFAULT 0,
+          error_summary TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS catalog_releases (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          remote_url TEXT NOT NULL UNIQUE,
+          wp_post_id INTEGER,
+          wp_post_type TEXT,
+          remote_path TEXT NOT NULL,
+          local_path TEXT NOT NULL,
+          system_name TEXT NOT NULL,
+          release_type TEXT NOT NULL DEFAULT 'Retail ROM',
+          release_tags_json TEXT NOT NULL DEFAULT '[]',
+          title TEXT NOT NULL,
+          file_size_bytes INTEGER NOT NULL DEFAULT 0,
+          published_at TEXT,
+          remote_updated_at TEXT,
+          status TEXT NOT NULL DEFAULT 'queued',
+          error_message TEXT,
+          last_run_id INTEGER,
+          discovered_at TEXT NOT NULL,
+          downloaded_at TEXT,
+          publisher TEXT,
+          developer TEXT,
+          release_year TEXT,
+          genres_json TEXT NOT NULL DEFAULT '[]',
+          regions_json TEXT NOT NULL DEFAULT '[]',
+          languages_json TEXT NOT NULL DEFAULT '[]',
+          sources_json TEXT NOT NULL DEFAULT '[]',
+          cover_local_path TEXT,
+          screenshots_json TEXT NOT NULL DEFAULT '[]',
+          metadata_json TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_releases_system ON catalog_releases(system_name);
+        CREATE INDEX IF NOT EXISTS idx_releases_status ON catalog_releases(status);
+
+        CREATE TABLE IF NOT EXISTS catalog_release_files (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          release_id INTEGER NOT NULL REFERENCES catalog_releases(id) ON DELETE CASCADE,
+          remote_url TEXT NOT NULL UNIQUE,
+          download_url TEXT NOT NULL,
+          remote_path TEXT NOT NULL,
+          local_path TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          display_label TEXT NOT NULL,
+          file_role TEXT NOT NULL DEFAULT 'ROM',
+          file_size_bytes INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL,
+          error_message TEXT,
+          last_run_id INTEGER,
+          discovered_at TEXT NOT NULL,
+          downloaded_at TEXT,
+          UNIQUE(release_id, filename)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_release_files_release_id ON catalog_release_files(release_id);
+        CREATE INDEX IF NOT EXISTS idx_release_files_local_path ON catalog_release_files(local_path);
+
+        CREATE TABLE IF NOT EXISTS activity_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id INTEGER,
+          level TEXT NOT NULL,
+          message TEXT NOT NULL,
+          detail TEXT,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS distributed_locks (
+          lock_name TEXT PRIMARY KEY,
+          holder_id TEXT NOT NULL,
+          acquired_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+      `);
+
+      // Cleanly retire legacy v1 flat table if upgrading from an early pre-grouped release
+      if (hadLegacyItemsTable) {
+        db.prepare('DROP TABLE IF EXISTS repository_items').run();
+        const hasConfig = db.prepare(`SELECT 1 FROM scraper_config WHERE id = 1`).get();
+        if (hasConfig) {
+          db.prepare('UPDATE scraper_config SET last_watermark_at = NULL WHERE id = 1').run();
+        }
+      }
+    },
+  },
+  {
+    version: 2,
+    name: 'config_discovery_and_auth_history',
+    description: 'Add discovered_systems_json and last_authenticated_at columns to scraper_config for pod-restart persistence',
+    up: (db) => {
+      if (!tableHasColumn(db, 'scraper_config', 'discovered_systems_json')) {
+        db.prepare(`ALTER TABLE scraper_config ADD COLUMN discovered_systems_json TEXT NOT NULL DEFAULT '[]'`).run();
+      }
+      if (!tableHasColumn(db, 'scraper_config', 'last_authenticated_at')) {
+        db.prepare(`ALTER TABLE scraper_config ADD COLUMN last_authenticated_at TEXT`).run();
+      }
+    },
+  },
+  {
+    version: 3,
+    name: 'release_remote_updated_at_and_index',
+    description: 'Add remote_updated_at timestamp column and index on catalog_releases for delta sync tracking',
+    up: (db) => {
+      if (!tableHasColumn(db, 'catalog_releases', 'remote_updated_at')) {
+        db.prepare(`ALTER TABLE catalog_releases ADD COLUMN remote_updated_at TEXT`).run();
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_releases_remote_updated_at ON catalog_releases(remote_updated_at);`);
+    },
+  },
+  {
+    version: 4,
+    name: 'legacy_config_defaults_and_data_dir_normalization',
+    description: 'Normalize retired repository URLs, legacy User-Agent strings, and migrated DOWNLOAD_DIR paths',
+    up: (db, ctx) => {
+      const existing = db
+        .prepare('SELECT id, base_url, login_url, download_dir FROM scraper_config WHERE id = 1')
+        .get() as { id: number; base_url: string; login_url: string; download_dir: string } | undefined;
+
+      if (!existing) return;
+
+      if (existing.base_url === 'https://retrogametalk.com/repository/') {
+        db.prepare('UPDATE scraper_config SET base_url = ? WHERE id = 1').run('https://retrogametalk.com/repo/');
+      }
+      if (existing.login_url === 'https://retrogametalk.com/wp-login.php') {
+        db.prepare('UPDATE scraper_config SET login_url = ? WHERE id = 1').run('https://retrogametalk.com/login/');
+      }
+      db.prepare('UPDATE scraper_config SET user_agent = ? WHERE id = 1 AND user_agent IN (?, ?, ?)').run(
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (compatible; RetroGameTalkSync/1.0)',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      );
+      const legacyDownloadDirs = new Set([
+        path.resolve('./data/repository'),
+        path.resolve('/app/data/repository'),
+      ]);
+      if (ctx.dataDir === '/run/repo/.rgt-data' && legacyDownloadDirs.has(path.resolve(existing.download_dir))) {
+        db.prepare('UPDATE scraper_config SET download_dir = ? WHERE id = 1').run(ctx.defaultDownloadDir);
+      }
+    },
+  },
+];
+
+export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
+
+function createPreMigrationBackup(db: Database.Database, dataDir: string, fromVersion: number, toVersion: number): string | null {
+  const backupsDir = path.join(dataDir, 'backups');
+  fs.mkdirSync(backupsDir, { recursive: true });
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = `scraper.db.pre-v${fromVersion}-to-v${toVersion}-${stamp}.bak`;
+  const backupPath = path.join(backupsDir, filename);
+
+  // VACUUM INTO creates an atomic, WAL-consistent standalone snapshot without blocking/mutating live WAL state.
+  // SQLite does not accept parameter binding for VACUUM INTO filenames in all builds, so escape single quotes safely.
+  const escaped = backupPath.replace(/'/g, "''");
+  db.exec(`VACUUM INTO '${escaped}'`);
+
+  // Prune older snapshots so persistent storage stays bounded across many image deployments
+  try {
+    const entries = fs
+      .readdirSync(backupsDir)
+      .filter((name) => name.startsWith('scraper.db.') && name.endsWith('.bak'))
+      .map((name) => {
+        const full = path.join(backupsDir, name);
+        return { name, full, mtimeMs: fs.statSync(full).mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    for (const stale of entries.slice(MAX_RETAINED_BACKUPS)) {
+      fs.rmSync(stale.full, { force: true });
+    }
+  } catch {
+    // Non-fatal backup pruning error
+  }
+
+  return backupPath;
+}
+
+function readAppliedHistory(db: Database.Database): AppliedMigrationRecord[] {
+  const rows = db
+    .prepare('SELECT version, name, description, checksum, applied_at, duration_ms FROM schema_migrations ORDER BY version ASC')
+    .all() as {
+    version: number;
+    name: string;
+    description: string;
+    checksum: string;
+    applied_at: string;
+    duration_ms: number;
+  }[];
+
+  return rows.map((row) => ({
+    version: Number(row.version),
+    name: String(row.name),
+    description: String(row.description),
+    checksum: String(row.checksum),
+    appliedAt: String(row.applied_at),
+    durationMs: Number(row.duration_ms),
+  }));
+}
+
+export function runDatabaseMigrations(
+  db: Database.Database,
+  ctx: MigrationContext,
+  migrations: readonly SchemaMigration[] = SCHEMA_MIGRATIONS,
+): DatabaseMigrationReport {
+  const sorted = [...migrations].sort((a, b) => a.version - b.version);
+  for (let i = 0; i < sorted.length; i += 1) {
+    if (i > 0 && sorted[i].version <= sorted[i - 1].version) {
+      throw new Error(`Duplicate or out-of-order migration version v${sorted[i].version}`);
+    }
+  }
+
+  const targetVersion = sorted.length > 0 ? sorted[sorted.length - 1].version : 0;
+
+  const existingAppTables = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != 'schema_migrations'`)
+    .all() as { name: string }[];
+  const hadExistingData = existingAppTables.length > 0;
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      checksum TEXT NOT NULL,
+      applied_at TEXT NOT NULL,
+      duration_ms INTEGER NOT NULL
+    );
+  `);
+
+  const pragmaVersion = Number(db.pragma('user_version', { simple: true }) || 0);
+  const recorded = readAppliedHistory(db);
+  const recordedByVersion = new Map<number, AppliedMigrationRecord>();
+  let maxRecordedVersion = 0;
+  for (const rec of recorded) {
+    recordedByVersion.set(rec.version, rec);
+    if (rec.version > maxRecordedVersion) {
+      maxRecordedVersion = rec.version;
+    }
+  }
+
+  const previousVersion = Math.max(pragmaVersion, maxRecordedVersion);
+
+  // Detect rollback (existing DB has newer schema than running binary knows)
+  let rollbackWarning: string | null = null;
+  if (previousVersion > targetVersion) {
+    rollbackWarning = `Database schema v${previousVersion} is newer than binary target v${targetVersion}; skipping forward migrations to avoid data loss.`;
+    logDbMigration('WARN', rollbackWarning);
+    return {
+      previousVersion,
+      currentVersion: previousVersion,
+      targetVersion,
+      backupPath: null,
+      appliedNow: [],
+      history: recorded,
+      rollbackWarning,
+    };
+  }
+
+  // Verify checksums of already-applied migrations (informational warning only)
+  for (const m of sorted) {
+    const prev = recordedByVersion.get(m.version);
+    if (prev) {
+      const expectedChecksum = computeMigrationChecksum(m);
+      if (prev.checksum !== expectedChecksum || prev.name !== m.name) {
+        logDbMigration(
+          'WARN',
+          `Migration v${m.version} ("${m.name}") checksum/name differs from recorded history ("${prev.name}"); leaving applied schema intact.`,
+        );
+      }
+    }
+  }
+
+  const pending = sorted.filter((m) => m.version > previousVersion && !recordedByVersion.has(m.version));
+  if (pending.length === 0) {
+    if (pragmaVersion !== targetVersion && maxRecordedVersion === targetVersion) {
+      db.pragma(`user_version = ${targetVersion}`);
+    }
+    logDbMigration('INFO', `SQLite schema up to date at v${previousVersion} (${recorded.length}/${sorted.length} migrations recorded)`);
+    return {
+      previousVersion,
+      currentVersion: previousVersion,
+      targetVersion,
+      backupPath: null,
+      appliedNow: [],
+      history: recorded,
+      rollbackWarning: null,
+    };
+  }
+
+  let backupPath: string | null = null;
+  if (hadExistingData) {
+    try {
+      backupPath = createPreMigrationBackup(db, ctx.dataDir, previousVersion, targetVersion);
+      logDbMigration('INFO', `Created pre-migration snapshot: ${backupPath}`);
+    } catch (err) {
+      logDbMigration(
+        'WARN',
+        `Pre-migration snapshot skipped (${err instanceof Error ? err.message : String(err)}); proceeding with transactional migration`,
+      );
+    }
+  }
+
+  const appliedNow: AppliedMigrationRecord[] = [];
+
+  for (const migration of pending) {
+    const startedMs = performance.now();
+    const checksum = computeMigrationChecksum(migration);
+    const appliedAt = new Date().toISOString();
+
+    if (migration.disableForeignKeys) {
+      db.pragma('foreign_keys = OFF');
+    }
+
+    try {
+      const runTx = db.transaction(() => {
+        migration.up(db, ctx);
+        const durationMs = Math.max(0, Math.round(performance.now() - startedMs));
+        db.prepare(`
+          INSERT INTO schema_migrations (version, name, description, checksum, applied_at, duration_ms)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(migration.version, migration.name, migration.description, checksum, appliedAt, durationMs);
+        db.pragma(`user_version = ${migration.version}`);
+        return durationMs;
+      });
+
+      const durationMs = runTx();
+
+      if (migration.disableForeignKeys) {
+        db.pragma('foreign_keys = ON');
+        const fkViolations = db.pragma('foreign_key_check') as unknown[];
+        if (fkViolations.length > 0) {
+          throw new Error(`Foreign key integrity check failed after migration v${migration.version} (${fkViolations.length} violation(s))`);
+        }
+      }
+
+      appliedNow.push({
+        version: migration.version,
+        name: migration.name,
+        description: migration.description,
+        checksum,
+        appliedAt,
+        durationMs,
+      });
+
+      logDbMigration('INFO', `Applied migration v${migration.version} (${migration.name}) in ${durationMs}ms`);
+    } catch (err) {
+      if (migration.disableForeignKeys) {
+        try {
+          db.pragma('foreign_keys = ON');
+        } catch {
+          // Ignore secondary pragma error
+        }
+      }
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logDbMigration(
+        'ERROR',
+        `Migration v${migration.version} (${migration.name}) failed and rolled back: ${errMsg}${backupPath ? ` (backup preserved at ${backupPath})` : ''}`,
+      );
+      throw err;
+    }
+  }
+
+  const finalVersion = Number(db.pragma('user_version', { simple: true }) || targetVersion);
+  const fullHistory = readAppliedHistory(db);
+
+  logDbMigration(
+    'INFO',
+    `Schema migration complete: v${previousVersion} -> v${finalVersion} (+${appliedNow.length} migration(s))`,
+  );
+
+  return {
+    previousVersion,
+    currentVersion: finalVersion,
+    targetVersion,
+    backupPath,
+    appliedNow,
+    history: fullHistory,
+    rollbackWarning: null,
+  };
+}

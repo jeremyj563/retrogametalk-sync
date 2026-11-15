@@ -20,6 +20,7 @@ import {
   getLastAuthenticatedAt,
   getReleaseFileById,
   getRepositoryItemById,
+  getSchemaMigrationReport,
   listSyncRuns,
   recordSuccessfulLogin,
   releaseDistributedLock,
@@ -161,8 +162,9 @@ export class ScraperOrchestrator extends EventEmitter {
           ? 'Unverified'
           : 'Unset';
 
+    const schemaReport = getSchemaMigrationReport();
     console.log(
-      `[${new Date().toISOString()}] [STARTUP] [INFO] Persistence initialized — DATA_DIR="${getDataDir()}", DOWNLOAD_DIR="${refreshedCfg.downloadDir}", auth=${authLabel} (hasCompletedLogin=${authSnap.hasCompletedLogin}, cookies=[${hydrated.cookieNames}]), discoveredSystems=${refreshedCfg.discoveredSystems.length}, catalogReleases=${totals.totalCatalogItems} (reconciledFromDisk=${reconciled.releasesImported})`,
+      `[${new Date().toISOString()}] [STARTUP] [INFO] Persistence initialized — DATA_DIR="${getDataDir()}", DOWNLOAD_DIR="${refreshedCfg.downloadDir}", schema=v${schemaReport.currentVersion}/v${schemaReport.targetVersion}, auth=${authLabel} (hasCompletedLogin=${authSnap.hasCompletedLogin}, cookies=[${hydrated.cookieNames}]), discoveredSystems=${refreshedCfg.discoveredSystems.length}, catalogReleases=${totals.totalCatalogItems} (reconciledFromDisk=${reconciled.releasesImported})`,
     );
 
     this.reconfigureScheduler(refreshedCfg);
@@ -2043,6 +2045,9 @@ export class ScraperOrchestrator extends EventEmitter {
       '# HELP rgt_rate_limit_hits_total Cumulative upstream rate limit events encountered',
       '# TYPE rgt_rate_limit_hits_total counter',
       `rgt_rate_limit_hits_total ${totalRateHits}`,
+      '# HELP rgt_db_schema_version Current SQLite database schema migration version',
+      '# TYPE rgt_db_schema_version gauge',
+      `rgt_db_schema_version ${getSchemaMigrationReport().currentVersion}`,
       '',
     ].join('\n');
   }

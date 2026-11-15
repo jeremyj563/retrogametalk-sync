@@ -5,6 +5,7 @@ import express from 'express';
 import {
   getPublicConfig,
   getRepositoryItemById,
+  getSchemaMigrationReport,
   initDb,
   listActivityLogs,
   listSyncRuns,
@@ -32,11 +33,12 @@ async function bootstrap() {
   app.get('/readyz', (_req, res) => {
     try {
       const snap = orchestrator.getStatusSnapshot();
+      const schema = getSchemaMigrationReport();
       if (!snap.storage.writable) {
         res.status(503).json({ status: 'not_ready', reason: 'DOWNLOAD_DIR not writable' });
         return;
       }
-      res.status(200).json({ status: 'ready', podId: snap.podId });
+      res.status(200).json({ status: 'ready', podId: snap.podId, schemaVersion: schema.currentVersion });
     } catch (err) {
       res.status(503).json({ status: 'not_ready', reason: String(err) });
     }
@@ -51,6 +53,11 @@ async function bootstrap() {
   // Service snapshot
   app.get('/api/status', (_req, res) => {
     res.json(orchestrator.getStatusSnapshot());
+  });
+
+  // SQLite schema version & applied migration history
+  app.get('/api/schema', (_req, res) => {
+    res.json(getSchemaMigrationReport());
   });
 
   // Server-Sent Events stream for live operational updates
