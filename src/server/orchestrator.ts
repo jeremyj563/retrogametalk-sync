@@ -21,6 +21,7 @@ import {
   getReleaseFileById,
   getRepositoryItemById,
   getSchemaMigrationReport,
+  listReleasesNeedingRetry,
   listSyncRuns,
   recordSuccessfulLogin,
   releaseDistributedLock,
@@ -1002,6 +1003,119 @@ export class ScraperOrchestrator extends EventEmitter {
     return run;
   }
 
+  private async retryReleaseEntry(
+    item: RepositoryItemRecord,
+    filesToRetry: ReleaseFileRecord[],
+    cfg: ScraperConfigInternal,
+    runId: number,
+    root: string,
+    signal: AbortSignal,
+    runLogger: LoggerFn,
+  ): Promise<{ downloaded: number; skipped: number; failed: number; bytes: number }> {
+    let downloaded = 0;
+    let skipped = 0;
+    let failed = 0;
+    let bytes = 0;
+
+    const pageUrl = item.remoteUrl.split('#')[0];
+    let freshDownloads: DiscoveredRelease[] = [];
+
+    if (pageUrl.startsWith('http')) {
+      const pageData = await this.client.fetchPageHtml(pageUrl, cfg, signal, runLogger);
+      if (pageData.status >= 400) {
+        throw new Error(`HTTP ${pageData.status} fetching release page ${pageData.finalUrl}`);
+      }
+      const wpPostIdHint = item.wpPostId ?? this.client.extractWpPostIdHint(pageData.html);
+      const wpData = await this.client.fetchReleaseWpMetadata(
+        pageData.finalUrl,
+        wpPostIdHint,
+        cfg,
+        signal,
+        runLogger,
+      );
+      const dynamic = await this.client.extractDynamicReleaseDownloads(
+        pageData.html,
+        pageData.finalUrl,
+        cfg,
+        signal,
+        runLogger,
+      );
+      const linked = this.client.extractLinksFromHtml(pageData.html, pageData.finalUrl, cfg).downloads;
+      freshDownloads = [...dynamic, ...linked];
+
+      const allRoleInputs = freshDownloads.length > 0 ? freshDownloads : item.files;
+      const fileRoles = allRoleInputs.map((f) =>
+        classifyFileRole(f.filename, f.displayLabel || f.filename, {
+          genres: wpData?.genres ?? item.genres,
+          languages: wpData?.languages ?? item.languages,
+          sources: wpData?.sources ?? item.sources,
+          title: wpData?.title ?? item.title,
+          systemName: item.systemName,
+        }),
+      );
+
+      const freshMeta = this.client.extractReleaseMetadata(
+        pageData.html,
+        pageData.finalUrl,
+        wpData,
+        fileRoles,
+      );
+      const releaseDir = this.resolveReleaseDir(item, root);
+      if (releaseDir) {
+        const mirrored = await this.client.mirrorReleaseAssets(
+          freshMeta,
+          releaseDir,
+          cfg,
+          signal,
+          runLogger,
+        );
+        updateCatalogReleaseMetadata(
+          item.id,
+          mirrored.metadata,
+          mirrored.coverAbsPath,
+          mirrored.screenshotAbsPaths,
+        );
+      }
+    }
+
+    for (const targetFile of filesToRetry) {
+      if (signal.aborted) break;
+      const matched =
+        freshDownloads.find((f) => f.filename === targetFile.filename) ||
+        freshDownloads.find((f) => f.remoteUrl === targetFile.remoteUrl) ||
+        (filesToRetry.length === 1 ? freshDownloads[0] : undefined);
+
+      const release: DiscoveredRelease = matched || {
+        remoteUrl: targetFile.remoteUrl,
+        pageUrl,
+        downloadUrl: targetFile.downloadUrl,
+        remotePath: targetFile.remotePath,
+        filename: targetFile.filename,
+        displayLabel: targetFile.displayLabel,
+        systemName: item.systemName,
+        releaseType: targetFile.fileRole,
+        title: item.title,
+        publishedAt: item.publishedAt,
+      };
+
+      const outcome = await this.downloadReleaseFile(
+        item.id,
+        release,
+        cfg,
+        runId,
+        signal,
+        runLogger,
+        getRepositoryItemById(item.id) || item,
+      );
+      if (outcome.downloaded) downloaded += 1;
+      if (outcome.skipped) skipped += 1;
+      if (outcome.failed) failed += 1;
+      bytes += outcome.bytes;
+    }
+
+    return { downloaded, skipped, failed, bytes };
+  }
+
   async retryItem(itemId: number, fileId?: number): Promise<SyncRunRecord> {
     const item = getRepositoryItemById(itemId);
     if (!item) {
@@ -1060,101 +1174,19 @@ export class ScraperOrchestrator extends EventEmitter {
           this.client.setPersistedLastAuthenticatedAt(ts);
         }
 
-        const pageUrl = item.remoteUrl.split('#')[0];
-        let freshDownloads: DiscoveredRelease[] = [];
-
-        if (pageUrl.startsWith('http')) {
-          const pageData = await this.client.fetchPageHtml(pageUrl, cfg, signal, runLogger);
-          if (pageData.status >= 400) {
-            throw new Error(`HTTP ${pageData.status} fetching release page ${pageData.finalUrl}`);
-          }
-          const wpPostIdHint = item.wpPostId ?? this.client.extractWpPostIdHint(pageData.html);
-          const wpData = await this.client.fetchReleaseWpMetadata(
-            pageData.finalUrl,
-            wpPostIdHint,
-            cfg,
-            signal,
-            runLogger,
-          );
-          const dynamic = await this.client.extractDynamicReleaseDownloads(
-            pageData.html,
-            pageData.finalUrl,
-            cfg,
-            signal,
-            runLogger,
-          );
-          const linked = this.client.extractLinksFromHtml(pageData.html, pageData.finalUrl, cfg).downloads;
-          freshDownloads = [...dynamic, ...linked];
-
-          const allRoleInputs = freshDownloads.length > 0 ? freshDownloads : item.files;
-          const fileRoles = allRoleInputs.map((f) =>
-            classifyFileRole(f.filename, f.displayLabel || f.filename, {
-              genres: wpData?.genres ?? item.genres,
-              languages: wpData?.languages ?? item.languages,
-              sources: wpData?.sources ?? item.sources,
-              title: wpData?.title ?? item.title,
-              systemName: item.systemName,
-            }),
-          );
-
-          const freshMeta = this.client.extractReleaseMetadata(
-            pageData.html,
-            pageData.finalUrl,
-            wpData,
-            fileRoles,
-          );
-          const releaseDir = this.resolveReleaseDir(item, root);
-          if (releaseDir) {
-            const mirrored = await this.client.mirrorReleaseAssets(
-              freshMeta,
-              releaseDir,
-              cfg,
-              signal,
-              runLogger,
-            );
-            updateCatalogReleaseMetadata(
-              item.id,
-              mirrored.metadata,
-              mirrored.coverAbsPath,
-              mirrored.screenshotAbsPaths,
-            );
-          }
-        }
-
-        for (const targetFile of filesToRetry) {
-          if (signal.aborted) break;
-          const matched =
-            freshDownloads.find((f) => f.filename === targetFile.filename) ||
-            freshDownloads.find((f) => f.remoteUrl === targetFile.remoteUrl) ||
-            (filesToRetry.length === 1 ? freshDownloads[0] : undefined);
-
-          const release: DiscoveredRelease = matched || {
-            remoteUrl: targetFile.remoteUrl,
-            pageUrl,
-            downloadUrl: targetFile.downloadUrl,
-            remotePath: targetFile.remotePath,
-            filename: targetFile.filename,
-            displayLabel: targetFile.displayLabel,
-            systemName: item.systemName,
-            releaseType: targetFile.fileRole,
-            title: item.title,
-            publishedAt: item.publishedAt,
-          };
-
-          const outcome = await this.downloadReleaseFile(
-            item.id,
-            release,
-            cfg,
-            run.id,
-            signal,
-            runLogger,
-            getRepositoryItemById(item.id) || item,
-          );
-          if (outcome.downloaded) downloaded += 1;
-          if (outcome.skipped) skipped += 1;
-          if (outcome.failed) failed += 1;
-          bytes += outcome.bytes;
-        }
+        const outcome = await this.retryReleaseEntry(
+          item,
+          filesToRetry,
+          cfg,
+          run.id,
+          root,
+          signal,
+          runLogger,
+        );
+        downloaded = outcome.downloaded;
+        skipped = outcome.skipped;
+        failed = outcome.failed;
+        bytes = outcome.bytes;
 
         if (!signal.aborted && failed > 0 && downloaded === 0 && skipped === 0) {
           throw new Error(`Retry failed for all ${failed} file(s)`);
@@ -1186,6 +1218,186 @@ export class ScraperOrchestrator extends EventEmitter {
           runLogger('error', `Retry run #${run.id} failed: ${msg}`);
         }
       } finally {
+        this.activeTransfer = null;
+        this.activeRun = null;
+        this.abortController = null;
+        this.currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
+        this.emitStatus();
+      }
+    })();
+
+    return run;
+  }
+
+  async retryAllFailed(options?: { system?: string; itemIds?: number[] }): Promise<SyncRunRecord> {
+    if (this.activeRun) {
+      throw new Error(`Sync run #${this.activeRun.id} is already in progress`);
+    }
+
+    const cfg = getInternalConfig();
+    this.assertCanRunSync(cfg);
+
+    const targets = listReleasesNeedingRetry({
+      system: options?.system,
+      ids: options?.itemIds,
+    });
+    if (targets.length === 0) {
+      throw new Error('No failed or partial releases found to retry');
+    }
+
+    const lockKey = 'retry:failed';
+    if (!acquireDistributedLock(lockKey, POD_ID, 180)) {
+      throw new Error(`Another pod holds distributed lock "${lockKey}"`);
+    }
+
+    const root = path.resolve(cfg.downloadDir);
+    const run = createSyncRun('retry', 'incremental');
+    this.activeRun = run;
+    this.abortController = new AbortController();
+    this.currentPhase = `Retrying ${targets.length} failed/partial release${targets.length === 1 ? '' : 's'}`;
+
+    this.lockRenewTimer = setInterval(() => {
+      acquireDistributedLock(lockKey, POD_ID, 180);
+    }, 60_000);
+
+    this.log(
+      'info',
+      `Started batch retry run #${run.id} for ${targets.length} failed/partial release(s)`,
+      options?.system && options.system !== 'all' ? `System filter: ${options.system}` : null,
+      run.id,
+    );
+    this.emitStatus();
+
+    void (async () => {
+      const signal = this.abortController!.signal;
+      const runLogger: LoggerFn = (level, msg, detail) => this.log(level, msg, detail ?? null, run.id);
+      let attemptedFiles = 0;
+      let downloaded = 0;
+      let skipped = 0;
+      let failed = 0;
+      let bytes = 0;
+
+      try {
+        if (!cfg.username || !cfg.password) {
+          throw new Error('Credentials missing: configure Repository Username and Password before retrying downloads.');
+        }
+        if (!this.client.getAuthStatus(cfg, getLastAuthenticatedAt()).authenticated) {
+          const loginRes = await this.client.login(cfg, signal, runLogger);
+          if (!loginRes.authenticated) {
+            throw new Error(loginRes.message);
+          }
+          const ts = recordSuccessfulLogin();
+          this.client.setPersistedLastAuthenticatedAt(ts);
+        }
+
+        for (let idx = 0; idx < targets.length; idx += 1) {
+          if (signal.aborted) break;
+          const item = getRepositoryItemById(targets[idx].id) || targets[idx];
+          let filesToRetry = item.files.filter(
+            (f) => f.status === 'failed' || !f.localPath || !fs.existsSync(f.localPath),
+          );
+          if (filesToRetry.length === 0) {
+            filesToRetry = item.files;
+          }
+          if (filesToRetry.length === 0) {
+            continue;
+          }
+
+          attemptedFiles += filesToRetry.length;
+          this.currentPhase = `Retry Failed (${idx + 1}/${targets.length}): ${item.systemName} / ${item.title}`;
+          this.emitStatus();
+
+          try {
+            const outcome = await this.retryReleaseEntry(
+              item,
+              filesToRetry,
+              cfg,
+              run.id,
+              root,
+              signal,
+              runLogger,
+            );
+            downloaded += outcome.downloaded;
+            skipped += outcome.skipped;
+            failed += outcome.failed;
+            bytes += outcome.bytes;
+          } catch (itemErr) {
+            if (signal.aborted) break;
+            const errMsg = itemErr instanceof Error ? itemErr.message : String(itemErr);
+            if (/Cloudflare|Authentication|Re-authentication/i.test(errMsg)) {
+              throw itemErr;
+            }
+            for (const f of filesToRetry) {
+              upsertReleaseFile({
+                releaseId: item.id,
+                remoteUrl: f.remoteUrl,
+                downloadUrl: f.downloadUrl,
+                remotePath: f.remotePath,
+                localPath: f.localPath,
+                filename: f.filename,
+                displayLabel: f.displayLabel,
+                fileRole: f.fileRole,
+                status: 'failed',
+                errorMessage: errMsg,
+                lastRunId: run.id,
+              });
+              failed += 1;
+            }
+            runLogger('error', `Batch retry failed for ${item.title}: ${errMsg}`, item.remoteUrl);
+            this.emitCatalogUpdated('file_failed', item.id);
+          }
+
+          updateSyncRun(run.id, {
+            newFound: attemptedFiles,
+            downloadedCount: downloaded,
+            skippedCount: skipped,
+            failedCount: failed,
+            bytesDownloaded: bytes,
+            avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
+          });
+          this.emitStatus();
+        }
+
+        if (!signal.aborted && failed > 0 && downloaded === 0 && skipped === 0) {
+          throw new Error(`Batch retry failed for all ${failed} file(s)`);
+        }
+
+        const finalStatus = signal.aborted ? 'stopped' : 'completed';
+        updateSyncRun(run.id, {
+          status: finalStatus,
+          finishedAt: new Date().toISOString(),
+          newFound: attemptedFiles,
+          downloadedCount: downloaded,
+          skippedCount: skipped,
+          failedCount: failed,
+          bytesDownloaded: bytes,
+          avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
+        });
+        runLogger(
+          'info',
+          `Batch retry run #${run.id} ${finalStatus}: ${downloaded} recovered, ${skipped} skipped, ${failed} failed`,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        updateSyncRun(run.id, {
+          status: signal.aborted ? 'stopped' : 'failed',
+          finishedAt: new Date().toISOString(),
+          newFound: attemptedFiles,
+          downloadedCount: downloaded,
+          skippedCount: skipped,
+          failedCount: Math.max(1, failed),
+          bytesDownloaded: bytes,
+          errorSummary: msg,
+        });
+        if (!signal.aborted) {
+          runLogger('error', `Batch retry run #${run.id} failed: ${msg}`);
+        }
+      } finally {
+        if (this.lockRenewTimer) {
+          clearInterval(this.lockRenewTimer);
+          this.lockRenewTimer = null;
+        }
+        releaseDistributedLock(lockKey, POD_ID);
         this.activeTransfer = null;
         this.activeRun = null;
         this.abortController = null;
@@ -1940,20 +2152,80 @@ export class ScraperOrchestrator extends EventEmitter {
     this.emitStatus();
 
     try {
-      const res = await this.client.downloadFileAtomic(
-        { ...release, remotePath },
-        cfg,
-        signal,
-        (progress) => {
-          if (this.activeTransfer) {
-            this.activeTransfer.bytesReceived = progress.bytesReceived;
-            this.activeTransfer.totalBytes = progress.totalBytes;
-            this.activeTransfer.bytesPerSec = progress.bytesPerSec;
-            this.emit('transfer', this.activeTransfer);
-          }
-        },
-        runLogger,
-      );
+      let activeRelease: DiscoveredRelease = { ...release, remotePath };
+      let res: Awaited<ReturnType<RetroGameTalkClient['downloadFileAtomic']>>;
+      try {
+        res = await this.client.downloadFileAtomic(
+          activeRelease,
+          cfg,
+          signal,
+          (progress) => {
+            if (this.activeTransfer) {
+              this.activeTransfer.bytesReceived = progress.bytesReceived;
+              this.activeTransfer.totalBytes = progress.totalBytes;
+              this.activeTransfer.bytesPerSec = progress.bytesPerSec;
+              this.emit('transfer', this.activeTransfer);
+            }
+          },
+          runLogger,
+        );
+      } catch (firstErr) {
+        const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+        const pageUrl = (release.pageUrl || '').split('#')[0];
+        const canRefreshLink =
+          !signal.aborted &&
+          pageUrl.startsWith('http') &&
+          /timed ?out|timedout|body|decode|econnreset|socket|nonce may have expired|expected archive binary/i.test(
+            firstMsg,
+          );
+        if (!canRefreshLink) {
+          throw firstErr;
+        }
+
+        // Re-fetch release page to mint a fresh nonce & signed download key, then retry once
+        const pageData = await this.client.fetchPageHtml(pageUrl, cfg, signal, runLogger);
+        if (pageData.status >= 400) {
+          throw firstErr;
+        }
+        const dynamic = await this.client.extractDynamicReleaseDownloads(
+          pageData.html,
+          pageData.finalUrl,
+          cfg,
+          signal,
+          runLogger,
+        );
+        const linked = this.client.extractLinksFromHtml(pageData.html, pageData.finalUrl, cfg).downloads;
+        const freshCandidates = [...dynamic, ...linked];
+        const matchedFresh =
+          freshCandidates.find((f) => f.filename.toLowerCase() === release.filename.toLowerCase()) ||
+          freshCandidates.find((f) => f.remoteUrl === release.remoteUrl) ||
+          (freshCandidates.length === 1 ? freshCandidates[0] : undefined);
+
+        if (!matchedFresh || matchedFresh.downloadUrl === activeRelease.downloadUrl) {
+          throw firstErr;
+        }
+
+        runLogger(
+          'warn',
+          `Refreshing download key and retrying ${release.filename}`,
+          firstMsg,
+        );
+        activeRelease = { ...matchedFresh, remotePath };
+        res = await this.client.downloadFileAtomic(
+          activeRelease,
+          cfg,
+          signal,
+          (progress) => {
+            if (this.activeTransfer) {
+              this.activeTransfer.bytesReceived = progress.bytesReceived;
+              this.activeTransfer.totalBytes = progress.totalBytes;
+              this.activeTransfer.bytesPerSec = progress.bytesPerSec;
+              this.emit('transfer', this.activeTransfer);
+            }
+          },
+          runLogger,
+        );
+      }
 
       this.activeTransfer = null;
 

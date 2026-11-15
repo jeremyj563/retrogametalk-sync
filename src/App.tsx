@@ -41,6 +41,7 @@ export default function App() {
   const [confirmingFullSync, setConfirmingFullSync] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [catalogRevision, setCatalogRevision] = useState(0);
+  const [catalogFocusFailedTick, setCatalogFocusFailedTick] = useState(0);
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -226,12 +227,31 @@ export default function App() {
   };
 
   const handleRetryItem = async (itemId: number, fileId?: number) => {
+    setErrorBanner(null);
     const qs = fileId ? `?fileId=${encodeURIComponent(String(fileId))}` : '';
     const res = await fetch(`/api/items/${itemId}/retry${qs}`, { method: 'POST' });
     const parsed = await readJsonSafely<{ error?: string }>(res);
     if (!parsed.ok) {
       setErrorBanner(parsed.errorMessage || `Retry failed (HTTP ${res.status})`);
+      return;
     }
+    await loadInitialData();
+  };
+
+  const handleRetryAllFailed = async (options?: { system?: string; ids?: number[] }) => {
+    setErrorBanner(null);
+    const res = await fetch('/api/items/retry-failed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options || {}),
+    });
+    const parsed = await readJsonSafely<{ run?: SyncRunRecord; error?: string }>(res);
+    if (!parsed.ok) {
+      const msg = parsed.errorMessage || `Batch retry failed (HTTP ${res.status})`;
+      setErrorBanner(msg);
+      throw new Error(msg);
+    }
+    await loadInitialData();
   };
 
   const handleSaveConfig = async (patch: Partial<ScraperConfigPublic> & { password?: string }) => {
@@ -332,11 +352,13 @@ export default function App() {
                 <Square className="h-3.5 w-3.5 fill-current" />
                 {stopRequested
                   ? 'Stopping...'
-                  : status.activeRun.mode === 'dry_run'
-                    ? 'Dry Run'
-                    : status.activeRun.mode === 'full'
-                      ? 'Full Sync'
-                      : 'Incremental Sync'}
+                  : status.activeRun.triggerType === 'retry'
+                    ? 'Stop Retry'
+                    : status.activeRun.mode === 'dry_run'
+                      ? 'Dry Run'
+                      : status.activeRun.mode === 'full'
+                        ? 'Full Sync'
+                        : 'Incremental Sync'}
               </button>
             ) : (
               <button
@@ -565,13 +587,19 @@ export default function App() {
                   onClearLogs={handleClearLogs}
                   onClearRuns={handleClearRuns}
                   onNavigateToOperations={() => setSection('operations')}
+                  onReviewFailed={() => {
+                    setCatalogFocusFailedTick((t) => t + 1);
+                    setSection('catalog');
+                  }}
                 />
               )}
               {section === 'catalog' && (
                 <CatalogPanel
                   status={status}
                   catalogRevision={catalogRevision}
+                  focusFailedSignal={catalogFocusFailedTick}
                   onRetryItem={handleRetryItem}
+                  onRetryAllFailed={handleRetryAllFailed}
                   onRefreshStatus={loadInitialData}
                 />
               )}

@@ -440,6 +440,33 @@ export class RetroGameTalkClient {
     return causeMsg || `Network error connecting to "${host}"`;
   }
 
+  private isRetryableStreamError(err: unknown): boolean {
+    const anyErr = err as {
+      name?: string;
+      message?: string;
+      code?: string;
+      cause?: { code?: string; message?: string };
+    } | null;
+    const code = String(anyErr?.cause?.code || anyErr?.code || '');
+    const msg = String(anyErr?.cause?.message || anyErr?.message || err || '');
+    if (this.isNonRetryableNetworkError(err)) {
+      return false;
+    }
+    return (
+      code === 'ECONNRESET' ||
+      code === 'ETIMEDOUT' ||
+      code === 'EPIPE' ||
+      code === 'UND_ERR_SOCKET' ||
+      code === 'UND_ERR_BODY_TIMEOUT' ||
+      code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+      anyErr?.name === 'TimeoutError' ||
+      anyErr?.name === 'ReadTimeout' ||
+      /timed ?out|timedout|body|decode|econnreset|connection reset|premature close|socket hang up|empty response stream|unexpected eof/i.test(
+        msg,
+      )
+    );
+  }
+
   isCloudflareChallengeResponse(status: number, headers: Headers, body: string): boolean {
     return this.isCloudflareChallenge(status, headers, body);
   }
@@ -571,6 +598,7 @@ export class RetroGameTalkClient {
     signal?: AbortSignal,
     log?: LoggerFn,
     maxRedirects = 8,
+    timeoutMsOverride?: number,
   ): Promise<{ response: ImpitResponse; finalUrl: string; latencyMs: number }> {
     let currentUrl = url;
     let attempt = 0;
@@ -617,7 +645,7 @@ export class RetroGameTalkClient {
           headers,
           body: init.body !== undefined && init.body !== null ? String(init.body) : undefined,
           redirect: 'manual',
-          timeout: config.requestTimeoutMs,
+          timeout: timeoutMsOverride ?? config.requestTimeoutMs,
           signal,
         });
       } catch (err) {
@@ -1920,10 +1948,16 @@ export class RetroGameTalkClient {
 
       if (isUnderRepo && IGNORED_REPO_PREFIXES.has(firstSegLower)) return;
 
-      const systemCandidate = relSegs[0] ? sanitizePathSegment(relSegs[0]) : 'uncategorized';
+      const paramPlatform = resolved.searchParams.get('platform');
+      const systemCandidate = paramPlatform
+        ? sanitizePathSegment(paramPlatform)
+        : relSegs[0]
+          ? sanitizePathSegment(relSegs[0])
+          : 'uncategorized';
 
       if (
         systemFilters.length > 0 &&
+        (isUnderRepo || Boolean(paramPlatform)) &&
         relSegs.length > 0 &&
         firstSegLower !== 'page' &&
         !systemFilters.includes(systemCandidate.toLowerCase())
@@ -2291,157 +2325,203 @@ export class RetroGameTalkClient {
       }
     }
 
-    const { response, finalUrl } = await this.fetchWithRedirects(
-      release.downloadUrl,
-      config,
-      {
-        method: 'GET',
-        headers: {
-          Referer: release.pageUrl || config.baseUrl,
-        },
-      },
-      signal,
-      log,
-    );
+    // Decouple binary archive transfer timeout from short API/page requestTimeoutMs
+    const streamTimeoutMs = Math.min(600_000, Math.max(config.requestTimeoutMs * 6, 180_000));
+    const maxStreamAttempts = Math.min(3, Math.max(1, (config.maxRetries ?? 2) + 1));
 
-    if (!response.ok) {
-      const bodySnippet = await response.text().catch(() => '');
-      if (this.isCloudflareChallenge(response.status, response.headers, bodySnippet)) {
-        const msg = `Blocked by Cloudflare bot protection (HTTP ${response.status}) downloading ${release.downloadUrl}`;
-        this.setAuthState({
-          configured: Boolean(config.username && config.password),
-          authenticated: false,
-          cookieCount: this.getSafeCookieCount(config.baseUrl),
-          lastMessage: msg,
-        });
-        throw new Error(msg);
+    for (let streamAttempt = 1; streamAttempt <= maxStreamAttempts; streamAttempt += 1) {
+      if (signal.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
       }
-      if (response.status === 401 || response.status === 403) {
-        this.setAuthState({
-          configured: Boolean(config.username && config.password),
-          authenticated: false,
-          cookieCount: this.getSafeCookieCount(config.baseUrl),
-          lastMessage: `Download access denied (HTTP ${response.status}) at ${finalUrl}`,
+
+      let partPath: string | null = null;
+      try {
+        const { response, finalUrl } = await this.fetchWithRedirects(
+          release.downloadUrl,
+          config,
+          {
+            method: 'GET',
+            headers: {
+              Referer: release.pageUrl || config.baseUrl,
+            },
+          },
+          signal,
+          log,
+          8,
+          streamTimeoutMs,
+        );
+
+        if (!response.ok) {
+          const bodySnippet = await response.text().catch(() => '');
+          if (this.isCloudflareChallenge(response.status, response.headers, bodySnippet)) {
+            const msg = `Blocked by Cloudflare bot protection (HTTP ${response.status}) downloading ${release.downloadUrl}`;
+            this.setAuthState({
+              configured: Boolean(config.username && config.password),
+              authenticated: false,
+              cookieCount: this.getSafeCookieCount(config.baseUrl),
+              lastMessage: msg,
+            });
+            throw new Error(msg);
+          }
+          if (response.status === 401 || response.status === 403) {
+            this.setAuthState({
+              configured: Boolean(config.username && config.password),
+              authenticated: false,
+              cookieCount: this.getSafeCookieCount(config.baseUrl),
+              lastMessage: `Download access denied (HTTP ${response.status}) at ${finalUrl}`,
+            });
+          }
+          throw new Error(`HTTP ${response.status} downloading ${release.downloadUrl}`);
+        }
+
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        if (contentType.includes('text/html') && !contentType.includes('octet-stream')) {
+          await response.body?.cancel().catch(() => undefined);
+          throw new Error(`Expected archive binary but received HTML (${finalUrl}); session or nonce may have expired`);
+        }
+
+        // 2. Resolve exact filename from Content-Disposition or query param/path
+        const headerFilename = parseContentDispositionFilename(response.headers.get('content-disposition'));
+        const finalFilename = headerFilename
+          ? sanitizePathSegment(headerFilename)
+          : release.filename;
+
+        const dirRel = path.dirname(release.remotePath);
+        const finalRemotePath = dirRel === '.' ? finalFilename : `${dirRel}/${finalFilename}`;
+        const resolvedRoot = path.resolve(config.downloadDir);
+        const finalLocalPath = path.resolve(resolvedRoot, finalRemotePath);
+
+        if (!finalLocalPath.startsWith(resolvedRoot + path.sep)) {
+          await response.body?.cancel().catch(() => undefined);
+          throw new Error(`Resolved download path escapes root: ${finalRemotePath}`);
+        }
+
+        // 3. Filename-only deduplication after Content-Disposition resolution
+        if (fs.existsSync(finalLocalPath)) {
+          const stat = fs.statSync(finalLocalPath);
+          if (stat.size > 0) {
+            await response.body?.cancel().catch(() => undefined);
+            return {
+              outcome: 'skipped',
+              localPath: finalLocalPath,
+              remotePath: finalRemotePath,
+              filename: finalFilename,
+              bytes: stat.size,
+            };
+          }
+        }
+
+        // 4. Atomic streaming write to .part -> rename
+        fs.mkdirSync(path.dirname(finalLocalPath), { recursive: true });
+        partPath = `${finalLocalPath}.part`;
+        const totalBytesHeader = response.headers.get('content-length');
+        const totalBytes = totalBytesHeader ? Number(totalBytesHeader) : null;
+
+        if (!response.body) {
+          throw new Error(`Empty response stream for ${release.downloadUrl}`);
+        }
+
+        let bytesReceived = 0;
+        const startedAt = Date.now();
+        let lastEmitAt = 0;
+
+        const writeStream = fs.createWriteStream(partPath);
+        const nodeReadable = Readable.fromWeb(response.body as unknown as import('node:stream/web').ReadableStream);
+
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            nodeReadable.destroy();
+            writeStream.destroy();
+            reject(new DOMException('Aborted', 'AbortError'));
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+
+          nodeReadable.on('data', (chunk: Buffer) => {
+            bytesReceived += chunk.length;
+            const now = Date.now();
+            if (now - lastEmitAt >= 200) {
+              lastEmitAt = now;
+              const elapsedSec = Math.max(0.1, (now - startedAt) / 1000);
+              onProgress({
+                bytesReceived,
+                totalBytes,
+                bytesPerSec: Math.round(bytesReceived / elapsedSec),
+              });
+            }
+          });
+
+          nodeReadable.on('error', (err) => {
+            signal.removeEventListener('abort', onAbort);
+            writeStream.destroy();
+            reject(err);
+          });
+
+          writeStream.on('error', (err) => {
+            signal.removeEventListener('abort', onAbort);
+            nodeReadable.destroy();
+            reject(err);
+          });
+
+          writeStream.on('finish', () => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+          });
+
+          nodeReadable.pipe(writeStream);
         });
-      }
-      throw new Error(`HTTP ${response.status} downloading ${release.downloadUrl}`);
-    }
 
-    const contentType = (response.headers.get('content-type') || '').toLowerCase();
-    if (contentType.includes('text/html') && !contentType.includes('octet-stream')) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new Error(`Expected archive binary but received HTML (${finalUrl}); session or nonce may have expired`);
-    }
+        await fs.promises.rename(partPath, finalLocalPath);
+        partPath = null;
+        onProgress({
+          bytesReceived,
+          totalBytes: totalBytes ?? bytesReceived,
+          bytesPerSec: Math.round(bytesReceived / Math.max(0.1, (Date.now() - startedAt) / 1000)),
+        });
 
-    // 2. Resolve exact filename from Content-Disposition or query param/path
-    const headerFilename = parseContentDispositionFilename(response.headers.get('content-disposition'));
-    const finalFilename = headerFilename
-      ? sanitizePathSegment(headerFilename)
-      : release.filename;
-
-    const dirRel = path.dirname(release.remotePath);
-    const finalRemotePath = dirRel === '.' ? finalFilename : `${dirRel}/${finalFilename}`;
-    const resolvedRoot = path.resolve(config.downloadDir);
-    const finalLocalPath = path.resolve(resolvedRoot, finalRemotePath);
-
-    if (!finalLocalPath.startsWith(resolvedRoot + path.sep)) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new Error(`Resolved download path escapes root: ${finalRemotePath}`);
-    }
-
-    // 3. Filename-only deduplication after Content-Disposition resolution
-    if (fs.existsSync(finalLocalPath)) {
-      const stat = fs.statSync(finalLocalPath);
-      if (stat.size > 0) {
-        await response.body?.cancel().catch(() => undefined);
         return {
-          outcome: 'skipped',
+          outcome: 'downloaded',
           localPath: finalLocalPath,
           remotePath: finalRemotePath,
           filename: finalFilename,
-          bytes: stat.size,
+          bytes: bytesReceived,
         };
+      } catch (err) {
+        if (partPath) {
+          await fs.promises.unlink(partPath).catch(() => undefined);
+        }
+        if (signal.aborted) {
+          throw err;
+        }
+        const canRetryStream = streamAttempt < maxStreamAttempts && this.isRetryableStreamError(err);
+        if (!canRetryStream) {
+          throw err;
+        }
+        const errMsg = err instanceof Error ? err.message : String(err);
+        log?.(
+          'warn',
+          `Stream interrupted for ${release.filename}; retrying (${streamAttempt}/${maxStreamAttempts - 1})`,
+          errMsg,
+        );
+        const retryWaitMs = Math.min(2000, Math.max(100, config.minDelayMs) * streamAttempt);
+        await new Promise<void>((resolve, reject) => {
+          if (signal.aborted) {
+            reject(new DOMException('Aborted', 'AbortError'));
+            return;
+          }
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(new DOMException('Aborted', 'AbortError'));
+          };
+          const timer = setTimeout(() => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+          }, retryWaitMs);
+          signal.addEventListener('abort', onAbort, { once: true });
+        });
       }
     }
 
-    // 4. Atomic streaming write to .part -> rename
-    fs.mkdirSync(path.dirname(finalLocalPath), { recursive: true });
-    const partPath = `${finalLocalPath}.part`;
-    const totalBytesHeader = response.headers.get('content-length');
-    const totalBytes = totalBytesHeader ? Number(totalBytesHeader) : null;
-
-    if (!response.body) {
-      throw new Error(`Empty response stream for ${release.downloadUrl}`);
-    }
-
-    let bytesReceived = 0;
-    const startedAt = Date.now();
-    let lastEmitAt = 0;
-
-    const writeStream = fs.createWriteStream(partPath);
-    const nodeReadable = Readable.fromWeb(response.body as unknown as import('node:stream/web').ReadableStream);
-
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const onAbort = () => {
-          nodeReadable.destroy();
-          writeStream.destroy();
-          reject(new DOMException('Aborted', 'AbortError'));
-        };
-        signal.addEventListener('abort', onAbort, { once: true });
-
-        nodeReadable.on('data', (chunk: Buffer) => {
-          bytesReceived += chunk.length;
-          const now = Date.now();
-          if (now - lastEmitAt >= 200) {
-            lastEmitAt = now;
-            const elapsedSec = Math.max(0.1, (now - startedAt) / 1000);
-            onProgress({
-              bytesReceived,
-              totalBytes,
-              bytesPerSec: Math.round(bytesReceived / elapsedSec),
-            });
-          }
-        });
-
-        nodeReadable.on('error', (err) => {
-          signal.removeEventListener('abort', onAbort);
-          writeStream.destroy();
-          reject(err);
-        });
-
-        writeStream.on('error', (err) => {
-          signal.removeEventListener('abort', onAbort);
-          nodeReadable.destroy();
-          reject(err);
-        });
-
-        writeStream.on('finish', () => {
-          signal.removeEventListener('abort', onAbort);
-          resolve();
-        });
-
-        nodeReadable.pipe(writeStream);
-      });
-
-      await fs.promises.rename(partPath, finalLocalPath);
-      onProgress({
-        bytesReceived,
-        totalBytes: totalBytes ?? bytesReceived,
-        bytesPerSec: Math.round(bytesReceived / Math.max(0.1, (Date.now() - startedAt) / 1000)),
-      });
-
-      return {
-        outcome: 'downloaded',
-        localPath: finalLocalPath,
-        remotePath: finalRemotePath,
-        filename: finalFilename,
-        bytes: bytesReceived,
-      };
-    } catch (err) {
-      await fs.promises.unlink(partPath).catch(() => undefined);
-      throw err;
-    }
+    throw new Error(`Exceeded max stream retries for ${release.downloadUrl}`);
   }
 
   private async getWpRestTypes(

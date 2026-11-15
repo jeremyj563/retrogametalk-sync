@@ -1234,8 +1234,12 @@ export function queryRepositoryItems(params: {
     args.push(params.system);
   }
   if (params.status && params.status !== 'all') {
-    conditions.push('status = ?');
-    args.push(params.status);
+    if (params.status === 'needs_retry') {
+      conditions.push("status IN ('failed', 'partial')");
+    } else {
+      conditions.push('status = ?');
+      args.push(params.status);
+    }
   }
   if (params.tag && params.tag !== 'all') {
     conditions.push('EXISTS (SELECT 1 FROM json_each(release_tags_json) WHERE value = ?)');
@@ -1281,6 +1285,40 @@ export function queryRepositoryItems(params: {
     total: Number(countRow.count),
     facets,
   };
+}
+
+export function listReleasesNeedingRetry(options?: {
+  system?: string;
+  ids?: number[];
+}): RepositoryItemRecord[] {
+  const conditions: string[] = ["status IN ('failed', 'partial')"];
+  const args: unknown[] = [];
+
+  if (options?.system && options.system !== 'all') {
+    conditions.push('system_name = ?');
+    args.push(options.system);
+  }
+
+  if (options?.ids && options.ids.length > 0) {
+    const cleanIds = Array.from(
+      new Set(options.ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
+    );
+    if (cleanIds.length === 0) {
+      return [];
+    }
+    const placeholders = cleanIds.map(() => '?').join(', ');
+    conditions.push(`id IN (${placeholders})`);
+    args.push(...cleanIds);
+  }
+
+  const where = `WHERE ${conditions.join(' AND ')}`;
+  const rows = getDb()
+    .prepare(`SELECT * FROM catalog_releases ${where} ORDER BY id ASC`)
+    .all(...args) as Record<string, unknown>[];
+
+  const releaseIds = rows.map((r) => Number(r.id));
+  const filesMap = loadFilesByReleaseIds(releaseIds);
+  return rows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || []));
 }
 
 export function getCatalogTotalsAndSystems(): {
