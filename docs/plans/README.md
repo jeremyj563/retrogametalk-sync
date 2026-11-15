@@ -25,3 +25,4 @@ implemented_at: null # ISO-8601 UTC timestamp once executed, or null
 | 2026-11-15 | [Incremental Sync vs. Full Sync](./2026-11-15-incremental-vs-full-sync.md) | `implemented` | `2026-11-15T19:45:00Z` | `2026-11-15T19:55:00Z` | Reconstructed from codebase (pre-archive) |
 | 2026-11-15 | [Automated SQLite Schema Migrations](./2026-11-15-automated-sql-schema-migrations.md) | `implemented` | `2026-11-15T20:02:00Z` | `2026-11-15T20:06:35Z` | Reconstructed from codebase (pre-archive) |
 | 2026-11-15 | [Failed Downloads Queue, Batch Recovery & Stream Resilience](./2026-11-15-failed-downloads-queue-and-retry.md) | `implemented` | `2026-11-15T20:22:03Z` | `2026-11-15T20:30:38Z` | Archived verbatim from `implementation_plan.md` |
+| 2026-11-15 | [Prepared ROM Downloads & Direct-to-SD-Card Exporter](./2026-11-15-prepared-rom-downloads-and-sd-export.md) | `implemented` | `2026-11-15T21:31:00Z` | `2026-11-15T21:50:00Z` | Dual export workflow, 7z/zip streamer, v5 schema |

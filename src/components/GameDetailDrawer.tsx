@@ -13,11 +13,12 @@ import {
   RotateCcw,
   SkipForward,
   Trash2,
+  Usb,
   X,
   XCircle,
   ZoomIn,
 } from 'lucide-react';
-import type { RepositoryItemRecord } from '../types';
+import type { ArchiveInspectResult, RepositoryItemRecord } from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
 
@@ -29,6 +30,7 @@ interface GameDetailDrawerProps {
   onItemUpdated: (updated: RepositoryItemRecord) => void;
   onRetryItem: (id: number, fileId?: number) => Promise<void>;
   onDeleteItem: (id: number) => Promise<void>;
+  onExportToSdCard?: (id: number) => void;
 }
 
 interface LightboxState {
@@ -44,6 +46,7 @@ export function GameDetailDrawer({
   onItemUpdated,
   onRetryItem,
   onDeleteItem,
+  onExportToSdCard,
 }: GameDetailDrawerProps) {
   const [fetchingMeta, setFetchingMeta] = useState(false);
   const [metaError, setMetaError] = useState<string | null>(null);
@@ -53,6 +56,10 @@ export function GameDetailDrawer({
   const [coverFailed, setCoverFailed] = useState(false);
   const [failedScreenshots, setFailedScreenshots] = useState<Set<number>>(new Set());
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
+  const [inspectingFileId, setInspectingFileId] = useState<number | null>(null);
+  const [inspection, setInspection] = useState<ArchiveInspectResult | null>(null);
+  const [inspectError, setInspectError] = useState<string | null>(null);
+  const [preparedNames, setPreparedNames] = useState<Record<string, string>>({});
 
   const assetVersion = item?.metadata?.fetchedAt ? `&v=${encodeURIComponent(item.metadata.fetchedAt)}` : '';
   const screenshotCount = item?.metadata?.screenshotLocalRelPaths?.length ?? item?.screenshotsCount ?? 0;
@@ -63,6 +70,10 @@ export function GameDetailDrawer({
     setCoverFailed(false);
     setFailedScreenshots(new Set());
     setLightbox(null);
+    setInspectingFileId(null);
+    setInspection(null);
+    setInspectError(null);
+    setPreparedNames({});
   }, [item?.id, item?.metadata?.fetchedAt]);
 
   useEffect(() => {
@@ -202,6 +213,32 @@ export function GameDetailDrawer({
       await onDeleteItem(item.id);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleInspectPreparedRom = async (fileId: number) => {
+    setInspectingFileId(fileId);
+    setInspectError(null);
+    try {
+      const res = await fetch(`/api/items/${item.id}/inspect?fileId=${encodeURIComponent(String(fileId))}`);
+      const parsed = await readJsonSafely<{ inspection?: ArchiveInspectResult; error?: string }>(res);
+      if (!parsed.ok || !parsed.data?.inspection) {
+        setInspectError(parsed.errorMessage || `Archive inspection failed (HTTP ${res.status})`);
+        setInspection(null);
+        return;
+      }
+      const insp = parsed.data.inspection;
+      const nextNames: Record<string, string> = {};
+      for (const target of insp.playableTargets) {
+        nextNames[target.id] = target.kind === 'disc_set' ? target.suggestedArchiveName : target.suggestedFilename;
+      }
+      setPreparedNames(nextNames);
+      setInspection(insp);
+    } catch (err) {
+      setInspectError(err instanceof Error ? err.message : String(err));
+      setInspection(null);
+    } finally {
+      setInspectingFileId(null);
     }
   };
 
@@ -472,16 +509,28 @@ export function GameDetailDrawer({
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
                         {canDownload ? (
-                          <a
-                            href={`/api/items/${item.id}/download?fileId=${file.id}`}
-                            download={file.filename}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap"
-                          >
-                            <Download className="h-3.5 w-3.5" />
-                            Download
-                          </a>
+                          <>
+                            <button
+                              type="button"
+                              disabled={inspectingFileId === file.id}
+                              onClick={() => void handleInspectPreparedRom(file.id)}
+                              title="Inspect archive, strip readme/doc clutter, and download pre-renamed ROM"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50"
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              {inspectingFileId === file.id ? 'Inspecting...' : 'Prepared ROM'}
+                            </button>
+                            <a
+                              href={`/api/items/${item.id}/download?fileId=${file.id}`}
+                              download={file.filename}
+                              title="Download exact raw mirrored archive"
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border border-crt-border hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap"
+                            >
+                              Raw
+                            </a>
+                          </>
                         ) : file.status === 'failed' ? (
                           <button
                             type="button"
@@ -502,6 +551,106 @@ export function GameDetailDrawer({
                     </div>
                   );
                 })}
+              </div>
+            )}
+
+            {inspectError && (
+              <div className="border border-crt-crimson/50 bg-crt-crimson/10 rounded-md px-4 py-3 text-xs font-mono text-crt-crimson">
+                {inspectError}
+              </div>
+            )}
+
+            {inspection && (
+              <div className="border border-crt-phosphor/50 bg-crt-bg rounded-md p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-crt-border pb-2.5">
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="text-xs font-semibold text-crt-phosphor">
+                      Prepared ROM Export · {inspection.archiveFormat.toUpperCase()}
+                    </div>
+                    <div className="font-mono text-[11px] text-crt-muted truncate">
+                      {inspection.notes[0] || `Source: ${inspection.sourceFilename}`}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setInspection(null)}
+                    aria-label="Close prepared ROM panel"
+                    className="p-1 text-crt-muted hover:text-crt-text rounded"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                {inspection.playableTargets.length === 0 ? (
+                  <div className="text-xs font-mono text-crt-amber space-y-2">
+                    <p>
+                      {inspection.patchOnly
+                        ? 'This archive contains patch files only (no standalone playable ROM payload).'
+                        : 'No playable ROM files were detected inside this archive.'}
+                    </p>
+                    <a
+                      href={`/api/items/${item.id}/download?fileId=${inspection.fileId}`}
+                      download={inspection.sourceFilename}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border text-crt-text hover:border-crt-phosphor rounded transition-colors"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Download Raw Archive
+                    </a>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {inspection.playableTargets.length > 1 && (
+                      <p className="text-xs font-mono text-crt-amber">
+                        {inspection.playableTargets.length} playable ROM variants found inside archive — download the variant you need:
+                      </p>
+                    )}
+
+                    {inspection.playableTargets.map((target) => {
+                      const editedName = preparedNames[target.id] ?? (target.kind === 'disc_set' ? target.suggestedArchiveName : target.suggestedFilename);
+                      const dlHref = `/api/items/${item.id}/download-rom?fileId=${inspection.fileId}&targetId=${encodeURIComponent(target.id)}&name=${encodeURIComponent(editedName)}`;
+                      return (
+                        <div
+                          key={target.id}
+                          className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1"
+                        >
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-crt-muted">
+                              <span className="text-crt-text truncate">{target.displayName}</span>
+                              <span>·</span>
+                              <span className="tabular-nums">{formatBytes(target.sizeBytes)}</span>
+                              {target.detectedVersion && (
+                                <>
+                                  <span>·</span>
+                                  <span className="text-crt-phosphor">{target.detectedVersion}</span>
+                                </>
+                              )}
+                            </div>
+                            <input
+                              type="text"
+                              value={editedName}
+                              aria-label={`Prepared output filename for ${target.displayName}`}
+                              onChange={(e) =>
+                                setPreparedNames((prev) => ({ ...prev, [target.id]: e.target.value }))
+                              }
+                              className="w-full px-2.5 py-1.5 text-xs font-mono bg-crt-surface border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+                            />
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0 sm:pt-4">
+                            <a
+                              href={dlHref}
+                              download={editedName}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap"
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              {target.kind === 'disc_set' ? 'Download Clean Zip' : 'Download ROM'}
+                            </a>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -588,14 +737,35 @@ export function GameDetailDrawer({
         <footer className="px-6 py-3.5 border-t border-crt-border bg-crt-bg flex flex-wrap items-center justify-between gap-3 shrink-0">
           <div className="flex flex-wrap items-center gap-2.5">
             {primaryDownloadFile ? (
-              <a
-                href={`/api/items/${item.id}/download?fileId=${primaryDownloadFile.id}`}
-                download={primaryDownloadFile.filename}
-                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap"
-              >
-                <Download className="h-3.5 w-3.5" />
-                {item.filesCount > 1 ? 'Download Primary ROM' : 'Download ROM'}
-              </a>
+              <>
+                <button
+                  type="button"
+                  disabled={inspectingFileId === primaryDownloadFile.id}
+                  onClick={() => void handleInspectPreparedRom(primaryDownloadFile.id)}
+                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  {inspectingFileId === primaryDownloadFile.id ? 'Inspecting...' : 'Prepared ROM'}
+                </button>
+                {onExportToSdCard && (
+                  <button
+                    type="button"
+                    onClick={() => onExportToSdCard(item.id)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap"
+                  >
+                    <Usb className="h-3.5 w-3.5" />
+                    Send to SD Card
+                  </button>
+                )}
+                <a
+                  href={`/api/items/${item.id}/download?fileId=${primaryDownloadFile.id}`}
+                  download={primaryDownloadFile.filename}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap"
+                >
+                  <FileArchive className="h-3.5 w-3.5" />
+                  Raw Archive
+                </a>
+              </>
             ) : (
               <span
                 title="No mirrored ROM archive is currently available on disk"

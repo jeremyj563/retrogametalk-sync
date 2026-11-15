@@ -26,6 +26,11 @@ export interface ScraperConfigPublic {
   systemFilter: string;
   discoveredSystems: string[];
   lastWatermarkAt: string | null;
+  romNamingTemplate: string;
+  romSanitizeFat32: boolean;
+  romMaxFilenameLen: number;
+  devicePreset: string;
+  deviceFolderMap: Record<string, string>;
   updatedAt: string;
   envOverrides: string[];
 }
@@ -50,6 +55,11 @@ export interface ConfigUpdateInput {
   userAgent?: string;
   systemFilter?: string;
   lastWatermarkAt?: string | null;
+  romNamingTemplate?: string;
+  romSanitizeFat32?: boolean;
+  romMaxFilenameLen?: number;
+  devicePreset?: string;
+  deviceFolderMap?: Record<string, string>;
 }
 
 export interface SyncRunRecord {
@@ -295,4 +305,32 @@ export interface DatabaseMigrationReport {
   appliedNow: AppliedMigrationRecord[];
   history: AppliedMigrationRecord[];
   rollbackWarning: string | null;
+}
+
+export type ArchiveFormat = 'zip' | '7z' | 'rar' | 'tar' | 'raw';
+
+export interface PlayableExportTarget {
+  id: string;
+  kind: 'rom' | 'disc_set' | 'patch_only';
+  displayName: string;
+  primaryEntry: string;
+  entryPaths: string[];
+  extension: string;
+  sizeBytes: number;
+  suggestedFilename: string;
+  suggestedArchiveName: string;
+  detectedVersion: string | null;
+  roleBadge: string | null;
+}
+
+export interface ArchiveInspectResult {
+  itemId: number;
+  fileId: number;
+  sourceFilename: string;
+  archiveFormat: ArchiveFormat;
+  playableTargets: PlayableExportTarget[];
+  ignoredEntriesCount: number;
+  ignoredSample: string[];
+  patchOnly: boolean;
+  notes: string[];
 }

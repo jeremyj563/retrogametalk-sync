@@ -42,8 +42,10 @@ import {
   type WpPostMetadata,
   resolveMirroredPaths,
 } from './rgtClient.ts';
+import { inspectArchiveForItem } from './archiveService.ts';
 import type {
   ActiveTransferState,
+  ArchiveInspectResult,
   AuthTestResult,
   ConfigUpdateInput,
   FsTreeNode,
@@ -772,7 +774,10 @@ export class ScraperOrchestrator extends EventEmitter {
     return null;
   }
 
-  resolveItemRomFile(itemId: number, fileId?: number): { absPath: string; filename: string } | null {
+  resolveItemFileContext(
+    itemId: number,
+    fileId?: number,
+  ): { item: RepositoryItemRecord; file: ReleaseFileRecord; absPath: string; cfg: ScraperConfigInternal } | null {
     const item = getRepositoryItemById(itemId);
     if (!item) return null;
     const cfg = getInternalConfig();
@@ -809,7 +814,23 @@ export class ScraperOrchestrator extends EventEmitter {
     const absPath = path.resolve(targetFile.localPath);
     if (!absPath.startsWith(root + path.sep)) return null;
     if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) return null;
-    return { absPath, filename: targetFile.filename || path.basename(absPath) };
+    return { item, file: targetFile, absPath, cfg };
+  }
+
+  resolveItemRomFile(itemId: number, fileId?: number): { absPath: string; filename: string } | null {
+    const ctx = this.resolveItemFileContext(itemId, fileId);
+    if (!ctx) return null;
+    return { absPath: ctx.absPath, filename: ctx.file.filename || path.basename(ctx.absPath) };
+  }
+
+  async inspectItemArchive(itemId: number, fileId?: number): Promise<ArchiveInspectResult | null> {
+    const ctx = this.resolveItemFileContext(itemId, fileId);
+    if (!ctx) return null;
+    return inspectArchiveForItem(ctx.item, ctx.file, ctx.absPath, {
+      romNamingTemplate: ctx.cfg.romNamingTemplate,
+      romSanitizeFat32: ctx.cfg.romSanitizeFat32,
+      romMaxFilenameLen: ctx.cfg.romMaxFilenameLen,
+    });
   }
 
   async fetchItemMetadata(itemId: number): Promise<RepositoryItemRecord> {
