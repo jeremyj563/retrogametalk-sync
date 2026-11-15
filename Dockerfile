@@ -11,6 +11,9 @@ RUN npm run build
 FROM node:22-alpine AS runner
 WORKDIR /app
 
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
+
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV DATA_DIR=/app/data
