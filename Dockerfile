@@ -23,7 +23,7 @@ RUN addgroup -S rgt && adduser -S rgt -G rgt \
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/server.ts ./server.ts
+COPY --from=builder /app/src/server.ts ./server.ts
 COPY --from=builder /app/src/server ./src/server
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
