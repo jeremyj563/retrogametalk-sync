@@ -20,13 +20,13 @@ ENV APP_VERSION=${APP_VERSION}
 
 ENV NODE_ENV=production
 ENV PORT=3000
-ENV DATA_DIR=/app/data
+ENV DATA_DIR=/run/repo/.rgt-data
 ENV DOWNLOAD_DIR=/run/repo
 
 RUN apk add --no-cache curl \
   && addgroup -S rgt && adduser -S rgt -G rgt \
-  && mkdir -p $DOWNLOAD_DIR $DATA_DIR \
-  && chown -R rgt:rgt $DOWNLOAD_DIR $DATA_DIR
+  && mkdir -p $DOWNLOAD_DIR $DATA_DIR /app/data \
+  && chown -R rgt:rgt $DOWNLOAD_DIR /app/data
 
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
@@ -37,7 +37,7 @@ COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
 USER rgt
 EXPOSE 3000
-VOLUME ["/run/repo", "/app/data"]
+VOLUME ["/run/repo"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3000/healthz || exit 1

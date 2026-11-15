@@ -446,6 +446,60 @@ export class RetroGameTalkClient {
     };
   }
 
+  hydratePersistedSession(
+    config: ScraperConfigInternal,
+    persistedLastAuthenticatedAt: string | null,
+  ): { restoredActiveCookies: boolean; cookieCount: number; cookieNames: string } {
+    const cookies = (() => {
+      try {
+        return this.jar.getCookiesSync(config.baseUrl);
+      } catch {
+        return [];
+      }
+    })();
+    const hasAuthCookie = cookies.some(
+      (c) => c.key === 'xf_user' || c.key.startsWith('wordpress_logged_in_'),
+    );
+    const cookieNames = cookies.length > 0 ? cookies.map((c) => c.key).join(', ') : 'none';
+    const configured = Boolean(config.username && config.password);
+
+    if (hasAuthCookie) {
+      const now = new Date().toISOString();
+      const effectiveLastAuthAt = persistedLastAuthenticatedAt || now;
+      this.authStatus = {
+        configured,
+        authenticated: true,
+        hasCompletedLogin: true,
+        lastAuthenticatedAt: effectiveLastAuthAt,
+        cookieCount: cookies.length,
+        lastCheckedAt: now,
+        lastMessage: `Restored persisted session (${cookies.length} cookies)`,
+      };
+      return {
+        restoredActiveCookies: true,
+        cookieCount: cookies.length,
+        cookieNames,
+      };
+    }
+
+    this.authStatus = {
+      configured,
+      authenticated: false,
+      hasCompletedLogin: Boolean(persistedLastAuthenticatedAt),
+      lastAuthenticatedAt: persistedLastAuthenticatedAt,
+      cookieCount: cookies.length,
+      lastCheckedAt: null,
+      lastMessage: persistedLastAuthenticatedAt
+        ? 'Verified login history restored; session will refresh automatically on next sync'
+        : null,
+    };
+    return {
+      restoredActiveCookies: false,
+      cookieCount: cookies.length,
+      cookieNames,
+    };
+  }
+
   resetAuthSession(clearHistory = false): void {
     this.jar = new CookieJar();
     this.saveCookieJar();

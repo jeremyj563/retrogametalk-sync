@@ -76,8 +76,8 @@ credentials:
 scraper:
   # HTTP server listening port inside the container
   port: 3000
-  # SQLite database, keyfile, and cookie jar directory (inside persistence.mountPath)
-  dataDir: /app/data
+  # SQLite database, keyfile, and cookie jar directory (inside persistence.mountPath so auth & catalog survive pod restarts)
+  dataDir: /run/repo/.rgt-data
   # Mirrored local filesystem root where <system>/<release>/<file> directories are written
   downloadDir: /run/repo
   # Target RetroGameTalk repository index URL

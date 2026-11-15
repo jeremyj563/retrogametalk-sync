@@ -8,11 +8,11 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      DATA_DIR: /run/repo
-      DOWNLOAD_DIR: /run/repo/repository
+      DATA_DIR: /run/repo/.rgt-data
+      DOWNLOAD_DIR: /run/repo
       CRON_SCHEDULE: "0 */6 * * *"
       RGT_BASE_URL: "https://retrogametalk.com/repo/"
-      RGT_LOGIN_URL: "https://retrogametalk.com/login/"
+      RGT_LOGIN_URL: "https://retrogametalk.com/login/login"
       RGT_USERNAME: "${RGT_USERNAME:-}"
       RGT_PASSWORD: "${RGT_PASSWORD:-}"
       SCRAPER_SYSTEM_FILTER: "${SCRAPER_SYSTEM_FILTER:-}"
