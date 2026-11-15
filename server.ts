@@ -217,6 +217,29 @@ async function bootstrap() {
     }
   });
 
+  app.post('/api/items/retry-failed', async (req, res) => {
+    const rawSystem = typeof req.body?.system === 'string' ? req.body.system.trim() : undefined;
+    const rawIds = Array.isArray(req.body?.ids)
+      ? req.body.ids.map(Number).filter((id: number) => Number.isInteger(id) && id > 0)
+      : undefined;
+    if (Array.isArray(req.body?.ids) && (!rawIds || rawIds.length === 0)) {
+      res.status(400).json({ error: 'Provide one or more valid catalog release IDs to retry' });
+      return;
+    }
+
+    try {
+      const run = await orchestrator.retryAllFailed({
+        system: rawSystem && rawSystem !== 'all' ? rawSystem : undefined,
+        itemIds: rawIds,
+      });
+      res.status(202).json({ run });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const statusCode = /No failed or partial releases/i.test(msg) ? 400 : 409;
+      res.status(statusCode).json({ error: msg });
+    }
+  });
+
   app.post('/api/items/:id/retry', async (req, res) => {
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId) || itemId <= 0) {

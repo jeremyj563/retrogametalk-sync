@@ -23,15 +23,18 @@ import { GameDetailDrawer } from './GameDetailDrawer';
 interface CatalogPanelProps {
   status: ServiceStatusSnapshot;
   catalogRevision?: number;
+  focusFailedSignal?: number;
   onRetryItem: (itemId: number, fileId?: number) => Promise<void>;
+  onRetryAllFailed: (options?: { system?: string; ids?: number[] }) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
 }
 
 const CATALOG_VIEW_STORAGE_KEY = 'rgt_sync_catalog_view_v1';
-const VALID_STATUS_FILTERS = new Set(['all', 'downloaded', 'skipped', 'partial', 'failed']);
+const VALID_STATUS_FILTERS = new Set(['all', 'downloaded', 'skipped', 'partial', 'failed', 'needs_retry']);
+const VALID_VIEW_MODES = new Set(['catalog', 'failed', 'filesystem']);
 
 interface CatalogViewPrefs {
-  viewMode: 'catalog' | 'filesystem';
+  viewMode: 'catalog' | 'failed' | 'filesystem';
   catalogLayout: 'table' | 'grid';
   search: string;
   systemFilter: string;
@@ -67,7 +70,10 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
     if (!raw) return { ...DEFAULT_CATALOG_VIEW_PREFS };
     const parsed = JSON.parse(raw) as Partial<CatalogViewPrefs>;
     return {
-      viewMode: parsed.viewMode === 'filesystem' ? 'filesystem' : 'catalog',
+      viewMode:
+        typeof parsed.viewMode === 'string' && VALID_VIEW_MODES.has(parsed.viewMode)
+          ? (parsed.viewMode as CatalogViewPrefs['viewMode'])
+          : 'catalog',
       catalogLayout: parsed.catalogLayout === 'grid' ? 'grid' : 'table',
       search: typeof parsed.search === 'string' ? parsed.search : '',
       systemFilter: typeof parsed.systemFilter === 'string' && parsed.systemFilter ? parsed.systemFilter : 'all',
@@ -90,12 +96,14 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
 
 function buildCatalogQueryKey(prefs: Pick<
   CatalogViewPrefs,
-  'search' | 'systemFilter' | 'statusFilter' | 'tagFilter' | 'genreFilter' | 'regionFilter' | 'languageFilter'
+  'viewMode' | 'search' | 'systemFilter' | 'statusFilter' | 'tagFilter' | 'genreFilter' | 'regionFilter' | 'languageFilter'
 >): string {
+  const effectiveStatus = prefs.viewMode === 'failed' ? 'needs_retry' : prefs.statusFilter;
   return JSON.stringify([
+    prefs.viewMode,
     prefs.search,
     prefs.systemFilter,
-    prefs.statusFilter,
+    effectiveStatus,
     prefs.tagFilter,
     prefs.genreFilter,
     prefs.regionFilter,
@@ -104,6 +112,7 @@ function buildCatalogQueryKey(prefs: Pick<
 }
 
 let memoryCatalogViewPrefs: CatalogViewPrefs = loadInitialCatalogViewPrefs();
+let lastConsumedFocusFailedSignal = 0;
 let memoryCatalogFacets: CatalogFacets = {
   tags: [],
   genres: [],
@@ -121,15 +130,34 @@ let memoryFsSnapshot: {
   nodes: FsTreeNode[];
 } | null = null;
 
-export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefreshStatus }: CatalogPanelProps) {
+export function CatalogPanel({
+  status,
+  catalogRevision = 0,
+  focusFailedSignal = 0,
+  onRetryItem,
+  onRetryAllFailed,
+  onRefreshStatus,
+}: CatalogPanelProps) {
+  const initialFocusFailed = focusFailedSignal > lastConsumedFocusFailedSignal;
+  if (initialFocusFailed) {
+    lastConsumedFocusFailedSignal = focusFailedSignal;
+  }
+  const initialViewMode: CatalogViewPrefs['viewMode'] = initialFocusFailed
+    ? 'failed'
+    : memoryCatalogViewPrefs.viewMode;
+
   const initialMatchedCatalog =
-    memoryCatalogSnapshot?.queryKey === buildCatalogQueryKey(memoryCatalogViewPrefs)
+    memoryCatalogSnapshot?.queryKey ===
+    buildCatalogQueryKey({
+      ...memoryCatalogViewPrefs,
+      viewMode: initialViewMode,
+    })
       ? memoryCatalogSnapshot
       : null;
   const initialMatchedFs =
     memoryFsSnapshot?.fsPath === memoryCatalogViewPrefs.fsPath ? memoryFsSnapshot : null;
 
-  const [viewMode, setViewMode] = useState<'catalog' | 'filesystem'>(() => memoryCatalogViewPrefs.viewMode);
+  const [viewMode, setViewMode] = useState<'catalog' | 'failed' | 'filesystem'>(initialViewMode);
   const [catalogLayout, setCatalogLayout] = useState<'table' | 'grid'>(() => memoryCatalogViewPrefs.catalogLayout);
   const [search, setSearch] = useState(() => memoryCatalogViewPrefs.search);
   const [systemFilter, setSystemFilter] = useState(() => memoryCatalogViewPrefs.systemFilter);
@@ -143,11 +171,12 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
   const [totalItems, setTotalItems] = useState(() => initialMatchedCatalog?.totalItems ?? 0);
   const [loading, setLoading] = useState(() => !initialMatchedCatalog);
   const [retryingId, setRetryingId] = useState<number | null>(null);
+  const [batchRetrying, setBatchRetrying] = useState(false);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [failedCovers, setFailedCovers] = useState<Set<number>>(new Set());
   const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
 
-  // Selection state for Indexed Catalog (filtered items)
+  // Selection state for Indexed Catalog / Failed Queue
   const [selectedCatalogIds, setSelectedCatalogIds] = useState<Set<number>>(new Set());
   const [confirmCatalogBulk, setConfirmCatalogBulk] = useState(false);
 
@@ -158,6 +187,15 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
   const [fsLoading, setFsLoading] = useState(false);
   const [selectedFsPaths, setSelectedFsPaths] = useState<Set<string>>(new Set());
   const [confirmFsBulk, setConfirmFsBulk] = useState(false);
+
+  useEffect(() => {
+    if (focusFailedSignal > lastConsumedFocusFailedSignal) {
+      lastConsumedFocusFailedSignal = focusFailedSignal;
+      setViewMode('failed');
+      setSelectedCatalogIds(new Set());
+      setConfirmCatalogBulk(false);
+    }
+  }, [focusFailedSignal]);
 
   useEffect(() => {
     const nextPrefs: CatalogViewPrefs = {
@@ -207,14 +245,16 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
       const reqId = ++catalogReqSeqRef.current;
       if (!silent) setLoading(true);
       try {
+        const isFailedQueue = viewMode === 'failed';
+        const effectiveStatus = isFailedQueue ? 'needs_retry' : statusFilter;
         const qs = new URLSearchParams({
           search,
           system: systemFilter,
-          status: statusFilter,
-          tag: tagFilter,
-          genre: genreFilter,
-          region: regionFilter,
-          language: languageFilter,
+          status: effectiveStatus,
+          tag: isFailedQueue ? 'all' : tagFilter,
+          genre: isFailedQueue ? 'all' : genreFilter,
+          region: isFailedQueue ? 'all' : regionFilter,
+          language: isFailedQueue ? 'all' : languageFilter,
           limit: '150',
           offset: '0',
         });
@@ -227,13 +267,14 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
         const nextTotal = data.total || 0;
         memoryCatalogSnapshot = {
           queryKey: buildCatalogQueryKey({
+            viewMode,
             search,
             systemFilter,
-            statusFilter,
-            tagFilter,
-            genreFilter,
-            regionFilter,
-            languageFilter,
+            statusFilter: effectiveStatus,
+            tagFilter: isFailedQueue ? 'all' : tagFilter,
+            genreFilter: isFailedQueue ? 'all' : genreFilter,
+            regionFilter: isFailedQueue ? 'all' : regionFilter,
+            languageFilter: isFailedQueue ? 'all' : languageFilter,
           }),
           items: nextItems,
           totalItems: nextTotal,
@@ -297,7 +338,7 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
         }
       }
     },
-    [search, systemFilter, statusFilter, tagFilter, genreFilter, regionFilter, languageFilter],
+    [viewMode, search, systemFilter, statusFilter, tagFilter, genreFilter, regionFilter, languageFilter],
   );
 
   const loadFsTree = useCallback(async (subpath: string, silent = false) => {
@@ -331,10 +372,11 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
   }, []);
 
   useEffect(() => {
-    if (viewMode === 'catalog') {
+    if (viewMode === 'catalog' || viewMode === 'failed') {
       const hasCached =
         memoryCatalogSnapshot?.queryKey ===
         buildCatalogQueryKey({
+          viewMode,
           search,
           systemFilter,
           statusFilter,
@@ -366,7 +408,7 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
   useEffect(() => {
     if (catalogRevision === lastHandledRevisionRef.current) return;
     lastHandledRevisionRef.current = catalogRevision;
-    if (viewMode === 'catalog') {
+    if (viewMode === 'catalog' || viewMode === 'failed') {
       void loadCatalog(true);
     } else {
       void loadFsTree(fsPath, true);
@@ -430,7 +472,7 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
     setRetryingId(id);
     try {
       await onRetryItem(id, fileId);
-      await loadCatalog();
+      await loadCatalog(true);
       if (activeDetailItem?.id === id) {
         const res = await fetch(`/api/items/${id}`);
         if (res.ok) {
@@ -440,6 +482,23 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
       }
     } finally {
       setRetryingId(null);
+    }
+  };
+
+  const handleBatchRetry = async (ids?: number[]) => {
+    setBatchRetrying(true);
+    try {
+      await onRetryAllFailed({
+        system: systemFilter !== 'all' ? systemFilter : undefined,
+        ids: ids && ids.length > 0 ? ids : undefined,
+      });
+      setSelectedCatalogIds(new Set());
+      setConfirmCatalogBulk(false);
+      await loadCatalog(true);
+    } catch {
+      // Error surfaced via top-level errorBanner in App.tsx
+    } finally {
+      setBatchRetrying(false);
     }
   };
 
@@ -556,18 +615,34 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               <button
                 type="button"
                 onClick={() => setViewMode('catalog')}
-                className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
                   viewMode === 'catalog'
                     ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
                     : 'text-crt-muted hover:text-crt-text border border-transparent'
                 }`}
               >
-                Indexed Catalog ({totalItems})
+                Indexed Catalog ({viewMode === 'catalog' ? totalItems : status.totals.totalCatalogItems})
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('failed')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 tabular-nums ${
+                  viewMode === 'failed'
+                    ? status.totals.failedItems > 0
+                      ? 'bg-crt-elevated text-crt-crimson border border-crt-crimson/60'
+                      : 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
+                    : status.totals.failedItems > 0
+                      ? 'text-crt-crimson hover:text-crt-crimson/90 border border-transparent'
+                      : 'text-crt-muted hover:text-crt-text border border-transparent'
+                }`}
+              >
+                {status.totals.failedItems > 0 && <XCircle className="h-3.5 w-3.5 shrink-0" />}
+                Failed Queue ({status.totals.failedItems})
               </button>
               <button
                 type="button"
                 onClick={() => setViewMode('filesystem')}
-                className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
                   viewMode === 'filesystem'
                     ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
                     : 'text-crt-muted hover:text-crt-text border border-transparent'
@@ -583,7 +658,7 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
                   type="button"
                   onClick={() => setCatalogLayout('table')}
                   aria-label="Table view"
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
                     catalogLayout === 'table'
                       ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
                       : 'text-crt-muted hover:text-crt-text border border-transparent'
@@ -596,7 +671,7 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
                   type="button"
                   onClick={() => setCatalogLayout('grid')}
                   aria-label="Box-Art Grid view"
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
                     catalogLayout === 'grid'
                       ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
                       : 'text-crt-muted hover:text-crt-text border border-transparent'
@@ -609,12 +684,41 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
             )}
           </div>
 
-          {viewMode === 'catalog' ? (
+          {viewMode === 'catalog' || viewMode === 'failed' ? (
             <div className="flex items-center gap-2 self-start lg:self-auto">
+              {viewMode === 'failed' && (
+                <button
+                  type="button"
+                  disabled={
+                    status.totals.failedItems === 0 ||
+                    batchRetrying ||
+                    Boolean(status.activeRun) ||
+                    !status.auth.hasCompletedLogin
+                  }
+                  title={
+                    !status.auth.hasCompletedLogin
+                      ? 'Verify login in Operations before retrying failed downloads'
+                      : status.activeRun
+                        ? 'Wait for or stop the active sync run first'
+                        : systemFilter !== 'all'
+                          ? `Retry all failed and partial releases in ${systemFilter}`
+                          : 'Retry all failed and partial releases across catalog'
+                  }
+                  onClick={() => void handleBatchRetry()}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 tabular-nums disabled:opacity-45 disabled:cursor-not-allowed"
+                >
+                  <RotateCcw className={`h-3.5 w-3.5 ${batchRetrying ? 'animate-spin' : ''}`} />
+                  {batchRetrying
+                    ? 'Starting Retry...'
+                    : systemFilter !== 'all'
+                      ? `Retry Failed (${items.length})`
+                      : `Retry All Failed (${status.totals.failedItems})`}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => void loadCatalog()}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap shrink-0"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
                 Refresh
@@ -791,6 +895,7 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
               <option value="all">All Statuses</option>
               <option value="downloaded">Downloaded</option>
               <option value="skipped">Skipped (Exists)</option>
+              <option value="needs_retry">Needs Attention (Failed &amp; Partial)</option>
               <option value="partial">Partial</option>
               <option value="failed">Failed</option>
             </select>
@@ -811,13 +916,89 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
           </div>
         )}
 
-        {/* Contextual Bulk Selection Bar (Indexed Catalog) */}
-        {viewMode === 'catalog' && selectedCatalogIds.size > 0 && (
+        {/* Failed Queue Filter Row */}
+        {viewMode === 'failed' && (
+          <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-crt-border">
+            <div className="relative">
+              <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Filter failed titles or files..."
+                className={`pl-8 ${search ? 'pr-7' : 'pr-3'} py-1.5 text-xs bg-crt-bg border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-64 ${
+                  search.trim() ? 'border-crt-phosphor/60' : 'border-crt-border'
+                }`}
+              />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch('')}
+                  aria-label="Clear search query"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-crt-muted hover:text-crt-text p-0.5 rounded"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            <select
+              value={systemFilter}
+              onChange={(e) => setSystemFilter(e.target.value)}
+              aria-label="Filter failed releases by console system"
+              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
+                systemFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
+              }`}
+            >
+              <option value="all">All Systems ({status.systems.length})</option>
+              {systemFilter !== 'all' && !status.systems.some((sys) => sys.systemName === systemFilter) && (
+                <option value={systemFilter}>{systemFilter}</option>
+              )}
+              {status.systems.map((sys) => (
+                <option key={sys.systemName} value={sys.systemName}>
+                  {sys.systemName} ({sys.failedItems} failed)
+                </option>
+              ))}
+            </select>
+
+            {(search.trim() !== '' || systemFilter !== 'all') && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearch('');
+                  setSystemFilter('all');
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 transition-colors whitespace-nowrap"
+              >
+                <X className="h-3.5 w-3.5" />
+                Reset Filter
+              </button>
+            )}
+
+            <span className="sm:ml-auto text-xs font-mono text-crt-muted tabular-nums">
+              Showing {items.length} of {totalItems} failed/partial release{totalItems === 1 ? '' : 's'}
+            </span>
+          </div>
+        )}
+
+        {/* Contextual Bulk Selection Bar (Indexed Catalog & Failed Queue) */}
+        {(viewMode === 'catalog' || viewMode === 'failed') && selectedCatalogIds.size > 0 && (
           <div className="pt-3 border-t border-crt-border flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
             <span className="text-crt-phosphor tabular-nums">
               {selectedCatalogIds.size} item{selectedCatalogIds.size === 1 ? '' : 's'} selected
             </span>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {viewMode === 'failed' && !confirmCatalogBulk && (
+                <button
+                  type="button"
+                  disabled={batchRetrying || Boolean(status.activeRun) || !status.auth.hasCompletedLogin}
+                  onClick={() => void handleBatchRetry(Array.from(selectedCatalogIds))}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Retry Selected ({selectedCatalogIds.size})
+                </button>
+              )}
               {confirmCatalogBulk ? (
                 <>
                   <button
@@ -911,7 +1092,189 @@ export function CatalogPanel({ status, catalogRevision = 0, onRetryItem, onRefre
       </div>
 
       {/* Main Content View */}
-      {viewMode === 'catalog' ? (
+      {viewMode === 'failed' ? (
+        <div className="border border-crt-border bg-crt-surface rounded-md overflow-hidden">
+          {loading ? (
+            <div className="p-6 space-y-3">
+              {[0, 1, 2, 3, 4].map((row) => (
+                <div key={row} className="h-14 bg-crt-bg border border-crt-border rounded animate-pulse" />
+              ))}
+            </div>
+          ) : items.length === 0 ? (
+            <div className="p-12 text-center space-y-3">
+              <CheckCircle2 className="h-6 w-6 text-crt-phosphor mx-auto" />
+              <p className="text-sm font-medium text-crt-text">
+                {search.trim() !== '' || systemFilter !== 'all'
+                  ? 'No failed or partial releases match this filter'
+                  : 'No failed or partial releases'}
+              </p>
+              <p className="text-xs text-crt-muted max-w-md mx-auto">
+                {search.trim() !== '' || systemFilter !== 'all'
+                  ? 'Clear your search query or system filter to view all releases awaiting recovery.'
+                  : 'Every indexed download completed cleanly or was deduplicated against local disk.'}
+              </p>
+              <div className="pt-1 flex items-center justify-center gap-2">
+                {(search.trim() !== '' || systemFilter !== 'all') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearch('');
+                      setSystemFilter('all');
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    Reset Filter
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setViewMode('catalog')}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors"
+                >
+                  Back to Indexed Catalog
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-crt-border bg-crt-bg text-[11px] font-mono text-crt-muted">
+                    <th className="py-2.5 pl-4 pr-2 w-9">
+                      <input
+                        type="checkbox"
+                        checked={allCatalogSelected}
+                        onChange={toggleAllCatalog}
+                        aria-label="Select all failed releases"
+                        className="accent-crt-phosphor cursor-pointer"
+                      />
+                    </th>
+                    <th className="py-2.5 px-3 font-medium">System</th>
+                    <th className="py-2.5 px-3 font-medium">Release &amp; Failing Files</th>
+                    <th className="py-2.5 px-3 font-medium">Status</th>
+                    <th className="py-2.5 px-4 font-medium text-right">Recovery</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-crt-border text-xs">
+                  {items.map((item) => {
+                    const checked = selectedCatalogIds.has(item.id);
+                    const isDeletingThis = deletingKey === `item-${item.id}`;
+                    const failingFiles = item.files.filter((f) => f.status === 'failed');
+                    const failureSummary =
+                      failingFiles.length > 0
+                        ? `${failingFiles.length} of ${item.filesCount || item.files.length} file${(item.filesCount || item.files.length) === 1 ? '' : 's'} failed`
+                        : item.status === 'partial'
+                          ? 'Missing local archive'
+                          : 'Download failed';
+
+                    return (
+                      <tr
+                        key={item.id}
+                        onClick={() => void openDetailItem(item)}
+                        className={`cursor-pointer transition-colors align-top ${
+                          checked ? 'bg-crt-phosphor/5' : 'hover:bg-crt-elevated'
+                        }`}
+                      >
+                        <td className="pl-4 pr-2 py-3" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleCatalogItem(item.id)}
+                            aria-label={`Select ${item.title}`}
+                            className="accent-crt-phosphor cursor-pointer"
+                          />
+                        </td>
+                        <td className="px-3 py-3 font-mono text-crt-text whitespace-nowrap">
+                          {item.systemName}
+                        </td>
+                        <td className="px-3 py-3 max-w-2xl">
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                              <span className="font-medium text-crt-text">{item.title}</span>
+                              <span className="font-mono text-[11px] text-crt-muted tabular-nums">
+                                {failureSummary} · {item.remotePath}
+                              </span>
+                            </div>
+                            {failingFiles.length > 0 ? (
+                              <div className="space-y-1 pt-0.5">
+                                {failingFiles.map((f) => (
+                                  <div key={f.id} className="font-mono text-[11px] leading-snug break-all">
+                                    <span className="text-crt-text">{f.filename}</span>
+                                    {f.errorMessage && (
+                                      <span className="text-crt-crimson ml-2">· {f.errorMessage}</span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              item.errorMessage && (
+                                <div className="font-mono text-[11px] text-crt-crimson leading-snug break-all">
+                                  {item.errorMessage}
+                                </div>
+                              )
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-3 py-3 font-mono whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center gap-1.5 ${
+                              item.status === 'failed' ? 'text-crt-crimson' : 'text-crt-amber'
+                            }`}
+                          >
+                            {item.status === 'failed' ? (
+                              <XCircle className="h-3.5 w-3.5" />
+                            ) : (
+                              <AlertCircle className="h-3.5 w-3.5" />
+                            )}
+                            {item.status}
+                          </span>
+                        </td>
+                        <td
+                          className="px-4 py-3 text-right whitespace-nowrap"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div className="inline-flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              disabled={
+                                retryingId === item.id ||
+                                batchRetrying ||
+                                Boolean(status.activeRun) ||
+                                !status.auth.hasCompletedLogin
+                              }
+                              title={
+                                !status.auth.hasCompletedLogin
+                                  ? 'Verify login in Operations before retrying'
+                                  : 'Re-fetch download link and retry failed/missing files'
+                              }
+                              onClick={() => void handleRetry(item.id)}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium border border-crt-border hover:border-crt-phosphor text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              <RotateCcw className={`h-3 w-3 ${retryingId === item.id ? 'animate-spin' : ''}`} />
+                              {retryingId === item.id ? 'Retrying...' : 'Retry'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isDeletingThis}
+                              onClick={() => void handleDeleteCatalogItems([item.id])}
+                              aria-label={`Delete ${item.title}`}
+                              title="Delete release and local mirrored files"
+                              className="p-1.5 border border-crt-border hover:border-crt-crimson text-crt-muted hover:text-crt-crimson rounded transition-colors disabled:opacity-50"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      ) : viewMode === 'catalog' ? (
         <div className="border border-crt-border bg-crt-surface rounded-md overflow-hidden">
           {loading ? (
             <div className="p-6 space-y-3">

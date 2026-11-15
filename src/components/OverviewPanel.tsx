@@ -34,6 +34,7 @@ interface OverviewPanelProps {
   onClearLogs: (level: 'all' | LogLevel) => Promise<void>;
   onClearRuns: () => Promise<void>;
   onNavigateToOperations: () => void;
+  onReviewFailed?: () => void;
 }
 
 function toLocalDateTimeInputValue(date: Date): string {
@@ -51,6 +52,7 @@ export function OverviewPanel({
   onClearLogs,
   onClearRuns,
   onNavigateToOperations,
+  onReviewFailed,
 }: OverviewPanelProps) {
   const [logFilter, setLogFilter] = useState<'all' | LogLevel>('all');
   const [autoScroll, setAutoScroll] = useState(true);
@@ -368,8 +370,24 @@ export function OverviewPanel({
           <p className="font-mono text-2xl font-semibold text-crt-text tabular-nums">
             {status.storage.totalFilesOnDisk.toLocaleString()}
           </p>
-          <p className="text-xs font-mono text-crt-muted tabular-nums">
-            {status.totals.downloadedItems} synced · {status.totals.skippedItems} deduped
+          <p className="text-xs font-mono text-crt-muted tabular-nums flex flex-wrap items-center gap-x-1.5 gap-y-1">
+            <span>
+              {status.totals.downloadedItems} synced · {status.totals.skippedItems} deduped
+            </span>
+            {status.totals.failedItems > 0 && (
+              <>
+                <span aria-hidden="true">·</span>
+                <button
+                  type="button"
+                  onClick={onReviewFailed}
+                  className="inline-flex items-center gap-1 text-crt-crimson hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                  title="Open Failed Queue in Catalog to inspect errors and retry downloads"
+                >
+                  <XCircle className="h-3 w-3 shrink-0" />
+                  <span>{status.totals.failedItems} failed · Review</span>
+                </button>
+              </>
+            )}
           </p>
         </div>
 
