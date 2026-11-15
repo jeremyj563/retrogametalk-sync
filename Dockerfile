@@ -1,3 +1,13 @@
+FROM node:22-alpine AS builder
+WORKDIR /app
+
+RUN apk add --no-cache python3 make g++
+COPY package.json package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci --legacy-peer-deps; else npm install --legacy-peer-deps; fi
+
+COPY . .
+RUN npm run build
+
 FROM node:22-alpine AS runner
 WORKDIR /app
 
