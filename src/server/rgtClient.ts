@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { load as loadHtml } from 'cheerio';
+import { type HttpMethod, Impit, type ImpitResponse } from 'impit';
 import { CookieJar } from 'tough-cookie';
 import { getCookieJarPath } from './db.ts';
 import type { AdaptiveRateLimiter } from './rateLimiter.ts';
@@ -15,6 +16,13 @@ import type {
 } from './types.ts';
 
 export { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
+
+const DEFAULT_BROWSER_USER_AGENTS = new Set([
+  '',
+  'Mozilla/5.0 (compatible; RetroGameTalkSync/1.0)',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+]);
 
 const ARCHIVE_EXTENSIONS = new Set([
   '.zip', '.7z', '.rar', '.tar', '.gz', '.bz2', '.xz',
@@ -223,6 +231,7 @@ function isDownloadCandidateUrl(url: URL, anchorText: string, hasDownloadAttr: b
 
 export class RetroGameTalkClient {
   private jar: CookieJar;
+  private httpClient: Impit;
   private rateLimiter: AdaptiveRateLimiter;
   private wpTypesCache: Map<string, string> | null = null;
   private authStatus: AuthSessionStatus = {
@@ -238,6 +247,10 @@ export class RetroGameTalkClient {
   constructor(rateLimiter: AdaptiveRateLimiter) {
     this.rateLimiter = rateLimiter;
     this.jar = this.loadCookieJar();
+    this.httpClient = new Impit({
+      browser: 'chrome131',
+      followRedirects: false,
+    });
   }
 
   private loadCookieJar(): CookieJar {
@@ -292,15 +305,20 @@ export class RetroGameTalkClient {
   }
 
   private isNonRetryableNetworkError(err: unknown): boolean {
-    const anyErr = err as { code?: string; cause?: { code?: string } } | null;
+    const anyErr = err as { name?: string; message?: string; code?: string; cause?: { code?: string; message?: string } } | null;
     const code = String(anyErr?.cause?.code || anyErr?.code || '');
+    const msg = String(anyErr?.cause?.message || anyErr?.message || err || '');
     return (
       code === 'ENOTFOUND' ||
       code === 'ECONNREFUSED' ||
       code === 'ERR_INVALID_URL' ||
       code === 'ERR_TLS_CERT_ALTNAME_INVALID' ||
       code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
-      code.startsWith('CERT_')
+      code.startsWith('CERT_') ||
+      anyErr?.name === 'InvalidURL' ||
+      /dns error|failed to lookup address|name or service not known|nodename nor servname/i.test(msg) ||
+      /connectionrefused|connection refused/i.test(msg) ||
+      /certificate|unknownissuer|invalidpeer|cert_/i.test(msg)
     );
   }
 
@@ -315,19 +333,35 @@ export class RetroGameTalkClient {
       // Keep raw targetUrl
     }
 
-    if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    if (
+      code === 'ENOTFOUND' ||
+      code === 'EAI_AGAIN' ||
+      /dns error|failed to lookup address|name or service not known|nodename nor servname/i.test(causeMsg)
+    ) {
       return `Cannot resolve hostname "${anyErr?.cause?.hostname || host}" — verify the URL spelling and DNS/network access.`;
     }
-    if (code === 'ECONNREFUSED') {
+    if (code === 'ECONNREFUSED' || /connectionrefused|connection refused/i.test(causeMsg)) {
       return `Connection refused by "${host}" — the target server appears to be down or unreachable on that port.`;
     }
-    if (anyErr?.name === 'TimeoutError' || code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT') {
+    if (
+      anyErr?.name === 'TimeoutError' ||
+      anyErr?.name === 'ConnectTimeout' ||
+      anyErr?.name === 'ReadTimeout' ||
+      code === 'ETIMEDOUT' ||
+      code === 'UND_ERR_CONNECT_TIMEOUT' ||
+      /timed? out/i.test(causeMsg)
+    ) {
       return `Connection to "${host}" timed out — server may be down, firewalled, or unreachable.`;
     }
-    if (code === 'ECONNRESET' || code === 'UND_ERR_SOCKET') {
+    if (code === 'ECONNRESET' || code === 'UND_ERR_SOCKET' || /connectionreset|connection reset|broken pipe/i.test(causeMsg)) {
       return `Connection reset by "${host}" before a response was received.`;
     }
-    if (code.startsWith('CERT_') || code.startsWith('ERR_TLS_') || code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE') {
+    if (
+      code.startsWith('CERT_') ||
+      code.startsWith('ERR_TLS_') ||
+      code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+      /certificate|tls|ssl|handshake/i.test(causeMsg)
+    ) {
       return `TLS/SSL certificate error connecting to "${host}": ${causeMsg}`;
     }
     return causeMsg || `Network error connecting to "${host}"`;
@@ -410,7 +444,7 @@ export class RetroGameTalkClient {
     signal?: AbortSignal,
     log?: LoggerFn,
     maxRedirects = 8,
-  ): Promise<{ response: Response; finalUrl: string; latencyMs: number }> {
+  ): Promise<{ response: ImpitResponse; finalUrl: string; latencyMs: number }> {
     let currentUrl = url;
     let attempt = 0;
 
@@ -429,25 +463,35 @@ export class RetroGameTalkClient {
       }
 
       const headers = new Headers(init.headers || {});
-      headers.set('User-Agent', config.userAgent);
-      headers.set('Accept', headers.get('Accept') || 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
-      if (!headers.has('Accept-Language')) {
-        headers.set('Accept-Language', 'en-US,en;q=0.9');
+      const trimmedUa = (config.userAgent || '').trim();
+      // Preserve impit's exact Chrome 131 User-Agent + Sec-CH-UA coherence unless a custom UA was explicitly configured
+      if (trimmedUa && !DEFAULT_BROWSER_USER_AGENTS.has(trimmedUa)) {
+        headers.set('User-Agent', trimmedUa);
+      }
+      // Align Sec-Fetch-Site with Referer so same-origin navigations and form POSTs match real Chrome
+      const referer = headers.get('Referer');
+      if (referer && !headers.has('Sec-Fetch-Site')) {
+        try {
+          const refOrigin = new URL(referer).origin;
+          const curOrigin = new URL(currentUrl).origin;
+          headers.set('Sec-Fetch-Site', refOrigin === curOrigin ? 'same-origin' : 'cross-site');
+        } catch {
+          // Keep default Sec-Fetch-Site
+        }
       }
       if (cookieHeader) {
         headers.set('Cookie', cookieHeader);
       }
 
-      const timeoutCtrl = AbortSignal.timeout(config.requestTimeoutMs);
-      const combinedSignal = signal ? AbortSignal.any([signal, timeoutCtrl]) : timeoutCtrl;
-
-      let res: Response;
+      let res: ImpitResponse;
       try {
-        res = await fetch(currentUrl, {
-          ...init,
+        res = await this.httpClient.fetch(currentUrl, {
+          method: ((init.method || 'GET').toUpperCase() as HttpMethod),
           headers,
+          body: init.body !== undefined && init.body !== null ? String(init.body) : undefined,
           redirect: 'manual',
-          signal: combinedSignal,
+          timeout: config.requestTimeoutMs,
+          signal,
         });
       } catch (err) {
         const latency = performance.now() - started;
@@ -585,60 +629,62 @@ export class RetroGameTalkClient {
 
     log?.('info', `Authenticating XenForo + Repo gate at ${config.loginUrl}`);
 
-    // Step 1: GET the configured Login Endpoint URL directly first so configured paths (e.g. /login/login) are honored and reported accurately
-    let formPage: { response: Response; finalUrl: string; latencyMs: number };
-    try {
-      formPage = await this.fetchWithRedirects(config.loginUrl, config, { method: 'GET' }, signal, log);
-    } catch (err) {
-      const msg = `Cannot reach Login Endpoint URL (${config.loginUrl}): ${this.formatNetworkError(err, config.loginUrl)}`;
-      this.setAuthState({
-        configured: true,
-        authenticated: false,
-        cookieCount: this.getSafeCookieCount(config.baseUrl),
-        lastMessage: msg,
-      });
-      return { authenticated: false, statusCode: 0, message: msg };
-    }
+    // Step 1: Load the XenForo login form page to obtain xf_csrf cookie + _xfToken hidden field.
+    // When loginUrl points to XenForo's POST action (/login/login), real browsers visit GET /login/ first
+    // before submitting POST /login/login. We mirror that exact browser navigation order, and fall back
+    // to GET loginUrl if /login/ is not served (e.g. custom auth endpoints or mock servers).
+    const trimmedLoginUrl = config.loginUrl.trim();
+    const isXenForoPostEndpoint = /\/login\/login\/?$/i.test(trimmedLoginUrl);
+    const parentFormUrl = isXenForoPostEndpoint
+      ? trimmedLoginUrl.replace(/\/login\/login\/?$/i, '/login/')
+      : null;
 
-    let html = await formPage.response.text();
-    if (this.isCloudflareChallenge(formPage.response.status, formPage.response.headers, html)) {
-      const msg = `Blocked by Cloudflare bot protection (HTTP ${formPage.response.status}) at Login Endpoint URL (${formPage.finalUrl}). Cloudflare is requiring an interactive JS/Turnstile browser challenge for this server IP, so automated login cannot complete from this host.`;
-      this.setAuthState({
-        configured: true,
-        authenticated: false,
-        cookieCount: this.getSafeCookieCount(config.baseUrl),
-        lastMessage: msg,
-      });
-      return { authenticated: false, statusCode: formPage.response.status, message: msg };
-    }
+    let formPage: { response: ImpitResponse; finalUrl: string; latencyMs: number } | null = null;
+    let html = '';
 
-    // Optional XenForo fallback: if GET /login/login returns 404/405 or no form, try parent /login/ to fetch CSRF _xfToken
-    if (
-      config.loginUrl.endsWith('/login/login') &&
-      (formPage.response.status === 404 ||
-        formPage.response.status === 405 ||
-        (formPage.response.ok && loadHtml(html)('input[type="password"]').length === 0))
-    ) {
-      const parentFormUrl = config.loginUrl.replace(/\/login\/login$/, '/login/');
+    if (parentFormUrl) {
       try {
-        const fallbackPage = await this.fetchWithRedirects(parentFormUrl, config, { method: 'GET' }, signal, log);
-        const fallbackHtml = await fallbackPage.response.text();
-        if (this.isCloudflareChallenge(fallbackPage.response.status, fallbackPage.response.headers, fallbackHtml)) {
-          const msg = `Blocked by Cloudflare bot protection (HTTP ${fallbackPage.response.status}) at Login Endpoint URL (${fallbackPage.finalUrl}). Cloudflare is requiring an interactive JS/Turnstile browser challenge for this server IP.`;
-          this.setAuthState({
-            configured: true,
-            authenticated: false,
-            cookieCount: this.getSafeCookieCount(config.baseUrl),
-            lastMessage: msg,
-          });
-          return { authenticated: false, statusCode: fallbackPage.response.status, message: msg };
-        }
-        if (fallbackPage.response.ok && loadHtml(fallbackHtml)('input[type="password"]').length > 0) {
-          formPage = fallbackPage;
-          html = fallbackHtml;
+        const candidatePage = await this.fetchWithRedirects(parentFormUrl, config, { method: 'GET' }, signal, log);
+        const candidateHtml = await candidatePage.response.text();
+        if (
+          !this.isCloudflareChallenge(candidatePage.response.status, candidatePage.response.headers, candidateHtml) &&
+          candidatePage.response.ok &&
+          (loadHtml(candidateHtml)('input[type="password"]').length > 0 ||
+            this.getSafeCookieCount(config.baseUrl) > 0)
+        ) {
+          formPage = candidatePage;
+          html = candidateHtml;
         }
       } catch {
-        // Keep original response error reporting below
+        // Fall through to GET config.loginUrl directly so exact URL network errors are reported
+      }
+    }
+
+    if (!formPage) {
+      try {
+        formPage = await this.fetchWithRedirects(config.loginUrl, config, { method: 'GET' }, signal, log);
+      } catch (err) {
+        const msg = `Cannot reach Login Endpoint URL (${config.loginUrl}): ${this.formatNetworkError(err, config.loginUrl)}`;
+        this.setAuthState({
+          configured: true,
+          authenticated: false,
+          cookieCount: this.getSafeCookieCount(config.baseUrl),
+          lastMessage: msg,
+        });
+        return { authenticated: false, statusCode: 0, message: msg };
+      }
+
+      html = await formPage.response.text();
+      if (this.isCloudflareChallenge(formPage.response.status, formPage.response.headers, html)) {
+        const cfRay = formPage.response.headers.get('cf-ray');
+        const msg = `Blocked by Cloudflare Managed Challenge (HTTP ${formPage.response.status}${cfRay ? ` · CF-Ray ${cfRay}` : ''}) at Login Endpoint URL (${config.loginUrl}). Cloudflare returned an interactive Turnstile/JS challenge page instead of the XenForo login form.`;
+        this.setAuthState({
+          configured: true,
+          authenticated: false,
+          cookieCount: this.getSafeCookieCount(config.baseUrl),
+          lastMessage: msg,
+        });
+        return { authenticated: false, statusCode: formPage.response.status, message: msg };
       }
     }
 
@@ -757,7 +803,7 @@ export class RetroGameTalkClient {
       params.set('remember', '1');
     }
 
-    let postRes: { response: Response; finalUrl: string; latencyMs: number };
+    let postRes: { response: ImpitResponse; finalUrl: string; latencyMs: number };
     try {
       postRes = await this.fetchWithRedirects(
         actionUrl,
@@ -909,7 +955,7 @@ export class RetroGameTalkClient {
         }
       }
 
-      let repoRes: { response: Response; finalUrl: string; latencyMs: number };
+      let repoRes: { response: ImpitResponse; finalUrl: string; latencyMs: number };
       try {
         repoRes = await this.fetchWithRedirects(probeConfig.baseUrl, probeConfig, { method: 'GET' }, signal);
       } catch (err) {

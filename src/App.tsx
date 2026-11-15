@@ -306,7 +306,13 @@ export default function App() {
                 }`}
               >
                 <Square className="h-3.5 w-3.5 fill-current" />
-                {stopRequested ? 'Stopping...' : 'Stop Sync'}
+                {stopRequested
+                  ? 'Stopping...'
+                  : status.activeRun.mode === 'dry_run'
+                    ? 'Dry Run'
+                    : status.activeRun.mode === 'full'
+                      ? 'Full Sync'
+                      : 'Incremental Sync'}
               </button>
             ) : (
               <button
