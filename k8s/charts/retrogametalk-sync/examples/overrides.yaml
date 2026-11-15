@@ -1,0 +1,15 @@
+# EXAMPLE: .../retrogametalk-sync/helm template . -f examples/overrides.yaml
+# helm -n rgt-sync upgrade rgt-sync --install --create-namespace helm\charts\retrogametalk-sync -f helm\charts\retrogametalk-sync\examples\overrides.yaml
+---
+image:
+  pullPolicy: Always
+ingress:
+  enabled: true
+persistence:
+  enabled: true
+  size: 5Gi
+podAnnotations:
+  k9scli.io/auto-port-forwards: retrogametalk-sync::3000:3000
+credentials:
+  username: ""
+  password: ""
