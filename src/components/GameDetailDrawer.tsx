@@ -24,6 +24,7 @@ import { readJsonSafely } from '../utils/http';
 interface GameDetailDrawerProps {
   item: RepositoryItemRecord | null;
   activeRun: boolean;
+  canSync: boolean;
   onClose: () => void;
   onItemUpdated: (updated: RepositoryItemRecord) => void;
   onRetryItem: (id: number, fileId?: number) => Promise<void>;
@@ -38,6 +39,7 @@ interface LightboxState {
 export function GameDetailDrawer({
   item,
   activeRun,
+  canSync,
   onClose,
   onItemUpdated,
   onRetryItem,
@@ -483,9 +485,10 @@ export function GameDetailDrawer({
                         ) : file.status === 'failed' ? (
                           <button
                             type="button"
-                            disabled={retryingKey !== null || activeRun}
+                            disabled={retryingKey !== null || activeRun || !canSync}
+                            title={!canSync ? 'Verify login in Operations before retrying' : undefined}
                             onClick={() => void handleRetry(file.id)}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors disabled:opacity-50 whitespace-nowrap"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                           >
                             <RotateCcw className={`h-3.5 w-3.5 ${isRetryingThis ? 'animate-spin' : ''}`} />
                             {isRetryingThis ? 'Retrying...' : 'Retry'}
@@ -616,9 +619,10 @@ export function GameDetailDrawer({
             {hasFailedFiles && (
               <button
                 type="button"
-                disabled={retryingKey !== null || activeRun}
+                disabled={retryingKey !== null || activeRun || !canSync}
+                title={!canSync ? 'Verify login in Operations before retrying' : undefined}
                 onClick={() => void handleRetry()}
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
               >
                 <RotateCcw className={`h-3.5 w-3.5 ${retryingKey === 'release' ? 'animate-spin' : ''}`} />
                 {retryingKey === 'release' ? 'Retrying...' : 'Retry Failed'}

@@ -228,6 +228,8 @@ export class RetroGameTalkClient {
   private authStatus: AuthSessionStatus = {
     configured: false,
     authenticated: false,
+    hasCompletedLogin: false,
+    lastAuthenticatedAt: null,
     cookieCount: 0,
     lastCheckedAt: null,
     lastMessage: null,
@@ -331,6 +333,10 @@ export class RetroGameTalkClient {
     return causeMsg || `Network error connecting to "${host}"`;
   }
 
+  isCloudflareChallengeResponse(status: number, headers: Headers, body: string): boolean {
+    return this.isCloudflareChallenge(status, headers, body);
+  }
+
   private isCloudflareChallenge(status: number, headers: Headers, body: string): boolean {
     if (headers.get('cf-mitigated')?.toLowerCase() === 'challenge') return true;
     if (status === 403 || status === 503) {
@@ -342,10 +348,57 @@ export class RetroGameTalkClient {
     return false;
   }
 
-  getAuthStatus(config: ScraperConfigInternal): AuthSessionStatus {
+  private setAuthState(next: {
+    configured: boolean;
+    authenticated: boolean;
+    cookieCount: number;
+    lastMessage: string;
+    lastCheckedAt?: string;
+  }): void {
+    const now = next.lastCheckedAt || new Date().toISOString();
+    const lastAuthenticatedAt = next.authenticated ? now : this.authStatus.lastAuthenticatedAt;
+    this.authStatus = {
+      configured: next.configured,
+      authenticated: next.authenticated,
+      hasCompletedLogin: Boolean(next.authenticated || lastAuthenticatedAt),
+      lastAuthenticatedAt,
+      cookieCount: next.cookieCount,
+      lastCheckedAt: now,
+      lastMessage: next.lastMessage,
+    };
+  }
+
+  setPersistedLastAuthenticatedAt(lastAuthenticatedAt: string | null): void {
+    this.authStatus = {
+      ...this.authStatus,
+      lastAuthenticatedAt,
+      hasCompletedLogin: Boolean(this.authStatus.authenticated || lastAuthenticatedAt),
+    };
+  }
+
+  resetAuthSession(clearHistory = false): void {
+    this.jar = new CookieJar();
+    this.saveCookieJar();
+    const lastAuthenticatedAt = clearHistory ? null : this.authStatus.lastAuthenticatedAt;
+    this.authStatus = {
+      ...this.authStatus,
+      authenticated: false,
+      hasCompletedLogin: Boolean(lastAuthenticatedAt),
+      lastAuthenticatedAt,
+      cookieCount: 0,
+      lastCheckedAt: clearHistory ? null : this.authStatus.lastCheckedAt,
+      lastMessage: clearHistory ? null : this.authStatus.lastMessage,
+    };
+  }
+
+  getAuthStatus(config: ScraperConfigInternal, persistedLastAuthAt?: string | null): AuthSessionStatus {
+    const effectiveLastAuthAt =
+      this.authStatus.lastAuthenticatedAt || persistedLastAuthAt || null;
     return {
       ...this.authStatus,
       configured: Boolean(config.username && config.password),
+      hasCompletedLogin: Boolean(this.authStatus.authenticated || effectiveLastAuthAt),
+      lastAuthenticatedAt: effectiveLastAuthAt,
       cookieCount: this.getSafeCookieCount(config.baseUrl),
     };
   }
@@ -487,35 +540,32 @@ export class RetroGameTalkClient {
 
     if (!username && !password) {
       const msg = 'Credentials missing: enter both Repository Username and Repository Password.';
-      this.authStatus = {
+      this.setAuthState({
         configured: false,
         authenticated: false,
         cookieCount: this.getSafeCookieCount(config.baseUrl),
-        lastCheckedAt: new Date().toISOString(),
         lastMessage: msg,
-      };
+      });
       return { authenticated: false, statusCode: 0, message: msg };
     }
     if (!username) {
       const msg = 'Repository Username is missing. Enter a valid username.';
-      this.authStatus = {
+      this.setAuthState({
         configured: false,
         authenticated: false,
         cookieCount: this.getSafeCookieCount(config.baseUrl),
-        lastCheckedAt: new Date().toISOString(),
         lastMessage: msg,
-      };
+      });
       return { authenticated: false, statusCode: 0, message: msg };
     }
     if (!password) {
       const msg = `Repository Password is missing for user "${username}".`;
-      this.authStatus = {
+      this.setAuthState({
         configured: false,
         authenticated: false,
         cookieCount: this.getSafeCookieCount(config.baseUrl),
-        lastCheckedAt: new Date().toISOString(),
         lastMessage: msg,
-      };
+      });
       return { authenticated: false, statusCode: 0, message: msg };
     }
 
@@ -524,13 +574,12 @@ export class RetroGameTalkClient {
       this.validateHttpUrlOrExplain(config.baseUrl, 'Repository Base URL');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.authStatus = {
+      this.setAuthState({
         configured: true,
         authenticated: false,
         cookieCount: 0,
-        lastCheckedAt: new Date().toISOString(),
         lastMessage: msg,
-      };
+      });
       return { authenticated: false, statusCode: 0, message: msg };
     }
 
@@ -542,28 +591,24 @@ export class RetroGameTalkClient {
       formPage = await this.fetchWithRedirects(config.loginUrl, config, { method: 'GET' }, signal, log);
     } catch (err) {
       const msg = `Cannot reach Login Endpoint URL (${config.loginUrl}): ${this.formatNetworkError(err, config.loginUrl)}`;
-      this.authStatus = {
+      this.setAuthState({
         configured: true,
         authenticated: false,
         cookieCount: this.getSafeCookieCount(config.baseUrl),
-        lastCheckedAt: new Date().toISOString(),
         lastMessage: msg,
-      };
-      log?.('error', msg);
+      });
       return { authenticated: false, statusCode: 0, message: msg };
     }
 
     let html = await formPage.response.text();
     if (this.isCloudflareChallenge(formPage.response.status, formPage.response.headers, html)) {
       const msg = `Blocked by Cloudflare bot protection (HTTP ${formPage.response.status}) at Login Endpoint URL (${formPage.finalUrl}). Cloudflare is requiring an interactive JS/Turnstile browser challenge for this server IP, so automated login cannot complete from this host.`;
-      this.authStatus = {
+      this.setAuthState({
         configured: true,
         authenticated: false,
         cookieCount: this.getSafeCookieCount(config.baseUrl),
-        lastCheckedAt: new Date().toISOString(),
         lastMessage: msg,
-      };
-      log?.('warn', msg);
+      });
       return { authenticated: false, statusCode: formPage.response.status, message: msg };
     }
 
@@ -580,14 +625,12 @@ export class RetroGameTalkClient {
         const fallbackHtml = await fallbackPage.response.text();
         if (this.isCloudflareChallenge(fallbackPage.response.status, fallbackPage.response.headers, fallbackHtml)) {
           const msg = `Blocked by Cloudflare bot protection (HTTP ${fallbackPage.response.status}) at Login Endpoint URL (${fallbackPage.finalUrl}). Cloudflare is requiring an interactive JS/Turnstile browser challenge for this server IP.`;
-          this.authStatus = {
+          this.setAuthState({
             configured: true,
             authenticated: false,
             cookieCount: this.getSafeCookieCount(config.baseUrl),
-            lastCheckedAt: new Date().toISOString(),
             lastMessage: msg,
-          };
-          log?.('warn', msg);
+          });
           return { authenticated: false, statusCode: fallbackPage.response.status, message: msg };
         }
         if (fallbackPage.response.ok && loadHtml(fallbackHtml)('input[type="password"]').length > 0) {
@@ -601,14 +644,12 @@ export class RetroGameTalkClient {
 
     if (formPage.response.status >= 400) {
       const msg = `Login Endpoint URL returned HTTP ${formPage.response.status} (${formPage.finalUrl}). Check that the Login Endpoint URL is correct.`;
-      this.authStatus = {
+      this.setAuthState({
         configured: true,
         authenticated: false,
         cookieCount: this.getSafeCookieCount(config.baseUrl),
-        lastCheckedAt: new Date().toISOString(),
         lastMessage: msg,
-      };
-      log?.('warn', msg);
+      });
       return { authenticated: false, statusCode: formPage.response.status, message: msg };
     }
 
@@ -623,16 +664,57 @@ export class RetroGameTalkClient {
       );
       if (!alreadySignedIn) {
         const msg = `No login form found at Login Endpoint URL (${formPage.finalUrl}). Verify the Login Endpoint URL points to the login page.`;
-        this.authStatus = {
+        this.setAuthState({
           configured: true,
           authenticated: false,
           cookieCount: preCookies.length,
-          lastCheckedAt: new Date().toISOString(),
           lastMessage: msg,
-        };
-        log?.('warn', msg);
+        });
         return { authenticated: false, statusCode: formPage.response.status, message: msg };
       }
+
+      // Already have a valid session cookie (e.g. /login/ redirected away because user is already signed in)
+      let repoTitle = '';
+      let repoOk = false;
+      try {
+        const repoCheck = await this.fetchWithRedirects(config.baseUrl, config, { method: 'GET' }, signal, log);
+        const repoHtml = await repoCheck.response.text();
+        const repo$ = loadHtml(repoHtml);
+        repoTitle = repo$('title').first().text().trim();
+        repoOk =
+          repoCheck.response.ok &&
+          !repoCheck.finalUrl.includes('/login') &&
+          repo$('input[name="login"]').length === 0 &&
+          repo$('input[type="password"]').length === 0;
+      } catch {
+        repoOk = false;
+      }
+
+      if (repoOk) {
+        const cookies = await this.jar.getCookies(config.baseUrl);
+        const msg = `Authenticated as ${username} (${cookies.length} cookies${repoTitle ? ` · "${repoTitle}"` : ''})`;
+        this.setAuthState({
+          configured: true,
+          authenticated: true,
+          cookieCount: cookies.length,
+          lastMessage: msg,
+        });
+        log?.('info', msg);
+        return {
+          authenticated: true,
+          statusCode: formPage.response.status,
+          message: msg,
+        };
+      }
+
+      const msg = `Session cookies present but Repository Base URL (${config.baseUrl}) could not be verified as authenticated.`;
+      this.setAuthState({
+        configured: true,
+        authenticated: false,
+        cookieCount: preCookies.length,
+        lastMessage: msg,
+      });
+      return { authenticated: false, statusCode: formPage.response.status, message: msg };
     }
 
     let actionUrl = config.loginUrl;
@@ -694,33 +776,31 @@ export class RetroGameTalkClient {
       );
     } catch (err) {
       const msg = `Failed submitting credentials to "${actionUrl}": ${this.formatNetworkError(err, actionUrl)}`;
-      this.authStatus = {
+      this.setAuthState({
         configured: true,
         authenticated: false,
         cookieCount: this.getSafeCookieCount(config.baseUrl),
-        lastCheckedAt: new Date().toISOString(),
         lastMessage: msg,
-      };
-      log?.('error', msg);
+      });
       return { authenticated: false, statusCode: 0, message: msg };
     }
 
     const postBody = await postRes.response.text();
     if (this.isCloudflareChallenge(postRes.response.status, postRes.response.headers, postBody)) {
       const msg = `Login request blocked by Cloudflare challenge (HTTP ${postRes.response.status}) at ${postRes.finalUrl}. Cloudflare is requiring an interactive JS/Turnstile browser challenge for this server IP.`;
-      this.authStatus = {
+      this.setAuthState({
         configured: true,
         authenticated: false,
         cookieCount: this.getSafeCookieCount(config.baseUrl),
-        lastCheckedAt: new Date().toISOString(),
         lastMessage: msg,
-      };
-      log?.('warn', msg);
+      });
       return { authenticated: false, statusCode: postRes.response.status, message: msg };
     }
 
     const post$ = loadHtml(postBody);
-    const blockError = post$('.blockMessage--error, .blockMessage, #login_error, .errorPanel, .message--error, .formRow--error')
+    const blockError = post$('.blockMessage--error, #login_error, .errorPanel, .message--error, .formRow--error')
+      .not('.u-noJsOnly, .blockMessage--important')
+      .filter((_, el) => post$(el).closest('noscript, template').length === 0)
       .first()
       .text()
       .replace(/\s+/g, ' ')
@@ -775,15 +855,16 @@ export class RetroGameTalkClient {
       message = `Authentication failed (HTTP ${postRes.response.status}): no active session cookie returned from ${postRes.finalUrl}.`;
     }
 
-    this.authStatus = {
+    this.setAuthState({
       configured: true,
       authenticated,
       cookieCount: cookies.length,
-      lastCheckedAt: new Date().toISOString(),
       lastMessage: message,
-    };
+    });
 
-    log?.(authenticated ? 'info' : 'warn', message);
+    if (authenticated) {
+      log?.('info', message);
+    }
     return {
       authenticated,
       statusCode: postRes.response.status,
@@ -832,14 +913,21 @@ export class RetroGameTalkClient {
       try {
         repoRes = await this.fetchWithRedirects(probeConfig.baseUrl, probeConfig, { method: 'GET' }, signal);
       } catch (err) {
+        const msg = `Cannot reach Repository Base URL (${probeConfig.baseUrl}): ${this.formatNetworkError(err, probeConfig.baseUrl)}`;
+        this.setAuthState({
+          configured: Boolean(username && password),
+          authenticated: false,
+          cookieCount: this.getSafeCookieCount(probeConfig.baseUrl),
+          lastMessage: msg,
+        });
         return {
           success: false,
           statusCode: null,
-          authenticated,
+          authenticated: false,
           cookieCount: this.getSafeCookieCount(probeConfig.baseUrl),
           discoveredSystems: [],
           sampleReleaseUrls: [],
-          message: `Cannot reach Repository Base URL (${probeConfig.baseUrl}): ${this.formatNetworkError(err, probeConfig.baseUrl)}`,
+          message: msg,
           latencyMs: Math.round(performance.now() - started),
         };
       }
@@ -849,27 +937,41 @@ export class RetroGameTalkClient {
       const latencyMs = Math.round(performance.now() - started);
 
       if (this.isCloudflareChallenge(repoRes.response.status, repoRes.response.headers, html)) {
+        const msg = `Blocked by Cloudflare bot protection (HTTP ${repoRes.response.status}) at Repository Base URL (${repoRes.finalUrl}).`;
+        this.setAuthState({
+          configured: Boolean(username && password),
+          authenticated: false,
+          cookieCount: cookiesCount,
+          lastMessage: msg,
+        });
         return {
           success: false,
           statusCode: repoRes.response.status,
-          authenticated,
+          authenticated: false,
           cookieCount: cookiesCount,
           discoveredSystems: [],
           sampleReleaseUrls: [],
-          message: `Blocked by Cloudflare bot protection (HTTP ${repoRes.response.status}) at Repository Base URL (${repoRes.finalUrl}).`,
+          message: msg,
           latencyMs,
         };
       }
 
       if (repoRes.response.status >= 400) {
+        const msg = `Repository Base URL returned HTTP ${repoRes.response.status} at ${repoRes.finalUrl}. Verify the Repository Base URL is correct.`;
+        this.setAuthState({
+          configured: Boolean(username && password),
+          authenticated: false,
+          cookieCount: cookiesCount,
+          lastMessage: msg,
+        });
         return {
           success: false,
           statusCode: repoRes.response.status,
-          authenticated,
+          authenticated: false,
           cookieCount: cookiesCount,
           discoveredSystems: [],
           sampleReleaseUrls: [],
-          message: `Repository Base URL returned HTTP ${repoRes.response.status} at ${repoRes.finalUrl}. Verify the Repository Base URL is correct.`,
+          message: msg,
           latencyMs,
         };
       }
@@ -883,6 +985,12 @@ export class RetroGameTalkClient {
         const reason = !username && !password
           ? `Credentials missing: enter both Repository Username and Repository Password (target redirected to ${repoRes.finalUrl}).`
           : `Access rejected: Repository Base URL redirected back to login (${repoRes.finalUrl}). Check your credentials and Login Endpoint URL.`;
+        this.setAuthState({
+          configured: Boolean(username && password),
+          authenticated: false,
+          cookieCount: cookiesCount,
+          lastMessage: reason,
+        });
         return {
           success: false,
           statusCode: repoRes.response.status,
@@ -903,6 +1011,13 @@ export class RetroGameTalkClient {
 
       const sortedSystems = [...systems].sort((a, b) => a.localeCompare(b));
       if (!username && !password && sortedSystems.length === 0 && releasePages.length === 0) {
+        const msg = `Credentials missing (username and password are empty) and no consoles were discovered at ${repoRes.finalUrl}.`;
+        this.setAuthState({
+          configured: false,
+          authenticated: false,
+          cookieCount: cookiesCount,
+          lastMessage: msg,
+        });
         return {
           success: false,
           statusCode: repoRes.response.status,
@@ -910,7 +1025,7 @@ export class RetroGameTalkClient {
           cookieCount: cookiesCount,
           discoveredSystems: [],
           sampleReleaseUrls: [],
-          message: `Credentials missing (username and password are empty) and no consoles were discovered at ${repoRes.finalUrl}.`,
+          message: msg,
           latencyMs,
         };
       }
@@ -926,6 +1041,13 @@ export class RetroGameTalkClient {
         latencyMs,
       };
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.setAuthState({
+        configured: Boolean(probeConfig.username && probeConfig.password),
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(probeConfig.baseUrl),
+        lastMessage: msg,
+      });
       return {
         success: false,
         statusCode: null,
@@ -933,7 +1055,7 @@ export class RetroGameTalkClient {
         cookieCount: this.getSafeCookieCount(probeConfig.baseUrl),
         discoveredSystems: [],
         sampleReleaseUrls: [],
-        message: err instanceof Error ? err.message : String(err),
+        message: msg,
         latencyMs: Math.round(performance.now() - started),
       };
     }
@@ -1297,14 +1419,57 @@ export class RetroGameTalkClient {
       await response.body?.cancel().catch(() => undefined);
       log?.('warn', 'Session expired mid-crawl; re-authenticating');
       const auth = await this.login(config, signal, log);
-      if (auth.authenticated) {
-        const retry = await this.fetchWithRedirects(url, config, { method: 'GET' }, signal, log);
-        const html = await retry.response.text();
-        return { html, finalUrl: retry.finalUrl, status: retry.response.status };
+      if (!auth.authenticated) {
+        throw new Error(`Re-authentication failed mid-crawl: ${auth.message}`);
       }
+      const retry = await this.fetchWithRedirects(url, config, { method: 'GET' }, signal, log);
+      const retryHtml = await retry.response.text();
+      if (this.isCloudflareChallenge(retry.response.status, retry.response.headers, retryHtml)) {
+        const msg = `Blocked by Cloudflare bot protection (HTTP ${retry.response.status}) at ${retry.finalUrl}`;
+        this.setAuthState({
+          configured: Boolean(config.username && config.password),
+          authenticated: false,
+          cookieCount: this.getSafeCookieCount(config.baseUrl),
+          lastMessage: msg,
+        });
+        throw new Error(msg);
+      }
+      if (retry.finalUrl.includes('/login') || retry.finalUrl.includes('wp-login.php')) {
+        const msg = `Authentication expired or rejected: ${url} redirected to ${retry.finalUrl}`;
+        this.setAuthState({
+          configured: Boolean(config.username && config.password),
+          authenticated: false,
+          cookieCount: this.getSafeCookieCount(config.baseUrl),
+          lastMessage: msg,
+        });
+        throw new Error(msg);
+      }
+      return { html: retryHtml, finalUrl: retry.finalUrl, status: retry.response.status };
     }
 
     const html = await response.text();
+    if (this.isCloudflareChallenge(response.status, response.headers, html)) {
+      const msg = `Blocked by Cloudflare bot protection (HTTP ${response.status}) at ${finalUrl}`;
+      this.setAuthState({
+        configured: Boolean(config.username && config.password),
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastMessage: msg,
+      });
+      throw new Error(msg);
+    }
+
+    if (finalUrl.includes('/login') || finalUrl.includes('wp-login.php')) {
+      const msg = `Authentication required or expired: ${url} redirected to ${finalUrl}`;
+      this.setAuthState({
+        configured: Boolean(config.username && config.password),
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastMessage: msg,
+      });
+      throw new Error(msg);
+    }
+
     return { html, finalUrl, status: response.status };
   }
 
@@ -1350,7 +1515,25 @@ export class RetroGameTalkClient {
     );
 
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
+      const bodySnippet = await response.text().catch(() => '');
+      if (this.isCloudflareChallenge(response.status, response.headers, bodySnippet)) {
+        const msg = `Blocked by Cloudflare bot protection (HTTP ${response.status}) downloading ${release.downloadUrl}`;
+        this.setAuthState({
+          configured: Boolean(config.username && config.password),
+          authenticated: false,
+          cookieCount: this.getSafeCookieCount(config.baseUrl),
+          lastMessage: msg,
+        });
+        throw new Error(msg);
+      }
+      if (response.status === 401 || response.status === 403) {
+        this.setAuthState({
+          configured: Boolean(config.username && config.password),
+          authenticated: false,
+          cookieCount: this.getSafeCookieCount(config.baseUrl),
+          lastMessage: `Download access denied (HTTP ${response.status}) at ${finalUrl}`,
+        });
+      }
       throw new Error(`HTTP ${response.status} downloading ${release.downloadUrl}`);
     }
 

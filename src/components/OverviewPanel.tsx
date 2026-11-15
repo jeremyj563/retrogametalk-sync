@@ -80,13 +80,13 @@ export function OverviewPanel({
 
   return (
     <div className="space-y-6">
-      {/* Credentials setup notice when not yet configured */}
-      {!status.auth.configured && (
+      {/* Login / credentials notice until at least one login succeeds */}
+      {!status.auth.configured ? (
         <div className="flex flex-wrap items-center justify-between gap-4 border border-crt-amber/40 bg-crt-amber/5 px-5 py-3.5 rounded-md">
           <div className="flex items-center gap-3 text-sm text-crt-text">
             <AlertTriangle className="h-4 w-4 text-crt-amber shrink-0" />
             <span>
-              Repository credentials are not configured yet. Add your retrogametalk.com login to unlock gated ROM and translation downloads.
+              Repository credentials are not configured yet. Add and verify your retrogametalk.com login in Operations to enable syncing.
             </span>
           </div>
           <button
@@ -97,7 +97,25 @@ export function OverviewPanel({
             Configure Credentials
           </button>
         </div>
-      )}
+      ) : !status.auth.hasCompletedLogin ? (
+        <div className="flex flex-wrap items-center justify-between gap-4 border border-crt-amber/40 bg-crt-amber/5 px-5 py-3.5 rounded-md">
+          <div className="flex items-center gap-3 text-sm text-crt-text min-w-0">
+            <AlertTriangle className="h-4 w-4 text-crt-amber shrink-0" />
+            <span className="break-words">
+              {status.auth.lastCheckedAt && status.auth.lastMessage
+                ? `Sync locked — login has not succeeded yet (${status.auth.lastMessage})`
+                : 'Sync locked — run "Test Login & Discover Consoles" in Operations to verify your account before syncing.'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onNavigateToOperations}
+            className="px-3.5 py-1.5 text-xs font-medium text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0"
+          >
+            Open Operations
+          </button>
+        </div>
+      ) : null}
 
       {/* Active Runner Phase Status Panel */}
       <section className="border border-crt-border bg-crt-surface rounded-md p-5">
@@ -347,7 +365,7 @@ export function OverviewPanel({
                         #{run.id} <span className="text-crt-muted">· {run.triggerType}</span>
                       </td>
                       <td className="px-3 text-crt-muted">{run.mode}</td>
-                      <td className="px-3">
+                      <td className="px-3" title={run.errorSummary || undefined}>
                         <span
                           className={`inline-flex items-center gap-1.5 ${
                             run.status === 'completed'

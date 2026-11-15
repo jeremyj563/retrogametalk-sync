@@ -763,9 +763,10 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
                             {item.status === 'failed' || item.status === 'partial' ? (
                               <button
                                 type="button"
-                                disabled={retryingId === item.id || Boolean(status.activeRun)}
+                                disabled={retryingId === item.id || Boolean(status.activeRun) || !status.auth.hasCompletedLogin}
+                                title={!status.auth.hasCompletedLogin ? 'Verify login in Operations before retrying' : undefined}
                                 onClick={() => void handleRetry(item.id)}
-                                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-border hover:border-crt-phosphor text-crt-text rounded transition-colors disabled:opacity-50"
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-border hover:border-crt-phosphor text-crt-text rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                               >
                                 <RotateCcw className="h-3 w-3" />
                                 Retry
@@ -1050,6 +1051,7 @@ export function CatalogPanel({ status, onRetryItem, onRefreshStatus }: CatalogPa
       <GameDetailDrawer
         item={activeDetailItem}
         activeRun={Boolean(status.activeRun)}
+        canSync={Boolean(status.auth.hasCompletedLogin)}
         onClose={() => setActiveDetailItem(null)}
         onItemUpdated={handleItemUpdated}
         onRetryItem={handleRetry}
