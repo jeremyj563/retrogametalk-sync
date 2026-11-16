@@ -34,9 +34,11 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
   const activePreset = detectActiveCrtPreset(settings);
   const presetBadge = !settings.enabled
     ? 'Bypassed'
-    : activePreset === 'custom'
-      ? 'Custom'
-      : CRT_PRESETS[activePreset].label;
+    : settings.uiMotion === 'ultra'
+      ? 'Ultra FX'
+      : activePreset === 'custom'
+        ? 'Custom'
+        : CRT_PRESETS[activePreset].label;
 
   const handleToggleMaster = () => {
     onChange({ ...settings, enabled: !settings.enabled });
@@ -193,12 +195,20 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
           <div className="space-y-1.5 pt-1 border-t border-crt-border/70">
             <div className="flex items-center justify-between text-[10px] font-mono text-crt-muted">
               <span>Living UI Motion</span>
-              <span className="text-crt-text/85">
-                {CRT_UI_MOTION_LEVELS[settings.uiMotion].label}
+              <span
+                className={
+                  settings.uiMotion === 'ultra'
+                    ? 'text-crt-phosphor font-semibold'
+                    : 'text-crt-text/85'
+                }
+              >
+                {settings.uiMotion === 'ultra'
+                  ? 'Ultra · Boosted'
+                  : CRT_UI_MOTION_LEVELS[settings.uiMotion].label}
               </span>
             </div>
-            <div className="grid grid-cols-4 gap-1" role="group" aria-label="Living UI animation level">
-              {(['off', 'low', 'medium', 'high'] as const).map((level) => {
+            <div className="grid grid-cols-5 gap-1" role="group" aria-label="Living UI animation level">
+              {(['off', 'low', 'medium', 'high', 'ultra'] as const).map((level) => {
                 const info = CRT_UI_MOTION_LEVELS[level];
                 const active = settings.uiMotion === level;
                 return (
@@ -208,11 +218,13 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
                     aria-pressed={active}
                     title={info.description}
                     onClick={() => onChange({ ...settings, uiMotion: level })}
-                    className={`px-1 py-1 text-[11px] font-mono rounded border transition-colors whitespace-nowrap cursor-pointer ${
+                    className={`px-0.5 py-1 text-[10px] font-mono rounded border transition-colors whitespace-nowrap cursor-pointer ${
                       active
                         ? level === 'off'
                           ? 'border-crt-border-strong bg-crt-elevated text-crt-text font-medium'
-                          : 'border-crt-phosphor/60 bg-crt-elevated text-crt-phosphor font-medium'
+                          : level === 'ultra'
+                            ? 'crt-ultra-pill-active border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor font-semibold'
+                            : 'border-crt-phosphor/60 bg-crt-elevated text-crt-phosphor font-medium'
                         : 'border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
                     }`}
                   >

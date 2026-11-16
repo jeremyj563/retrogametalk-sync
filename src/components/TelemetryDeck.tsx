@@ -523,6 +523,7 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
       {/* Main Interactive Grafana Viewport (Fixed 212px Height to Prevent Layout Shift) */}
       <div className="relative h-[212px] border border-crt-border bg-crt-bg rounded p-2.5 flex flex-col justify-center overflow-hidden select-none">
         <div aria-hidden="true" className="crt-telemetry-raster" />
+        <div aria-hidden="true" className="crt-telemetry-raster crt-telemetry-raster-secondary" />
         {/* SLIDE 1: PACING */}
         {activeSlide === 'pacing' &&
           (delaySeries.length < 2 ? (
