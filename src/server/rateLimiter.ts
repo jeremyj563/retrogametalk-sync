@@ -153,7 +153,7 @@ export class AdaptiveRateLimiter {
       latencyMs: Math.round(latencyMs),
       throttled,
     });
-    if (this.history.length > 60) {
+    if (this.history.length > 120) {
       this.history.shift();
     }
   }

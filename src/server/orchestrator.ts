@@ -61,6 +61,7 @@ import type {
   ServiceStatusSnapshot,
   StorageStats,
   SyncRunRecord,
+  TransferSpeedSample,
 } from './types.ts';
 
 const POD_ID = process.env.HOSTNAME || os.hostname() || 'rgt-sync-pod';
@@ -131,6 +132,8 @@ export class ScraperOrchestrator extends EventEmitter {
   private cronJob: Cron | null = null;
   private activeRun: SyncRunRecord | null = null;
   private activeTransfer: ActiveTransferState | null = null;
+  private transferHistory: TransferSpeedSample[] = [];
+  private lastTransferSampleMs = 0;
   private currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
   private abortController: AbortController | null = null;
   private lockRenewTimer: NodeJS.Timeout | null = null;
@@ -961,9 +964,39 @@ export class ScraperOrchestrator extends EventEmitter {
     return cleared;
   }
 
+  private handleTransferProgress(progress: {
+    bytesReceived: number;
+    totalBytes: number | null;
+    bytesPerSec: number;
+  }): void {
+    if (!this.activeTransfer) return;
+    this.activeTransfer.bytesReceived = progress.bytesReceived;
+    this.activeTransfer.totalBytes = progress.totalBytes;
+    this.activeTransfer.bytesPerSec = progress.bytesPerSec;
+    this.emit('transfer', this.activeTransfer);
+
+    const now = Date.now();
+    const isFinished =
+      progress.totalBytes !== null && progress.totalBytes > 0 && progress.bytesReceived >= progress.totalBytes;
+    if (progress.bytesPerSec > 0 && (now - this.lastTransferSampleMs >= 450 || isFinished)) {
+      this.lastTransferSampleMs = now;
+      this.transferHistory.push({
+        timestamp: new Date(now).toISOString(),
+        bytesPerSec: Math.round(progress.bytesPerSec),
+        bytesReceived: progress.bytesReceived,
+        totalBytes: progress.totalBytes,
+        filename: this.activeTransfer.filename,
+        systemName: this.activeTransfer.systemName,
+      });
+      if (this.transferHistory.length > 90) {
+        this.transferHistory.shift();
+      }
+    }
+  }
+
   getStatusSnapshot(): ServiceStatusSnapshot {
     const cfg = getInternalConfig();
-    const { totals, systems } = getCatalogTotalsAndSystems();
+    const { totals, systems, releaseTypes } = getCatalogTotalsAndSystems();
     const nextRun = this.cronJob?.nextRun();
 
     return {
@@ -971,6 +1004,7 @@ export class ScraperOrchestrator extends EventEmitter {
       build: resolveRuntimeBuildInfo(),
       activeRun: this.activeRun,
       activeTransfer: this.activeTransfer,
+      transferHistory: [...this.transferHistory],
       currentPhase: this.currentPhase,
       nextScheduledRunAt: cfg.scheduleEnabled && nextRun ? nextRun.toISOString() : null,
       scheduleEnabled: cfg.scheduleEnabled,
@@ -981,6 +1015,7 @@ export class ScraperOrchestrator extends EventEmitter {
       storage: this.getStorageStats(cfg.downloadDir),
       totals,
       systems,
+      releaseTypes,
     };
   }
 
@@ -2337,12 +2372,7 @@ export class ScraperOrchestrator extends EventEmitter {
           cfg,
           signal,
           (progress) => {
-            if (this.activeTransfer) {
-              this.activeTransfer.bytesReceived = progress.bytesReceived;
-              this.activeTransfer.totalBytes = progress.totalBytes;
-              this.activeTransfer.bytesPerSec = progress.bytesPerSec;
-              this.emit('transfer', this.activeTransfer);
-            }
+            this.handleTransferProgress(progress);
           },
           runLogger,
         );
@@ -2409,12 +2439,7 @@ export class ScraperOrchestrator extends EventEmitter {
           cfg,
           signal,
           (progress) => {
-            if (this.activeTransfer) {
-              this.activeTransfer.bytesReceived = progress.bytesReceived;
-              this.activeTransfer.totalBytes = progress.totalBytes;
-              this.activeTransfer.bytesPerSec = progress.bytesPerSec;
-              this.emit('transfer', this.activeTransfer);
-            }
+            this.handleTransferProgress(progress);
           },
           runLogger,
         );

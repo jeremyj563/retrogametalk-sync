@@ -171,10 +171,42 @@ export default function App() {
       }
     });
 
+    let lastLiveTransferSampleMs = 0;
     source.addEventListener('transfer', (ev) => {
       try {
         const transfer = JSON.parse((ev as MessageEvent).data) as ActiveTransferState;
-        setStatus((prev) => (prev ? { ...prev, activeTransfer: transfer } : prev));
+        const now = Date.now();
+        const isDone =
+          transfer.totalBytes !== null &&
+          transfer.totalBytes > 0 &&
+          transfer.bytesReceived >= transfer.totalBytes;
+        const shouldSample =
+          transfer.bytesPerSec > 0 && (now - lastLiveTransferSampleMs >= 450 || isDone);
+        if (shouldSample) {
+          lastLiveTransferSampleMs = now;
+        }
+        setStatus((prev) => {
+          if (!prev) return prev;
+          if (!shouldSample) {
+            return { ...prev, activeTransfer: transfer };
+          }
+          const nextHistory = [
+            ...(prev.transferHistory || []),
+            {
+              timestamp: new Date(now).toISOString(),
+              bytesPerSec: Math.round(transfer.bytesPerSec),
+              bytesReceived: transfer.bytesReceived,
+              totalBytes: transfer.totalBytes,
+              filename: transfer.filename,
+              systemName: transfer.systemName,
+            },
+          ].slice(-90);
+          return {
+            ...prev,
+            activeTransfer: transfer,
+            transferHistory: nextHistory,
+          };
+        });
       } catch {
         // Ignore
       }

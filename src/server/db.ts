@@ -16,6 +16,7 @@ import type {
   LogLevel,
   ReleaseFileRecord,
   ReleaseMetadata,
+  ReleaseTypeBreakdown,
   RepositoryItemRecord,
   RunMode,
   RunStatus,
@@ -1452,6 +1453,7 @@ export function getCatalogTotalsAndSystems(): {
     totalRuns: number;
   };
   systems: SystemBreakdown[];
+  releaseTypes: ReleaseTypeBreakdown[];
 } {
   const totalsRow = getDb().prepare(`
     SELECT
@@ -1478,6 +1480,33 @@ export function getCatalogTotalsAndSystems(): {
     ORDER BY total_items DESC, system_name ASC
   `).all() as Record<string, unknown>[];
 
+  const releaseTypeRows = getDb().prepare(`
+    WITH normalized_tags AS (
+      SELECT
+        r.id,
+        r.status,
+        r.file_size_bytes,
+        TRIM(CAST(j.value AS TEXT)) AS tag_name
+      FROM catalog_releases r,
+        json_each(
+          CASE
+            WHEN json_valid(r.release_tags_json) AND json_array_length(r.release_tags_json) > 0
+            THEN r.release_tags_json
+            ELSE json_array(COALESCE(NULLIF(TRIM(r.release_type), ''), 'Retail ROM'))
+          END
+        ) AS j
+      WHERE TRIM(CAST(j.value AS TEXT)) != ''
+    )
+    SELECT
+      tag_name AS type_name,
+      COUNT(DISTINCT id) AS total_items,
+      COUNT(DISTINCT CASE WHEN status IN ('downloaded', 'skipped') THEN id END) AS downloaded_items,
+      COALESCE(SUM(CASE WHEN status IN ('downloaded', 'skipped', 'partial') THEN file_size_bytes ELSE 0 END), 0) AS total_bytes
+    FROM normalized_tags
+    GROUP BY tag_name
+    ORDER BY downloaded_items DESC, total_bytes DESC, type_name ASC
+  `).all() as Record<string, unknown>[];
+
   return {
     totals: {
       totalCatalogItems: Number(totalsRow.total_items || 0),
@@ -1494,6 +1523,12 @@ export function getCatalogTotalsAndSystems(): {
       skippedItems: Number(r.skipped_items),
       failedItems: Number(r.failed_items),
       totalBytes: Number(r.total_bytes),
+    })),
+    releaseTypes: releaseTypeRows.map((r) => ({
+      typeName: String(r.type_name),
+      downloadedItems: Number(r.downloaded_items || 0),
+      totalItems: Number(r.total_items || 0),
+      totalBytes: Number(r.total_bytes || 0),
     })),
   };
 }

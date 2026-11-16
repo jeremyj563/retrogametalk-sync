@@ -394,7 +394,7 @@ export function SdCardExportModal({
         if (e.target === e.currentTarget && !writing) onClose();
       }}
     >
-      <div className="w-full max-w-4xl max-h-[90vh] bg-crt-surface border border-crt-border-strong rounded-md flex flex-col shadow-2xl overflow-hidden">
+      <div className="crt-canvas crt-drawer-panel w-full max-w-4xl max-h-[90vh] bg-crt-surface border border-crt-border-strong rounded-md flex flex-col shadow-2xl overflow-hidden">
         {/* Header */}
         <header className="px-6 py-4 border-b border-crt-border bg-crt-bg flex items-center justify-between gap-4 shrink-0">
           <div className="flex items-center gap-3 min-w-0">

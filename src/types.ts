@@ -186,6 +186,22 @@ export interface ActiveTransferState {
   bytesPerSec: number;
 }
 
+export interface TransferSpeedSample {
+  timestamp: string;
+  bytesPerSec: number;
+  bytesReceived: number;
+  totalBytes: number | null;
+  filename: string;
+  systemName: string;
+}
+
+export interface ReleaseTypeBreakdown {
+  typeName: string;
+  downloadedItems: number;
+  totalItems: number;
+  totalBytes: number;
+}
+
 export interface ServiceStatusSnapshot {
   podId: string;
   build: {
@@ -194,6 +210,7 @@ export interface ServiceStatusSnapshot {
   };
   activeRun: SyncRunRecord | null;
   activeTransfer: ActiveTransferState | null;
+  transferHistory: TransferSpeedSample[];
   currentPhase: string;
   nextScheduledRunAt: string | null;
   scheduleEnabled: boolean;
@@ -234,6 +251,7 @@ export interface ServiceStatusSnapshot {
     failedItems: number;
     totalBytes: number;
   }[];
+  releaseTypes: ReleaseTypeBreakdown[];
 }
 
 export interface AuthTestResult {
