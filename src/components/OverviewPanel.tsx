@@ -8,7 +8,6 @@ import {
   Clock,
   Download,
   Pause,
-  Terminal,
   Trash2,
   XCircle,
 } from 'lucide-react';
@@ -32,6 +31,7 @@ import {
   formatTimeShort,
 } from '../utils/format';
 import { FailedQueueDrawer } from './FailedQueueDrawer';
+import { LivingNavIcon, LivingTerminalIcon } from './LivingNavIcon';
 import { TelemetryDeck } from './TelemetryDeck';
 
 interface OverviewPanelProps {
@@ -333,20 +333,21 @@ export function OverviewPanel({
       ) : null}
 
       {/* Active Runner Phase Status Panel */}
-      <section className="border border-crt-border bg-crt-surface rounded-md p-5 space-y-4">
+      <section className="relative crt-panel-living crt-panel-hero border border-crt-border bg-crt-surface rounded-md p-5 space-y-4">
+        <div aria-hidden="true" className="crt-edge-beam">
+          <span />
+        </div>
         {/* Zone 1: Full-Width Phase Header */}
         <div className="space-y-1.5 min-w-0">
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
             <span
               className={`inline-flex items-center gap-1.5 font-medium ${
                 status.activeRun
-                  ? status.activeRun.dryRun || status.activeRun.mode === 'dry_run'
-                    ? 'text-crt-amber'
-                    : 'text-crt-phosphor'
+                  ? `${status.activeRun.dryRun || status.activeRun.mode === 'dry_run' ? 'text-crt-amber' : 'text-crt-phosphor'} crt-phase-sync-active`
                   : 'text-crt-muted'
               }`}
             >
-              <Activity className="h-3.5 w-3.5 shrink-0" />
+              <LivingNavIcon section="monitor" className="h-3.5 w-3.5 shrink-0" />
               <span>
                 {status.activeRun
                   ? `${status.activeRun.dryRun || status.activeRun.mode === 'dry_run' ? 'Dry Run Active' : 'Sync Active'} · Run #${status.activeRun.id}`
@@ -413,7 +414,7 @@ export function OverviewPanel({
             >
               {transferPct !== null ? (
                 <div
-                  className="h-full bg-crt-phosphor transition-all duration-200"
+                  className="h-full bg-crt-phosphor crt-progress-beam transition-all duration-200"
                   style={{ width: `${transferPct}%` }}
                 />
               ) : (
@@ -580,8 +581,11 @@ export function OverviewPanel({
 
       {/* 4-Column KPI Strip + Inline Collapsible Failed Queue */}
       <div>
-        <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 border border-crt-border bg-crt-surface rounded-md divide-y sm:divide-y-0 sm:divide-x divide-crt-border">
-        <div className="p-4 space-y-1">
+        <section className="relative crt-panel-living grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 border border-crt-border bg-crt-surface rounded-md divide-y sm:divide-y-0 sm:divide-x divide-crt-border">
+          <div aria-hidden="true" className="crt-edge-beam">
+            <span />
+          </div>
+          <div className="p-4 space-y-1">
           <p className="text-xs text-crt-muted">Mirrored Files on Disk</p>
           <p className="crt-kpi-value font-mono text-2xl font-semibold text-crt-text tabular-nums">
             {status.storage.totalFilesOnDisk.toLocaleString()}
@@ -682,7 +686,10 @@ export function OverviewPanel({
         <TelemetryDeck status={status} runs={runs} />
 
         {/* Recent Sync Runs Table */}
-        <div className="lg:col-span-6 border border-crt-border bg-crt-surface rounded-md p-5 flex flex-col">
+        <div className="relative crt-panel-living lg:col-span-6 border border-crt-border bg-crt-surface rounded-md p-5 flex flex-col">
+          <div aria-hidden="true" className="crt-edge-beam">
+            <span />
+          </div>
           <div className="flex items-center justify-between gap-4 mb-4">
             <div>
               <h2 className="font-display text-base font-semibold text-crt-text">
@@ -797,10 +804,13 @@ export function OverviewPanel({
       </section>
 
       {/* Live Event Stream Console */}
-      <section className="border border-crt-border bg-crt-surface rounded-md p-5 space-y-3">
+      <section className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-5 space-y-3">
+        <div aria-hidden="true" className="crt-edge-beam">
+          <span />
+        </div>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-2.5">
-            <Terminal className="h-4 w-4 text-crt-phosphor" />
+            <LivingTerminalIcon />
             <h2 className="font-display text-base font-semibold text-crt-text">
               Live Scraper Event Stream
             </h2>

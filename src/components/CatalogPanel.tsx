@@ -998,7 +998,10 @@ export function CatalogPanel({
   return (
     <div className="space-y-5">
       {/* Toolbar */}
-      <div className="border border-crt-border bg-crt-surface rounded-md p-4 space-y-3">
+      <div className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-4 space-y-3">
+        <div aria-hidden="true" className="crt-edge-beam">
+          <span />
+        </div>
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-1 p-1 bg-crt-bg border border-crt-border rounded-md self-start">
@@ -1068,7 +1071,7 @@ export function CatalogPanel({
                     ? `Mounted SD card folder: ${sdRootHandle.name} (click to switch)`
                     : 'Mount a flash cart, ODE, or handheld SD card root folder'
                 }
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded transition-colors whitespace-nowrap shrink-0 ${
+                className={`crt-cta-beam inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded transition-colors whitespace-nowrap shrink-0 ${
                   sdRootHandle
                     ? 'border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/15'
                     : 'border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-text'
@@ -1683,7 +1686,7 @@ export function CatalogPanel({
                                 >
                                   {transfer.mode === 'determinate' ? (
                                     <div
-                                      className="h-full bg-crt-phosphor transition-all duration-200"
+                                      className="h-full bg-crt-phosphor crt-progress-beam transition-all duration-200"
                                       style={{ width: `${transfer.percent}%` }}
                                     />
                                   ) : (
@@ -1718,7 +1721,7 @@ export function CatalogPanel({
                                     className="h-1 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
                                   >
                                     <div
-                                      className="h-full bg-crt-phosphor/80 transition-all duration-200"
+                                      className="h-full bg-crt-phosphor/80 crt-progress-beam transition-all duration-200"
                                       style={{ width: `${transfer.overall.percent}%` }}
                                     />
                                   </div>
@@ -1920,7 +1923,7 @@ export function CatalogPanel({
                             >
                               {transfer.mode === 'determinate' ? (
                                 <div
-                                  className="h-full bg-crt-phosphor transition-all duration-200"
+                                  className="h-full bg-crt-phosphor crt-progress-beam transition-all duration-200"
                                   style={{ width: `${transfer.percent}%` }}
                                 />
                               ) : (
@@ -1991,7 +1994,7 @@ export function CatalogPanel({
                                 className="h-1.5 w-full bg-crt-surface border border-crt-border rounded-sm overflow-hidden"
                               >
                                 <div
-                                  className="h-full bg-crt-phosphor/80 transition-all duration-200"
+                                  className="h-full bg-crt-phosphor/80 crt-progress-beam transition-all duration-200"
                                   style={{ width: `${transfer.overall.percent}%` }}
                                 />
                               </div>

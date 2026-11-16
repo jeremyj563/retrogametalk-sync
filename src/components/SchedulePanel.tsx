@@ -86,10 +86,13 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
   return (
     <form onSubmit={(e) => void handleSubmit(e)} className="space-y-6 max-w-5xl">
       {/* Schedule Section */}
-      <section className="border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+      <section className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+        <div aria-hidden="true" className="crt-edge-beam">
+          <span />
+        </div>
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
           <div className="flex items-start gap-3">
-            <Clock className="h-5 w-5 text-crt-phosphor mt-0.5 shrink-0" />
+            <Clock className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
             <div>
               <h2 className="font-display text-lg font-semibold text-crt-text">
                 Continuous Cron Scheduler
@@ -169,9 +172,12 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
       </section>
 
       {/* Adaptive Rate Limiter Tuning */}
-      <section className="border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+      <section className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+        <div aria-hidden="true" className="crt-edge-beam">
+          <span />
+        </div>
         <div className="flex items-start gap-3 border-b border-crt-border pb-4">
-          <Gauge className="h-5 w-5 text-crt-phosphor mt-0.5 shrink-0" />
+          <Gauge className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
           <div>
             <h2 className="font-display text-lg font-semibold text-crt-text">
               Adaptive AIMD Rate-Limit Guard
@@ -356,7 +362,7 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
         <button
           type="submit"
           disabled={saving}
-          className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors disabled:opacity-60"
+          className="crt-cta-beam inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors disabled:opacity-60"
         >
           <Save className="h-3.5 w-3.5" />
           {saving ? 'Saving...' : 'Save Schedule & Rate Limits'}
