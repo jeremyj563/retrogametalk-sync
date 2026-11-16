@@ -1059,8 +1059,8 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
               const count = chronologicalRuns.length;
               const maxStack = Math.max(
                 1,
-                ...chronologicalRuns.map(
-                  (r) => r.downloadedCount + r.skippedCount + r.failedCount || r.newFound || 0,
+                ...chronologicalRuns.map((r) =>
+                  Math.max(r.downloadedCount + r.skippedCount + r.failedCount, r.newFound || 0),
                 ),
               );
               const maxBytes = Math.max(1, ...chronologicalRuns.map((r) => r.bytesDownloaded));
@@ -1117,12 +1117,16 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
 
                     {chronologicalRuns.map((r, i) => {
                       const cx = PAD_L + (i + 0.5) * slotW;
+                      const isDry = Boolean(r.dryRun) || r.mode === 'dry_run';
                       const dlH = (r.downloadedCount / maxStack) * PLOT_H;
                       const skH = (r.skippedCount / maxStack) * PLOT_H;
                       const flH = (r.failedCount / maxStack) * PLOT_H;
+                      const wouldDownloadCount = isDry
+                        ? Math.max(0, r.newFound - r.skippedCount - r.failedCount)
+                        : 0;
                       const dryH =
-                        dlH + skH + flH === 0 && r.newFound > 0
-                          ? (r.newFound / maxStack) * PLOT_H
+                        isDry && wouldDownloadCount > 0
+                          ? (wouldDownloadCount / maxStack) * PLOT_H
                           : 0;
                       const isHovered = hIdx === i;
 
@@ -1169,11 +1173,11 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                           {dryH > 0 && (
                             <rect
                               x={cx - barW / 2}
-                              y={PAD_T + PLOT_H - dryH}
+                              y={(curY -= dryH)}
                               width={barW}
                               height={dryH}
                               fill="none"
-                              stroke="var(--color-crt-phosphor)"
+                              stroke="var(--color-crt-amber)"
                               strokeDasharray="2 2"
                               strokeWidth="1.2"
                             />
@@ -1215,44 +1219,76 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                     )}
                   </svg>
 
-                  {hRun && (
-                    <div
-                      className={`pointer-events-none absolute top-2 z-20 w-52 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1 ${
-                        flipLeft ? 'left-12' : 'right-2'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between text-crt-muted border-b border-crt-border pb-1">
-                        <span className="text-crt-text font-semibold">
-                          Run #{hRun.id} · {hRun.mode}
-                        </span>
-                        <span>{formatRunDuration(hRun.startedAt, hRun.finishedAt)}</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-crt-phosphor">Downloaded</span>
-                        <span className="text-crt-text">{hRun.downloadedCount}</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-crt-muted">Skipped (Disk)</span>
-                        <span className="text-crt-text">{hRun.skippedCount}</span>
-                      </div>
-                      {hRun.failedCount > 0 && (
-                        <div className="flex items-center justify-between">
-                          <span className="text-crt-crimson">Failed</span>
-                          <span className="text-crt-crimson font-medium">{hRun.failedCount}</span>
+                  {hRun &&
+                    (() => {
+                      const isDry = Boolean(hRun.dryRun) || hRun.mode === 'dry_run';
+                      const scopeLabel =
+                        hRun.triggerType === 'retry'
+                          ? 'retry'
+                          : hRun.mode === 'dry_run'
+                            ? 'incremental'
+                            : hRun.mode;
+                      const wouldDownload = Math.max(
+                        0,
+                        hRun.newFound - hRun.skippedCount - hRun.failedCount,
+                      );
+                      return (
+                        <div
+                          className={`pointer-events-none absolute top-2 z-20 w-56 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1 ${
+                            flipLeft ? 'left-12' : 'right-2'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2 text-crt-muted border-b border-crt-border pb-1">
+                            <span className="text-crt-text font-semibold truncate">
+                              Run #{hRun.id} · {scopeLabel}
+                              {isDry ? ' (dry-run)' : ''}
+                            </span>
+                            <span className="shrink-0">
+                              {formatRunDuration(hRun.startedAt, hRun.finishedAt)}
+                            </span>
+                          </div>
+                          {isDry ? (
+                            <>
+                              <div className="flex items-center justify-between">
+                                <span className="text-crt-amber">Would Download</span>
+                                <span className="text-crt-text">{wouldDownload}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-crt-muted">Already on Disk</span>
+                                <span className="text-crt-text">{hRun.skippedCount}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-crt-muted">Total Discovered</span>
+                                <span className="text-crt-text">{hRun.newFound}</span>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="flex items-center justify-between">
+                                <span className="text-crt-phosphor">Downloaded</span>
+                                <span className="text-crt-text">{hRun.downloadedCount}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-crt-muted">Skipped (Disk)</span>
+                                <span className="text-crt-text">{hRun.skippedCount}</span>
+                              </div>
+                            </>
+                          )}
+                          {hRun.failedCount > 0 && (
+                            <div className="flex items-center justify-between">
+                              <span className="text-crt-crimson">Failed</span>
+                              <span className="text-crt-crimson font-medium">{hRun.failedCount}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center justify-between border-t border-crt-border pt-1">
+                            <span className="text-crt-amber">Bytes Saved</span>
+                            <span className="text-crt-text">
+                              {isDry ? '0 B (dry-run)' : formatBytes(hRun.bytesDownloaded)}
+                            </span>
+                          </div>
                         </div>
-                      )}
-                      {hRun.mode === 'dry_run' && (
-                        <div className="flex items-center justify-between">
-                          <span className="text-crt-muted">New Discovered</span>
-                          <span className="text-crt-text">{hRun.newFound}</span>
-                        </div>
-                      )}
-                      <div className="flex items-center justify-between border-t border-crt-border pt-1">
-                        <span className="text-crt-amber">Bytes Saved</span>
-                        <span className="text-crt-text">{formatBytes(hRun.bytesDownloaded)}</span>
-                      </div>
-                    </div>
-                  )}
+                      );
+                    })()}
                 </div>
               );
             })()

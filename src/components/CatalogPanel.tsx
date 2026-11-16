@@ -46,7 +46,7 @@ interface CatalogPanelProps {
   catalogRevision?: number;
   activeRetryItemId?: number | null;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
-  onRetryItem: (itemId: number, fileId?: number) => Promise<void>;
+  onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
 }
 
@@ -669,10 +669,14 @@ export function CatalogPanel({
     void loadCatalog();
   };
 
-  const handleRetry = async (id: number, fileId?: number) => {
+  const handleRetry = async (
+    id: number,
+    fileId?: number,
+    options?: { dryRun?: boolean },
+  ) => {
     setRetryingId(id);
     try {
-      await onRetryItem(id, fileId);
+      await onRetryItem(id, fileId, options);
       await loadCatalog(true);
       if (activeDetailItem?.id === id) {
         const res = await fetch(`/api/items/${id}`);

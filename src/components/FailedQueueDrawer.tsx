@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  Check,
   CheckCircle2,
+  FlaskConical,
   RefreshCw,
   RotateCcw,
   Search,
@@ -19,8 +21,8 @@ interface FailedQueueDrawerProps {
   catalogRevision: number;
   activeRetryItemId?: number | null;
   onClose: () => void;
-  onRetryItem: (itemId: number, fileId?: number) => Promise<void>;
-  onRetryAllFailed: (options?: { system?: string; ids?: number[] }) => Promise<void>;
+  onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
+  onRetryAllFailed: (options?: { system?: string; ids?: number[]; dryRun?: boolean }) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
 }
 
@@ -44,6 +46,7 @@ export function FailedQueueDrawer({
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<number | null>(null);
   const [batchRetrying, setBatchRetrying] = useState(false);
+  const [retryDryRun, setRetryDryRun] = useState(false);
   const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
 
   const reqSeqRef = useRef(0);
@@ -181,10 +184,14 @@ export function FailedQueueDrawer({
     }
   };
 
-  const handleRetry = async (id: number, fileId?: number) => {
+  const handleRetry = async (
+    id: number,
+    fileId?: number,
+    options?: { dryRun?: boolean },
+  ) => {
     setRetryingId(id);
     try {
-      await onRetryItem(id, fileId);
+      await onRetryItem(id, fileId, { dryRun: options?.dryRun ?? retryDryRun });
       await loadFailedQueue(true);
       if (activeDetailItem?.id === id) {
         const res = await fetch(`/api/items/${id}`);
@@ -206,6 +213,7 @@ export function FailedQueueDrawer({
       await onRetryAllFailed({
         system: systemFilter !== 'all' ? systemFilter : undefined,
         ids: ids && ids.length > 0 ? ids : undefined,
+        dryRun: retryDryRun,
       });
       setSelectedIds(new Set());
       setConfirmBulkDelete(false);
@@ -266,6 +274,32 @@ export function FailedQueueDrawer({
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               type="button"
+              aria-pressed={retryDryRun}
+              disabled={batchRetrying || Boolean(status.activeRun) || !status.auth.hasCompletedLogin}
+              title="Toggle Dry Run ON to verify fresh download link resolution on RetroGameTalk without downloading archives or modifying status"
+              onClick={() => setRetryDryRun((prev) => !prev)}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap shrink-0 ${
+                retryDryRun
+                  ? 'border-crt-amber/80 bg-crt-amber/12 text-crt-amber'
+                  : 'border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+              } disabled:opacity-45 disabled:cursor-not-allowed`}
+            >
+              <span
+                aria-hidden="true"
+                className={`h-3.5 w-3.5 rounded-[3px] border flex items-center justify-center transition-colors shrink-0 ${
+                  retryDryRun
+                    ? 'border-crt-amber bg-crt-amber text-crt-bg'
+                    : 'border-crt-border-strong bg-crt-surface'
+                }`}
+              >
+                {retryDryRun && <Check className="h-2.5 w-2.5 stroke-[3]" />}
+              </span>
+              <FlaskConical className="h-3.5 w-3.5 shrink-0" />
+              <span>Dry Run</span>
+            </button>
+
+            <button
+              type="button"
               disabled={
                 status.totals.failedItems === 0 ||
                 batchRetrying ||
@@ -277,19 +311,35 @@ export function FailedQueueDrawer({
                   ? 'Verify login in Operations before retrying failed downloads'
                   : status.activeRun
                     ? 'Wait for or stop the active sync run first'
-                    : systemFilter !== 'all'
-                      ? `Retry all failed and partial releases in ${systemFilter}`
-                      : 'Retry all failed and partial releases'
+                    : retryDryRun
+                      ? 'Verify fresh download link resolution across failed/partial releases without downloading files'
+                      : systemFilter !== 'all'
+                        ? `Retry all failed and partial releases in ${systemFilter}`
+                        : 'Retry all failed and partial releases'
               }
               onClick={() => void handleBatchRetry()}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 tabular-nums disabled:opacity-45 disabled:cursor-not-allowed"
+              className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 tabular-nums disabled:opacity-45 disabled:cursor-not-allowed ${
+                retryDryRun
+                  ? 'bg-crt-amber hover:brightness-110'
+                  : 'bg-crt-phosphor hover:brightness-110'
+              }`}
             >
-              <RotateCcw className={`h-3.5 w-3.5 ${batchRetrying ? 'animate-spin' : ''}`} />
+              {retryDryRun ? (
+                <FlaskConical className={`h-3.5 w-3.5 ${batchRetrying ? 'animate-spin' : ''}`} />
+              ) : (
+                <RotateCcw className={`h-3.5 w-3.5 ${batchRetrying ? 'animate-spin' : ''}`} />
+              )}
               {batchRetrying
-                ? 'Starting Retry...'
-                : systemFilter !== 'all'
-                  ? `Retry Failed (${items.length})`
-                  : `Retry All Failed (${status.totals.failedItems})`}
+                ? retryDryRun
+                  ? 'Starting Dry Run...'
+                  : 'Starting Retry...'
+                : retryDryRun
+                  ? systemFilter !== 'all'
+                    ? `Dry Run Failed (${items.length})`
+                    : `Dry Run All Failed (${status.totals.failedItems})`
+                  : systemFilter !== 'all'
+                    ? `Retry Failed (${items.length})`
+                    : `Retry All Failed (${status.totals.failedItems})`}
             </button>
             <button
               type="button"
@@ -386,10 +436,18 @@ export function FailedQueueDrawer({
                   type="button"
                   disabled={batchRetrying || Boolean(status.activeRun) || !status.auth.hasCompletedLogin}
                   onClick={() => void handleBatchRetry(Array.from(selectedIds))}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed ${
+                    retryDryRun
+                      ? 'border-crt-amber/80 text-crt-amber hover:bg-crt-amber/10'
+                      : 'border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10'
+                  }`}
                 >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  Retry Selected ({selectedIds.size})
+                  {retryDryRun ? (
+                    <FlaskConical className="h-3.5 w-3.5" />
+                  ) : (
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  )}
+                  {retryDryRun ? `Dry Run Selected (${selectedIds.size})` : `Retry Selected (${selectedIds.size})`}
                 </button>
               )}
               {confirmBulkDelete ? (
@@ -587,13 +645,29 @@ export function FailedQueueDrawer({
                             title={
                               !status.auth.hasCompletedLogin
                                 ? 'Verify login in Operations before retrying'
-                                : 'Re-fetch download link and retry failed/missing files'
+                                : retryDryRun
+                                  ? 'Dry-run: verify fresh download link resolution without downloading files'
+                                  : 'Re-fetch download link and retry failed/missing files'
                             }
-                            onClick={() => void handleRetry(item.id)}
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium border border-crt-border hover:border-crt-phosphor text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={() => void handleRetry(item.id, undefined, { dryRun: retryDryRun })}
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium border rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${
+                              retryDryRun
+                                ? 'border-crt-amber/70 hover:border-crt-amber text-crt-amber bg-crt-amber/5'
+                                : 'border-crt-border hover:border-crt-phosphor text-crt-text'
+                            }`}
                           >
-                            <RotateCcw className={`h-3 w-3 ${effectiveRetryingId === item.id ? 'animate-spin' : ''}`} />
-                            {effectiveRetryingId === item.id ? 'Retrying...' : 'Retry'}
+                            {retryDryRun ? (
+                              <FlaskConical className={`h-3 w-3 ${effectiveRetryingId === item.id ? 'animate-spin' : ''}`} />
+                            ) : (
+                              <RotateCcw className={`h-3 w-3 ${effectiveRetryingId === item.id ? 'animate-spin' : ''}`} />
+                            )}
+                            {effectiveRetryingId === item.id
+                              ? retryDryRun
+                                ? 'Checking...'
+                                : 'Retrying...'
+                              : retryDryRun
+                                ? 'Dry Run'
+                                : 'Retry'}
                           </button>
                           <button
                             type="button"

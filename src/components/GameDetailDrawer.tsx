@@ -7,6 +7,7 @@ import {
   Download,
   ExternalLink,
   FileArchive,
+  FlaskConical,
   Gamepad2,
   Image as ImageIcon,
   RefreshCw,
@@ -29,7 +30,7 @@ interface GameDetailDrawerProps {
   retryingItem?: boolean;
   onClose: () => void;
   onItemUpdated: (updated: RepositoryItemRecord) => void;
-  onRetryItem: (id: number, fileId?: number) => Promise<void>;
+  onRetryItem: (id: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onDeleteItem: (id: number) => Promise<void>;
   onExportToSdCard?: (id: number) => void;
 }
@@ -200,10 +201,18 @@ export function GameDetailDrawer({
     }
   };
 
-  const handleRetry = async (fileId?: number) => {
-    setRetryingKey(fileId ? `file-${fileId}` : 'release');
+  const handleRetry = async (fileId?: number, dryRun = false) => {
+    setRetryingKey(
+      fileId
+        ? dryRun
+          ? `file-${fileId}-dry`
+          : `file-${fileId}`
+        : dryRun
+          ? 'release-dry'
+          : 'release',
+    );
     try {
-      await onRetryItem(item.id, fileId);
+      await onRetryItem(item.id, fileId, { dryRun });
     } finally {
       setRetryingKey(null);
     }
@@ -535,16 +544,32 @@ export function GameDetailDrawer({
                             </a>
                           </>
                         ) : file.status === 'failed' ? (
-                          <button
-                            type="button"
-                            disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
-                            title={!canSync ? 'Verify login in Operations before retrying' : undefined}
-                            onClick={() => void handleRetry(file.id)}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-                          >
-                            <RotateCcw className={`h-3.5 w-3.5 ${isRetryingThis || retryingItem ? 'animate-spin' : ''}`} />
-                            {isRetryingThis || retryingItem ? 'Retrying...' : 'Retry'}
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
+                              title={
+                                !canSync
+                                  ? 'Verify login in Operations before retrying'
+                                  : 'Dry-run: verify fresh download link for this file without downloading'
+                              }
+                              onClick={() => void handleRetry(file.id, true)}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border border-crt-amber/70 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
+                            >
+                              <FlaskConical className={`h-3.5 w-3.5 ${retryingKey === `file-${file.id}-dry` ? 'animate-spin' : ''}`} />
+                              {retryingKey === `file-${file.id}-dry` ? 'Checking...' : 'Dry Run'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
+                              title={!canSync ? 'Verify login in Operations before retrying' : undefined}
+                              onClick={() => void handleRetry(file.id, false)}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
+                            >
+                              <RotateCcw className={`h-3.5 w-3.5 ${isRetryingThis || retryingItem ? 'animate-spin' : ''}`} />
+                              {isRetryingThis || retryingItem ? 'Retrying...' : 'Retry'}
+                            </button>
+                          </>
                         ) : (
                           <span className="font-mono text-[11px] text-crt-muted px-2">
                             {file.status}
@@ -790,16 +815,32 @@ export function GameDetailDrawer({
             </button>
 
             {hasFailedFiles && (
-              <button
-                type="button"
-                disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
-                title={!canSync ? 'Verify login in Operations before retrying' : undefined}
-                onClick={() => void handleRetry()}
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-              >
-                <RotateCcw className={`h-3.5 w-3.5 ${retryingKey === 'release' || retryingItem ? 'animate-spin' : ''}`} />
-                {retryingKey === 'release' || retryingItem ? 'Retrying...' : 'Retry Failed'}
-              </button>
+              <>
+                <button
+                  type="button"
+                  disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
+                  title={
+                    !canSync
+                      ? 'Verify login in Operations before retrying'
+                      : 'Simulate retry by verifying fresh download link resolution without downloading archives'
+                  }
+                  onClick={() => void handleRetry(undefined, true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-amber/70 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
+                >
+                  <FlaskConical className={`h-3.5 w-3.5 ${retryingKey === 'release-dry' ? 'animate-spin' : ''}`} />
+                  {retryingKey === 'release-dry' ? 'Checking...' : 'Dry Run Retry'}
+                </button>
+                <button
+                  type="button"
+                  disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
+                  title={!canSync ? 'Verify login in Operations before retrying' : undefined}
+                  onClick={() => void handleRetry(undefined, false)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
+                >
+                  <RotateCcw className={`h-3.5 w-3.5 ${retryingKey === 'release' || retryingItem ? 'animate-spin' : ''}`} />
+                  {retryingKey === 'release' || retryingItem ? 'Retrying...' : 'Retry Failed'}
+                </button>
+              </>
             )}
           </div>
 

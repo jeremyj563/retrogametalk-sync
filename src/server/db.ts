@@ -635,12 +635,15 @@ export function setWatermark(isoTimestamp: string): void {
   );
 }
 
-export function createSyncRun(triggerType: RunTrigger, mode: RunMode): SyncRunRecord {
+export function createSyncRun(triggerType: RunTrigger, mode: RunMode, dryRun = false): SyncRunRecord {
   const startedAt = new Date().toISOString();
+  const isLegacyDry = mode === 'dry_run';
+  const storedMode: RunMode = isLegacyDry ? 'incremental' : mode;
+  const storedDryRun = dryRun || isLegacyDry ? 1 : 0;
   const info = getDb().prepare(`
-    INSERT INTO sync_runs (trigger_type, mode, status, started_at)
-    VALUES (?, ?, 'running', ?)
-  `).run(triggerType, mode, startedAt);
+    INSERT INTO sync_runs (trigger_type, mode, dry_run, status, started_at)
+    VALUES (?, ?, ?, 'running', ?)
+  `).run(triggerType, storedMode, storedDryRun, startedAt);
 
   return getSyncRunById(Number(info.lastInsertRowid))!;
 }
@@ -707,10 +710,13 @@ export function listSyncRuns(limit = 25): SyncRunRecord[] {
 }
 
 function mapRunRow(row: Record<string, unknown>): SyncRunRecord {
+  const rawMode = String(row.mode);
+  const isLegacyDry = rawMode === 'dry_run';
   return {
     id: Number(row.id),
     triggerType: String(row.trigger_type) as RunTrigger,
-    mode: String(row.mode) as RunMode,
+    mode: (isLegacyDry ? 'incremental' : rawMode) as RunMode,
+    dryRun: Boolean(row.dry_run) || isLegacyDry,
     status: String(row.status) as RunStatus,
     startedAt: String(row.started_at),
     finishedAt: row.finished_at ? String(row.finished_at) : null,

@@ -1028,7 +1028,11 @@ export class ScraperOrchestrator extends EventEmitter {
     }
   }
 
-  async startRun(trigger: RunTrigger, mode: RunMode): Promise<SyncRunRecord> {
+  async startRun(
+    trigger: RunTrigger,
+    mode: RunMode,
+    options?: { dryRun?: boolean },
+  ): Promise<SyncRunRecord> {
     if (this.activeRun) {
       throw new Error(`Sync run #${this.activeRun.id} is already in progress`);
     }
@@ -1044,16 +1048,29 @@ export class ScraperOrchestrator extends EventEmitter {
       throw new Error(`Another pod holds distributed lock "${lockKey}"`);
     }
 
-    const run = createSyncRun(trigger, mode);
+    const effectiveScope: 'incremental' | 'full' = mode === 'full' ? 'full' : 'incremental';
+    const isDryRun = mode === 'dry_run' || Boolean(options?.dryRun);
+    const run = createSyncRun(trigger, effectiveScope, isDryRun);
+    const modeLabel = isDryRun
+      ? `Dry Run · ${effectiveScope === 'full' ? 'Full Sync' : 'Incremental'}`
+      : effectiveScope === 'full'
+        ? 'Full Sync'
+        : 'Incremental';
+
     this.activeRun = run;
     this.abortController = new AbortController();
-    this.currentPhase = `Run #${run.id} initializing (${mode})`;
+    this.currentPhase = `Run #${run.id} initializing (${modeLabel})`;
 
     this.lockRenewTimer = setInterval(() => {
       acquireDistributedLock(lockKey, POD_ID, 180);
     }, 60_000);
 
-    this.log('info', `Started ${mode} sync run #${run.id} (${trigger})`, `Target: ${cfg.baseUrl}`, run.id);
+    this.log(
+      'info',
+      `Started ${modeLabel} sync run #${run.id} (${trigger})`,
+      isDryRun ? `Target: ${cfg.baseUrl} · Simulation mode (0 bytes written to disk)` : `Target: ${cfg.baseUrl}`,
+      run.id,
+    );
     this.emitStatus();
 
     void this.executeRun(run, cfg, lockKey);
@@ -1068,11 +1085,13 @@ export class ScraperOrchestrator extends EventEmitter {
     root: string,
     signal: AbortSignal,
     runLogger: LoggerFn,
-  ): Promise<{ downloaded: number; skipped: number; failed: number; bytes: number }> {
+    isDryRun = false,
+  ): Promise<{ downloaded: number; skipped: number; failed: number; bytes: number; wouldRecover: number }> {
     let downloaded = 0;
     let skipped = 0;
     let failed = 0;
     let bytes = 0;
+    let wouldRecover = 0;
 
     const pageUrl = item.remoteUrl.split('#')[0];
     let freshDownloads: DiscoveredRelease[] = [];
@@ -1107,49 +1126,51 @@ export class ScraperOrchestrator extends EventEmitter {
       }
       freshDownloads = Array.from(deduped.values());
 
-      const allRoleInputs = freshDownloads.length > 0 ? freshDownloads : item.files;
-      const fileRoles = allRoleInputs.map((f) =>
-        classifyFileRole(f.filename, f.displayLabel || f.filename, {
-          genres: wpData?.genres ?? item.genres,
-          languages: wpData?.languages ?? item.languages,
-          sources: wpData?.sources ?? item.sources,
-          title: wpData?.title ?? item.title,
-          systemName: item.systemName,
-        }),
-      );
-
-      try {
-        const freshMeta = this.client.extractReleaseMetadata(
-          pageData.html,
-          pageData.finalUrl,
-          wpData,
-          fileRoles,
+      if (!isDryRun) {
+        const allRoleInputs = freshDownloads.length > 0 ? freshDownloads : item.files;
+        const fileRoles = allRoleInputs.map((f) =>
+          classifyFileRole(f.filename, f.displayLabel || f.filename, {
+            genres: wpData?.genres ?? item.genres,
+            languages: wpData?.languages ?? item.languages,
+            sources: wpData?.sources ?? item.sources,
+            title: wpData?.title ?? item.title,
+            systemName: item.systemName,
+          }),
         );
-        const releaseDir =
-          this.resolveReleaseDir(item, root) ||
-          path.dirname(resolveMirroredPaths(cfg.baseUrl, pageData.finalUrl, root, 'probe.zip').localPath);
-        if (releaseDir) {
-          const mirrored = await this.client.mirrorReleaseAssets(
-            freshMeta,
-            releaseDir,
-            cfg,
-            signal,
-            runLogger,
+
+        try {
+          const freshMeta = this.client.extractReleaseMetadata(
+            pageData.html,
+            pageData.finalUrl,
+            wpData,
+            fileRoles,
           );
-          updateCatalogReleaseMetadata(
-            item.id,
-            mirrored.metadata,
-            mirrored.coverAbsPath,
-            mirrored.screenshotAbsPaths,
+          const releaseDir =
+            this.resolveReleaseDir(item, root) ||
+            path.dirname(resolveMirroredPaths(cfg.baseUrl, pageData.finalUrl, root, 'probe.zip').localPath);
+          if (releaseDir) {
+            const mirrored = await this.client.mirrorReleaseAssets(
+              freshMeta,
+              releaseDir,
+              cfg,
+              signal,
+              runLogger,
+            );
+            updateCatalogReleaseMetadata(
+              item.id,
+              mirrored.metadata,
+              mirrored.coverAbsPath,
+              mirrored.screenshotAbsPaths,
+            );
+          }
+        } catch (assetErr) {
+          if (signal.aborted) throw assetErr;
+          runLogger(
+            'warn',
+            `Metadata/artwork refresh skipped during retry for ${item.title}`,
+            assetErr instanceof Error ? assetErr.message : String(assetErr),
           );
         }
-      } catch (assetErr) {
-        if (signal.aborted) throw assetErr;
-        runLogger(
-          'warn',
-          `Metadata/artwork refresh skipped during retry for ${item.title}`,
-          assetErr instanceof Error ? assetErr.message : String(assetErr),
-        );
       }
     }
 
@@ -1160,6 +1181,23 @@ export class ScraperOrchestrator extends EventEmitter {
       }
       for (const release of freshDownloads) {
         if (signal.aborted) break;
+        if (isDryRun) {
+          const mirrored = resolveMirroredPaths(cfg.baseUrl, release.pageUrl || pageUrl, cfg.downloadDir, release.filename);
+          const remotePath = release.remotePath || mirrored.remotePath;
+          const expectedLocal = path.resolve(cfg.downloadDir, remotePath);
+          const alreadyExists = fs.existsSync(expectedLocal) && fs.statSync(expectedLocal).size > 0;
+          if (alreadyExists) {
+            skipped += 1;
+          } else {
+            wouldRecover += 1;
+            runLogger(
+              'info',
+              `[Dry Run · Retry] Verified fresh download link for ${remotePath}`,
+              release.downloadUrl,
+            );
+          }
+          continue;
+        }
         const outcome = await this.downloadReleaseFile(
           item.id,
           release,
@@ -1174,7 +1212,7 @@ export class ScraperOrchestrator extends EventEmitter {
         if (outcome.failed) failed += 1;
         bytes += outcome.bytes;
       }
-      return { downloaded, skipped, failed, bytes };
+      return { downloaded, skipped, failed, bytes, wouldRecover };
     }
 
     const matchFreshDownload = (targetFile: ReleaseFileRecord): DiscoveredRelease | undefined => {
@@ -1218,6 +1256,15 @@ export class ScraperOrchestrator extends EventEmitter {
         targetFile.localPath && fs.existsSync(targetFile.localPath) && fs.statSync(targetFile.localPath).size > 0,
       );
       if (!matched && !targetAlreadyOnDisk && (!storedUrlClean.startsWith('http') || storedUrlClean === pageUrl)) {
+        if (isDryRun) {
+          runLogger(
+            'warn',
+            `[Dry Run · Retry] Could not resolve fresh download link for ${targetFile.filename}`,
+            pageUrl,
+          );
+          failed += 1;
+          continue;
+        }
         upsertReleaseFile({
           releaseId: item.id,
           targetFileId: targetFile.id,
@@ -1251,6 +1298,20 @@ export class ScraperOrchestrator extends EventEmitter {
         publishedAt: item.publishedAt,
       };
 
+      if (isDryRun) {
+        if (targetAlreadyOnDisk) {
+          skipped += 1;
+        } else {
+          wouldRecover += 1;
+          runLogger(
+            'info',
+            `[Dry Run · Retry] Verified fresh download link for ${release.remotePath || release.filename}`,
+            release.downloadUrl,
+          );
+        }
+        continue;
+      }
+
       const outcome = await this.downloadReleaseFile(
         item.id,
         release,
@@ -1267,10 +1328,14 @@ export class ScraperOrchestrator extends EventEmitter {
       bytes += outcome.bytes;
     }
 
-    return { downloaded, skipped, failed, bytes };
+    return { downloaded, skipped, failed, bytes, wouldRecover };
   }
 
-  async retryItem(itemId: number, fileId?: number): Promise<SyncRunRecord> {
+  async retryItem(
+    itemId: number,
+    fileId?: number,
+    options?: { dryRun?: boolean },
+  ): Promise<SyncRunRecord> {
     const item = getRepositoryItemById(itemId);
     if (!item) {
       throw new Error(`Catalog release #${itemId} not found`);
@@ -1308,13 +1373,15 @@ export class ScraperOrchestrator extends EventEmitter {
     const cfg = getInternalConfig();
     this.assertCanRunSync(cfg);
     const root = path.resolve(cfg.downloadDir);
-    const run = createSyncRun('retry', 'incremental');
+    const isDryRun = Boolean(options?.dryRun);
+    const run = createSyncRun('retry', 'incremental', isDryRun);
+    const actionPrefix = isDryRun ? 'Dry Run (Retry)' : 'Retrying';
     this.activeRun = run;
     this.abortController = new AbortController();
     this.currentPhase =
       filesToRetry.length === 1
-        ? `Retrying ${filesToRetry[0].filename}`
-        : `Retrying ${item.title}${filesToRetry.length > 0 ? ` (${filesToRetry.length} files)` : ''}`;
+        ? `${actionPrefix}: ${filesToRetry[0].filename}`
+        : `${actionPrefix}: ${item.title}${filesToRetry.length > 0 ? ` (${filesToRetry.length} files)` : ''}`;
     this.emitStatus();
 
     void (async () => {
@@ -1325,6 +1392,7 @@ export class ScraperOrchestrator extends EventEmitter {
       let skipped = 0;
       let failed = 0;
       let bytes = 0;
+      let wouldRecover = 0;
 
       try {
         if (!cfg.username || !cfg.password) {
@@ -1347,21 +1415,25 @@ export class ScraperOrchestrator extends EventEmitter {
           root,
           signal,
           runLogger,
+          isDryRun,
         );
         downloaded = outcome.downloaded;
         skipped = outcome.skipped;
         failed = outcome.failed;
         bytes = outcome.bytes;
-        attemptedFiles = Math.max(attemptedFiles, downloaded + skipped + failed);
+        wouldRecover = outcome.wouldRecover;
+        attemptedFiles = Math.max(attemptedFiles, downloaded + wouldRecover + skipped + failed);
 
-        if (!signal.aborted && ((failed > 0 && downloaded === 0 && skipped === 0) || (downloaded === 0 && skipped === 0 && failed === 0))) {
+        const resolvedAny = downloaded > 0 || wouldRecover > 0 || skipped > 0;
+        if (!signal.aborted && !resolvedAny) {
           const latestItem = getRepositoryItemById(item.id);
-          const detailErr = latestItem?.errorMessage;
-          throw new Error(detailErr || `Retry failed for all ${Math.max(1, failed)} file(s)`);
+          const detailErr = !isDryRun ? latestItem?.errorMessage : null;
+          throw new Error(detailErr || `${isDryRun ? 'Dry-run retry' : 'Retry'} failed for all ${Math.max(1, failed)} file(s)`);
         }
 
+        const finalStatus = signal.aborted ? 'stopped' : 'completed';
         updateSyncRun(run.id, {
-          status: signal.aborted ? 'stopped' : 'completed',
+          status: finalStatus,
           finishedAt: new Date().toISOString(),
           newFound: attemptedFiles,
           downloadedCount: downloaded,
@@ -1370,9 +1442,15 @@ export class ScraperOrchestrator extends EventEmitter {
           bytesDownloaded: bytes,
           avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
         });
+        if (isDryRun) {
+          runLogger(
+            'info',
+            `Retry dry run #${run.id} ${finalStatus} for ${item.title}: ${wouldRecover} link(s) verified, ${skipped} already on disk, ${failed} unresolved`,
+          );
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (!signal.aborted) {
+        if (!signal.aborted && !isDryRun) {
           const latestItem = getRepositoryItemById(item.id);
           if (filesToRetry.length > 0) {
             for (const f of filesToRetry) {
@@ -1411,7 +1489,7 @@ export class ScraperOrchestrator extends EventEmitter {
           errorSummary: msg,
         });
         if (!signal.aborted) {
-          runLogger('error', `Retry run #${run.id} failed: ${msg}`);
+          runLogger('error', `${isDryRun ? 'Retry dry run' : 'Retry run'} #${run.id} failed: ${msg}`);
         }
       } finally {
         this.activeTransfer = null;
@@ -1425,7 +1503,11 @@ export class ScraperOrchestrator extends EventEmitter {
     return run;
   }
 
-  async retryAllFailed(options?: { system?: string; itemIds?: number[] }): Promise<SyncRunRecord> {
+  async retryAllFailed(options?: {
+    system?: string;
+    itemIds?: number[];
+    dryRun?: boolean;
+  }): Promise<SyncRunRecord> {
     if (this.activeRun) {
       throw new Error(`Sync run #${this.activeRun.id} is already in progress`);
     }
@@ -1447,10 +1529,12 @@ export class ScraperOrchestrator extends EventEmitter {
     }
 
     const root = path.resolve(cfg.downloadDir);
-    const run = createSyncRun('retry', 'incremental');
+    const isDryRun = Boolean(options?.dryRun);
+    const run = createSyncRun('retry', 'incremental', isDryRun);
+    const phasePrefix = isDryRun ? 'Dry Run (Retry)' : 'Retry Failed';
     this.activeRun = run;
     this.abortController = new AbortController();
-    this.currentPhase = `Retrying ${targets.length} failed/partial release${targets.length === 1 ? '' : 's'}`;
+    this.currentPhase = `${phasePrefix}: ${targets.length} failed/partial release${targets.length === 1 ? '' : 's'}`;
 
     this.lockRenewTimer = setInterval(() => {
       acquireDistributedLock(lockKey, POD_ID, 180);
@@ -1458,8 +1542,13 @@ export class ScraperOrchestrator extends EventEmitter {
 
     this.log(
       'info',
-      `Started batch retry run #${run.id} for ${targets.length} failed/partial release(s)`,
-      options?.system && options.system !== 'all' ? `System filter: ${options.system}` : null,
+      `Started ${isDryRun ? 'dry-run batch retry' : 'batch retry'} run #${run.id} for ${targets.length} failed/partial release(s)`,
+      [
+        options?.system && options.system !== 'all' ? `System filter: ${options.system}` : null,
+        isDryRun ? 'Simulation mode (verifying fresh download links only)' : null,
+      ]
+        .filter(Boolean)
+        .join(' · ') || null,
       run.id,
     );
     this.emitStatus();
@@ -1472,6 +1561,7 @@ export class ScraperOrchestrator extends EventEmitter {
       let skipped = 0;
       let failed = 0;
       let bytes = 0;
+      let wouldRecover = 0;
 
       try {
         if (!cfg.username || !cfg.password) {
@@ -1505,7 +1595,7 @@ export class ScraperOrchestrator extends EventEmitter {
             continue;
           }
 
-          this.currentPhase = `Retry Failed (${idx + 1}/${targets.length}): ${item.systemName} / ${item.title}`;
+          this.currentPhase = `${phasePrefix} (${idx + 1}/${targets.length}): ${item.systemName} / ${item.title}`;
           this.emitStatus();
 
           try {
@@ -1517,9 +1607,14 @@ export class ScraperOrchestrator extends EventEmitter {
               root,
               signal,
               runLogger,
+              isDryRun,
             );
-            attemptedFiles += Math.max(filesToRetry.length, outcome.downloaded + outcome.skipped + outcome.failed);
+            attemptedFiles += Math.max(
+              filesToRetry.length,
+              outcome.downloaded + outcome.wouldRecover + outcome.skipped + outcome.failed,
+            );
             downloaded += outcome.downloaded;
+            wouldRecover += outcome.wouldRecover;
             skipped += outcome.skipped;
             failed += outcome.failed;
             bytes += outcome.bytes;
@@ -1529,32 +1624,39 @@ export class ScraperOrchestrator extends EventEmitter {
             if (/Cloudflare|Authentication|Re-authentication/i.test(errMsg)) {
               throw itemErr;
             }
-            if (filesToRetry.length > 0) {
-              attemptedFiles += filesToRetry.length;
-              for (const f of filesToRetry) {
-                upsertReleaseFile({
-                  releaseId: item.id,
-                  targetFileId: f.id,
-                  remoteUrl: f.remoteUrl,
-                  downloadUrl: f.downloadUrl,
-                  remotePath: f.remotePath,
-                  localPath: f.localPath,
-                  filename: f.filename,
-                  displayLabel: f.displayLabel,
-                  fileRole: f.fileRole,
-                  status: 'failed',
-                  errorMessage: errMsg,
-                  lastRunId: run.id,
-                });
-                failed += 1;
-              }
+            if (isDryRun) {
+              const count = Math.max(1, filesToRetry.length);
+              attemptedFiles += count;
+              failed += count;
+              runLogger('warn', `[Dry Run · Retry] Failed to verify ${item.title}: ${errMsg}`, item.remoteUrl);
             } else {
-              attemptedFiles += 1;
-              failed += 1;
-              markCatalogReleaseFailed(item.id, errMsg, run.id);
+              if (filesToRetry.length > 0) {
+                attemptedFiles += filesToRetry.length;
+                for (const f of filesToRetry) {
+                  upsertReleaseFile({
+                    releaseId: item.id,
+                    targetFileId: f.id,
+                    remoteUrl: f.remoteUrl,
+                    downloadUrl: f.downloadUrl,
+                    remotePath: f.remotePath,
+                    localPath: f.localPath,
+                    filename: f.filename,
+                    displayLabel: f.displayLabel,
+                    fileRole: f.fileRole,
+                    status: 'failed',
+                    errorMessage: errMsg,
+                    lastRunId: run.id,
+                  });
+                  failed += 1;
+                }
+              } else {
+                attemptedFiles += 1;
+                failed += 1;
+                markCatalogReleaseFailed(item.id, errMsg, run.id);
+              }
+              runLogger('error', `Batch retry failed for ${item.title}: ${errMsg}`, item.remoteUrl);
+              this.emitCatalogUpdated('file_failed', item.id);
             }
-            runLogger('error', `Batch retry failed for ${item.title}: ${errMsg}`, item.remoteUrl);
-            this.emitCatalogUpdated('file_failed', item.id);
           }
 
           updateSyncRun(run.id, {
@@ -1568,8 +1670,8 @@ export class ScraperOrchestrator extends EventEmitter {
           this.emitStatus();
         }
 
-        if (!signal.aborted && failed > 0 && downloaded === 0 && skipped === 0) {
-          throw new Error(`Batch retry failed for all ${failed} file(s)`);
+        if (!signal.aborted && failed > 0 && downloaded === 0 && wouldRecover === 0 && skipped === 0) {
+          throw new Error(`${isDryRun ? 'Dry-run batch retry' : 'Batch retry'} failed for all ${failed} file(s)`);
         }
 
         const finalStatus = signal.aborted ? 'stopped' : 'completed';
@@ -1585,7 +1687,9 @@ export class ScraperOrchestrator extends EventEmitter {
         });
         runLogger(
           'info',
-          `Batch retry run #${run.id} ${finalStatus}: ${downloaded} recovered, ${skipped} skipped, ${failed} failed`,
+          isDryRun
+            ? `Batch retry dry run #${run.id} ${finalStatus}: ${wouldRecover} fresh link(s) verified, ${skipped} already on disk, ${failed} unresolved`
+            : `Batch retry run #${run.id} ${finalStatus}: ${downloaded} recovered, ${skipped} skipped, ${failed} failed`,
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1600,7 +1704,7 @@ export class ScraperOrchestrator extends EventEmitter {
           errorSummary: msg,
         });
         if (!signal.aborted) {
-          runLogger('error', `Batch retry run #${run.id} failed: ${msg}`);
+          runLogger('error', `${isDryRun ? 'Batch retry dry run' : 'Batch retry run'} #${run.id} failed: ${msg}`);
         }
       } finally {
         if (this.lockRenewTimer) {
@@ -1683,7 +1787,9 @@ export class ScraperOrchestrator extends EventEmitter {
       }
 
       const runStartedAt = new Date().toISOString();
-      const isDeltaMode = run.mode === 'incremental' || run.mode === 'dry_run';
+      const isDryRun = Boolean(run.dryRun) || run.mode === 'dry_run';
+      const isDeltaMode = run.mode !== 'full';
+      const dryRunScopeTag = isDeltaMode ? 'Incremental' : 'Full';
       const usingDefaultLookback = !cfg.lastWatermarkAt;
       const effectiveCutoffIso = isDeltaMode
         ? (cfg.lastWatermarkAt || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
@@ -1693,10 +1799,18 @@ export class ScraperOrchestrator extends EventEmitter {
       if (isDeltaMode && effectiveCutoffIso) {
         runLogger(
           'info',
-          `${run.mode === 'dry_run' ? 'Dry Run' : 'Incremental'} cutoff active: ${effectiveCutoffIso}`,
-          usingDefaultLookback
-            ? 'Default 24h lookback (no prior watermark)'
-            : 'Syncing releases created or updated since cutoff',
+          `${isDryRun ? 'Dry Run (Incremental)' : 'Incremental'} cutoff active: ${effectiveCutoffIso}`,
+          isDryRun
+            ? 'Simulating delta sync since cutoff (no files downloaded or watermark changes)'
+            : usingDefaultLookback
+              ? 'Default 24h lookback (no prior watermark)'
+              : 'Syncing releases created or updated since cutoff',
+        );
+      } else if (isDryRun) {
+        runLogger(
+          'info',
+          'Dry Run (Full Sync) active: simulating uncapped mirror across target scope',
+          'Inspecting all releases in scope without downloading archives or modifying catalog rows',
         );
       } else {
         runLogger('info', 'Full Sync mode active: uncapped mirror of every release in target scope');
@@ -1752,19 +1866,26 @@ export class ScraperOrchestrator extends EventEmitter {
           recordObservedTimestamp(rel.publishedAt);
         }
 
-        if (run.mode === 'dry_run') {
+        if (isDryRun) {
           for (const rel of uniqueReleases) {
             if (signal.aborted) break;
             processedFileUrls.add(rel.remoteUrl);
             newFound += 1;
-            const expectedLocal = path.resolve(cfg.downloadDir, rel.remotePath);
+            const mirrored = resolveMirroredPaths(
+              cfg.baseUrl,
+              rel.pageUrl || canonicalPageUrl,
+              cfg.downloadDir,
+              rel.filename,
+            );
+            const remotePath = rel.remotePath || mirrored.remotePath;
+            const expectedLocal = path.resolve(cfg.downloadDir, remotePath);
             const alreadyExists = fs.existsSync(expectedLocal) && fs.statSync(expectedLocal).size > 0;
             if (alreadyExists) {
               skippedCount += 1;
             } else {
               runLogger(
                 'info',
-                `[Dry Run] Would download ${rel.remotePath}`,
+                `[Dry Run · ${dryRunScopeTag}] Would download ${remotePath}`,
                 rel.displayLabel && rel.displayLabel !== rel.filename
                   ? `${rel.displayLabel} · ${rel.downloadUrl}`
                   : rel.downloadUrl,
@@ -2098,7 +2219,12 @@ export class ScraperOrchestrator extends EventEmitter {
               }
             }
 
-            this.currentPhase = `${isDeltaMode ? 'Inspecting delta candidate' : 'Full Sync inspecting'}: ${this.formatRelativePhasePath(relPageUrl, cfg.baseUrl)}`;
+            const inspectPrefix = isDryRun
+              ? `Dry Run (${dryRunScopeTag}) inspecting`
+              : isDeltaMode
+                ? 'Inspecting delta candidate'
+                : 'Full Sync inspecting';
+            this.currentPhase = `${inspectPrefix}: ${this.formatRelativePhasePath(relPageUrl, cfg.baseUrl)}`;
             this.emitStatus();
 
             const res = await inspectAndProcessReleasePage(relPageUrl, undefined, cutoffMs);
@@ -2178,10 +2304,12 @@ export class ScraperOrchestrator extends EventEmitter {
           if (signal.aborted) break;
           const systemSlug = targetSystems[sysIdx];
           const scopeLabel = `${sysIdx + 1}/${targetSystems.length}`;
+          const prevNewFound = newFound;
+          const prevSkipped = skippedCount;
 
           this.currentPhase = isDeltaMode
-            ? `Checking ${systemSlug} (${scopeLabel}) since ${effectiveCutoffIso!.slice(0, 16).replace('T', ' ')} UTC`
-            : `Full Sync (${scopeLabel}): enumerating ${systemSlug}`;
+            ? `${isDryRun ? 'Dry Run (Incremental)' : 'Checking'} ${systemSlug} (${scopeLabel}) since ${effectiveCutoffIso!.slice(0, 16).replace('T', ' ')} UTC`
+            : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} (${scopeLabel}): enumerating ${systemSlug}`;
           this.emitStatus();
 
           const wpRes = await this.client.listConsoleReleasesViaWpRest(systemSlug, cfg, {
@@ -2192,8 +2320,8 @@ export class ScraperOrchestrator extends EventEmitter {
               pagesCrawled += 1;
               successfulPages += 1;
               this.currentPhase = isDeltaMode
-                ? `Checking ${systemSlug} (${scopeLabel}) · WP page ${wpPage}/${wpTotalPages}`
-                : `Full Sync (${scopeLabel}): ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`;
+                ? `${isDryRun ? 'Dry Run (Incremental)' : 'Checking'} ${systemSlug} (${scopeLabel}) · WP page ${wpPage}/${wpTotalPages}`
+                : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} (${scopeLabel}): ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`;
               persistCounters();
             },
           });
@@ -2203,7 +2331,7 @@ export class ScraperOrchestrator extends EventEmitter {
               if (wpRes.posts.length > 0) {
                 runLogger(
                   'info',
-                  `Found ${wpRes.posts.length} new/updated release(s) in ${systemSlug} since cutoff`,
+                  `${isDryRun ? '[Dry Run · Incremental] ' : ''}Found ${wpRes.posts.length} new/updated release(s) in ${systemSlug} since cutoff`,
                 );
               }
               for (let pIdx = 0; pIdx < wpRes.posts.length; pIdx += 1) {
@@ -2212,19 +2340,24 @@ export class ScraperOrchestrator extends EventEmitter {
                 if (!post.link) continue;
                 recordObservedTimestamp(post.dateGmt);
                 recordObservedTimestamp(post.modifiedGmt);
-                this.currentPhase = `${run.mode === 'dry_run' ? 'Dry Run' : 'Incremental'} · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
+                this.currentPhase = `${isDryRun ? 'Dry Run (Incremental)' : 'Incremental'} · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
                 this.emitStatus();
                 await inspectAndProcessReleasePage(post.link, post, cutoffMs);
               }
             } else if (wpRes.posts.length > 0) {
-              runLogger('info', `Full Sync mirroring ${wpRes.posts.length} release(s) in ${systemSlug}`);
+              runLogger(
+                'info',
+                isDryRun
+                  ? `[Dry Run · Full] Inspecting ${wpRes.posts.length} release(s) in ${systemSlug}`
+                  : `Full Sync mirroring ${wpRes.posts.length} release(s) in ${systemSlug}`,
+              );
               for (let pIdx = 0; pIdx < wpRes.posts.length; pIdx += 1) {
                 if (signal.aborted) break;
                 const post = wpRes.posts[pIdx];
                 if (!post.link) continue;
                 recordObservedTimestamp(post.dateGmt);
                 recordObservedTimestamp(post.modifiedGmt);
-                this.currentPhase = `Full Sync · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
+                this.currentPhase = `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
                 this.emitStatus();
                 await inspectAndProcessReleasePage(post.link, post, null);
               }
@@ -2238,6 +2371,16 @@ export class ScraperOrchestrator extends EventEmitter {
             await crawlHtmlScope([consoleHtmlUrl], systemSlug);
           }
 
+          if (isDryRun && !signal.aborted && newFound > prevNewFound) {
+            const sysDiscovered = newFound - prevNewFound;
+            const sysSkipped = skippedCount - prevSkipped;
+            const sysWouldDownload = Math.max(0, sysDiscovered - sysSkipped);
+            runLogger(
+              'info',
+              `[Dry Run · ${dryRunScopeTag}] ${systemSlug} summary: ${sysWouldDownload} would download, ${sysSkipped} already on disk`,
+            );
+          }
+
           persistCounters();
         }
       }
@@ -2249,7 +2392,7 @@ export class ScraperOrchestrator extends EventEmitter {
         if (failedCount > 0 && downloadedCount === 0 && skippedCount === 0) {
           throw new Error(`Sync failed: all ${failedCount} file download(s) failed`);
         }
-        if (run.mode !== 'dry_run') {
+        if (!isDryRun) {
           const runStartMs = Date.parse(runStartedAt);
           const newestObsMs = newestReleaseIso ? Date.parse(newestReleaseIso) : NaN;
           const nextWatermarkIso =
@@ -2276,10 +2419,18 @@ export class ScraperOrchestrator extends EventEmitter {
         avgDelayMs: rl.currentDelayMs,
       });
 
-      runLogger(
-        'info',
-        `Run #${run.id} ${finalStatus}: ${downloadedCount} downloaded, ${skippedCount} skipped, ${failedCount} failed`,
-      );
+      if (isDryRun) {
+        const wouldDownloadTotal = Math.max(0, newFound - skippedCount);
+        runLogger(
+          'info',
+          `Run #${run.id} ${finalStatus} (Dry Run · ${dryRunScopeTag}): ${newFound} discovered, ${wouldDownloadTotal} would download, ${skippedCount} already on disk`,
+        );
+      } else {
+        runLogger(
+          'info',
+          `Run #${run.id} ${finalStatus}: ${downloadedCount} downloaded, ${skippedCount} skipped, ${failedCount} failed`,
+        );
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       updateSyncRun(run.id, {

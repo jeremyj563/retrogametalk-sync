@@ -296,6 +296,21 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `).run();
     },
   },
+  {
+    version: 8,
+    name: 'add_dry_run_flag_to_sync_runs',
+    description: 'Decouple dry_run boolean flag from sync_runs.mode so Incremental, Full, and Retry runs can all execute as dry runs',
+    up: (db) => {
+      if (!tableHasColumn(db, 'sync_runs', 'dry_run')) {
+        db.exec('ALTER TABLE sync_runs ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0');
+      }
+      db.prepare(`
+        UPDATE sync_runs
+        SET dry_run = 1, mode = 'incremental'
+        WHERE mode = 'dry_run'
+      `).run();
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

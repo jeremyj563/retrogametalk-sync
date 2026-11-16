@@ -120,9 +120,11 @@ async function bootstrap() {
     const mode: RunMode = ['incremental', 'full', 'dry_run'].includes(requestedMode)
       ? requestedMode
       : 'incremental';
+    const dryRun = Boolean(req.body?.dryRun) || mode === 'dry_run';
+    const normalizedMode: RunMode = mode === 'dry_run' ? 'incremental' : mode;
 
     try {
-      const run = await orchestrator.startRun('manual', mode);
+      const run = await orchestrator.startRun('manual', normalizedMode, { dryRun });
       res.status(202).json({ run });
     } catch (err) {
       res.status(409).json({ error: err instanceof Error ? err.message : String(err) });
@@ -402,6 +404,7 @@ async function bootstrap() {
     const rawIds = Array.isArray(req.body?.ids)
       ? req.body.ids.map(Number).filter((id: number) => Number.isInteger(id) && id > 0)
       : undefined;
+    const dryRun = Boolean(req.body?.dryRun ?? (req.query.dryRun === 'true'));
     if (Array.isArray(req.body?.ids) && (!rawIds || rawIds.length === 0)) {
       res.status(400).json({ error: 'Provide one or more valid catalog release IDs to retry' });
       return;
@@ -411,6 +414,7 @@ async function bootstrap() {
       const run = await orchestrator.retryAllFailed({
         system: rawSystem && rawSystem !== 'all' ? rawSystem : undefined,
         itemIds: rawIds,
+        dryRun,
       });
       res.status(202).json({ run });
     } catch (err) {
@@ -432,8 +436,9 @@ async function bootstrap() {
       res.status(400).json({ error: 'Invalid fileId' });
       return;
     }
+    const dryRun = Boolean(req.body?.dryRun ?? (req.query.dryRun === 'true'));
     try {
-      const run = await orchestrator.retryItem(itemId, fileId);
+      const run = await orchestrator.retryItem(itemId, fileId, { dryRun });
       res.status(202).json({ run });
     } catch (err) {
       res.status(409).json({ error: err instanceof Error ? err.message : String(err) });
