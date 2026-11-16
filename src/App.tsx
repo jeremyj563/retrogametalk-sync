@@ -13,7 +13,11 @@ import {
 } from 'lucide-react';
 import { CatalogPanel } from './components/CatalogPanel';
 import { CrtDisplayControl } from './components/CrtDisplayControl';
-import { OperationsPanel } from './components/OperationsPanel';
+import {
+  OperationsPanel,
+  type OperationsDirtyState,
+  type OperationsPanelHandle,
+} from './components/OperationsPanel';
 import { OverviewPanel } from './components/OverviewPanel';
 import { SchedulePanel } from './components/SchedulePanel';
 import {
@@ -62,6 +66,14 @@ export default function App() {
   const [section, setSection] = useState<NavSection>('monitor');
   const [operationsFocus, setOperationsFocus] = useState<OperationsFocusRequest | null>(null);
   const operationsFocusNonceRef = useRef(0);
+  const operationsPanelRef = useRef<OperationsPanelHandle | null>(null);
+  const [operationsDirty, setOperationsDirty] = useState<OperationsDirtyState>({
+    isDirty: false,
+    changedSections: [],
+  });
+  const [pendingNavSection, setPendingNavSection] = useState<NavSection | null>(null);
+  const [navGuardSaving, setNavGuardSaving] = useState(false);
+  const [navGuardError, setNavGuardError] = useState<string | null>(null);
   const [status, setStatus] = useState<ServiceStatusSnapshot | null>(null);
   const [config, setConfig] = useState<ScraperConfigPublic | null>(null);
   const [runs, setRuns] = useState<SyncRunRecord[]>([]);
@@ -451,6 +463,58 @@ export default function App() {
     saveCrtDisplaySettings(crtSettings);
   }, [crtSettings]);
 
+  const requestSectionChange = useCallback(
+    (nextSection: NavSection) => {
+      if (nextSection === section) return;
+      if (section === 'operations' && operationsDirty.isDirty) {
+        setNavGuardError(null);
+        setPendingNavSection(nextSection);
+        return;
+      }
+      setOperationsFocus(null);
+      setSection(nextSection);
+    },
+    [section, operationsDirty.isDirty],
+  );
+
+  useEffect(() => {
+    if (!pendingNavSection) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !navGuardSaving) {
+        setPendingNavSection(null);
+        setNavGuardError(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [pendingNavSection, navGuardSaving]);
+
+  const handleGuardSaveAndLeave = async () => {
+    if (!pendingNavSection) return;
+    setNavGuardSaving(true);
+    setNavGuardError(null);
+    const saved = await operationsPanelRef.current?.save();
+    setNavGuardSaving(false);
+    if (!saved) {
+      setNavGuardError('Fix the validation or save error shown in Operations before leaving.');
+      return;
+    }
+    const destination = pendingNavSection;
+    setPendingNavSection(null);
+    setOperationsFocus(null);
+    setSection(destination);
+  };
+
+  const handleGuardDiscardAndLeave = () => {
+    if (!pendingNavSection || navGuardSaving) return;
+    const destination = pendingNavSection;
+    operationsPanelRef.current?.discard();
+    setPendingNavSection(null);
+    setNavGuardError(null);
+    setOperationsFocus(null);
+    setSection(destination);
+  };
+
   const crtCssVars = computeCrtCssVariables(crtSettings);
   const showScanlines = crtSettings.enabled && crtSettings.scanlines > 0;
   const showGrille = crtSettings.enabled && crtSettings.apertureGrille > 0;
@@ -473,8 +537,7 @@ export default function App() {
           href="#monitor"
           onClick={(e) => {
             e.preventDefault();
-            setOperationsFocus(null);
-            setSection('monitor');
+            requestSectionChange('monitor');
           }}
           className="font-display text-lg font-bold tracking-tight text-crt-phosphor whitespace-nowrap shrink-0"
         >
@@ -683,18 +746,25 @@ export default function App() {
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => {
-                      setOperationsFocus(null);
-                      setSection(item.id);
-                    }}
-                    className={`flex items-center gap-2.5 px-3 py-2 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
+                    onClick={() => requestSectionChange(item.id)}
+                    className={`flex items-center justify-between gap-2 px-3 py-2 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
                       active
                         ? 'bg-crt-elevated border-crt-border-strong text-crt-phosphor'
                         : 'bg-transparent border-transparent text-crt-muted hover:text-crt-text hover:bg-crt-bg'
                     }`}
                   >
-                    <Icon className="h-4 w-4 shrink-0" />
-                    <span>{item.label}</span>
+                    <span className="inline-flex items-center gap-2.5 min-w-0">
+                      <Icon className="h-4 w-4 shrink-0" />
+                      <span>{item.label}</span>
+                    </span>
+                    {item.id === 'operations' && operationsDirty.isDirty && (
+                      <span
+                        title={`Unsaved changes: ${operationsDirty.changedSections.join(', ')}`}
+                        className="text-[10px] font-mono text-crt-amber shrink-0"
+                      >
+                        Unsaved
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -864,9 +934,11 @@ export default function App() {
               )}
               {section === 'operations' && (
                 <OperationsPanel
+                  ref={operationsPanelRef}
                   config={config}
                   status={status}
                   focusRequest={operationsFocus}
+                  onDirtyChange={setOperationsDirty}
                   onSaveConfig={handleSaveConfig}
                   onRefreshConfig={loadInitialData}
                 />
@@ -889,6 +961,86 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Unsaved Operations Changes Guard Modal */}
+      {pendingNavSection && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="unsaved-ops-title"
+          onClick={() => {
+            if (!navGuardSaving) {
+              setPendingNavSection(null);
+              setNavGuardError(null);
+            }
+          }}
+          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-[2px] flex items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md border border-crt-border-strong bg-crt-surface rounded-md p-5 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-crt-amber shrink-0 mt-0.5" />
+              <div className="space-y-1.5 min-w-0">
+                <h2
+                  id="unsaved-ops-title"
+                  className="font-display text-base font-semibold text-crt-text"
+                >
+                  Unsaved Operations Changes
+                </h2>
+                <p className="text-xs text-crt-muted leading-relaxed">
+                  You have unsaved configuration edits in{' '}
+                  <span className="font-mono text-crt-text">
+                    {operationsDirty.changedSections.join(', ')}
+                  </span>
+                  . Save before switching to{' '}
+                  <span className="text-crt-text font-medium">
+                    {navItems.find((n) => n.id === pendingNavSection)?.label ?? pendingNavSection}
+                  </span>
+                  ?
+                </p>
+              </div>
+            </div>
+
+            {navGuardError && (
+              <p className="text-xs font-mono text-crt-crimson border border-crt-crimson/40 bg-crt-crimson/10 rounded px-3 py-2">
+                {navGuardError}
+              </p>
+            )}
+
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                disabled={navGuardSaving}
+                onClick={() => {
+                  setPendingNavSection(null);
+                  setNavGuardError(null);
+                }}
+                className="px-3 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+              >
+                Keep Editing
+              </button>
+              <button
+                type="button"
+                disabled={navGuardSaving}
+                onClick={handleGuardDiscardAndLeave}
+                className="px-3 py-1.5 text-xs font-medium border border-crt-crimson/45 bg-crt-crimson/10 text-crt-crimson hover:bg-crt-crimson/20 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+              >
+                Discard &amp; Leave
+              </button>
+              <button
+                type="button"
+                disabled={navGuardSaving}
+                onClick={() => void handleGuardSaveAndLeave()}
+                className="px-4 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+              >
+                {navGuardSaving ? 'Saving...' : 'Save & Leave'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

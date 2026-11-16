@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -44,21 +44,51 @@ import type {
 import { formatBytes } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
 
+export interface OperationsDirtyState {
+  isDirty: boolean;
+  changedSections: string[];
+}
+
+export interface OperationsPanelHandle {
+  save: () => Promise<boolean>;
+  discard: () => void;
+}
+
 interface OperationsPanelProps {
   config: ScraperConfigPublic;
   status: ServiceStatusSnapshot;
   focusRequest?: OperationsFocusRequest | null;
+  onDirtyChange?: (state: OperationsDirtyState) => void;
   onSaveConfig: (patch: Partial<ScraperConfigPublic> & { password?: string }) => Promise<void>;
   onRefreshConfig: () => Promise<void>;
 }
 
-export function OperationsPanel({
-  config,
-  status,
-  focusRequest = null,
-  onSaveConfig,
-  onRefreshConfig,
-}: OperationsPanelProps) {
+function canonicalSystemFilterKey(raw: string): string {
+  const seen = new Set<string>();
+  const list: string[] = [];
+  for (const part of raw.split(',')) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const lower = trimmed.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    list.push(lower);
+  }
+  return list.sort((a, b) => a.localeCompare(b)).join(',');
+}
+
+export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanelProps>(
+  function OperationsPanel(
+    {
+      config,
+      status,
+      focusRequest = null,
+      onDirtyChange,
+      onSaveConfig,
+      onRefreshConfig,
+    },
+    ref,
+  ) {
   const [baseUrl, setBaseUrl] = useState(config.baseUrl);
   const [loginUrl, setLoginUrl] = useState(config.loginUrl);
   const [username, setUsername] = useState(config.username);
@@ -91,6 +121,9 @@ export function OperationsPanel({
   const [testingAuth, setTestingAuth] = useState(false);
   const [authResult, setAuthResult] = useState<AuthTestResult | null>(null);
 
+  const isDirtyRef = useRef(false);
+  const saveNoticeTimerRef = useRef<number | null>(null);
+
   const usernameLockedByEnv = config.envOverrides.includes('RGT_USERNAME');
   const passwordLockedByEnv = config.envOverrides.includes('RGT_PASSWORD');
   const dataDirLockedByEnv = config.envOverrides.includes('DATA_DIR');
@@ -98,21 +131,27 @@ export function OperationsPanel({
   const filterLockedByEnv = config.envOverrides.includes('SCRAPER_SYSTEM_FILTER');
   const typeFilterLockedByEnv = config.envOverrides.includes('SCRAPER_RELEASE_TYPE_FILTER');
 
-  useEffect(() => {
-    setBaseUrl(config.baseUrl);
-    setLoginUrl(config.loginUrl);
-    setUsername(config.username);
-    setPassword(config.password);
-    setDownloadDir(config.downloadDir);
-    setSystemFilter(config.systemFilter);
-    const normalizedTypes = normalizeAllowedReleaseTypes(config.allowedReleaseTypes);
+  const resetFormToConfig = useCallback((target: ScraperConfigPublic) => {
+    setBaseUrl(target.baseUrl);
+    setLoginUrl(target.loginUrl);
+    setUsername(target.username);
+    setPassword(target.password);
+    setDownloadDir(target.downloadDir);
+    setSystemFilter(target.systemFilter);
+    const normalizedTypes = normalizeAllowedReleaseTypes(target.allowedReleaseTypes);
     setAllowedReleaseTypes(normalizedTypes);
     setReleaseTypeMode(normalizedTypes.length > 0 ? 'custom' : 'all');
-    setRomNamingTemplate(config.romNamingTemplate);
-    setRomSanitizeFat32(config.romSanitizeFat32);
-    setRomMaxFilenameLen(config.romMaxFilenameLen);
-    setDevicePreset(config.devicePreset || 'everdrive');
-  }, [config]);
+    setRomNamingTemplate(target.romNamingTemplate);
+    setRomSanitizeFat32(target.romSanitizeFat32);
+    setRomMaxFilenameLen(target.romMaxFilenameLen);
+    setDevicePreset(target.devicePreset || 'everdrive');
+  }, []);
+
+  useEffect(() => {
+    if (!isDirtyRef.current) {
+      resetFormToConfig(config);
+    }
+  }, [config, resetFormToConfig]);
 
   const selectedSystems = useMemo(() => {
     return new Set(
@@ -399,24 +438,134 @@ export function OperationsPanel({
     ];
   }, [romNamingTemplate, romSanitizeFat32, romMaxFilenameLen]);
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const dirtyState = useMemo<OperationsDirtyState>(() => {
+    const changedSections: string[] = [];
+
+    const credentialsChanged =
+      (!config.envOverrides.includes('RGT_BASE_URL') && baseUrl !== config.baseUrl) ||
+      (!config.envOverrides.includes('RGT_LOGIN_URL') && loginUrl !== config.loginUrl) ||
+      (!usernameLockedByEnv && username !== config.username) ||
+      (!passwordLockedByEnv && password !== config.password) ||
+      (!downloadDirLockedByEnv && downloadDir !== config.downloadDir);
+    if (credentialsChanged) changedSections.push('Credentials & Path');
+
+    const systemsChanged =
+      !filterLockedByEnv &&
+      canonicalSystemFilterKey(systemFilter) !== canonicalSystemFilterKey(config.systemFilter);
+    if (systemsChanged) changedSections.push('Target Consoles');
+
+    const savedReleaseTypes = normalizeAllowedReleaseTypes(config.allowedReleaseTypes);
+    const savedReleaseMode: 'all' | 'custom' = savedReleaseTypes.length > 0 ? 'custom' : 'all';
+    const currentReleaseTypes =
+      releaseTypeMode === 'all' ? [] : normalizeAllowedReleaseTypes(allowedReleaseTypes);
+    const releaseTypesChanged =
+      !typeFilterLockedByEnv &&
+      (releaseTypeMode !== savedReleaseMode ||
+        currentReleaseTypes.length !== savedReleaseTypes.length ||
+        currentReleaseTypes.some((v, idx) => v !== savedReleaseTypes[idx]));
+    if (releaseTypesChanged) changedSections.push('Type Filter');
+
+    const namingChanged =
+      romNamingTemplate !== config.romNamingTemplate ||
+      romSanitizeFat32 !== config.romSanitizeFat32 ||
+      romMaxFilenameLen !== config.romMaxFilenameLen ||
+      (devicePreset || 'everdrive') !== (config.devicePreset || 'everdrive');
+    if (namingChanged) changedSections.push('ROM Naming & Export');
+
+    return {
+      isDirty: changedSections.length > 0,
+      changedSections,
+    };
+  }, [
+    config,
+    baseUrl,
+    loginUrl,
+    username,
+    password,
+    downloadDir,
+    systemFilter,
+    releaseTypeMode,
+    allowedReleaseTypes,
+    romNamingTemplate,
+    romSanitizeFat32,
+    romMaxFilenameLen,
+    devicePreset,
+    usernameLockedByEnv,
+    passwordLockedByEnv,
+    downloadDirLockedByEnv,
+    filterLockedByEnv,
+    typeFilterLockedByEnv,
+  ]);
+
+  isDirtyRef.current = dirtyState.isDirty;
+
+  useEffect(() => {
+    onDirtyChange?.(dirtyState);
+  }, [dirtyState, onDirtyChange]);
+
+  useEffect(() => {
+    return () => {
+      onDirtyChange?.({ isDirty: false, changedSections: [] });
+      if (saveNoticeTimerRef.current !== null) {
+        window.clearTimeout(saveNoticeTimerRef.current);
+      }
+    };
+  }, [onDirtyChange]);
+
+  useEffect(() => {
+    if (dirtyState.isDirty && saveMsg) {
+      setSaveMsg(null);
+    }
+  }, [dirtyState.isDirty, saveMsg]);
+
+  const saveConfiguration = useCallback(async (): Promise<boolean> => {
     if (customTypeSelectionEmpty) {
       setSaveErr('Select at least one allowed game or ROM type, or switch to All Release Types.');
       setSaveMsg(null);
-      return;
+      return false;
+    }
+    if (saveNoticeTimerRef.current !== null) {
+      window.clearTimeout(saveNoticeTimerRef.current);
+      saveNoticeTimerRef.current = null;
     }
     setSaving(true);
     setSaveMsg(null);
     setSaveErr(null);
     try {
       await onSaveConfig(buildSavePayload());
-      setSaveMsg('Credentials, storage path, console scope, and release type filters saved');
+      isDirtyRef.current = false;
+      setSaveMsg('Operations configuration saved');
+      saveNoticeTimerRef.current = window.setTimeout(() => {
+        setSaveMsg(null);
+        saveNoticeTimerRef.current = null;
+      }, 3500);
+      return true;
     } catch (err) {
       setSaveErr(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
       setSaving(false);
     }
+  }, [customTypeSelectionEmpty, onSaveConfig, buildSavePayload]);
+
+  const discardChanges = useCallback(() => {
+    resetFormToConfig(config);
+    setSaveMsg(null);
+    setSaveErr(null);
+  }, [config, resetFormToConfig]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      save: saveConfiguration,
+      discard: discardChanges,
+    }),
+    [saveConfiguration, discardChanges],
+  );
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await saveConfiguration();
   };
 
   const handleTestAuth = async () => {
@@ -1393,27 +1542,75 @@ export function OperationsPanel({
         </div>
       </section>
 
-      {/* Unified Save Footer */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="text-xs">
-          {saveMsg && (
-            <span className="inline-flex items-center gap-1.5 text-crt-phosphor">
-              <CheckCircle2 className="h-4 w-4" />
-              {saveMsg}
-            </span>
-          )}
-          {saveErr && <span className="text-crt-crimson">{saveErr}</span>}
-        </div>
-
-        <button
-          type="submit"
-          disabled={saving || customTypeSelectionEmpty}
-          className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+      {/* Sticky Dirty-Only Save / Discard Bar */}
+      {(dirtyState.isDirty || saving || Boolean(saveErr) || Boolean(saveMsg)) && (
+        <div
+          role="region"
+          aria-label="Operations configuration save actions"
+          className={`sticky bottom-3 z-20 border rounded-md px-4 py-3 shadow-[0_-8px_28px_-12px_rgba(0,0,0,0.85)] backdrop-blur-md transition-colors ${
+            saveErr
+              ? 'border-crt-crimson/60 bg-crt-surface/95'
+              : dirtyState.isDirty
+                ? 'border-crt-amber/60 bg-crt-surface/95'
+                : 'border-crt-phosphor/50 bg-crt-surface/95'
+          }`}
         >
-          <Save className="h-3.5 w-3.5" />
-          {saving ? 'Saving...' : 'Save Configuration'}
-        </button>
-      </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0 flex-1 text-xs">
+              {saveErr ? (
+                <div className="flex items-center gap-2 text-crt-crimson font-mono">
+                  <XCircle className="h-4 w-4 shrink-0" />
+                  <span className="break-words">{saveErr}</span>
+                </div>
+              ) : dirtyState.isDirty ? (
+                <div className="space-y-0.5">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-crt-amber font-medium">
+                    <span className="inline-flex items-center gap-1.5 shrink-0">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      <span>Unsaved changes</span>
+                    </span>
+                    <span className="font-mono font-normal text-crt-text truncate">
+                      · {dirtyState.changedSections.join(', ')}
+                    </span>
+                  </div>
+                  {customTypeSelectionEmpty && (
+                    <p className="text-[11px] font-mono text-crt-amber/90">
+                      Select at least one release type or switch back to All Release Types before saving.
+                    </p>
+                  )}
+                </div>
+              ) : saveMsg ? (
+                <div className="flex items-center gap-2 text-crt-phosphor font-mono">
+                  <CheckCircle2 className="h-4 w-4 shrink-0" />
+                  <span>{saveMsg}</span>
+                </div>
+              ) : null}
+            </div>
+
+            {(dirtyState.isDirty || saving || Boolean(saveErr)) && (
+              <div className="flex items-center gap-2 shrink-0 ml-auto">
+                <button
+                  type="button"
+                  disabled={saving || !dirtyState.isDirty}
+                  onClick={discardChanges}
+                  className="px-3 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  Discard
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving || customTypeSelectionEmpty || !dirtyState.isDirty}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <Save className="h-3.5 w-3.5" />
+                  <span>{saving ? 'Saving...' : 'Save Changes'}</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </form>
   );
-}
+});
+
