@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   Check,
   CheckCircle2,
   Eye,
   EyeOff,
+  Filter,
   Gamepad2,
   KeyRound,
+  Languages,
   Save,
   Search,
   ShieldCheck,
@@ -13,6 +16,16 @@ import {
   XCircle,
 } from 'lucide-react';
 import { DEVICE_PRESETS, type DevicePresetId } from '../shared/devicePresets';
+import {
+  CURATED_RELEASE_TYPE_OPTIONS,
+  MACHINE_TRANSLATION_KEY,
+  RELEASE_TYPE_PRESETS,
+  TRANSLATION_LANGUAGE_OPTIONS,
+  TRANSLATIONS_ALL_KEY,
+  formatAllowedReleaseTypesSummary,
+  isHumanTranslationLanguageKey,
+  normalizeAllowedReleaseTypes,
+} from '../shared/releaseTypeFilter';
 import { formatPreparedRomName, ROM_NAMING_PRESETS } from '../shared/romNaming';
 import type { AuthTestResult, ScraperConfigPublic, ServiceStatusSnapshot } from '../types';
 import { formatBytes } from '../utils/format';
@@ -39,6 +52,12 @@ export function OperationsPanel({
   const [downloadDir, setDownloadDir] = useState(config.downloadDir);
   const [systemFilter, setSystemFilter] = useState(config.systemFilter);
   const [consoleSearch, setConsoleSearch] = useState('');
+  const [releaseTypeMode, setReleaseTypeMode] = useState<'all' | 'custom'>(
+    config.allowedReleaseTypes.length > 0 ? 'custom' : 'all',
+  );
+  const [allowedReleaseTypes, setAllowedReleaseTypes] = useState<string[]>(() =>
+    normalizeAllowedReleaseTypes(config.allowedReleaseTypes),
+  );
   const [romNamingTemplate, setRomNamingTemplate] = useState(config.romNamingTemplate);
   const [romSanitizeFat32, setRomSanitizeFat32] = useState(config.romSanitizeFat32);
   const [romMaxFilenameLen, setRomMaxFilenameLen] = useState(config.romMaxFilenameLen);
@@ -56,6 +75,7 @@ export function OperationsPanel({
   const dataDirLockedByEnv = config.envOverrides.includes('DATA_DIR');
   const downloadDirLockedByEnv = config.envOverrides.includes('DOWNLOAD_DIR');
   const filterLockedByEnv = config.envOverrides.includes('SCRAPER_SYSTEM_FILTER');
+  const typeFilterLockedByEnv = config.envOverrides.includes('SCRAPER_RELEASE_TYPE_FILTER');
 
   useEffect(() => {
     setBaseUrl(config.baseUrl);
@@ -64,6 +84,9 @@ export function OperationsPanel({
     setPassword(config.password);
     setDownloadDir(config.downloadDir);
     setSystemFilter(config.systemFilter);
+    const normalizedTypes = normalizeAllowedReleaseTypes(config.allowedReleaseTypes);
+    setAllowedReleaseTypes(normalizedTypes);
+    setReleaseTypeMode(normalizedTypes.length > 0 ? 'custom' : 'all');
     setRomNamingTemplate(config.romNamingTemplate);
     setRomSanitizeFat32(config.romSanitizeFat32);
     setRomMaxFilenameLen(config.romMaxFilenameLen);
@@ -115,6 +138,135 @@ export function OperationsPanel({
     setSystemFilter('');
   };
 
+  const humanTranslationOptions = useMemo(
+    () => TRANSLATION_LANGUAGE_OPTIONS.filter((o) => !o.isMachine),
+    [],
+  );
+  const machineTranslationOption = useMemo(
+    () => TRANSLATION_LANGUAGE_OPTIONS.find((o) => o.isMachine) ?? null,
+    [],
+  );
+
+  const translationsAllEnabled = allowedReleaseTypes.includes(TRANSLATIONS_ALL_KEY);
+  const machineTranslationEnabled = allowedReleaseTypes.includes(MACHINE_TRANSLATION_KEY);
+  const specificLanguageKeys = useMemo(
+    () => allowedReleaseTypes.filter((k) => isHumanTranslationLanguageKey(k)),
+    [allowedReleaseTypes],
+  );
+  const translationsCategoryActive =
+    releaseTypeMode === 'custom' &&
+    (translationsAllEnabled || specificLanguageKeys.length > 0 || machineTranslationEnabled);
+  const customTypeSelectionEmpty =
+    releaseTypeMode === 'custom' && allowedReleaseTypes.length === 0;
+
+  const activePresetId = useMemo(() => {
+    if (releaseTypeMode === 'all') return 'all';
+    if (allowedReleaseTypes.length === 0) return null;
+    const match = RELEASE_TYPE_PRESETS.find(
+      (p) =>
+        p.values.length > 0 &&
+        p.values.length === allowedReleaseTypes.length &&
+        p.values.every((v, idx) => allowedReleaseTypes[idx] === v),
+    );
+    return match?.id ?? null;
+  }, [releaseTypeMode, allowedReleaseTypes]);
+
+  const handleSelectReleaseTypeMode = (mode: 'all' | 'custom') => {
+    if (typeFilterLockedByEnv) return;
+    if (mode === 'all') {
+      setReleaseTypeMode('all');
+      setAllowedReleaseTypes([]);
+      return;
+    }
+    setReleaseTypeMode('custom');
+    if (allowedReleaseTypes.length === 0) {
+      setAllowedReleaseTypes(['retail']);
+    }
+  };
+
+  const handleApplyReleaseTypePreset = (values: string[]) => {
+    if (typeFilterLockedByEnv) return;
+    if (values.length === 0) {
+      setReleaseTypeMode('all');
+      setAllowedReleaseTypes([]);
+      return;
+    }
+    setReleaseTypeMode('custom');
+    setAllowedReleaseTypes(normalizeAllowedReleaseTypes(values));
+  };
+
+  const handleToggleCuratedType = (typeId: string) => {
+    if (typeFilterLockedByEnv) return;
+    setReleaseTypeMode('custom');
+    if (typeId === TRANSLATIONS_ALL_KEY) {
+      if (translationsCategoryActive) {
+        setAllowedReleaseTypes((prev) =>
+          normalizeAllowedReleaseTypes(
+            prev.filter(
+              (k) =>
+                k !== TRANSLATIONS_ALL_KEY &&
+                !isHumanTranslationLanguageKey(k) &&
+                k !== MACHINE_TRANSLATION_KEY,
+            ),
+          ),
+        );
+      } else {
+        setAllowedReleaseTypes((prev) =>
+          normalizeAllowedReleaseTypes([...prev, TRANSLATIONS_ALL_KEY]),
+        );
+      }
+      return;
+    }
+
+    setAllowedReleaseTypes((prev) => {
+      const exists = prev.includes(typeId);
+      const next = exists ? prev.filter((k) => k !== typeId) : [...prev, typeId];
+      return normalizeAllowedReleaseTypes(next);
+    });
+  };
+
+  const handleToggleAllFanTranslationLanguages = () => {
+    if (typeFilterLockedByEnv) return;
+    setReleaseTypeMode('custom');
+    setAllowedReleaseTypes((prev) => {
+      if (prev.includes(TRANSLATIONS_ALL_KEY)) {
+        return normalizeAllowedReleaseTypes(
+          prev.filter((k) => k !== TRANSLATIONS_ALL_KEY && !isHumanTranslationLanguageKey(k)),
+        );
+      }
+      return normalizeAllowedReleaseTypes([...prev, TRANSLATIONS_ALL_KEY]);
+    });
+  };
+
+  const handleToggleSpecificLanguage = (langId: string) => {
+    if (typeFilterLockedByEnv) return;
+    setReleaseTypeMode('custom');
+    if (langId === MACHINE_TRANSLATION_KEY) {
+      setAllowedReleaseTypes((prev) =>
+        normalizeAllowedReleaseTypes(
+          prev.includes(MACHINE_TRANSLATION_KEY)
+            ? prev.filter((k) => k !== MACHINE_TRANSLATION_KEY)
+            : [...prev, MACHINE_TRANSLATION_KEY],
+        ),
+      );
+      return;
+    }
+
+    setAllowedReleaseTypes((prev) => {
+      if (prev.includes(TRANSLATIONS_ALL_KEY)) {
+        // Expand master 'translations' to all human languages except the deselected one
+        const withoutAll = prev.filter((k) => k !== TRANSLATIONS_ALL_KEY);
+        const remainingHumanLangs = humanTranslationOptions
+          .map((o) => o.id)
+          .filter((id) => id !== langId);
+        return normalizeAllowedReleaseTypes([...withoutAll, ...remainingHumanLangs]);
+      }
+      const exists = prev.includes(langId);
+      const next = exists ? prev.filter((k) => k !== langId) : [...prev, langId];
+      return normalizeAllowedReleaseTypes(next);
+    });
+  };
+
   const buildSavePayload = () => ({
     ...(!config.envOverrides.includes('RGT_BASE_URL') ? { baseUrl } : {}),
     ...(!config.envOverrides.includes('RGT_LOGIN_URL') ? { loginUrl } : {}),
@@ -122,6 +274,9 @@ export function OperationsPanel({
     ...(!passwordLockedByEnv ? { password } : {}),
     ...(!downloadDirLockedByEnv ? { downloadDir } : {}),
     ...(!filterLockedByEnv ? { systemFilter } : {}),
+    ...(!typeFilterLockedByEnv && !customTypeSelectionEmpty
+      ? { allowedReleaseTypes: releaseTypeMode === 'all' ? [] : allowedReleaseTypes }
+      : {}),
     romNamingTemplate,
     romSanitizeFat32,
     romMaxFilenameLen,
@@ -180,12 +335,17 @@ export function OperationsPanel({
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (customTypeSelectionEmpty) {
+      setSaveErr('Select at least one allowed game or ROM type, or switch to All Release Types.');
+      setSaveMsg(null);
+      return;
+    }
     setSaving(true);
     setSaveMsg(null);
     setSaveErr(null);
     try {
       await onSaveConfig(buildSavePayload());
-      setSaveMsg('Credentials, storage path, and console preferences saved');
+      setSaveMsg('Credentials, storage path, console scope, and release type filters saved');
     } catch (err) {
       setSaveErr(err instanceof Error ? err.message : String(err));
     } finally {
@@ -524,6 +684,293 @@ export function OperationsPanel({
         </div>
       </section>
 
+      {/* Allowed Game & ROM Types Section */}
+      <section className="border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
+          <div className="flex items-start gap-3">
+            <Filter className="h-5 w-5 text-crt-phosphor mt-0.5 shrink-0" />
+            <div>
+              <h2 className="font-display text-lg font-semibold text-crt-text">
+                Allowed Game &amp; ROM Types
+              </h2>
+              <p className="text-xs text-crt-muted">
+                Choose which release categories and translation languages are downloaded across all synced systems. Disallowed releases and sibling archives are skipped before resolving download links.
+              </p>
+            </div>
+          </div>
+
+          <div className="text-xs font-mono text-crt-text tabular-nums">
+            Scope:{' '}
+            <span className={releaseTypeMode === 'custom' ? 'text-crt-amber' : 'text-crt-phosphor'}>
+              {releaseTypeMode === 'all'
+                ? 'All Types (Unfiltered)'
+                : customTypeSelectionEmpty
+                  ? 'None Selected'
+                  : formatAllowedReleaseTypesSummary(allowedReleaseTypes)}
+            </span>
+          </div>
+        </div>
+
+        {typeFilterLockedByEnv && (
+          <p className="text-xs font-mono text-crt-amber">
+            Release type filtering is locked by the SCRAPER_RELEASE_TYPE_FILTER environment variable.
+          </p>
+        )}
+
+        {/* Mode Switcher + Quick Presets */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div
+            role="group"
+            aria-label="Release type filter mode"
+            className="inline-flex items-center p-1 bg-crt-bg border border-crt-border rounded"
+          >
+            <button
+              type="button"
+              disabled={typeFilterLockedByEnv}
+              onClick={() => handleSelectReleaseTypeMode('all')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 ${
+                releaseTypeMode === 'all'
+                  ? 'bg-crt-elevated text-crt-phosphor'
+                  : 'text-crt-muted hover:text-crt-text'
+              }`}
+            >
+              All Release Types
+            </button>
+            <button
+              type="button"
+              disabled={typeFilterLockedByEnv}
+              onClick={() => handleSelectReleaseTypeMode('custom')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 ${
+                releaseTypeMode === 'custom'
+                  ? 'bg-crt-elevated text-crt-phosphor'
+                  : 'text-crt-muted hover:text-crt-text'
+              }`}
+            >
+              Selected Types Only
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-mono text-crt-muted whitespace-nowrap">
+              Presets:
+            </span>
+            {RELEASE_TYPE_PRESETS.filter((p) => p.id !== 'all').map((preset) => {
+              const isPresetActive = activePresetId === preset.id;
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  disabled={typeFilterLockedByEnv}
+                  onClick={() => handleApplyReleaseTypePreset(preset.values)}
+                  className={`px-2.5 py-1.5 text-xs font-mono border rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 ${
+                    isPresetActive
+                      ? 'border-crt-phosphor bg-crt-phosphor/10 text-crt-phosphor'
+                      : 'border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Curated Category Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+          {CURATED_RELEASE_TYPE_OPTIONS.map((option) => {
+            const isTranslations = option.id === TRANSLATIONS_ALL_KEY;
+            const isActive =
+              releaseTypeMode === 'all'
+                ? true
+                : isTranslations
+                  ? translationsCategoryActive
+                  : allowedReleaseTypes.includes(option.id);
+
+            const translationBadgeText =
+              releaseTypeMode === 'custom' && isTranslations
+                ? translationsAllEnabled
+                  ? machineTranslationEnabled
+                    ? 'All + MTL'
+                    : 'All Languages'
+                  : specificLanguageKeys.length > 0 || machineTranslationEnabled
+                    ? `${specificLanguageKeys.length + (machineTranslationEnabled ? 1 : 0)} selected`
+                    : null
+                : null;
+
+            return (
+              <button
+                key={option.id}
+                type="button"
+                disabled={typeFilterLockedByEnv}
+                onClick={() => handleToggleCuratedType(option.id)}
+                className={`p-3 text-left border rounded transition-colors flex items-start justify-between gap-3 disabled:opacity-60 ${
+                  isActive
+                    ? releaseTypeMode === 'all'
+                      ? 'border-crt-phosphor/35 bg-crt-bg text-crt-text'
+                      : 'border-crt-phosphor bg-crt-phosphor/10 text-crt-text'
+                    : 'border-crt-border bg-crt-bg text-crt-muted hover:border-crt-border-strong hover:text-crt-text'
+                }`}
+              >
+                <div className="space-y-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`text-xs font-semibold ${
+                        isActive
+                          ? releaseTypeMode === 'all'
+                            ? 'text-crt-text'
+                            : 'text-crt-phosphor'
+                          : 'text-crt-text'
+                      }`}
+                    >
+                      {option.label}
+                    </span>
+                    {translationBadgeText && (
+                      <span className="text-[11px] font-mono text-crt-phosphor tabular-nums">
+                        · {translationBadgeText}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-crt-muted leading-snug">{option.description}</p>
+                </div>
+
+                <span
+                  aria-hidden="true"
+                  className={`mt-0.5 h-4 w-4 shrink-0 rounded-sm border flex items-center justify-center transition-colors ${
+                    isActive
+                      ? releaseTypeMode === 'all'
+                        ? 'border-crt-phosphor/50 bg-crt-phosphor/15 text-crt-phosphor'
+                        : 'border-crt-phosphor bg-crt-phosphor text-crt-bg'
+                      : 'border-crt-border bg-crt-surface'
+                  }`}
+                >
+                  {isActive && <Check className="h-3 w-3" />}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Grouped Translation Languages Sub-Panel (visible when customizing allowlist) */}
+        {releaseTypeMode === 'custom' && (
+          <div className="border-t border-crt-border pt-4 space-y-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <Languages className="h-4 w-4 text-crt-phosphor shrink-0" />
+                <div>
+                  <h3 className="text-xs font-semibold text-crt-text">
+                    Translation Language Scope
+                  </h3>
+                  <p className="text-[11px] text-crt-muted">
+                    Select All Fan Translation Languages or pick specific target languages. Machine / AI translations remain excluded unless explicitly enabled below.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={typeFilterLockedByEnv}
+                onClick={handleToggleAllFanTranslationLanguages}
+                className={`inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono border rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 ${
+                  translationsAllEnabled
+                    ? 'border-crt-phosphor bg-crt-phosphor/10 text-crt-phosphor'
+                    : 'border-crt-border bg-crt-bg text-crt-text hover:border-crt-border-strong'
+                }`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`h-3.5 w-3.5 rounded-sm border flex items-center justify-center ${
+                    translationsAllEnabled
+                      ? 'border-crt-phosphor bg-crt-phosphor text-crt-bg'
+                      : 'border-crt-border bg-crt-surface'
+                  }`}
+                >
+                  {translationsAllEnabled && <Check className="h-2.5 w-2.5" />}
+                </span>
+                <span>All Fan Translation Languages</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2">
+              {humanTranslationOptions.map((lang) => {
+                const checked = translationsAllEnabled || allowedReleaseTypes.includes(lang.id);
+                return (
+                  <button
+                    key={lang.id}
+                    type="button"
+                    disabled={typeFilterLockedByEnv}
+                    onClick={() => handleToggleSpecificLanguage(lang.id)}
+                    className={`flex items-center justify-between gap-2 px-2.5 py-2 text-xs border rounded text-left transition-colors disabled:opacity-60 ${
+                      checked
+                        ? 'border-crt-phosphor bg-crt-phosphor/10 text-crt-text'
+                        : 'border-crt-border bg-crt-bg text-crt-muted hover:border-crt-border-strong hover:text-crt-text'
+                    }`}
+                  >
+                    <span className="truncate">
+                      <span className="font-mono text-[10px] text-crt-muted mr-1.5">
+                        {lang.shortCode}
+                      </span>
+                      <span className={checked ? 'text-crt-phosphor font-medium' : ''}>
+                        {lang.label}
+                      </span>
+                    </span>
+                    <span
+                      aria-hidden="true"
+                      className={`h-3.5 w-3.5 shrink-0 rounded-sm border flex items-center justify-center ${
+                        checked
+                          ? 'border-crt-phosphor bg-crt-phosphor text-crt-bg'
+                          : 'border-crt-border bg-crt-surface'
+                      }`}
+                    >
+                      {checked && <Check className="h-2.5 w-2.5" />}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {machineTranslationOption && (
+              <div className="pt-1 flex flex-wrap items-center justify-between gap-3">
+                <button
+                  type="button"
+                  disabled={typeFilterLockedByEnv}
+                  onClick={() => handleToggleSpecificLanguage(machineTranslationOption.id)}
+                  className={`inline-flex items-center gap-2.5 px-3 py-2 text-xs border rounded transition-colors disabled:opacity-60 ${
+                    machineTranslationEnabled
+                      ? 'border-crt-amber bg-crt-amber/10 text-crt-amber'
+                      : 'border-crt-border bg-crt-bg text-crt-muted hover:border-crt-border-strong hover:text-crt-text'
+                  }`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`h-3.5 w-3.5 shrink-0 rounded-sm border flex items-center justify-center ${
+                      machineTranslationEnabled
+                        ? 'border-crt-amber bg-crt-amber text-crt-bg'
+                        : 'border-crt-border bg-crt-surface'
+                    }`}
+                  >
+                    {machineTranslationEnabled && <Check className="h-2.5 w-2.5" />}
+                  </span>
+                  <span className="font-mono text-[10px]">{machineTranslationOption.shortCode}</span>
+                  <span className="font-medium">{machineTranslationOption.label}</span>
+                  <span className="text-[11px] text-crt-muted">
+                    — explicitly allow AI / automated machine translation patches
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {customTypeSelectionEmpty && (
+          <div className="flex items-center gap-2.5 border border-crt-amber/40 bg-crt-amber/5 rounded px-3.5 py-2.5 text-xs text-crt-amber">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <span>
+              Select at least one allowed game or ROM type above before saving, or switch back to All Release Types.
+            </span>
+          </div>
+        )}
+      </section>
+
       {/* Prepared ROM Naming & SD Card Device Export Defaults */}
       <section className="border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
@@ -657,8 +1104,8 @@ export function OperationsPanel({
 
         <button
           type="submit"
-          disabled={saving}
-          className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors disabled:opacity-60"
+          disabled={saving || customTypeSelectionEmpty}
+          className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
         >
           <Save className="h-3.5 w-3.5" />
           {saving ? 'Saving...' : 'Save Configuration'}
