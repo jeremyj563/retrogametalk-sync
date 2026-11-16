@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   CheckCircle2,
   ChevronRight,
   FileArchive,
@@ -17,7 +20,19 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import type { CatalogFacets, FsTreeNode, RepositoryItemRecord, ScraperConfigPublic, ServiceStatusSnapshot } from '../types';
+import {
+  CATALOG_SORT_OPTIONS,
+  DEFAULT_CATALOG_SORT,
+  normalizeCatalogSort,
+} from '../shared/catalogSort';
+import type {
+  CatalogFacets,
+  CatalogSortOption,
+  FsTreeNode,
+  RepositoryItemRecord,
+  ScraperConfigPublic,
+  ServiceStatusSnapshot,
+} from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
 import { isFileSystemAccessSupported, pickSdCardRootDirectory, type SdDirectoryHandle } from '../utils/sdCardFs';
 import { GameDetailDrawer } from './GameDetailDrawer';
@@ -41,6 +56,7 @@ const VALID_VIEW_MODES = new Set(['catalog', 'failed', 'filesystem']);
 interface CatalogViewPrefs {
   viewMode: 'catalog' | 'failed' | 'filesystem';
   catalogLayout: 'table' | 'grid';
+  sort: CatalogSortOption;
   search: string;
   systemFilter: string;
   statusFilter: string;
@@ -55,6 +71,7 @@ interface CatalogViewPrefs {
 const DEFAULT_CATALOG_VIEW_PREFS: CatalogViewPrefs = {
   viewMode: 'catalog',
   catalogLayout: 'table',
+  sort: DEFAULT_CATALOG_SORT,
   search: '',
   systemFilter: 'all',
   statusFilter: 'all',
@@ -80,6 +97,7 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
           ? (parsed.viewMode as CatalogViewPrefs['viewMode'])
           : 'catalog',
       catalogLayout: parsed.catalogLayout === 'grid' ? 'grid' : 'table',
+      sort: normalizeCatalogSort(parsed.sort),
       search: typeof parsed.search === 'string' ? parsed.search : '',
       systemFilter: typeof parsed.systemFilter === 'string' && parsed.systemFilter ? parsed.systemFilter : 'all',
       statusFilter:
@@ -101,11 +119,13 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
 
 function buildCatalogQueryKey(prefs: Pick<
   CatalogViewPrefs,
-  'viewMode' | 'search' | 'systemFilter' | 'statusFilter' | 'tagFilter' | 'genreFilter' | 'regionFilter' | 'languageFilter'
+  'viewMode' | 'sort' | 'search' | 'systemFilter' | 'statusFilter' | 'tagFilter' | 'genreFilter' | 'regionFilter' | 'languageFilter'
 >): string {
   const effectiveStatus = prefs.viewMode === 'failed' ? 'needs_retry' : prefs.statusFilter;
+  const effectiveSort = prefs.viewMode === 'failed' ? 'discovered_desc' : prefs.sort;
   return JSON.stringify([
     prefs.viewMode,
+    effectiveSort,
     prefs.search,
     prefs.systemFilter,
     effectiveStatus,
@@ -166,6 +186,7 @@ export function CatalogPanel({
 
   const [viewMode, setViewMode] = useState<'catalog' | 'failed' | 'filesystem'>(initialViewMode);
   const [catalogLayout, setCatalogLayout] = useState<'table' | 'grid'>(() => memoryCatalogViewPrefs.catalogLayout);
+  const [sort, setSort] = useState<CatalogSortOption>(() => memoryCatalogViewPrefs.sort);
   const [search, setSearch] = useState(() => memoryCatalogViewPrefs.search);
   const [systemFilter, setSystemFilter] = useState(() => memoryCatalogViewPrefs.systemFilter);
   const [statusFilter, setStatusFilter] = useState(() => memoryCatalogViewPrefs.statusFilter);
@@ -234,6 +255,7 @@ export function CatalogPanel({
     const nextPrefs: CatalogViewPrefs = {
       viewMode,
       catalogLayout,
+      sort,
       search,
       systemFilter,
       statusFilter,
@@ -253,6 +275,7 @@ export function CatalogPanel({
   }, [
     viewMode,
     catalogLayout,
+    sort,
     search,
     systemFilter,
     statusFilter,
@@ -280,6 +303,7 @@ export function CatalogPanel({
       try {
         const isFailedQueue = viewMode === 'failed';
         const effectiveStatus = isFailedQueue ? 'needs_retry' : statusFilter;
+        const effectiveSort = isFailedQueue ? 'discovered_desc' : sort;
         const qs = new URLSearchParams({
           search,
           system: systemFilter,
@@ -288,6 +312,7 @@ export function CatalogPanel({
           genre: isFailedQueue ? 'all' : genreFilter,
           region: isFailedQueue ? 'all' : regionFilter,
           language: isFailedQueue ? 'all' : languageFilter,
+          sort: effectiveSort,
           limit: '150',
           offset: '0',
         });
@@ -301,6 +326,7 @@ export function CatalogPanel({
         memoryCatalogSnapshot = {
           queryKey: buildCatalogQueryKey({
             viewMode,
+            sort: effectiveSort,
             search,
             systemFilter,
             statusFilter: effectiveStatus,
@@ -371,7 +397,7 @@ export function CatalogPanel({
         }
       }
     },
-    [viewMode, search, systemFilter, statusFilter, tagFilter, genreFilter, regionFilter, languageFilter],
+    [viewMode, sort, search, systemFilter, statusFilter, tagFilter, genreFilter, regionFilter, languageFilter],
   );
 
   const loadFsTree = useCallback(async (subpath: string, silent = false) => {
@@ -410,6 +436,7 @@ export function CatalogPanel({
         memoryCatalogSnapshot?.queryKey ===
         buildCatalogQueryKey({
           viewMode,
+          sort,
           search,
           systemFilter,
           statusFilter,
@@ -425,6 +452,7 @@ export function CatalogPanel({
     }
   }, [
     viewMode,
+    sort,
     loadCatalog,
     loadFsTree,
     fsPath,
@@ -950,6 +978,21 @@ export function CatalogPanel({
               <option value="failed">Failed</option>
             </select>
 
+            <select
+              value={sort}
+              onChange={(e) => setSort(normalizeCatalogSort(e.target.value))}
+              aria-label="Sort catalog releases"
+              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
+                sort !== DEFAULT_CATALOG_SORT ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
+              }`}
+            >
+              {CATALOG_SORT_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+
             <button
               type="button"
               disabled={!hasActiveFilters}
@@ -1382,12 +1425,92 @@ export function CatalogPanel({
                         className="accent-crt-phosphor cursor-pointer"
                       />
                     </th>
-                    <th className="py-2.5 px-3 font-medium">System</th>
-                    <th className="py-2.5 px-3 font-medium">Release &amp; Mirrored Path</th>
+                    <th className="py-2.5 px-3 font-medium">
+                      <button
+                        type="button"
+                        onClick={() => setSort((cur) => (cur === 'system_asc' ? 'system_desc' : 'system_asc'))}
+                        className={`inline-flex items-center gap-1 font-medium whitespace-nowrap shrink-0 transition-colors hover:text-crt-text cursor-pointer focus-visible:outline-none focus-visible:text-crt-phosphor ${
+                          sort === 'system_asc' || sort === 'system_desc' ? 'text-crt-phosphor' : ''
+                        }`}
+                        title="Sort by console system"
+                      >
+                        <span>System</span>
+                        {sort === 'system_asc' ? (
+                          <ArrowUp className="h-3 w-3 shrink-0" />
+                        ) : sort === 'system_desc' ? (
+                          <ArrowDown className="h-3 w-3 shrink-0" />
+                        ) : (
+                          <ArrowUpDown className="h-3 w-3 shrink-0 opacity-50" />
+                        )}
+                      </button>
+                    </th>
+                    <th className="py-2.5 px-3 font-medium">
+                      <button
+                        type="button"
+                        onClick={() => setSort((cur) => (cur === 'title_asc' ? 'title_desc' : 'title_asc'))}
+                        className={`inline-flex items-center gap-1 font-medium whitespace-nowrap shrink-0 transition-colors hover:text-crt-text cursor-pointer focus-visible:outline-none focus-visible:text-crt-phosphor ${
+                          sort === 'title_asc' || sort === 'title_desc' ? 'text-crt-phosphor' : ''
+                        }`}
+                        title="Sort alphabetically by title"
+                      >
+                        <span>Release &amp; Mirrored Path</span>
+                        {sort === 'title_asc' ? (
+                          <ArrowUp className="h-3 w-3 shrink-0" />
+                        ) : sort === 'title_desc' ? (
+                          <ArrowDown className="h-3 w-3 shrink-0" />
+                        ) : (
+                          <ArrowUpDown className="h-3 w-3 shrink-0 opacity-50" />
+                        )}
+                      </button>
+                    </th>
                     <th className="py-2.5 px-3 font-medium">Type</th>
-                    <th className="py-2.5 px-3 font-medium text-right">Size</th>
+                    <th className="py-2.5 px-3 font-medium text-right">
+                      <button
+                        type="button"
+                        onClick={() => setSort((cur) => (cur === 'size_desc' ? 'size_asc' : 'size_desc'))}
+                        className={`inline-flex items-center justify-end gap-1 font-medium whitespace-nowrap shrink-0 transition-colors hover:text-crt-text cursor-pointer focus-visible:outline-none focus-visible:text-crt-phosphor ${
+                          sort === 'size_desc' || sort === 'size_asc' ? 'text-crt-phosphor' : ''
+                        }`}
+                        title="Sort by file size"
+                      >
+                        <span>Size</span>
+                        {sort === 'size_asc' ? (
+                          <ArrowUp className="h-3 w-3 shrink-0" />
+                        ) : sort === 'size_desc' ? (
+                          <ArrowDown className="h-3 w-3 shrink-0" />
+                        ) : (
+                          <ArrowUpDown className="h-3 w-3 shrink-0 opacity-50" />
+                        )}
+                      </button>
+                    </th>
                     <th className="py-2.5 px-3 font-medium">Status</th>
-                    <th className="py-2.5 px-4 font-medium text-right">Actions</th>
+                    <th className="py-2.5 px-4 font-medium text-right">
+                      <button
+                        type="button"
+                        onClick={() => setSort((cur) => (cur === 'submitted_desc' ? 'submitted_asc' : 'submitted_desc'))}
+                        className={`inline-flex items-center justify-end gap-1 font-medium whitespace-nowrap shrink-0 transition-colors hover:text-crt-text cursor-pointer focus-visible:outline-none focus-visible:text-crt-phosphor ${
+                          sort === 'submitted_desc' || sort === 'submitted_asc' || sort === 'downloaded_desc' || sort === 'discovered_desc'
+                            ? 'text-crt-phosphor'
+                            : ''
+                        }`}
+                        title="Toggle newest/oldest site submissions"
+                      >
+                        <span>
+                          {sort === 'downloaded_desc'
+                            ? 'Downloaded'
+                            : sort === 'discovered_desc'
+                              ? 'Discovered'
+                              : 'Submitted'}
+                        </span>
+                        {sort === 'submitted_asc' ? (
+                          <ArrowUp className="h-3 w-3 shrink-0" />
+                        ) : sort === 'submitted_desc' || sort === 'downloaded_desc' || sort === 'discovered_desc' ? (
+                          <ArrowDown className="h-3 w-3 shrink-0" />
+                        ) : (
+                          <ArrowUpDown className="h-3 w-3 shrink-0 opacity-50" />
+                        )}
+                      </button>
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-crt-border text-xs">
@@ -1508,8 +1631,27 @@ export function CatalogPanel({
                                 Retry
                               </button>
                             ) : (
-                              <span className="font-mono text-[11px] text-crt-muted">
-                                {formatDateTime(item.downloadedAt || item.discoveredAt)}
+                              <span
+                                className="font-mono text-[11px] text-crt-muted tabular-nums"
+                                title={
+                                  sort === 'downloaded_desc'
+                                    ? 'Downloaded to disk'
+                                    : sort === 'discovered_desc'
+                                      ? 'Indexed into catalog'
+                                      : item.publishedAt
+                                        ? 'Site submission date'
+                                        : item.remoteUpdatedAt
+                                          ? 'Site updated date'
+                                          : 'Indexed into catalog'
+                                }
+                              >
+                                {formatDateTime(
+                                  sort === 'downloaded_desc'
+                                    ? item.downloadedAt || item.discoveredAt
+                                    : sort === 'discovered_desc'
+                                      ? item.discoveredAt
+                                      : item.publishedAt || item.remoteUpdatedAt || item.downloadedAt || item.discoveredAt,
+                                )}
                               </span>
                             )}
                             <button

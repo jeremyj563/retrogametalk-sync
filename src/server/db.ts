@@ -4,9 +4,11 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { LATEST_SCHEMA_VERSION, runDatabaseMigrations } from './migrations.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
+import { normalizeCatalogSort } from '../shared/catalogSort.ts';
 import type {
   ActivityLogRecord,
   CatalogFacets,
+  CatalogSortOption,
   ConfigUpdateInput,
   DatabaseMigrationReport,
   FileItemStatus,
@@ -1258,6 +1260,21 @@ function listDistinctJsonFacet(
   return rows.map((r) => String(r.val));
 }
 
+const CATALOG_SORT_ORDER_BY: Record<CatalogSortOption, string> = {
+  submitted_desc: 'COALESCE(published_at, remote_updated_at, discovered_at) DESC, COALESCE(wp_post_id, id) DESC, id DESC',
+  submitted_asc: 'COALESCE(published_at, remote_updated_at, discovered_at) ASC, COALESCE(wp_post_id, id) ASC, id ASC',
+  title_asc: 'title COLLATE NOCASE ASC, id DESC',
+  title_desc: 'title COLLATE NOCASE DESC, id DESC',
+  size_desc: 'file_size_bytes DESC, title COLLATE NOCASE ASC, id DESC',
+  size_asc: 'file_size_bytes ASC, title COLLATE NOCASE ASC, id DESC',
+  downloaded_desc: 'COALESCE(downloaded_at, discovered_at) DESC, id DESC',
+  discovered_desc: 'discovered_at DESC, id DESC',
+  year_desc: "CASE WHEN release_year GLOB '[0-9][0-9][0-9][0-9]*' THEN 0 ELSE 1 END ASC, CAST(substr(release_year, 1, 4) AS INTEGER) DESC, title COLLATE NOCASE ASC, id DESC",
+  year_asc: "CASE WHEN release_year GLOB '[0-9][0-9][0-9][0-9]*' THEN 0 ELSE 1 END ASC, CAST(substr(release_year, 1, 4) AS INTEGER) ASC, title COLLATE NOCASE ASC, id DESC",
+  system_asc: 'system_name COLLATE NOCASE ASC, title COLLATE NOCASE ASC, id DESC',
+  system_desc: 'system_name COLLATE NOCASE DESC, title COLLATE NOCASE ASC, id DESC',
+};
+
 export function queryRepositoryItems(params: {
   search?: string;
   system?: string;
@@ -1266,6 +1283,7 @@ export function queryRepositoryItems(params: {
   genre?: string;
   region?: string;
   language?: string;
+  sort?: string;
   limit?: number;
   offset?: number;
 }): { items: RepositoryItemRecord[]; total: number; facets: CatalogFacets } {
@@ -1320,11 +1338,14 @@ export function queryRepositoryItems(params: {
   const limit = Math.min(200, Math.max(1, params.limit ?? 50));
   const offset = Math.max(0, params.offset ?? 0);
 
+  const sortKey = normalizeCatalogSort(params.sort);
+  const orderBy = CATALOG_SORT_ORDER_BY[sortKey];
+
   const countRow = getDb().prepare(`SELECT COUNT(*) as count FROM catalog_releases ${where}`).get(...args) as {
     count: number;
   };
   const rows = getDb()
-    .prepare(`SELECT * FROM catalog_releases ${where} ORDER BY id DESC LIMIT ? OFFSET ?`)
+    .prepare(`SELECT * FROM catalog_releases ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
     .all(...args, limit, offset) as Record<string, unknown>[];
 
   const releaseIds = rows.map((r) => Number(r.id));

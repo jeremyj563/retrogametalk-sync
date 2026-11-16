@@ -1,3 +1,4 @@
+export type { CatalogSortOption } from '../shared/catalogSort.ts';
 export type RunTrigger = 'scheduled' | 'manual' | 'retry';
 export type RunMode = 'incremental' | 'full' | 'dry_run';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'failed';

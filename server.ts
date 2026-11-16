@@ -148,6 +148,7 @@ async function bootstrap() {
       genre: typeof req.query.genre === 'string' ? req.query.genre : undefined,
       region: typeof req.query.region === 'string' ? req.query.region : undefined,
       language: typeof req.query.language === 'string' ? req.query.language : undefined,
+      sort: typeof req.query.sort === 'string' ? req.query.sort : undefined,
       limit: Number(req.query.limit || 50),
       offset: Number(req.query.offset || 0),
     });
