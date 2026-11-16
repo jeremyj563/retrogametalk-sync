@@ -1,6 +1,8 @@
 # Implementation Plans Archive
 
-This directory stores versioned Markdown snapshots of approved, implemented, and archived feature plans for **RetroGameTalk Sync**.
+This directory stores versioned, point-in-time Markdown snapshots of approved, implemented, and archived feature plans for **RetroGameTalk Sync**.
+
+> **Historical Changelog Only:** Documents under `/docs/` are preserved strictly for human readers to follow how the application has evolved over time. Later features may supersede earlier plans, and these snapshots are intentionally never retroactively rewritten—always treat the live codebase as the sole source of truth for current behavior.
 
 ## File Naming & Frontmatter Convention
 
