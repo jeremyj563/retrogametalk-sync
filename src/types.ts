@@ -1,3 +1,4 @@
+export type { CatalogSortOption } from './shared/catalogSort';
 export type NavSection = 'monitor' | 'catalog' | 'schedule' | 'operations';
 export type RunMode = 'incremental' | 'full' | 'dry_run';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'failed';

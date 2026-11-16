@@ -261,6 +261,20 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 6,
+    name: 'catalog_sort_indexes',
+    description: 'Add indexes on published_at, discovered_at, downloaded_at, title (NOCASE), and file_size_bytes on catalog_releases for server-side catalog sorting',
+    up: (db) => {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_releases_published_at ON catalog_releases(published_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_releases_discovered_at ON catalog_releases(discovered_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_releases_downloaded_at ON catalog_releases(downloaded_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_releases_title_nocase ON catalog_releases(title COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_releases_file_size ON catalog_releases(file_size_bytes DESC);
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
