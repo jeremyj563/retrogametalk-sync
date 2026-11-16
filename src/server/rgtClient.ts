@@ -263,6 +263,32 @@ function isDownloadCandidateUrl(url: URL, anchorText: string, hasDownloadAttr: b
   return false;
 }
 
+const MAX_LOGGED_COOKIE_NAMES = 12;
+
+function isIgnoredTrackingCookie(name: string): boolean {
+  return /^downloaded-/i.test(name.trim());
+}
+
+function formatCookieNamesForLog(names: string[]): string {
+  if (names.length === 0) return 'none';
+  if (names.length <= MAX_LOGGED_COOKIE_NAMES) return names.join(', ');
+  const priority = names.filter(
+    (n) =>
+      n === 'xf_user' ||
+      n === 'xf_session' ||
+      n === 'xf_csrf' ||
+      n === 'xf_online' ||
+      n === 'PHPSESSID' ||
+      n === 'cf_clearance' ||
+      n.startsWith('wordpress_logged_in_'),
+  );
+  const prioritySet = new Set(priority);
+  const rest = names.filter((n) => !prioritySet.has(n));
+  const shown = [...priority, ...rest].slice(0, MAX_LOGGED_COOKIE_NAMES);
+  const omitted = names.length - shown.length;
+  return `${shown.join(', ')}, ... (+${omitted} more, total=${names.length})`;
+}
+
 function logAuthContainer(level: 'INFO' | 'WARN' | 'ERROR', message: string): void {
   const line = `[${new Date().toISOString()}] [AUTH] [${level}] ${message}`;
   if (level === 'ERROR') {
@@ -347,7 +373,26 @@ export class RetroGameTalkClient {
     try {
       if (fs.existsSync(jarPath)) {
         const raw = fs.readFileSync(jarPath, 'utf8');
-        return CookieJar.deserializeSync(JSON.parse(raw));
+        const parsed = JSON.parse(raw) as { cookies?: Array<{ key?: string }> } & Record<string, unknown>;
+        let prunedCount = 0;
+        if (parsed && Array.isArray(parsed.cookies)) {
+          const before = parsed.cookies.length;
+          parsed.cookies = parsed.cookies.filter((c) => !isIgnoredTrackingCookie(String(c?.key || '')));
+          prunedCount = before - parsed.cookies.length;
+        }
+        const jar = CookieJar.deserializeSync(parsed as Parameters<typeof CookieJar.deserializeSync>[0]);
+        if (prunedCount > 0) {
+          try {
+            fs.writeFileSync(jarPath, JSON.stringify(jar.serializeSync()), { mode: 0o600 });
+          } catch {
+            // Non-fatal
+          }
+          logAuthContainer(
+            'INFO',
+            `Pruned ${prunedCount} accumulated "downloaded-*" tracking cookie(s) from persisted cookie jar to prevent HTTP 400 header bloat`,
+          );
+        }
+        return jar;
       }
     } catch {
       // Ignore corrupt cookie jar and start fresh
@@ -376,7 +421,7 @@ export class RetroGameTalkClient {
   private getSafeCookieNames(urlStr: string): string {
     try {
       const names = this.jar.getCookiesSync(urlStr).map((c) => c.key);
-      return names.length > 0 ? names.join(', ') : 'none';
+      return formatCookieNamesForLog(names);
     } catch {
       return 'none';
     }
@@ -549,7 +594,7 @@ export class RetroGameTalkClient {
     const hasAuthCookie = cookies.some(
       (c) => c.key === 'xf_user' || c.key.startsWith('wordpress_logged_in_'),
     );
-    const cookieNames = cookies.length > 0 ? cookies.map((c) => c.key).join(', ') : 'none';
+    const cookieNames = formatCookieNamesForLog(cookies.map((c) => c.key));
     const configured = Boolean(config.username && config.password);
 
     if (hasAuthCookie) {
@@ -690,18 +735,24 @@ export class RetroGameTalkClient {
 
       const latency = performance.now() - started;
 
-      // Capture Set-Cookie headers
+      // Capture Set-Cookie headers (ignoring ephemeral per-ROM "downloaded-*" UI tracking cookies to prevent header bloat)
       const setCookies = typeof res.headers.getSetCookie === 'function'
         ? res.headers.getSetCookie()
         : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : []);
+      let storedCookies = 0;
       for (const rawCookie of setCookies) {
+        const cookieName = rawCookie.split('=', 1)[0]?.trim() || '';
+        if (isIgnoredTrackingCookie(cookieName)) {
+          continue;
+        }
         try {
           await this.jar.setCookie(rawCookie, currentUrl);
+          storedCookies += 1;
         } catch {
           // Skip malformed cookie
         }
       }
-      if (setCookies.length > 0) {
+      if (storedCookies > 0) {
         this.saveCookieJar();
       }
 
@@ -1411,7 +1462,7 @@ export class RetroGameTalkClient {
         const parts = payload.split('\t');
         if (parts.length < 7) continue;
         const [rawDomain, includeSubdomains, cookiePath, secureFlag, expiresEpoch, name, ...valueParts] = parts;
-        if (!name) continue;
+        if (!name || isIgnoredTrackingCookie(name)) continue;
         const value = valueParts.join('\t');
         const cleanDomain = rawDomain.replace(/^\./, '');
         if (!cleanDomain) continue;
