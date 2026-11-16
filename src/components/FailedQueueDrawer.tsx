@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Check,
@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import type { RepositoryItemRecord, ServiceStatusSnapshot } from '../types';
 import { readJsonSafely } from '../utils/http';
-import { GameDetailDrawer } from './GameDetailDrawer';
+import { GameDetailDrawer, type GameDetailNavigation } from './GameDetailDrawer';
 
 interface FailedQueueDrawerProps {
   open: boolean;
@@ -53,6 +53,7 @@ export function FailedQueueDrawer({
   const [expanded, setExpanded] = useState(false);
 
   const reqSeqRef = useRef(0);
+  const detailReqSeqRef = useRef(0);
   const activeDetailIdRef = useRef<number | null>(null);
   const lastHandledRevisionRef = useRef(catalogRevision);
   const hasLoadedOnceRef = useRef(false);
@@ -270,22 +271,51 @@ export function FailedQueueDrawer({
     });
   };
 
-  const openDetailItem = async (item: RepositoryItemRecord) => {
+  const closeDetailDrawer = useCallback(() => {
+    detailReqSeqRef.current += 1;
+    setActiveDetailItem(null);
+  }, []);
+
+  const openDetailItem = useCallback(async (item: RepositoryItemRecord) => {
+    const reqSeq = ++detailReqSeqRef.current;
     setActiveDetailItem(item);
     try {
       const res = await fetch(`/api/items/${item.id}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.item) {
-          const fresh = data.item as RepositoryItemRecord;
-          setActiveDetailItem((current) => (current?.id === fresh.id ? fresh : current));
-          setItems((prev) => prev.map((row) => (row.id === fresh.id ? fresh : row)));
-        }
+      if (reqSeq !== detailReqSeqRef.current || !res.ok) return;
+      const data = await res.json();
+      if (reqSeq !== detailReqSeqRef.current) return;
+      if (data.item) {
+        const fresh = data.item as RepositoryItemRecord;
+        setActiveDetailItem((current) => (current?.id === fresh.id ? fresh : current));
+        setItems((prev) => prev.map((row) => (row.id === fresh.id ? fresh : row)));
       }
     } catch {
       // Keep optimistic cached item open on transient error
     }
-  };
+  }, []);
+
+  const detailNavigation = useMemo<GameDetailNavigation | null>(() => {
+    if (!activeDetailItem || items.length === 0) return null;
+    const idx = items.findIndex((row) => row.id === activeDetailItem.id);
+    if (idx < 0) return null;
+    const prevItem = idx > 0 ? items[idx - 1] ?? null : null;
+    const nextItem = idx < items.length - 1 ? items[idx + 1] ?? null : null;
+    return {
+      currentIndex: idx + 1,
+      totalCount: Math.max(totalItems, items.length),
+      canPrev: Boolean(prevItem),
+      canNext: Boolean(nextItem),
+      prevTitle: prevItem?.title ?? null,
+      nextTitle: nextItem?.title ?? null,
+      orderLabel: 'Failed Queue Order',
+      onPrev: () => {
+        if (prevItem) void openDetailItem(prevItem);
+      },
+      onNext: () => {
+        if (nextItem) void openDetailItem(nextItem);
+      },
+    };
+  }, [activeDetailItem, items, openDetailItem, totalItems]);
 
   const handleRetry = async (
     id: number,
@@ -341,7 +371,7 @@ export function FailedQueueDrawer({
         setSelectedIds(new Set());
         setConfirmBulkDelete(false);
         if (activeDetailItem && ids.includes(activeDetailItem.id)) {
-          setActiveDetailItem(null);
+          closeDetailDrawer();
         }
         await Promise.all([loadFailedQueue(true), onRefreshStatus()]);
       }
@@ -816,7 +846,8 @@ export function FailedQueueDrawer({
         activeRun={Boolean(status.activeRun)}
         canSync={Boolean(status.auth.hasCompletedLogin)}
         retryingItem={effectiveRetryingId === activeDetailItem?.id}
-        onClose={() => setActiveDetailItem(null)}
+        navigation={detailNavigation}
+        onClose={closeDetailDrawer}
         onItemUpdated={(updated) => {
           setActiveDetailItem(updated);
           setItems((prev) => prev.map((row) => (row.id === updated.id ? updated : row)));

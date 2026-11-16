@@ -26,12 +26,26 @@ import { formatBytes, formatDateTime } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
 import { resolveFileTransferProgress, resolveItemTransferProgress } from '../utils/transferProgress';
 
+export interface GameDetailNavigation {
+  currentIndex: number;
+  totalCount: number;
+  canPrev: boolean;
+  canNext: boolean;
+  loading?: boolean;
+  prevTitle?: string | null;
+  nextTitle?: string | null;
+  orderLabel?: string;
+  onPrev: () => void;
+  onNext: () => void;
+}
+
 interface GameDetailDrawerProps {
   item: RepositoryItemRecord | null;
   activeRun: boolean;
   activeTransfer?: ActiveTransferState | null;
   canSync: boolean;
   retryingItem?: boolean;
+  navigation?: GameDetailNavigation | null;
   onClose: () => void;
   onItemUpdated: (updated: RepositoryItemRecord) => void;
   onRetryItem: (id: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
@@ -57,6 +71,7 @@ export function GameDetailDrawer({
   activeTransfer = null,
   canSync,
   retryingItem = false,
+  navigation = null,
   onClose,
   onItemUpdated,
   onRetryItem,
@@ -80,6 +95,7 @@ export function GameDetailDrawer({
   const [inspectError, setInspectError] = useState<string | null>(null);
   const [preparedNames, setPreparedNames] = useState<Record<string, string>>({});
   const autoUpgradedIdsRef = useRef<Set<number>>(new Set());
+  const bodyScrollRef = useRef<HTMLDivElement | null>(null);
 
   const assetVersion = item?.metadata?.fetchedAt ? `&v=${encodeURIComponent(item.metadata.fetchedAt)}` : '';
   const screenshotCount = item?.metadata?.screenshotLocalRelPaths?.length ?? item?.screenshotsCount ?? 0;
@@ -99,6 +115,7 @@ export function GameDetailDrawer({
     setInspection(null);
     setInspectError(null);
     setPreparedNames({});
+    bodyScrollRef.current?.scrollTo({ top: 0, behavior: 'auto' });
   }, [item?.id]);
 
   // Refresh artwork URLs in place (without closing an open Lightbox) when metadata updates
@@ -184,21 +201,43 @@ export function GameDetailDrawer({
         }
         return;
       }
-      if (lightbox && lightbox.slides.length > 1) {
-        if (e.key === 'ArrowLeft') {
-          setLightbox((prev) =>
-            prev ? { ...prev, index: (prev.index - 1 + prev.slides.length) % prev.slides.length } : null,
-          );
-        } else if (e.key === 'ArrowRight') {
-          setLightbox((prev) =>
-            prev ? { ...prev, index: (prev.index + 1) % prev.slides.length } : null,
-          );
+      if (lightbox) {
+        if (lightbox.slides.length > 1) {
+          if (e.key === 'ArrowLeft') {
+            setLightbox((prev) =>
+              prev ? { ...prev, index: (prev.index - 1 + prev.slides.length) % prev.slides.length } : null,
+            );
+          } else if (e.key === 'ArrowRight') {
+            setLightbox((prev) =>
+              prev ? { ...prev, index: (prev.index + 1) % prev.slides.length } : null,
+            );
+          }
         }
+        return;
+      }
+      if (!navigation || navigation.loading || e.altKey || e.ctrlKey || e.metaKey) {
+        return;
+      }
+      if (
+        e.target instanceof HTMLElement &&
+        (e.target.tagName === 'INPUT' ||
+          e.target.tagName === 'TEXTAREA' ||
+          e.target.tagName === 'SELECT' ||
+          e.target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === 'ArrowLeft' && navigation.canPrev) {
+        e.preventDefault();
+        navigation.onPrev();
+      } else if (e.key === 'ArrowRight' && navigation.canNext) {
+        e.preventDefault();
+        navigation.onNext();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [item, lightbox, onClose]);
+  }, [item, lightbox, navigation, onClose]);
 
   const infoRows = useMemo(() => {
     if (!item) return [];
@@ -409,7 +448,7 @@ export function GameDetailDrawer({
           </div>
         {/* Drawer Header */}
         <header className="px-6 py-4 border-b border-crt-border bg-crt-bg flex items-start justify-between gap-4 shrink-0">
-          <div className="min-w-0 space-y-1">
+          <div className="min-w-0 flex-1 space-y-1">
             <div className="flex flex-wrap items-center gap-3">
               <h2 className="font-display text-xl font-bold text-crt-text tracking-tight break-words">
                 {item.title}
@@ -444,14 +483,77 @@ export function GameDetailDrawer({
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close game details"
-            className="p-1.5 border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors shrink-0"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {navigation && navigation.totalCount > 0 && (
+              <>
+                <span
+                  title={
+                    navigation.orderLabel
+                      ? `${navigation.orderLabel} · Use ← / → arrow keys`
+                      : 'Use ← / → arrow keys to navigate'
+                  }
+                  className="font-mono text-xs text-crt-muted tabular-nums whitespace-nowrap select-none pr-0.5"
+                >
+                  {navigation.currentIndex} / {navigation.totalCount}
+                </span>
+                <div
+                  role="group"
+                  aria-label="Catalog item navigation"
+                  className="inline-flex items-center border border-crt-border rounded bg-crt-surface overflow-hidden shrink-0"
+                >
+                  <button
+                    type="button"
+                    onClick={navigation.onPrev}
+                    disabled={!navigation.canPrev || Boolean(navigation.loading)}
+                    aria-label={
+                      navigation.prevTitle
+                        ? `Previous game: ${navigation.prevTitle}`
+                        : 'Previous game'
+                    }
+                    title={
+                      navigation.canPrev
+                        ? navigation.prevTitle
+                          ? `Previous: ${navigation.prevTitle} (←)`
+                          : 'Previous game (←)'
+                        : 'First game in current sort order'
+                    }
+                    className="p-1.5 border-r border-crt-border text-crt-muted hover:text-crt-phosphor hover:bg-crt-elevated focus-visible:outline-none focus-visible:text-crt-phosphor focus-visible:bg-crt-elevated disabled:opacity-35 disabled:pointer-events-none transition-colors cursor-pointer"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={navigation.onNext}
+                    disabled={!navigation.canNext || Boolean(navigation.loading)}
+                    aria-label={
+                      navigation.nextTitle
+                        ? `Next game: ${navigation.nextTitle}`
+                        : 'Next game'
+                    }
+                    title={
+                      navigation.canNext
+                        ? navigation.nextTitle
+                          ? `Next: ${navigation.nextTitle} (→)`
+                          : 'Next game (→)'
+                        : 'Last game in current sort order'
+                    }
+                    className="p-1.5 text-crt-muted hover:text-crt-phosphor hover:bg-crt-elevated focus-visible:outline-none focus-visible:text-crt-phosphor focus-visible:bg-crt-elevated disabled:opacity-35 disabled:pointer-events-none transition-colors cursor-pointer"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                </div>
+              </>
+            )}
+
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close game details"
+              className="p-1.5 border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors shrink-0"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </header>
 
         {/* Live Transfer Progress Strip */}
@@ -536,7 +638,7 @@ export function GameDetailDrawer({
         )}
 
         {/* Scrollable Body */}
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
+        <div ref={bodyScrollRef} className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
           {/* Missing Metadata Prompt */}
           {!item.hasMetadata && (
             <div className="border border-crt-amber/40 bg-crt-amber/5 rounded-md p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
