@@ -138,16 +138,28 @@ async function bootstrap() {
     res.json({ ok: true });
   });
 
+  const parseQueryFilterParam = (raw: unknown): string | string[] | undefined => {
+    if (Array.isArray(raw)) return raw.map((v) => String(v));
+    if (typeof raw === 'string') return raw;
+    return undefined;
+  };
+
   // Repository catalog, metadata, local assets, download & retry
   app.get('/api/items', (req, res) => {
     const result = queryRepositoryItems({
       search: typeof req.query.search === 'string' ? req.query.search : undefined,
-      system: typeof req.query.system === 'string' ? req.query.system : undefined,
-      status: typeof req.query.status === 'string' ? req.query.status : undefined,
-      tag: typeof req.query.tag === 'string' ? req.query.tag : undefined,
-      genre: typeof req.query.genre === 'string' ? req.query.genre : undefined,
-      region: typeof req.query.region === 'string' ? req.query.region : undefined,
-      language: typeof req.query.language === 'string' ? req.query.language : undefined,
+      system: parseQueryFilterParam(req.query.system),
+      status: parseQueryFilterParam(req.query.status),
+      tag: parseQueryFilterParam(req.query.tag),
+      tagMode: typeof req.query.tagMode === 'string' ? req.query.tagMode : undefined,
+      genre: parseQueryFilterParam(req.query.genre),
+      genreMode: typeof req.query.genreMode === 'string' ? req.query.genreMode : undefined,
+      region: parseQueryFilterParam(req.query.region),
+      regionMode: typeof req.query.regionMode === 'string' ? req.query.regionMode : undefined,
+      language: parseQueryFilterParam(req.query.language),
+      languageMode: typeof req.query.languageMode === 'string' ? req.query.languageMode : undefined,
+      source: parseQueryFilterParam(req.query.source),
+      sourceMode: typeof req.query.sourceMode === 'string' ? req.query.sourceMode : undefined,
       sort: typeof req.query.sort === 'string' ? req.query.sort : undefined,
       limit: Number(req.query.limit || 50),
       offset: Number(req.query.offset || 0),

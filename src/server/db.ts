@@ -7,11 +7,13 @@ import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import { normalizeCatalogSort } from '../shared/catalogSort.ts';
 import type {
   ActivityLogRecord,
+  CatalogFacetCounts,
   CatalogFacets,
   CatalogSortOption,
   ConfigUpdateInput,
   DatabaseMigrationReport,
   FileItemStatus,
+  FilterMatchMode,
   ItemStatus,
   LogLevel,
   ReleaseFileRecord,
@@ -1292,15 +1294,114 @@ export function countSiblingItemsInDir(dirPath: string): number {
   return Number(row.count || 0);
 }
 
-function listDistinctJsonFacet(
-  columnName: 'release_tags_json' | 'genres_json' | 'regions_json' | 'languages_json' | 'sources_json',
-): string[] {
+type JsonFacetColumn =
+  | 'release_tags_json'
+  | 'genres_json'
+  | 'regions_json'
+  | 'languages_json'
+  | 'sources_json';
+
+function jsonFacetColumnExpr(columnName: JsonFacetColumn): string {
+  if (columnName === 'release_tags_json') {
+    return `CASE
+      WHEN json_valid(catalog_releases.release_tags_json) AND json_array_length(catalog_releases.release_tags_json) > 0
+      THEN catalog_releases.release_tags_json
+      ELSE json_array(COALESCE(NULLIF(TRIM(catalog_releases.release_type), ''), 'Retail ROM'))
+    END`;
+  }
+  return `CASE WHEN json_valid(catalog_releases.${columnName}) THEN catalog_releases.${columnName} ELSE '[]' END`;
+}
+
+function listDistinctJsonFacetWithCounts(columnName: JsonFacetColumn): {
+  values: string[];
+  counts: Record<string, number>;
+} {
+  const expr = jsonFacetColumnExpr(columnName);
   const rows = getDb()
     .prepare(
-      `SELECT DISTINCT je.value as val FROM catalog_releases, json_each(${columnName}) as je WHERE je.value IS NOT NULL AND je.value != '' ORDER BY je.value ASC`,
+      `SELECT
+        TRIM(CAST(je.value AS TEXT)) AS val,
+        COUNT(DISTINCT catalog_releases.id) AS cnt
+      FROM catalog_releases, json_each(${expr}) AS je
+      WHERE je.value IS NOT NULL AND TRIM(CAST(je.value AS TEXT)) != ''
+      GROUP BY val
+      ORDER BY val COLLATE NOCASE ASC`,
     )
-    .all() as { val: string }[];
-  return rows.map((r) => String(r.val));
+    .all() as { val: string; cnt: number }[];
+
+  const values: string[] = [];
+  const counts: Record<string, number> = {};
+  for (const row of rows) {
+    const val = String(row.val);
+    values.push(val);
+    counts[val] = Number(row.cnt || 0);
+  }
+  return { values, counts };
+}
+
+function listStatusFacetCounts(): Record<string, number> {
+  const rows = getDb()
+    .prepare('SELECT status, COUNT(*) AS cnt FROM catalog_releases GROUP BY status')
+    .all() as { status: string; cnt: number }[];
+
+  const raw: Record<string, number> = {};
+  for (const row of rows) {
+    raw[String(row.status)] = Number(row.cnt || 0);
+  }
+
+  return {
+    ...raw,
+    downloaded: (raw.downloaded || 0) + (raw.skipped || 0),
+    needs_retry: (raw.failed || 0) + (raw.partial || 0),
+    partial: raw.partial || 0,
+    failed: raw.failed || 0,
+    queued: raw.queued || 0,
+    downloading: raw.downloading || 0,
+  };
+}
+
+function normalizeFilterList(raw: string | string[] | undefined): string[] {
+  if (!raw) return [];
+  const list = Array.isArray(raw) ? raw : [raw];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of list) {
+    const trimmed = String(entry).trim();
+    if (!trimmed || trimmed === 'all' || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function normalizeMatchMode(raw: string | undefined): FilterMatchMode {
+  return raw === 'all' ? 'all' : 'any';
+}
+
+function appendJsonFacetCondition(
+  conditions: string[],
+  args: unknown[],
+  columnName: JsonFacetColumn,
+  rawValues: string | string[] | undefined,
+  rawMode: string | undefined,
+): void {
+  const values = normalizeFilterList(rawValues);
+  if (values.length === 0) return;
+
+  const expr = jsonFacetColumnExpr(columnName);
+  const placeholders = values.map(() => '?').join(', ');
+
+  if (normalizeMatchMode(rawMode) === 'all' && values.length > 1) {
+    conditions.push(
+      `(SELECT COUNT(DISTINCT TRIM(CAST(je.value AS TEXT))) FROM json_each(${expr}) AS je WHERE TRIM(CAST(je.value AS TEXT)) IN (${placeholders})) = ?`,
+    );
+    args.push(...values, values.length);
+  } else {
+    conditions.push(
+      `EXISTS (SELECT 1 FROM json_each(${expr}) AS je WHERE TRIM(CAST(je.value AS TEXT)) IN (${placeholders}))`,
+    );
+    args.push(...values);
+  }
 }
 
 const CATALOG_SORT_ORDER_BY: Record<CatalogSortOption, string> = {
@@ -1320,12 +1421,18 @@ const CATALOG_SORT_ORDER_BY: Record<CatalogSortOption, string> = {
 
 export function queryRepositoryItems(params: {
   search?: string;
-  system?: string;
-  status?: string;
-  tag?: string;
-  genre?: string;
-  region?: string;
-  language?: string;
+  system?: string | string[];
+  status?: string | string[];
+  tag?: string | string[];
+  tagMode?: string;
+  genre?: string | string[];
+  genreMode?: string;
+  region?: string | string[];
+  regionMode?: string;
+  language?: string | string[];
+  languageMode?: string;
+  source?: string | string[];
+  sourceMode?: string;
   sort?: string;
   limit?: number;
   offset?: number;
@@ -1348,34 +1455,45 @@ export function queryRepositoryItems(params: {
     )`);
     args.push(q, q, q, q, q, q, q);
   }
-  if (params.system && params.system !== 'all') {
+
+  const systems = normalizeFilterList(params.system);
+  if (systems.length === 1) {
     conditions.push('system_name = ?');
-    args.push(params.system);
+    args.push(systems[0]);
+  } else if (systems.length > 1) {
+    conditions.push(`system_name IN (${systems.map(() => '?').join(', ')})`);
+    args.push(...systems);
   }
-  if (params.status && params.status !== 'all') {
-    if (params.status === 'needs_retry') {
-      conditions.push("status IN ('failed', 'partial')");
-    } else {
+
+  const rawStatuses = normalizeFilterList(params.status);
+  if (rawStatuses.length > 0) {
+    const expandedSet = new Set<string>();
+    for (const st of rawStatuses) {
+      if (st === 'needs_retry') {
+        expandedSet.add('failed');
+        expandedSet.add('partial');
+      } else if (st === 'downloaded') {
+        expandedSet.add('downloaded');
+        expandedSet.add('skipped');
+      } else {
+        expandedSet.add(st);
+      }
+    }
+    const expanded = Array.from(expandedSet);
+    if (expanded.length === 1) {
       conditions.push('status = ?');
-      args.push(params.status);
+      args.push(expanded[0]);
+    } else if (expanded.length > 1) {
+      conditions.push(`status IN (${expanded.map(() => '?').join(', ')})`);
+      args.push(...expanded);
     }
   }
-  if (params.tag && params.tag !== 'all') {
-    conditions.push('EXISTS (SELECT 1 FROM json_each(release_tags_json) WHERE value = ?)');
-    args.push(params.tag);
-  }
-  if (params.genre && params.genre !== 'all') {
-    conditions.push('EXISTS (SELECT 1 FROM json_each(genres_json) WHERE value = ?)');
-    args.push(params.genre);
-  }
-  if (params.region && params.region !== 'all') {
-    conditions.push('EXISTS (SELECT 1 FROM json_each(regions_json) WHERE value = ?)');
-    args.push(params.region);
-  }
-  if (params.language && params.language !== 'all') {
-    conditions.push('EXISTS (SELECT 1 FROM json_each(languages_json) WHERE value = ?)');
-    args.push(params.language);
-  }
+
+  appendJsonFacetCondition(conditions, args, 'release_tags_json', params.tag, params.tagMode);
+  appendJsonFacetCondition(conditions, args, 'genres_json', params.genre, params.genreMode);
+  appendJsonFacetCondition(conditions, args, 'regions_json', params.region, params.regionMode);
+  appendJsonFacetCondition(conditions, args, 'languages_json', params.language, params.languageMode);
+  appendJsonFacetCondition(conditions, args, 'sources_json', params.source, params.sourceMode);
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const limit = Math.min(200, Math.max(1, params.limit ?? 50));
@@ -1394,12 +1512,29 @@ export function queryRepositoryItems(params: {
   const releaseIds = rows.map((r) => Number(r.id));
   const filesMap = loadFilesByReleaseIds(releaseIds);
 
+  const tagsFacet = listDistinctJsonFacetWithCounts('release_tags_json');
+  const genresFacet = listDistinctJsonFacetWithCounts('genres_json');
+  const regionsFacet = listDistinctJsonFacetWithCounts('regions_json');
+  const languagesFacet = listDistinctJsonFacetWithCounts('languages_json');
+  const sourcesFacet = listDistinctJsonFacetWithCounts('sources_json');
+  const statusCounts = listStatusFacetCounts();
+
+  const counts: CatalogFacetCounts = {
+    tags: tagsFacet.counts,
+    genres: genresFacet.counts,
+    regions: regionsFacet.counts,
+    languages: languagesFacet.counts,
+    sources: sourcesFacet.counts,
+    statuses: statusCounts,
+  };
+
   const facets: CatalogFacets = {
-    tags: listDistinctJsonFacet('release_tags_json'),
-    genres: listDistinctJsonFacet('genres_json'),
-    regions: listDistinctJsonFacet('regions_json'),
-    languages: listDistinctJsonFacet('languages_json'),
-    sources: listDistinctJsonFacet('sources_json'),
+    tags: tagsFacet.values,
+    genres: genresFacet.values,
+    regions: regionsFacet.values,
+    languages: languagesFacet.values,
+    sources: sourcesFacet.values,
+    counts,
   };
 
   return {

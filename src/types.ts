@@ -85,12 +85,24 @@ export interface ReleaseMetadata {
   fetchedAt: string;
 }
 
+export type FilterMatchMode = 'any' | 'all';
+
+export interface CatalogFacetCounts {
+  tags: Record<string, number>;
+  genres: Record<string, number>;
+  regions: Record<string, number>;
+  languages: Record<string, number>;
+  sources: Record<string, number>;
+  statuses: Record<string, number>;
+}
+
 export interface CatalogFacets {
   tags: string[];
   genres: string[];
   regions: string[];
   languages: string[];
   sources: string[];
+  counts?: CatalogFacetCounts;
 }
 
 export interface ReleaseFileRecord {
