@@ -151,40 +151,79 @@ export function FailedQueueDrawer({
   }, [open]);
 
   useEffect(() => {
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current);
-      closeTimerRef.current = null;
+    if (open) {
+      setRendered(true);
+      return;
     }
+    setExpanded(false);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !rendered) return;
 
     const prefersReducedMotion =
       typeof window !== 'undefined' &&
       typeof window.matchMedia === 'function' &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-    if (open) {
-      setRendered(true);
-      if (prefersReducedMotion) {
-        setExpanded(true);
-        return;
-      }
-      let rafInner = 0;
-      const rafOuter = window.requestAnimationFrame(() => {
-        rafInner = window.requestAnimationFrame(() => {
-          setExpanded(true);
-        });
-      });
-      return () => {
-        window.cancelAnimationFrame(rafOuter);
-        if (rafInner) window.cancelAnimationFrame(rafInner);
-      };
+    if (prefersReducedMotion) {
+      setExpanded(true);
+      return;
     }
 
-    setExpanded(false);
+    let cancelled = false;
+    let raf1 = 0;
+    let raf2 = 0;
+    let waitTimer = 0;
+
+    const triggerExpand = () => {
+      if (cancelled) return;
+      raf1 = window.requestAnimationFrame(() => {
+        if (cancelled) return;
+        // Commit 0fr layout geometry for freshly mounted rows before switching to 1fr
+        void accordionRef.current?.getBoundingClientRect();
+        raf2 = window.requestAnimationFrame(() => {
+          if (!cancelled) {
+            setExpanded(true);
+          }
+        });
+      });
+    };
+
+    if (loading && !hasLoadedOnceRef.current) {
+      waitTimer = window.setTimeout(triggerExpand, 120);
+    } else {
+      triggerExpand();
+    }
+
+    return () => {
+      cancelled = true;
+      if (waitTimer) window.clearTimeout(waitTimer);
+      if (raf1) window.cancelAnimationFrame(raf1);
+      if (raf2) window.cancelAnimationFrame(raf2);
+    };
+  }, [open, rendered, loading]);
+
+  useEffect(() => {
+    if (open) {
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
+      return;
+    }
     if (!rendered) return;
+
+    const prefersReducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
     if (prefersReducedMotion) {
       setRendered(false);
       return;
     }
+
     closeTimerRef.current = window.setTimeout(() => {
       closeTimerRef.current = null;
       setRendered(false);
@@ -209,8 +248,6 @@ export function FailedQueueDrawer({
       setRendered(false);
     }
   };
-
-  if (!rendered) return null;
 
   const allSelected = items.length > 0 && items.every((i) => selectedIds.has(i.id));
 
@@ -324,11 +361,12 @@ export function FailedQueueDrawer({
         className="crt-accordion-grid"
       >
         <div className="crt-accordion-inner">
-          <div className="pt-6">
-            <section
-              aria-label="Failed Queue Drawer"
-              className="border border-crt-border bg-crt-surface rounded-md overflow-hidden"
-            >
+          {rendered && (
+            <div className="pt-6">
+              <section
+                aria-label="Failed Queue Drawer"
+                className="border border-crt-border bg-crt-surface rounded-md overflow-hidden"
+              >
         {/* Drawer Header Bar */}
         <div className="px-5 py-4 border-b border-crt-border flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
           <div className="space-y-0.5 min-w-0">
@@ -764,8 +802,9 @@ export function FailedQueueDrawer({
             </table>
           </div>
         )}
-            </section>
-          </div>
+              </section>
+            </div>
+          )}
         </div>
       </div>
 
