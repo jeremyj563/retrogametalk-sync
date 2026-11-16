@@ -478,6 +478,17 @@ export default function App() {
   );
 
   useEffect(() => {
+    if (!showFullSyncConfirm) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !actionPending) {
+        setConfirmingFullSync(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showFullSyncConfirm, actionPending]);
+
+  useEffect(() => {
     if (!pendingNavSection) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !navGuardSaving) {
@@ -530,8 +541,9 @@ export default function App() {
       {showGrille && <div aria-hidden="true" className="crt-layer-grille" />}
       {showScanlines && <div aria-hidden="true" className="crt-layer-scanlines" />}
       {showVignette && <div aria-hidden="true" className="crt-layer-vignette" />}
-      {/* Top Header Bar */}
-      <header className="sticky top-0 z-30 bg-crt-bg/95 backdrop-blur border-b border-crt-border px-4 lg:px-6 py-3.5 flex flex-wrap md:flex-nowrap items-center justify-between gap-4">
+      {/* Sticky Top Header & Full Sync Confirmation Container */}
+      <div className="sticky top-0 z-30">
+        <header className="bg-crt-bg/95 backdrop-blur border-b border-crt-border px-4 lg:px-6 py-3.5 flex flex-wrap md:flex-nowrap items-center justify-between gap-4">
         {/* Zone 1: Single-line Brand Title */}
         <a
           href="#monitor"
@@ -648,6 +660,7 @@ export default function App() {
             ) : (
               <button
                 type="button"
+                aria-expanded={selectedScope === 'full' && !dryRunEnabled ? showFullSyncConfirm : undefined}
                 disabled={actionPending || !status || !syncAllowed}
                 title={
                   !syncAllowed
@@ -687,9 +700,13 @@ export default function App() {
         </div>
       </header>
 
-      {/* Inline Uncapped Full Sync Confirmation Strip */}
+      {/* Inline Uncapped Full Sync Confirmation Strip (anchored inside sticky top container) */}
       {showFullSyncConfirm && (
-        <div className="border-b border-crt-amber/40 bg-crt-elevated px-4 lg:px-6 py-3 flex flex-wrap items-center justify-between gap-4">
+        <div
+          role="region"
+          aria-label="Confirm uncapped Full Sync"
+          className="border-b border-crt-amber/50 bg-crt-elevated/95 backdrop-blur px-4 lg:px-6 py-3 shadow-[0_10px_28px_-12px_rgba(0,0,0,0.9)] flex flex-wrap items-center justify-between gap-3"
+        >
           <div className="flex items-center gap-3 text-xs text-crt-text min-w-0">
             <AlertTriangle className="h-4 w-4 text-crt-amber shrink-0" />
             <span>
@@ -702,7 +719,7 @@ export default function App() {
               type="button"
               disabled={actionPending}
               onClick={() => setConfirmingFullSync(false)}
-              className="px-3 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0"
+              className="px-3 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Cancel
             </button>
@@ -713,7 +730,7 @@ export default function App() {
                 setDryRunEnabled(true);
                 void handleStartRun('full', true);
               }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-amber/80 bg-crt-amber/12 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-amber/80 bg-crt-amber/12 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
               title="Simulate Full Sync across all target consoles without downloading archives or modifying catalog rows"
             >
               <FlaskConical className="h-3.5 w-3.5 shrink-0" />
@@ -723,7 +740,7 @@ export default function App() {
               type="button"
               disabled={actionPending}
               onClick={() => void handleStartRun('full', false)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
             >
               <Play className="h-3 w-3 fill-current shrink-0" />
               Confirm Full Sync
@@ -731,6 +748,7 @@ export default function App() {
           </div>
         </div>
       )}
+      </div>
 
       {/* Main Workspace: Sidebar + Content Viewport */}
       <div className="flex-1 flex flex-col lg:flex-row">
