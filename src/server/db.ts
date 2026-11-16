@@ -4,7 +4,6 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { LATEST_SCHEMA_VERSION, runDatabaseMigrations } from './migrations.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
-import { validateBrandLogoUrl } from '../shared/brandLogo.ts';
 import { normalizeCatalogSort } from '../shared/catalogSort.ts';
 import { normalizeAllowedReleaseTypes } from '../shared/releaseTypeFilter.ts';
 import { filterValidSystemSlugs, sanitizeSystemFilterString } from '../shared/systemCatalog.ts';
@@ -420,7 +419,6 @@ export function getInternalConfig(): ScraperConfigInternal {
     romMaxFilenameLen: Math.max(0, Number(row.rom_max_filename_len || 0)),
     devicePreset: String(row.device_preset || 'everdrive'),
     deviceFolderMap,
-    customBrandLogoUrl: String(row.custom_brand_logo_url || ''),
     updatedAt: String(row.updated_at),
     envOverrides,
   };
@@ -574,11 +572,6 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     );
   }
 
-  const nextCustomBrandLogoUrl =
-    input.customBrandLogoUrl !== undefined
-      ? validateBrandLogoUrl(input.customBrandLogoUrl)
-      : String(current.custom_brand_logo_url || '');
-
   getDb().prepare(`
     UPDATE scraper_config SET
       base_url = ?,
@@ -604,7 +597,6 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       rom_max_filename_len = ?,
       device_preset = ?,
       device_folder_map_json = ?,
-      custom_brand_logo_url = ?,
       last_authenticated_at = ?,
       updated_at = ?
     WHERE id = 1
@@ -632,7 +624,6 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     nextRomMaxFilenameLen,
     nextDevicePreset,
     nextDeviceFolderMapJson,
-    nextCustomBrandLogoUrl,
     authCredentialsChanged ? null : (current.last_authenticated_at ? String(current.last_authenticated_at) : null),
     now,
   );
