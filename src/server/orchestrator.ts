@@ -23,6 +23,7 @@ import {
   getSchemaMigrationReport,
   listReleasesNeedingRetry,
   listSyncRuns,
+  markCatalogReleaseFailed,
   recordSuccessfulLogin,
   releaseDistributedLock,
   saveDiscoveredSystems,
@@ -1062,7 +1063,14 @@ export class ScraperOrchestrator extends EventEmitter {
         runLogger,
       );
       const linked = this.client.extractLinksFromHtml(pageData.html, pageData.finalUrl, cfg).downloads;
-      freshDownloads = [...dynamic, ...linked];
+      const deduped = new Map<string, DiscoveredRelease>();
+      for (const candidate of [...dynamic, ...linked]) {
+        const key = candidate.filename.toLowerCase();
+        if (!deduped.has(key)) {
+          deduped.set(key, candidate);
+        }
+      }
+      freshDownloads = Array.from(deduped.values());
 
       const allRoleInputs = freshDownloads.length > 0 ? freshDownloads : item.files;
       const fileRoles = allRoleInputs.map((f) =>
@@ -1075,36 +1083,125 @@ export class ScraperOrchestrator extends EventEmitter {
         }),
       );
 
-      const freshMeta = this.client.extractReleaseMetadata(
-        pageData.html,
-        pageData.finalUrl,
-        wpData,
-        fileRoles,
-      );
-      const releaseDir = this.resolveReleaseDir(item, root);
-      if (releaseDir) {
-        const mirrored = await this.client.mirrorReleaseAssets(
-          freshMeta,
-          releaseDir,
-          cfg,
-          signal,
-          runLogger,
+      try {
+        const freshMeta = this.client.extractReleaseMetadata(
+          pageData.html,
+          pageData.finalUrl,
+          wpData,
+          fileRoles,
         );
-        updateCatalogReleaseMetadata(
-          item.id,
-          mirrored.metadata,
-          mirrored.coverAbsPath,
-          mirrored.screenshotAbsPaths,
+        const releaseDir =
+          this.resolveReleaseDir(item, root) ||
+          path.dirname(resolveMirroredPaths(cfg.baseUrl, pageData.finalUrl, root, 'probe.zip').localPath);
+        if (releaseDir) {
+          const mirrored = await this.client.mirrorReleaseAssets(
+            freshMeta,
+            releaseDir,
+            cfg,
+            signal,
+            runLogger,
+          );
+          updateCatalogReleaseMetadata(
+            item.id,
+            mirrored.metadata,
+            mirrored.coverAbsPath,
+            mirrored.screenshotAbsPaths,
+          );
+        }
+      } catch (assetErr) {
+        if (signal.aborted) throw assetErr;
+        runLogger(
+          'warn',
+          `Metadata/artwork refresh skipped during retry for ${item.title}`,
+          assetErr instanceof Error ? assetErr.message : String(assetErr),
         );
       }
     }
 
+    // Release was interrupted mid-metadata before any child file rows were created: seed & download all discovered archives
+    if (filesToRetry.length === 0) {
+      if (freshDownloads.length === 0) {
+        throw new Error(`No downloadable archive files found on release page ${pageUrl}`);
+      }
+      for (const release of freshDownloads) {
+        if (signal.aborted) break;
+        const outcome = await this.downloadReleaseFile(
+          item.id,
+          release,
+          cfg,
+          runId,
+          signal,
+          runLogger,
+          getRepositoryItemById(item.id) || item,
+        );
+        if (outcome.downloaded) downloaded += 1;
+        if (outcome.skipped) skipped += 1;
+        if (outcome.failed) failed += 1;
+        bytes += outcome.bytes;
+      }
+      return { downloaded, skipped, failed, bytes };
+    }
+
+    const matchFreshDownload = (targetFile: ReleaseFileRecord): DiscoveredRelease | undefined => {
+      if (freshDownloads.length === 0) return undefined;
+      const lowerFilename = targetFile.filename.toLowerCase();
+      const lowerLabel = (targetFile.displayLabel || '').toLowerCase();
+
+      const direct =
+        freshDownloads.find((f) => f.filename === targetFile.filename) ||
+        freshDownloads.find((f) => f.filename.toLowerCase() === lowerFilename) ||
+        freshDownloads.find((f) => f.remoteUrl === targetFile.remoteUrl) ||
+        (lowerLabel ? freshDownloads.find((f) => (f.displayLabel || '').toLowerCase() === lowerLabel) : undefined);
+      if (direct) return direct;
+
+      if (freshDownloads.length === 1 && item.files.length <= 1) {
+        return freshDownloads[0];
+      }
+
+      if (filesToRetry.length === 1) {
+        const alreadyOkFilenames = new Set(
+          item.files
+            .filter((f) => f.id !== targetFile.id && (f.status === 'downloaded' || f.status === 'skipped'))
+            .map((f) => f.filename.toLowerCase()),
+        );
+        const unmatched = freshDownloads.filter((fd) => !alreadyOkFilenames.has(fd.filename.toLowerCase()));
+        if (unmatched.length === 1) {
+          return unmatched[0];
+        }
+      }
+
+      return undefined;
+    };
+
     for (const targetFile of filesToRetry) {
       if (signal.aborted) break;
-      const matched =
-        freshDownloads.find((f) => f.filename === targetFile.filename) ||
-        freshDownloads.find((f) => f.remoteUrl === targetFile.remoteUrl) ||
-        (filesToRetry.length === 1 ? freshDownloads[0] : undefined);
+      const matched = matchFreshDownload(targetFile);
+
+      // If no fresh download link was extracted and stored downloadUrl is just the page URL itself, fail explicitly
+      const storedUrlClean = (targetFile.downloadUrl || '').split('#')[0];
+      const targetAlreadyOnDisk = Boolean(
+        targetFile.localPath && fs.existsSync(targetFile.localPath) && fs.statSync(targetFile.localPath).size > 0,
+      );
+      if (!matched && !targetAlreadyOnDisk && (!storedUrlClean.startsWith('http') || storedUrlClean === pageUrl)) {
+        upsertReleaseFile({
+          releaseId: item.id,
+          targetFileId: targetFile.id,
+          remoteUrl: targetFile.remoteUrl,
+          downloadUrl: targetFile.downloadUrl,
+          remotePath: targetFile.remotePath,
+          localPath: targetFile.localPath,
+          filename: targetFile.filename,
+          displayLabel: targetFile.displayLabel,
+          fileRole: targetFile.fileRole,
+          status: 'failed',
+          errorMessage: `Could not resolve a fresh download link from ${pageUrl}`,
+          lastRunId: runId,
+        });
+        runLogger('error', `Could not resolve fresh download link for ${targetFile.filename}`, pageUrl);
+        this.emitCatalogUpdated('file_failed', item.id);
+        failed += 1;
+        continue;
+      }
 
       const release: DiscoveredRelease = matched || {
         remoteUrl: targetFile.remoteUrl,
@@ -1127,6 +1224,7 @@ export class ScraperOrchestrator extends EventEmitter {
         signal,
         runLogger,
         getRepositoryItemById(item.id) || item,
+        targetFile.id,
       );
       if (outcome.downloaded) downloaded += 1;
       if (outcome.skipped) skipped += 1;
@@ -1155,11 +1253,21 @@ export class ScraperOrchestrator extends EventEmitter {
       filesToRetry = [targetFile];
     } else {
       filesToRetry = item.files.filter(
-        (f) => f.status === 'failed' || !f.localPath || !fs.existsSync(f.localPath),
+        (f) =>
+          f.status === 'failed' ||
+          f.status === 'downloading' ||
+          f.status === 'queued' ||
+          !f.localPath ||
+          !fs.existsSync(f.localPath),
       );
-      if (filesToRetry.length === 0) {
+      if (filesToRetry.length === 0 && item.files.length > 0) {
         filesToRetry = item.files;
       }
+    }
+
+    const pageUrl = item.remoteUrl.split('#')[0];
+    if (filesToRetry.length === 0 && !pageUrl.startsWith('http')) {
+      throw new Error(`Catalog release #${itemId} has no remote release page or files to retry`);
     }
 
     const cfg = getInternalConfig();
@@ -1171,12 +1279,13 @@ export class ScraperOrchestrator extends EventEmitter {
     this.currentPhase =
       filesToRetry.length === 1
         ? `Retrying ${filesToRetry[0].filename}`
-        : `Retrying ${item.title} (${filesToRetry.length} files)`;
+        : `Retrying ${item.title}${filesToRetry.length > 0 ? ` (${filesToRetry.length} files)` : ''}`;
     this.emitStatus();
 
     void (async () => {
       const signal = this.abortController!.signal;
       const runLogger: LoggerFn = (level, msg, detail) => this.log(level, msg, detail ?? null, run.id);
+      let attemptedFiles = filesToRetry.length;
       let downloaded = 0;
       let skipped = 0;
       let failed = 0;
@@ -1208,15 +1317,18 @@ export class ScraperOrchestrator extends EventEmitter {
         skipped = outcome.skipped;
         failed = outcome.failed;
         bytes = outcome.bytes;
+        attemptedFiles = Math.max(attemptedFiles, downloaded + skipped + failed);
 
-        if (!signal.aborted && failed > 0 && downloaded === 0 && skipped === 0) {
-          throw new Error(`Retry failed for all ${failed} file(s)`);
+        if (!signal.aborted && ((failed > 0 && downloaded === 0 && skipped === 0) || (downloaded === 0 && skipped === 0 && failed === 0))) {
+          const latestItem = getRepositoryItemById(item.id);
+          const detailErr = latestItem?.errorMessage;
+          throw new Error(detailErr || `Retry failed for all ${Math.max(1, failed)} file(s)`);
         }
 
         updateSyncRun(run.id, {
           status: signal.aborted ? 'stopped' : 'completed',
           finishedAt: new Date().toISOString(),
-          newFound: filesToRetry.length,
+          newFound: attemptedFiles,
           downloadedCount: downloaded,
           skippedCount: skipped,
           failedCount: failed,
@@ -1225,10 +1337,38 @@ export class ScraperOrchestrator extends EventEmitter {
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        if (!signal.aborted) {
+          const latestItem = getRepositoryItemById(item.id);
+          if (filesToRetry.length > 0) {
+            for (const f of filesToRetry) {
+              const currentFile = latestItem?.files.find((cf) => cf.id === f.id);
+              if (currentFile && (currentFile.status === 'downloaded' || currentFile.status === 'skipped')) {
+                continue;
+              }
+              upsertReleaseFile({
+                releaseId: item.id,
+                targetFileId: f.id,
+                remoteUrl: f.remoteUrl,
+                downloadUrl: f.downloadUrl,
+                remotePath: f.remotePath,
+                localPath: f.localPath,
+                filename: f.filename,
+                displayLabel: f.displayLabel,
+                fileRole: f.fileRole,
+                status: 'failed',
+                errorMessage: msg,
+                lastRunId: run.id,
+              });
+            }
+          } else {
+            markCatalogReleaseFailed(item.id, msg, run.id);
+          }
+          this.emitCatalogUpdated('file_failed', item.id);
+        }
         updateSyncRun(run.id, {
           status: signal.aborted ? 'stopped' : 'failed',
           finishedAt: new Date().toISOString(),
-          newFound: filesToRetry.length,
+          newFound: Math.max(1, attemptedFiles),
           downloadedCount: downloaded,
           skippedCount: skipped,
           failedCount: Math.max(1, failed),
@@ -1315,16 +1455,21 @@ export class ScraperOrchestrator extends EventEmitter {
           if (signal.aborted) break;
           const item = getRepositoryItemById(targets[idx].id) || targets[idx];
           let filesToRetry = item.files.filter(
-            (f) => f.status === 'failed' || !f.localPath || !fs.existsSync(f.localPath),
+            (f) =>
+              f.status === 'failed' ||
+              f.status === 'downloading' ||
+              f.status === 'queued' ||
+              !f.localPath ||
+              !fs.existsSync(f.localPath),
           );
-          if (filesToRetry.length === 0) {
+          if (filesToRetry.length === 0 && item.files.length > 0) {
             filesToRetry = item.files;
           }
-          if (filesToRetry.length === 0) {
+          const hasPageUrl = item.remoteUrl.split('#')[0].startsWith('http');
+          if (filesToRetry.length === 0 && !hasPageUrl) {
             continue;
           }
 
-          attemptedFiles += filesToRetry.length;
           this.currentPhase = `Retry Failed (${idx + 1}/${targets.length}): ${item.systemName} / ${item.title}`;
           this.emitStatus();
 
@@ -1338,6 +1483,7 @@ export class ScraperOrchestrator extends EventEmitter {
               signal,
               runLogger,
             );
+            attemptedFiles += Math.max(filesToRetry.length, outcome.downloaded + outcome.skipped + outcome.failed);
             downloaded += outcome.downloaded;
             skipped += outcome.skipped;
             failed += outcome.failed;
@@ -1348,21 +1494,29 @@ export class ScraperOrchestrator extends EventEmitter {
             if (/Cloudflare|Authentication|Re-authentication/i.test(errMsg)) {
               throw itemErr;
             }
-            for (const f of filesToRetry) {
-              upsertReleaseFile({
-                releaseId: item.id,
-                remoteUrl: f.remoteUrl,
-                downloadUrl: f.downloadUrl,
-                remotePath: f.remotePath,
-                localPath: f.localPath,
-                filename: f.filename,
-                displayLabel: f.displayLabel,
-                fileRole: f.fileRole,
-                status: 'failed',
-                errorMessage: errMsg,
-                lastRunId: run.id,
-              });
+            if (filesToRetry.length > 0) {
+              attemptedFiles += filesToRetry.length;
+              for (const f of filesToRetry) {
+                upsertReleaseFile({
+                  releaseId: item.id,
+                  targetFileId: f.id,
+                  remoteUrl: f.remoteUrl,
+                  downloadUrl: f.downloadUrl,
+                  remotePath: f.remotePath,
+                  localPath: f.localPath,
+                  filename: f.filename,
+                  displayLabel: f.displayLabel,
+                  fileRole: f.fileRole,
+                  status: 'failed',
+                  errorMessage: errMsg,
+                  lastRunId: run.id,
+                });
+                failed += 1;
+              }
+            } else {
+              attemptedFiles += 1;
               failed += 1;
+              markCatalogReleaseFailed(item.id, errMsg, run.id);
             }
             runLogger('error', `Batch retry failed for ${item.title}: ${errMsg}`, item.remoteUrl);
             this.emitCatalogUpdated('file_failed', item.id);
@@ -2127,6 +2281,7 @@ export class ScraperOrchestrator extends EventEmitter {
     signal: AbortSignal,
     runLogger: LoggerFn,
     parentContext?: RepositoryItemRecord,
+    targetFileId?: number,
   ): Promise<{ downloaded: boolean; skipped: boolean; failed: boolean; bytes: number }> {
     const mirrored = resolveMirroredPaths(
       cfg.baseUrl,
@@ -2147,6 +2302,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
     const initial = upsertReleaseFile({
       releaseId,
+      targetFileId,
       remoteUrl: release.remoteUrl,
       downloadUrl: release.downloadUrl,
       remotePath,
@@ -2193,14 +2349,30 @@ export class ScraperOrchestrator extends EventEmitter {
       } catch (firstErr) {
         const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
         const pageUrl = (release.pageUrl || '').split('#')[0];
-        const canRefreshLink =
-          !signal.aborted &&
-          pageUrl.startsWith('http') &&
-          /timed ?out|timedout|body|decode|econnreset|socket|nonce may have expired|expected archive binary/i.test(
+        const isCloudflareErr = /cloudflare/i.test(firstMsg);
+        const isAuthOrExpiredErr =
+          !isCloudflareErr &&
+          /401|403|unauthorized|forbidden|authentication|login|nonce may have expired|expected archive binary/i.test(
             firstMsg,
           );
+        const canRefreshLink =
+          !signal.aborted &&
+          !isCloudflareErr &&
+          pageUrl.startsWith('http') &&
+          (isAuthOrExpiredErr || /timed ?out|timedout|body|decode|econnreset|socket/i.test(firstMsg));
         if (!canRefreshLink) {
           throw firstErr;
+        }
+
+        let didReauthenticate = false;
+        if (isAuthOrExpiredErr && cfg.username && cfg.password) {
+          runLogger('warn', `Session or download token expired for ${release.filename}; re-authenticating`);
+          const authRes = await this.client.login(cfg, signal, runLogger);
+          if (authRes.authenticated) {
+            const ts = recordSuccessfulLogin();
+            this.client.setPersistedLastAuthenticatedAt(ts);
+            didReauthenticate = true;
+          }
         }
 
         // Re-fetch release page to mint a fresh nonce & signed download key, then retry once
@@ -2222,7 +2394,7 @@ export class ScraperOrchestrator extends EventEmitter {
           freshCandidates.find((f) => f.remoteUrl === release.remoteUrl) ||
           (freshCandidates.length === 1 ? freshCandidates[0] : undefined);
 
-        if (!matchedFresh || matchedFresh.downloadUrl === activeRelease.downloadUrl) {
+        if (!matchedFresh || (!didReauthenticate && matchedFresh.downloadUrl === activeRelease.downloadUrl)) {
           throw firstErr;
         }
 
@@ -2259,8 +2431,9 @@ export class ScraperOrchestrator extends EventEmitter {
         }
         upsertReleaseFile({
           releaseId,
-          remoteUrl: release.remoteUrl,
-          downloadUrl: release.downloadUrl,
+          targetFileId: initial.file.id,
+          remoteUrl: activeRelease.remoteUrl,
+          downloadUrl: activeRelease.downloadUrl,
           remotePath: res.remotePath,
           localPath: res.localPath,
           filename: res.filename,
@@ -2280,8 +2453,9 @@ export class ScraperOrchestrator extends EventEmitter {
 
       upsertReleaseFile({
         releaseId,
-        remoteUrl: release.remoteUrl,
-        downloadUrl: release.downloadUrl,
+        targetFileId: initial.file.id,
+        remoteUrl: activeRelease.remoteUrl,
+        downloadUrl: activeRelease.downloadUrl,
         remotePath: res.remotePath,
         localPath: res.localPath,
         filename: res.filename,
@@ -2301,6 +2475,7 @@ export class ScraperOrchestrator extends EventEmitter {
       const errMsg = err instanceof Error ? err.message : String(err);
       upsertReleaseFile({
         releaseId,
+        targetFileId: initial.file.id,
         remoteUrl: release.remoteUrl,
         downloadUrl: release.downloadUrl,
         remotePath,

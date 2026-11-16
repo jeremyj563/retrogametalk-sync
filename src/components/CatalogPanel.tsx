@@ -43,6 +43,7 @@ interface CatalogPanelProps {
   status: ServiceStatusSnapshot;
   catalogRevision?: number;
   focusFailedSignal?: number;
+  activeRetryItemId?: number | null;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
   onRetryItem: (itemId: number, fileId?: number) => Promise<void>;
   onRetryAllFailed: (options?: { system?: string; ids?: number[] }) => Promise<void>;
@@ -162,6 +163,7 @@ export function CatalogPanel({
   status,
   catalogRevision = 0,
   focusFailedSignal = 0,
+  activeRetryItemId = null,
   onSaveConfig,
   onRetryItem,
   onRetryAllFailed,
@@ -205,6 +207,12 @@ export function CatalogPanel({
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [failedCovers, setFailedCovers] = useState<Set<number>>(new Set());
   const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
+
+  const effectiveRetryingId =
+    retryingId ??
+    (status.activeRun?.triggerType === 'retry'
+      ? (activeRetryItemId ?? status.activeTransfer?.itemId ?? null)
+      : null);
 
   // Selection state for Indexed Catalog / Failed Queue
   const [selectedCatalogIds, setSelectedCatalogIds] = useState<Set<number>>(new Set());
@@ -1342,7 +1350,7 @@ export function CatalogPanel({
                             <button
                               type="button"
                               disabled={
-                                retryingId === item.id ||
+                                effectiveRetryingId === item.id ||
                                 batchRetrying ||
                                 Boolean(status.activeRun) ||
                                 !status.auth.hasCompletedLogin
@@ -1355,8 +1363,8 @@ export function CatalogPanel({
                               onClick={() => void handleRetry(item.id)}
                               className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium border border-crt-border hover:border-crt-phosphor text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                              <RotateCcw className={`h-3 w-3 ${retryingId === item.id ? 'animate-spin' : ''}`} />
-                              {retryingId === item.id ? 'Retrying...' : 'Retry'}
+                              <RotateCcw className={`h-3 w-3 ${effectiveRetryingId === item.id ? 'animate-spin' : ''}`} />
+                              {effectiveRetryingId === item.id ? 'Retrying...' : 'Retry'}
                             </button>
                             <button
                               type="button"
@@ -1623,13 +1631,13 @@ export function CatalogPanel({
                             {item.status === 'failed' || item.status === 'partial' ? (
                               <button
                                 type="button"
-                                disabled={retryingId === item.id || Boolean(status.activeRun) || !status.auth.hasCompletedLogin}
+                                disabled={effectiveRetryingId === item.id || Boolean(status.activeRun) || !status.auth.hasCompletedLogin}
                                 title={!status.auth.hasCompletedLogin ? 'Verify login in Operations before retrying' : undefined}
                                 onClick={() => void handleRetry(item.id)}
                                 className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-border hover:border-crt-phosphor text-crt-text rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                               >
-                                <RotateCcw className="h-3 w-3" />
-                                Retry
+                                <RotateCcw className={`h-3 w-3 ${effectiveRetryingId === item.id ? 'animate-spin' : ''}`} />
+                                {effectiveRetryingId === item.id ? 'Retrying...' : 'Retry'}
                               </button>
                             ) : (
                               <span
@@ -1943,6 +1951,7 @@ export function CatalogPanel({
         item={activeDetailItem}
         activeRun={Boolean(status.activeRun)}
         canSync={Boolean(status.auth.hasCompletedLogin)}
+        retryingItem={effectiveRetryingId === activeDetailItem?.id}
         onClose={() => setActiveDetailItem(null)}
         onItemUpdated={handleItemUpdated}
         onRetryItem={handleRetry}

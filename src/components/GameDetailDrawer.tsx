@@ -26,6 +26,7 @@ interface GameDetailDrawerProps {
   item: RepositoryItemRecord | null;
   activeRun: boolean;
   canSync: boolean;
+  retryingItem?: boolean;
   onClose: () => void;
   onItemUpdated: (updated: RepositoryItemRecord) => void;
   onRetryItem: (id: number, fileId?: number) => Promise<void>;
@@ -42,6 +43,7 @@ export function GameDetailDrawer({
   item,
   activeRun,
   canSync,
+  retryingItem = false,
   onClose,
   onItemUpdated,
   onRetryItem,
@@ -534,13 +536,13 @@ export function GameDetailDrawer({
                         ) : file.status === 'failed' ? (
                           <button
                             type="button"
-                            disabled={retryingKey !== null || activeRun || !canSync}
+                            disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
                             title={!canSync ? 'Verify login in Operations before retrying' : undefined}
                             onClick={() => void handleRetry(file.id)}
                             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                           >
-                            <RotateCcw className={`h-3.5 w-3.5 ${isRetryingThis ? 'animate-spin' : ''}`} />
-                            {isRetryingThis ? 'Retrying...' : 'Retry'}
+                            <RotateCcw className={`h-3.5 w-3.5 ${isRetryingThis || retryingItem ? 'animate-spin' : ''}`} />
+                            {isRetryingThis || retryingItem ? 'Retrying...' : 'Retry'}
                           </button>
                         ) : (
                           <span className="font-mono text-[11px] text-crt-muted px-2">
@@ -789,13 +791,13 @@ export function GameDetailDrawer({
             {hasFailedFiles && (
               <button
                 type="button"
-                disabled={retryingKey !== null || activeRun || !canSync}
+                disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
                 title={!canSync ? 'Verify login in Operations before retrying' : undefined}
                 onClick={() => void handleRetry()}
                 className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
               >
-                <RotateCcw className={`h-3.5 w-3.5 ${retryingKey === 'release' ? 'animate-spin' : ''}`} />
-                {retryingKey === 'release' ? 'Retrying...' : 'Retry Failed'}
+                <RotateCcw className={`h-3.5 w-3.5 ${retryingKey === 'release' || retryingItem ? 'animate-spin' : ''}`} />
+                {retryingKey === 'release' || retryingItem ? 'Retrying...' : 'Retry Failed'}
               </button>
             )}
           </div>

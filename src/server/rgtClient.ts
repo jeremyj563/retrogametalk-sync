@@ -2240,6 +2240,7 @@ export class RetroGameTalkClient {
     config: ScraperConfigInternal,
     signal?: AbortSignal,
     log?: LoggerFn,
+    allowReauthRetry = true,
   ): Promise<DiscoveredRelease[]> {
     const $ = loadHtml(html);
     const wrapper = $('#acf-content-wrapper[data-id]').first();
@@ -2273,6 +2274,23 @@ export class RetroGameTalkClient {
     }
 
     const results: DiscoveredRelease[] = [];
+    let authFailureDetected = false;
+    let sawCloudflareChallenge = false;
+
+    const looksLikeAuthWall = (status: number, finalUrl: string, bodyText: string): boolean => {
+      if (status === 401 || status === 403) return true;
+      if (finalUrl.includes('/login') || finalUrl.includes('wp-login.php')) return true;
+      const trimmed = bodyText.trim();
+      if (trimmed === '0' || trimmed === '-1') return true;
+      const lower = trimmed.toLowerCase();
+      return (
+        lower.includes('type="password"') ||
+        lower.includes("type='password'") ||
+        lower.includes('must be logged in') ||
+        lower.includes('please log in') ||
+        lower.includes('login to download')
+      );
+    };
 
     // Standard release page (#acf-content-wrapper)
     if (wrapper.length > 0) {
@@ -2296,11 +2314,17 @@ export class RetroGameTalkClient {
           signal,
           log,
         );
-        return res.response.text();
+        const body = await res.response.text();
+        if (this.isCloudflareChallenge(res.response.status, res.response.headers, body)) {
+          sawCloudflareChallenge = true;
+        } else if (looksLikeAuthWall(res.response.status, res.finalUrl, body)) {
+          authFailureDetected = true;
+        }
+        return body;
       };
 
       let ajaxHtml = await fetchAjaxHtml(nonce);
-      if (!ajaxHtml.includes('download.php') && !ajaxHtml.includes('dl-btn-')) {
+      if (!ajaxHtml.includes('download.php') && !ajaxHtml.includes('dl-btn-') && !sawCloudflareChallenge) {
         // Refresh cached nonce via cdr_nonce endpoint
         const nonceRes = await this.fetchWithRedirects(
           `${nonceUrl}${nonceUrl.includes('?') ? '&' : '?'}post_id=${encodeURIComponent(postId)}`,
@@ -2310,7 +2334,11 @@ export class RetroGameTalkClient {
           log,
         );
         const freshNonce = (await nonceRes.response.text()).trim();
-        if (freshNonce && freshNonce !== '0' && freshNonce !== '-1') {
+        if (this.isCloudflareChallenge(nonceRes.response.status, nonceRes.response.headers, freshNonce)) {
+          sawCloudflareChallenge = true;
+        } else if (looksLikeAuthWall(nonceRes.response.status, nonceRes.finalUrl, freshNonce)) {
+          authFailureDetected = true;
+        } else if (freshNonce && freshNonce !== '0' && freshNonce !== '-1') {
           nonce = freshNonce;
           ajaxHtml = await fetchAjaxHtml(nonce);
         }
@@ -2353,7 +2381,7 @@ export class RetroGameTalkClient {
     }
 
     // DLC / BIOS row buttons (.dlc-button)
-    if (results.length === 0 && dlcButtons.length > 0) {
+    if (results.length === 0 && dlcButtons.length > 0 && !sawCloudflareChallenge) {
       for (let i = 0; i < dlcButtons.length; i += 1) {
         if (signal?.aborted) break;
         const btn = dlcButtons.eq(i);
@@ -2369,6 +2397,14 @@ export class RetroGameTalkClient {
           log,
         );
         const freshNonce = (await nonceRes.response.text()).trim();
+        if (this.isCloudflareChallenge(nonceRes.response.status, nonceRes.response.headers, freshNonce)) {
+          sawCloudflareChallenge = true;
+          break;
+        }
+        if (looksLikeAuthWall(nonceRes.response.status, nonceRes.finalUrl, freshNonce)) {
+          authFailureDetected = true;
+          continue;
+        }
         const urlRes = await this.fetchWithRedirects(
           ajaxUrl,
           config,
@@ -2385,6 +2421,14 @@ export class RetroGameTalkClient {
           log,
         );
         const dlHref = (await urlRes.response.text()).trim();
+        if (this.isCloudflareChallenge(urlRes.response.status, urlRes.response.headers, dlHref)) {
+          sawCloudflareChallenge = true;
+          break;
+        }
+        if (looksLikeAuthWall(urlRes.response.status, urlRes.finalUrl, dlHref)) {
+          authFailureDetected = true;
+          continue;
+        }
         if (!dlHref.startsWith('http')) continue;
 
         const dlUrl = new URL(dlHref);
@@ -2408,6 +2452,35 @@ export class RetroGameTalkClient {
       }
     }
 
+    if (
+      results.length === 0 &&
+      allowReauthRetry &&
+      !sawCloudflareChallenge &&
+      !signal?.aborted &&
+      (authFailureDetected || wrapper.length > 0 || dlcButtons.length > 0) &&
+      config.username &&
+      config.password
+    ) {
+      log?.(
+        'warn',
+        `Download link resolution returned no links for ${pageUrl}; re-authenticating and retrying`,
+      );
+      const auth = await this.login(config, signal, log);
+      if (auth.authenticated) {
+        const refreshed = await this.fetchPageHtml(pageUrl, config, signal, log);
+        if (refreshed.status < 400) {
+          return this.extractDynamicReleaseDownloads(
+            refreshed.html,
+            refreshed.finalUrl,
+            config,
+            signal,
+            log,
+            false,
+          );
+        }
+      }
+    }
+
     return results;
   }
 
@@ -2419,14 +2492,35 @@ export class RetroGameTalkClient {
   ): Promise<{ html: string; finalUrl: string; status: number }> {
     const { response, finalUrl } = await this.fetchWithRedirects(url, config, { method: 'GET' }, signal, log);
 
-    // If redirected to /login/ mid-crawl, refresh session and retry once
-    if (
-      (finalUrl.includes('/login') || finalUrl.includes('wp-login.php')) &&
-      config.username &&
-      config.password
-    ) {
+    const initialRedirectedToLogin =
+      finalUrl.includes('/login') || finalUrl.includes('wp-login.php');
+    let html = '';
+    if (initialRedirectedToLogin) {
       await response.body?.cancel().catch(() => undefined);
-      log?.('warn', 'Session expired mid-crawl; re-authenticating');
+    } else {
+      html = await response.text();
+    }
+
+    if (!initialRedirectedToLogin && this.isCloudflareChallenge(response.status, response.headers, html)) {
+      const msg = `Blocked by Cloudflare bot protection (HTTP ${response.status}) at ${finalUrl}`;
+      this.setAuthState({
+        configured: Boolean(config.username && config.password),
+        authenticated: false,
+        cookieCount: this.getSafeCookieCount(config.baseUrl),
+        lastMessage: msg,
+      });
+      throw new Error(msg);
+    }
+
+    const htmlLooksLikeLoginGate =
+      !initialRedirectedToLogin &&
+      (response.status === 401 ||
+        response.status === 403 ||
+        (loadHtml(html)('input[type="password"]').length > 0 && !html.includes('acf-content-wrapper')));
+
+    // If redirected to /login/, HTTP 401/403, or served an inline login form mid-crawl, refresh session and retry once
+    if ((initialRedirectedToLogin || htmlLooksLikeLoginGate) && config.username && config.password) {
+      log?.('warn', 'Session expired or unauthorized mid-crawl; re-authenticating');
       const auth = await this.login(config, signal, log);
       if (!auth.authenticated) {
         throw new Error(`Re-authentication failed mid-crawl: ${auth.message}`);
@@ -2456,19 +2550,7 @@ export class RetroGameTalkClient {
       return { html: retryHtml, finalUrl: retry.finalUrl, status: retry.response.status };
     }
 
-    const html = await response.text();
-    if (this.isCloudflareChallenge(response.status, response.headers, html)) {
-      const msg = `Blocked by Cloudflare bot protection (HTTP ${response.status}) at ${finalUrl}`;
-      this.setAuthState({
-        configured: Boolean(config.username && config.password),
-        authenticated: false,
-        cookieCount: this.getSafeCookieCount(config.baseUrl),
-        lastMessage: msg,
-      });
-      throw new Error(msg);
-    }
-
-    if (finalUrl.includes('/login') || finalUrl.includes('wp-login.php')) {
+    if (initialRedirectedToLogin) {
       const msg = `Authentication required or expired: ${url} redirected to ${finalUrl}`;
       this.setAuthState({
         configured: Boolean(config.username && config.password),
@@ -2561,7 +2643,19 @@ export class RetroGameTalkClient {
 
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
         if (contentType.includes('text/html') && !contentType.includes('octet-stream')) {
-          await response.body?.cancel().catch(() => undefined);
+          const htmlSnippet = await response.text().catch(() => '');
+          if (
+            finalUrl.includes('/login') ||
+            finalUrl.includes('wp-login.php') ||
+            /type=['"]password['"]|must be logged in|please log in/i.test(htmlSnippet.slice(0, 4000))
+          ) {
+            this.setAuthState({
+              configured: Boolean(config.username && config.password),
+              authenticated: false,
+              cookieCount: this.getSafeCookieCount(config.baseUrl),
+              lastMessage: `Session expired while downloading (${finalUrl})`,
+            });
+          }
           throw new Error(`Expected archive binary but received HTML (${finalUrl}); session or nonce may have expired`);
         }
 
