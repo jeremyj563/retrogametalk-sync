@@ -294,7 +294,7 @@ export function OverviewPanel({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 [overflow-anchor:none]">
       {/* Login / credentials notice until at least one login succeeds */}
       {!status.auth.configured ? (
         <div className="flex flex-wrap items-center justify-between gap-4 border border-crt-amber/40 bg-crt-amber/5 px-5 py-3.5 rounded-md">
