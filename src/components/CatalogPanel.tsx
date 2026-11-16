@@ -50,7 +50,7 @@ interface CatalogPanelProps {
 }
 
 const CATALOG_VIEW_STORAGE_KEY = 'rgt_sync_catalog_view_v1';
-const VALID_STATUS_FILTERS = new Set(['all', 'downloaded', 'skipped', 'partial', 'failed', 'needs_retry']);
+const VALID_STATUS_FILTERS = new Set(['all', 'downloaded', 'partial', 'failed', 'needs_retry']);
 const VALID_VIEW_MODES = new Set(['catalog', 'failed', 'filesystem']);
 
 interface CatalogViewPrefs {
@@ -101,9 +101,11 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
       search: typeof parsed.search === 'string' ? parsed.search : '',
       systemFilter: typeof parsed.systemFilter === 'string' && parsed.systemFilter ? parsed.systemFilter : 'all',
       statusFilter:
-        typeof parsed.statusFilter === 'string' && VALID_STATUS_FILTERS.has(parsed.statusFilter)
-          ? parsed.statusFilter
-          : 'all',
+        parsed.statusFilter === 'skipped'
+          ? 'downloaded'
+          : typeof parsed.statusFilter === 'string' && VALID_STATUS_FILTERS.has(parsed.statusFilter)
+            ? parsed.statusFilter
+            : 'all',
       tagFilter: typeof parsed.tagFilter === 'string' && parsed.tagFilter ? parsed.tagFilter : 'all',
       genreFilter: typeof parsed.genreFilter === 'string' && parsed.genreFilter ? parsed.genreFilter : 'all',
       regionFilter: typeof parsed.regionFilter === 'string' && parsed.regionFilter ? parsed.regionFilter : 'all',
@@ -972,7 +974,6 @@ export function CatalogPanel({
             >
               <option value="all">All Statuses</option>
               <option value="downloaded">Downloaded</option>
-              <option value="skipped">Skipped (Exists)</option>
               <option value="needs_retry">Needs Attention (Failed &amp; Partial)</option>
               <option value="partial">Partial</option>
               <option value="failed">Failed</option>
