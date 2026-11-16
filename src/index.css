@@ -38,7 +38,7 @@
     );
   }
 
-  /* Optional subtle CRT scanline overlay (disabled under prefers-reduced-motion) */
+  /* Live-adjustable CRT scanline overlay driven by --crt-scanline-alpha & --crt-scanline-opacity */
   .crt-scanlines::after {
     content: "";
     position: fixed;
@@ -47,18 +47,66 @@
     z-index: 40;
     background: repeating-linear-gradient(
       0deg,
-      rgba(0, 0, 0, 0.14) 0px,
-      rgba(0, 0, 0, 0.14) 1px,
+      rgba(0, 0, 0, var(--crt-scanline-alpha, 0.226)) 0px,
+      rgba(0, 0, 0, var(--crt-scanline-alpha, 0.226)) 1px,
       transparent 1px,
       transparent 3px
     );
-    opacity: 0.35;
+    opacity: var(--crt-scanline-opacity, 0.448);
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    .crt-scanlines::after {
-      display: none;
-    }
+  /* Custom CRT phosphor range slider */
+  .crt-range {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 6px;
+    border-radius: 9999px;
+    border: 1px solid var(--color-crt-border);
+    background: linear-gradient(
+      to right,
+      var(--crt-range-fill, var(--color-crt-phosphor)) 0%,
+      var(--crt-range-fill, var(--color-crt-phosphor)) var(--slider-pct, 35%),
+      var(--color-crt-surface) var(--slider-pct, 35%),
+      var(--color-crt-surface) 100%
+    );
+    cursor: pointer;
+  }
+
+  .crt-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 9999px;
+    background: var(--crt-range-thumb, var(--color-crt-phosphor));
+    border: 2px solid var(--color-crt-bg);
+    box-shadow: 0 0 0 1px var(--color-crt-border-strong);
+    cursor: pointer;
+    transition: transform 120ms ease;
+  }
+
+  .crt-range::-webkit-slider-thumb:hover {
+    transform: scale(1.12);
+  }
+
+  .crt-range::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 9999px;
+    background: var(--crt-range-thumb, var(--color-crt-phosphor));
+    border: 2px solid var(--color-crt-bg);
+    box-shadow: 0 0 0 1px var(--color-crt-border-strong);
+    cursor: pointer;
+    transition: transform 120ms ease;
+  }
+
+  .crt-range::-moz-range-thumb:hover {
+    transform: scale(1.12);
+  }
+
+  .crt-range:focus-visible {
+    outline: 2px solid var(--color-crt-phosphor);
+    outline-offset: 3px;
   }
 
   /* Custom thin CRT scrollbars */
