@@ -204,6 +204,12 @@ export function initDb(): Database.Database {
     WHERE status = 'running'
   `).run(now);
 
+  const interruptedReleaseRows = db.prepare(`
+    SELECT id FROM catalog_releases WHERE status = 'downloading'
+    UNION
+    SELECT DISTINCT release_id AS id FROM catalog_release_files WHERE status = 'downloading'
+  `).all() as { id: number }[];
+
   db.prepare(`
     UPDATE catalog_release_files
     SET status = 'failed', error_message = COALESCE(error_message, 'Interrupted by process restart')
@@ -215,6 +221,10 @@ export function initDb(): Database.Database {
     SET status = 'failed', error_message = COALESCE(error_message, 'Interrupted by process restart')
     WHERE status = 'downloading'
   `).run();
+
+  for (const relRow of interruptedReleaseRows) {
+    recomputeReleaseRollup(Number(relRow.id));
+  }
 
   const remainingRuns = db.prepare('SELECT COUNT(*) as count FROM sync_runs').get() as { count: number };
   if (remainingRuns.count === 0) {
@@ -888,7 +898,11 @@ export function recomputeReleaseRollup(releaseId: number): RepositoryItemRecord 
     JSON.stringify(releaseTags),
     totalBytes,
     status,
-    failedCount > 0 ? firstError || `${failedCount} file transfer(s) failed` : null,
+    files.length === 0 && status === 'failed'
+      ? (row.error_message ? String(row.error_message) : 'Interrupted or failed before file download')
+      : failedCount > 0
+        ? firstError || `${failedCount} file transfer(s) failed`
+        : null,
     latestDownloadedAt,
     metadataJson,
     releaseId,
@@ -1011,8 +1025,24 @@ export function upsertCatalogRelease(input: {
   return recomputeReleaseRollup(Number(row.id))!;
 }
 
+export function markCatalogReleaseFailed(
+  releaseId: number,
+  errorMessage: string,
+  runId?: number | null,
+): RepositoryItemRecord | null {
+  getDb().prepare(`
+    UPDATE catalog_releases
+    SET status = 'failed',
+        error_message = ?,
+        last_run_id = COALESCE(?, last_run_id)
+    WHERE id = ?
+  `).run(errorMessage, runId ?? null, releaseId);
+  return recomputeReleaseRollup(releaseId);
+}
+
 export function upsertReleaseFile(input: {
   releaseId: number;
+  targetFileId?: number;
   remoteUrl: string;
   downloadUrl: string;
   remotePath: string;
@@ -1042,16 +1072,31 @@ export function upsertReleaseFile(input: {
 
   const conn = getDb();
   const tx = conn.transaction(() => {
+    const byTarget =
+      input.targetFileId !== undefined && Number.isInteger(input.targetFileId) && input.targetFileId > 0
+        ? (conn
+            .prepare('SELECT id FROM catalog_release_files WHERE id = ? AND release_id = ?')
+            .get(input.targetFileId, input.releaseId) as { id: number } | undefined)
+        : undefined;
     const byUrl = conn
-      .prepare('SELECT id FROM catalog_release_files WHERE remote_url = ?')
-      .get(input.remoteUrl) as { id: number } | undefined;
+      .prepare('SELECT id, release_id FROM catalog_release_files WHERE remote_url = ?')
+      .get(input.remoteUrl) as { id: number; release_id: number } | undefined;
     const byName = conn
       .prepare('SELECT id FROM catalog_release_files WHERE release_id = ? AND filename = ?')
       .get(input.releaseId, input.filename) as { id: number } | undefined;
 
-    const targetId = byUrl?.id ?? byName?.id ?? null;
-    if (byUrl && byName && byUrl.id !== byName.id) {
-      conn.prepare('DELETE FROM catalog_release_files WHERE id = ?').run(byName.id);
+    const targetId =
+      byUrl && byUrl.release_id !== input.releaseId
+        ? byUrl.id
+        : (byTarget?.id ?? byUrl?.id ?? byName?.id ?? null);
+
+    if (targetId !== null) {
+      if (byUrl && byUrl.release_id === input.releaseId && byUrl.id !== targetId) {
+        conn.prepare('DELETE FROM catalog_release_files WHERE id = ?').run(byUrl.id);
+      }
+      if (byName && byName.id !== targetId) {
+        conn.prepare('DELETE FROM catalog_release_files WHERE id = ?').run(byName.id);
+      }
     }
 
     if (targetId !== null) {

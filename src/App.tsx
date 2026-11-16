@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -42,6 +42,9 @@ export default function App() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [catalogRevision, setCatalogRevision] = useState(0);
   const [catalogFocusFailedTick, setCatalogFocusFailedTick] = useState(0);
+  const [activeRetryItemId, setActiveRetryItemId] = useState<number | null>(null);
+  const activeRetryRunRef = useRef<{ runId: number; itemId: number } | null>(null);
+  const prevActiveRunRef = useRef<SyncRunRecord | null>(null);
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -52,14 +55,32 @@ export default function App() {
         fetch('/api/logs?limit=150'),
       ]);
 
-      if (statusRes.ok) setStatus(await statusRes.json());
+      let loadedStatus: ServiceStatusSnapshot | null = null;
+      if (statusRes.ok) {
+        loadedStatus = (await statusRes.json()) as ServiceStatusSnapshot;
+        setStatus(loadedStatus);
+        prevActiveRunRef.current = loadedStatus.activeRun;
+      }
       if (configRes.ok) {
         const d = await configRes.json();
         setConfig(d.config);
       }
       if (runsRes.ok) {
         const d = await runsRes.json();
-        setRuns(d.runs || []);
+        const nextRuns = (d.runs || []) as SyncRunRecord[];
+        setRuns(nextRuns);
+        if (loadedStatus && !loadedStatus.activeRun && activeRetryRunRef.current) {
+          const trackedId = activeRetryRunRef.current.runId;
+          const finishedRun = nextRuns.find((r) => r.id === trackedId);
+          if (finishedRun && finishedRun.triggerType === 'retry' && finishedRun.status === 'failed' && finishedRun.errorSummary) {
+            setErrorBanner(finishedRun.errorSummary);
+          }
+          activeRetryRunRef.current = null;
+          setActiveRetryItemId(null);
+        }
+      } else if (loadedStatus && !loadedStatus.activeRun) {
+        activeRetryRunRef.current = null;
+        setActiveRetryItemId(null);
       }
       if (logsRes.ok) {
         const d = await logsRes.json();
@@ -77,9 +98,21 @@ export default function App() {
     source.onopen = () => setSseConnected(true);
     source.onerror = () => setSseConnected(false);
 
+    let catalogBumpTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleCatalogRefresh = () => {
+      if (catalogBumpTimer) return;
+      catalogBumpTimer = setTimeout(() => {
+        catalogBumpTimer = null;
+        setCatalogRevision((rev) => rev + 1);
+      }, 250);
+    };
+
     source.addEventListener('status', (ev) => {
       try {
         const nextStatus = JSON.parse((ev as MessageEvent).data) as ServiceStatusSnapshot;
+        const prevRun = prevActiveRunRef.current;
+        prevActiveRunRef.current = nextStatus.activeRun;
+
         setStatus(nextStatus);
         setConfig((prev) =>
           prev && prev.lastWatermarkAt !== nextStatus.lastWatermarkAt
@@ -97,11 +130,32 @@ export default function App() {
           });
         } else {
           setStopRequested(false);
+          if (prevRun) {
+            if (activeRetryRunRef.current?.runId === prevRun.id) {
+              activeRetryRunRef.current = null;
+            }
+            setActiveRetryItemId(null);
+            scheduleCatalogRefresh();
+          }
           // Refresh runs when an active run finishes
           void fetch('/api/runs?limit=20')
             .then((r) => (r.ok ? r.json() : null))
             .then((d) => {
-              if (d?.runs) setRuns(d.runs);
+              if (d?.runs) {
+                const nextRuns = d.runs as SyncRunRecord[];
+                setRuns(nextRuns);
+                if (prevRun) {
+                  const finishedRun = nextRuns.find((r) => r.id === prevRun.id);
+                  if (
+                    finishedRun &&
+                    finishedRun.triggerType === 'retry' &&
+                    finishedRun.status === 'failed' &&
+                    finishedRun.errorSummary
+                  ) {
+                    setErrorBanner(finishedRun.errorSummary);
+                  }
+                }
+              }
             })
             .catch(() => undefined);
         }
@@ -137,15 +191,6 @@ export default function App() {
         // Ignore
       }
     });
-
-    let catalogBumpTimer: ReturnType<typeof setTimeout> | null = null;
-    const scheduleCatalogRefresh = () => {
-      if (catalogBumpTimer) return;
-      catalogBumpTimer = setTimeout(() => {
-        catalogBumpTimer = null;
-        setCatalogRevision((rev) => rev + 1);
-      }, 250);
-    };
 
     source.addEventListener('catalog_updated', () => {
       scheduleCatalogRefresh();
@@ -230,10 +275,14 @@ export default function App() {
     setErrorBanner(null);
     const qs = fileId ? `?fileId=${encodeURIComponent(String(fileId))}` : '';
     const res = await fetch(`/api/items/${itemId}/retry${qs}`, { method: 'POST' });
-    const parsed = await readJsonSafely<{ error?: string }>(res);
+    const parsed = await readJsonSafely<{ run?: SyncRunRecord; error?: string }>(res);
     if (!parsed.ok) {
       setErrorBanner(parsed.errorMessage || `Retry failed (HTTP ${res.status})`);
       return;
+    }
+    if (parsed.data?.run) {
+      activeRetryRunRef.current = { runId: parsed.data.run.id, itemId };
+      setActiveRetryItemId(itemId);
     }
     await loadInitialData();
   };
@@ -599,6 +648,7 @@ export default function App() {
                   status={status}
                   catalogRevision={catalogRevision}
                   focusFailedSignal={catalogFocusFailedTick}
+                  activeRetryItemId={activeRetryItemId}
                   onSaveConfig={handleSaveConfig}
                   onRetryItem={handleRetryItem}
                   onRetryAllFailed={handleRetryAllFailed}
