@@ -44,6 +44,79 @@ import { readJsonSafely } from './utils/http';
 const SYNC_SCOPE_STORAGE_KEY = 'rgt_sync_scope_v1';
 const SYNC_DRY_RUN_STORAGE_KEY = 'rgt_sync_dry_run_v1';
 
+interface AppHistoryState {
+  section: NavSection;
+  target: OperationsSectionTarget | null;
+  scrollY: number;
+  index: number;
+}
+
+interface PendingNavIntent {
+  section: NavSection;
+  target: OperationsSectionTarget | null;
+  historyDelta: number;
+}
+
+const OPERATIONS_TARGET_HASH_SLUG: Record<OperationsSectionTarget, string> = {
+  auth: 'auth',
+  systems: 'systems',
+  releaseTypes: 'release-types',
+};
+
+const HASH_SLUG_TO_OPERATIONS_TARGET: Record<string, OperationsSectionTarget> = {
+  auth: 'auth',
+  systems: 'systems',
+  'release-types': 'releaseTypes',
+  releasetypes: 'releaseTypes',
+};
+
+function parseLocationHash(rawHash: string): {
+  section: NavSection;
+  target: OperationsSectionTarget | null;
+} {
+  const cleaned = rawHash.replace(/^#\/?/, '').trim().toLowerCase();
+  if (!cleaned) {
+    return { section: 'monitor', target: null };
+  }
+  const [head, sub] = cleaned.split('/');
+  if (head === 'monitor' || head === 'sync') {
+    return { section: 'monitor', target: null };
+  }
+  if (head === 'catalog') {
+    return { section: 'catalog', target: null };
+  }
+  if (head === 'schedule') {
+    return { section: 'schedule', target: null };
+  }
+  if (head === 'operations') {
+    const target = sub ? (HASH_SLUG_TO_OPERATIONS_TARGET[sub] ?? null) : null;
+    return { section: 'operations', target };
+  }
+  return { section: 'monitor', target: null };
+}
+
+function formatLocationHash(
+  section: NavSection,
+  target: OperationsSectionTarget | null = null,
+): string {
+  if (section === 'operations' && target) {
+    return `#operations/${OPERATIONS_TARGET_HASH_SLUG[target]}`;
+  }
+  return `#${section}`;
+}
+
+function isAppHistoryState(raw: unknown): raw is AppHistoryState {
+  if (!raw || typeof raw !== 'object') return false;
+  const candidate = raw as Partial<AppHistoryState>;
+  return (
+    (candidate.section === 'monitor' ||
+      candidate.section === 'catalog' ||
+      candidate.section === 'schedule' ||
+      candidate.section === 'operations') &&
+    typeof candidate.index === 'number'
+  );
+}
+
 function loadInitialSyncScope(): SyncScope {
   try {
     const raw = window.localStorage?.getItem(SYNC_SCOPE_STORAGE_KEY);
@@ -63,17 +136,47 @@ function loadInitialDryRunEnabled(): boolean {
 }
 
 export default function App() {
-  const [section, setSection] = useState<NavSection>('monitor');
-  const [operationsFocus, setOperationsFocus] = useState<OperationsFocusRequest | null>(null);
-  const operationsFocusNonceRef = useRef(0);
+  const initialRouteRef = useRef<{
+    section: NavSection;
+    target: OperationsSectionTarget | null;
+  } | null>(null);
+  if (!initialRouteRef.current) {
+    initialRouteRef.current = parseLocationHash(
+      typeof window !== 'undefined' ? window.location.hash : '',
+    );
+  }
+
+  const [section, setSection] = useState<NavSection>(() => initialRouteRef.current!.section);
+  const [operationsFocus, setOperationsFocus] = useState<OperationsFocusRequest | null>(() =>
+    initialRouteRef.current!.target
+      ? { target: initialRouteRef.current!.target, nonce: 1 }
+      : null,
+  );
+  const operationsFocusNonceRef = useRef(initialRouteRef.current.target ? 1 : 0);
   const operationsPanelRef = useRef<OperationsPanelHandle | null>(null);
   const [operationsDirty, setOperationsDirty] = useState<OperationsDirtyState>({
     isDirty: false,
     changedSections: [],
   });
-  const [pendingNavSection, setPendingNavSection] = useState<NavSection | null>(null);
+  const [pendingNavIntent, setPendingNavIntent] = useState<PendingNavIntent | null>(null);
   const [navGuardSaving, setNavGuardSaving] = useState(false);
   const [navGuardError, setNavGuardError] = useState<string | null>(null);
+
+  const sectionRef = useRef<NavSection>(initialRouteRef.current.section);
+  const operationsDirtyRef = useRef(false);
+  const currentHistoryStateRef = useRef<AppHistoryState>({
+    section: initialRouteRef.current.section,
+    target: initialRouteRef.current.target,
+    scrollY: 0,
+    index: 0,
+  });
+  const historyIndexRef = useRef(0);
+  const ignoringNextPopstateRef = useRef(false);
+  const pendingScrollRestoreRef = useRef<{ section: NavSection; scrollY: number } | null>(null);
+
+  sectionRef.current = section;
+  operationsDirtyRef.current = operationsDirty.isDirty;
+
   const [status, setStatus] = useState<ServiceStatusSnapshot | null>(null);
   const [config, setConfig] = useState<ScraperConfigPublic | null>(null);
   const [runs, setRuns] = useState<SyncRunRecord[]>([]);
@@ -463,19 +566,200 @@ export default function App() {
     saveCrtDisplaySettings(crtSettings);
   }, [crtSettings]);
 
-  const requestSectionChange = useCallback(
-    (nextSection: NavSection) => {
-      if (nextSection === section) return;
-      if (section === 'operations' && operationsDirty.isDirty) {
-        setNavGuardError(null);
-        setPendingNavSection(nextSection);
-        return;
+  const commitNavigation = useCallback(
+    (nextSection: NavSection, target: OperationsSectionTarget | null = null) => {
+      if (typeof window !== 'undefined') {
+        const currentEntry: AppHistoryState = {
+          ...currentHistoryStateRef.current,
+          scrollY: window.scrollY,
+        };
+        window.history.replaceState(currentEntry, '', window.location.href);
+
+        const nextIndex = historyIndexRef.current + 1;
+        historyIndexRef.current = nextIndex;
+        const nextEntry: AppHistoryState = {
+          section: nextSection,
+          target: nextSection === 'operations' ? target : null,
+          scrollY: 0,
+          index: nextIndex,
+        };
+        currentHistoryStateRef.current = nextEntry;
+        window.history.pushState(
+          nextEntry,
+          '',
+          formatLocationHash(nextEntry.section, nextEntry.target),
+        );
       }
-      setOperationsFocus(null);
+
+      if (nextSection === 'operations' && target) {
+        pendingScrollRestoreRef.current = null;
+        operationsFocusNonceRef.current += 1;
+        setOperationsFocus({
+          target,
+          nonce: operationsFocusNonceRef.current,
+        });
+      } else {
+        setOperationsFocus(null);
+        pendingScrollRestoreRef.current = { section: nextSection, scrollY: 0 };
+      }
       setSection(nextSection);
     },
-    [section, operationsDirty.isDirty],
+    [],
   );
+
+  const requestSectionChange = useCallback(
+    (nextSection: NavSection, target: OperationsSectionTarget | null = null) => {
+      if (nextSection === section && !target) return;
+      if (section === 'operations' && nextSection !== 'operations' && operationsDirty.isDirty) {
+        setNavGuardError(null);
+        setPendingNavIntent({
+          section: nextSection,
+          target,
+          historyDelta: 0,
+        });
+        return;
+      }
+      commitNavigation(nextSection, target);
+    },
+    [section, operationsDirty.isDirty, commitNavigation],
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if ('scrollRestoration' in window.history) {
+      window.history.scrollRestoration = 'manual';
+    }
+
+    const existingState = window.history.state;
+    if (isAppHistoryState(existingState)) {
+      currentHistoryStateRef.current = existingState;
+      historyIndexRef.current = existingState.index;
+      if (existingState.scrollY > 0) {
+        pendingScrollRestoreRef.current = {
+          section: existingState.section,
+          scrollY: existingState.scrollY,
+        };
+      }
+    } else {
+      const parsed = parseLocationHash(window.location.hash);
+      const initialEntry: AppHistoryState = {
+        section: parsed.section,
+        target: parsed.target,
+        scrollY: 0,
+        index: 0,
+      };
+      currentHistoryStateRef.current = initialEntry;
+      historyIndexRef.current = 0;
+      window.history.replaceState(
+        initialEntry,
+        '',
+        formatLocationHash(initialEntry.section, initialEntry.target),
+      );
+    }
+
+    const onPopState = (ev: PopStateEvent) => {
+      if (ignoringNextPopstateRef.current) {
+        ignoringNextPopstateRef.current = false;
+        return;
+      }
+
+      const rawState = ev.state;
+      let nextState: AppHistoryState;
+      let hasIndexedState = false;
+
+      if (isAppHistoryState(rawState)) {
+        hasIndexedState = true;
+        nextState = {
+          section: rawState.section,
+          target: rawState.target ?? null,
+          scrollY: typeof rawState.scrollY === 'number' ? rawState.scrollY : 0,
+          index: rawState.index,
+        };
+      } else {
+        const parsed = parseLocationHash(window.location.hash);
+        const nextIdx = historyIndexRef.current + 1;
+        nextState = {
+          section: parsed.section,
+          target: parsed.target,
+          scrollY: 0,
+          index: nextIdx,
+        };
+      }
+
+      if (
+        sectionRef.current === 'operations' &&
+        nextState.section !== 'operations' &&
+        operationsDirtyRef.current
+      ) {
+        const currentIndex = currentHistoryStateRef.current.index;
+        const revertDelta = hasIndexedState
+          ? nextState.index < currentIndex
+            ? Math.max(1, currentIndex - nextState.index)
+            : Math.min(-1, currentIndex - nextState.index)
+          : -1;
+        ignoringNextPopstateRef.current = true;
+        window.history.go(revertDelta);
+        setNavGuardError(null);
+        setPendingNavIntent({
+          section: nextState.section,
+          target: nextState.target,
+          historyDelta: -revertDelta,
+        });
+        return;
+      }
+
+      if (!hasIndexedState) {
+        historyIndexRef.current = nextState.index;
+        window.history.replaceState(
+          nextState,
+          '',
+          formatLocationHash(nextState.section, nextState.target),
+        );
+      } else {
+        historyIndexRef.current = Math.max(historyIndexRef.current, nextState.index);
+      }
+
+      currentHistoryStateRef.current = nextState;
+
+      if (nextState.section === 'operations' && nextState.target && nextState.scrollY === 0) {
+        pendingScrollRestoreRef.current = null;
+        operationsFocusNonceRef.current += 1;
+        setOperationsFocus({
+          target: nextState.target,
+          nonce: operationsFocusNonceRef.current,
+        });
+      } else {
+        setOperationsFocus(null);
+        pendingScrollRestoreRef.current = {
+          section: nextState.section,
+          scrollY: nextState.scrollY,
+        };
+      }
+      setSection(nextState.section);
+    };
+
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  const hasLoadedWorkspace = Boolean(status && config);
+  useEffect(() => {
+    if (!hasLoadedWorkspace) return;
+    const pending = pendingScrollRestoreRef.current;
+    if (!pending || pending.section !== section) return;
+    pendingScrollRestoreRef.current = null;
+
+    let rafInner = 0;
+    const rafOuter = window.requestAnimationFrame(() => {
+      rafInner = window.requestAnimationFrame(() => {
+        window.scrollTo({ top: pending.scrollY, behavior: 'auto' });
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(rafOuter);
+      if (rafInner) window.cancelAnimationFrame(rafInner);
+    };
+  }, [section, hasLoadedWorkspace]);
 
   useEffect(() => {
     if (!showFullSyncConfirm) return;
@@ -489,19 +773,19 @@ export default function App() {
   }, [showFullSyncConfirm, actionPending]);
 
   useEffect(() => {
-    if (!pendingNavSection) return;
+    if (!pendingNavIntent) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !navGuardSaving) {
-        setPendingNavSection(null);
+        setPendingNavIntent(null);
         setNavGuardError(null);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [pendingNavSection, navGuardSaving]);
+  }, [pendingNavIntent, navGuardSaving]);
 
   const handleGuardSaveAndLeave = async () => {
-    if (!pendingNavSection) return;
+    if (!pendingNavIntent) return;
     setNavGuardSaving(true);
     setNavGuardError(null);
     const saved = await operationsPanelRef.current?.save();
@@ -510,20 +794,28 @@ export default function App() {
       setNavGuardError('Fix the validation or save error shown in Operations before leaving.');
       return;
     }
-    const destination = pendingNavSection;
-    setPendingNavSection(null);
-    setOperationsFocus(null);
-    setSection(destination);
+    const intent = pendingNavIntent;
+    setPendingNavIntent(null);
+    operationsDirtyRef.current = false;
+    if (intent.historyDelta !== 0) {
+      window.history.go(intent.historyDelta);
+    } else {
+      commitNavigation(intent.section, intent.target);
+    }
   };
 
   const handleGuardDiscardAndLeave = () => {
-    if (!pendingNavSection || navGuardSaving) return;
-    const destination = pendingNavSection;
+    if (!pendingNavIntent || navGuardSaving) return;
+    const intent = pendingNavIntent;
     operationsPanelRef.current?.discard();
-    setPendingNavSection(null);
+    setPendingNavIntent(null);
     setNavGuardError(null);
-    setOperationsFocus(null);
-    setSection(destination);
+    operationsDirtyRef.current = false;
+    if (intent.historyDelta !== 0) {
+      window.history.go(intent.historyDelta);
+    } else {
+      commitNavigation(intent.section, intent.target);
+    }
   };
 
   const crtCssVars = computeCrtCssVariables(crtSettings);
@@ -916,16 +1208,7 @@ export default function App() {
                   onClearLogs={handleClearLogs}
                   onClearRuns={handleClearRuns}
                   onNavigateToOperations={(target?: OperationsSectionTarget) => {
-                    if (target) {
-                      operationsFocusNonceRef.current += 1;
-                      setOperationsFocus({
-                        target,
-                        nonce: operationsFocusNonceRef.current,
-                      });
-                    } else {
-                      setOperationsFocus(null);
-                    }
-                    setSection('operations');
+                    requestSectionChange('operations', target ?? null);
                   }}
                   onRetryItem={handleRetryItem}
                   onRetryAllFailed={handleRetryAllFailed}
@@ -981,14 +1264,14 @@ export default function App() {
       </div>
 
       {/* Unsaved Operations Changes Guard Modal */}
-      {pendingNavSection && (
+      {pendingNavIntent && (
         <div
           role="dialog"
           aria-modal="true"
           aria-labelledby="unsaved-ops-title"
           onClick={() => {
             if (!navGuardSaving) {
-              setPendingNavSection(null);
+              setPendingNavIntent(null);
               setNavGuardError(null);
             }
           }}
@@ -1014,7 +1297,8 @@ export default function App() {
                   </span>
                   . Save before switching to{' '}
                   <span className="text-crt-text font-medium">
-                    {navItems.find((n) => n.id === pendingNavSection)?.label ?? pendingNavSection}
+                    {navItems.find((n) => n.id === pendingNavIntent.section)?.label ??
+                      pendingNavIntent.section}
                   </span>
                   ?
                 </p>
@@ -1032,7 +1316,7 @@ export default function App() {
                 type="button"
                 disabled={navGuardSaving}
                 onClick={() => {
-                  setPendingNavSection(null);
+                  setPendingNavIntent(null);
                   setNavGuardError(null);
                 }}
                 className="px-3 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
