@@ -128,8 +128,8 @@ export const RELEASE_TYPE_PRESETS: readonly ReleaseTypePreset[] = [
   },
   {
     id: 'modified_community',
-    label: 'Hacks, Translations, Homebrew & Ports',
-    values: [TRANSLATIONS_ALL_KEY, MACHINE_TRANSLATION_KEY, 'hack', 'homebrew', 'port'],
+    label: 'Hacks + English + Ports',
+    values: ['translation:english', MACHINE_TRANSLATION_KEY, 'hack', 'homebrew', 'port'],
   },
 ];
 
