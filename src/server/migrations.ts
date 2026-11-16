@@ -364,6 +364,16 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 12,
+    name: 'retire_custom_brand_logo_url',
+    description: 'Clear retired custom_brand_logo_url values after replacing header branding with the built-in CSS CRT banner',
+    up: (db) => {
+      if (tableHasColumn(db, 'scraper_config', 'custom_brand_logo_url')) {
+        db.prepare(`UPDATE scraper_config SET custom_brand_logo_url = '' WHERE id = 1`).run();
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

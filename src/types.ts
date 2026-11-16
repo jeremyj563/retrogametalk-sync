@@ -40,7 +40,6 @@ export interface ScraperConfigPublic {
   romMaxFilenameLen: number;
   devicePreset: string;
   deviceFolderMap: Record<string, string>;
-  customBrandLogoUrl: string;
   updatedAt: string;
   envOverrides: string[];
 }

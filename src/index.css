@@ -807,6 +807,226 @@
   }
 }
 
+/* --------------------------------------------------------------------------
+   Native CSS Animated CRT Header Banner (BrandMark)
+   -------------------------------------------------------------------------- */
+.crt-brand-banner {
+  --crt-banner-accent: var(--color-crt-phosphor);
+  --crt-banner-accent-rgb: var(--crt-phosphor-rgb, 56, 229, 107);
+}
+
+.crt-brand-banner[data-banner-dry-run="true"] {
+  --crt-banner-accent: var(--color-crt-amber);
+  --crt-banner-accent-rgb: 242, 178, 51;
+}
+
+.crt-banner-cartridge {
+  transition: filter 200ms ease, transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.crt-banner-scanline {
+  opacity: 0.22;
+}
+
+.crt-banner-pin-runner {
+  opacity: 0.85;
+}
+
+.crt-banner-led {
+  opacity: 0.9;
+}
+
+.crt-banner-sync-word {
+  color: var(--crt-banner-accent);
+  transition: color 180ms ease, text-shadow 200ms ease, filter 200ms ease;
+}
+
+.crt-fx-active .crt-banner-sync-word {
+  text-shadow: 0 0 8px rgba(var(--crt-banner-accent-rgb), 0.38);
+}
+
+.crt-banner-track {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 3.5px;
+  border-radius: 9999px;
+  background-color: var(--color-crt-elevated);
+  overflow: hidden;
+  transition: box-shadow 200ms ease;
+}
+
+/* Static resting posture (used when Living UI Motion is Off or reduced-motion is active) */
+.crt-banner-track-beam {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 9999px;
+  opacity: 0.48;
+  background: linear-gradient(
+    90deg,
+    rgba(var(--crt-banner-accent-rgb), 0.18) 0%,
+    var(--crt-banner-accent) 100%
+  );
+}
+
+@keyframes crt-banner-chevron-flow {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(14px);
+  }
+}
+
+@keyframes crt-banner-scanline-sweep {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.24;
+  }
+  50% {
+    transform: translateY(24.5px);
+    opacity: 0.48;
+  }
+}
+
+@keyframes crt-banner-pin-step {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(35px);
+  }
+}
+
+@keyframes crt-banner-led-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes crt-banner-track-sweep {
+  0% {
+    transform: translateX(-115%);
+  }
+  100% {
+    transform: translateX(305%);
+  }
+}
+
+/* Animated Banner Rules across Low, Medium, and High */
+[data-crt-motion="low"],
+[data-crt-motion="medium"],
+[data-crt-motion="high"] {
+  .crt-banner-cartridge {
+    filter: drop-shadow(
+      0 0 var(--crt-motion-glow-sm, 2px)
+        rgba(var(--crt-banner-accent-rgb), var(--crt-motion-tail-alpha, 0.3))
+    );
+  }
+
+  .crt-banner-chevrons {
+    animation: crt-banner-chevron-flow calc(1.9s * var(--crt-motion-speed, 1)) linear infinite;
+  }
+
+  .crt-banner-scanline {
+    opacity: 0.38;
+    animation: crt-banner-scanline-sweep calc(3.4s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+  }
+
+  .crt-banner-pin-runner {
+    opacity: 1;
+    animation: crt-banner-pin-step calc(3.1s * var(--crt-motion-speed, 1)) steps(5, end) infinite;
+  }
+
+  .crt-banner-led {
+    animation: crt-banner-led-pulse calc(2.6s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+  }
+
+  .crt-banner-track {
+    box-shadow: 0 0 var(--crt-motion-glow-sm, 2px)
+      rgba(var(--crt-banner-accent-rgb), calc(var(--crt-motion-tail-alpha, 0.25) * 0.65));
+  }
+
+  .crt-banner-track-beam {
+    width: 36%;
+    opacity: 1;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(var(--crt-banner-accent-rgb), 0.24) 22%,
+      var(--crt-banner-accent) 76%,
+      rgba(255, 255, 255, 0.88) 100%
+    );
+    will-change: transform;
+    animation: crt-banner-track-sweep calc(3.1s * var(--crt-motion-speed, 1)) cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
+  /* Header Brand Anchor Hover / Focus Wake-Up */
+  .crt-brand-link:hover .crt-banner-cartridge,
+  .crt-brand-link:focus-visible .crt-banner-cartridge {
+    filter: drop-shadow(
+      0 0 var(--crt-motion-glow-lg, 5px)
+        rgba(var(--crt-banner-accent-rgb), var(--crt-motion-glow-alpha, 0.45))
+    );
+  }
+
+  .crt-brand-link:hover .crt-banner-chevrons,
+  .crt-brand-link:focus-visible .crt-banner-chevrons {
+    animation-duration: 1.05s;
+  }
+
+  .crt-brand-link:hover .crt-banner-track-beam,
+  .crt-brand-link:focus-visible .crt-banner-track-beam {
+    animation-duration: 1.65s;
+  }
+}
+
+/* Medium & High Tier Wordmark Breathe + Richer Cadence */
+[data-crt-motion="medium"],
+[data-crt-motion="high"] {
+  .crt-banner-sync-word {
+    animation: crt-phosphor-breathe calc(3.2s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+  }
+
+  .crt-banner-track-beam {
+    animation-duration: calc(2.45s * var(--crt-motion-speed, 1));
+  }
+}
+
+/* Active Sync / Active Dry Run High-Throughput Cadence Boost */
+[data-crt-motion="low"][data-sync-running="true"],
+[data-crt-motion="medium"][data-sync-running="true"],
+[data-crt-motion="high"][data-sync-running="true"] {
+  .crt-banner-chevrons {
+    animation-duration: 0.9s;
+  }
+
+  .crt-banner-pin-runner {
+    animation-duration: 1.35s;
+  }
+
+  .crt-banner-led {
+    animation-duration: 1.1s;
+  }
+
+  .crt-banner-track-beam {
+    animation-duration: 1.35s;
+  }
+
+  .crt-banner-cartridge {
+    filter: drop-shadow(
+      0 0 var(--crt-motion-glow-lg, 6px)
+        rgba(var(--crt-banner-accent-rgb), var(--crt-motion-glow-alpha, 0.5))
+    );
+  }
+}
+
 /* Accessibility: strictly honor OS reduced-motion preference */
 @media (prefers-reduced-motion: reduce) {
   .crt-svg-sync-base {
@@ -830,9 +1050,25 @@
   .crt-drive-activity,
   .crt-chart-endpoint-pulse,
   .crt-dryrun-flask-active,
-  .crt-stop-active-pulse {
+  .crt-stop-active-pulse,
+  .crt-banner-chevrons,
+  .crt-banner-scanline,
+  .crt-banner-pin-runner,
+  .crt-banner-led,
+  .crt-banner-sync-word {
     animation: none !important;
     transform: none !important;
+  }
+  .crt-banner-track-beam {
+    width: 100% !important;
+    opacity: 0.48 !important;
+    animation: none !important;
+    transform: none !important;
+    background: linear-gradient(
+      90deg,
+      rgba(var(--crt-banner-accent-rgb), 0.18) 0%,
+      var(--crt-banner-accent) 100%
+    ) !important;
   }
 }
 

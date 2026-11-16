@@ -9,7 +9,6 @@ import {
   EyeOff,
   Filter,
   Gamepad2,
-  Image as ImageIcon,
   KeyRound,
   Languages,
   Save,
@@ -19,9 +18,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import { validateBrandLogoUrl } from '../shared/brandLogo';
 import { DEVICE_PRESETS, type DevicePresetId } from '../shared/devicePresets';
-import { BrandMark } from './BrandMark';
 import {
   CURATED_RELEASE_TYPE_OPTIONS,
   MACHINE_TRANSLATION_KEY,
@@ -112,8 +109,6 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
   const [romSanitizeFat32, setRomSanitizeFat32] = useState(config.romSanitizeFat32);
   const [romMaxFilenameLen, setRomMaxFilenameLen] = useState(config.romMaxFilenameLen);
   const [devicePreset, setDevicePreset] = useState(config.devicePreset || 'everdrive');
-  const [customBrandLogoUrl, setCustomBrandLogoUrl] = useState(config.customBrandLogoUrl || '');
-  const [brandPreviewError, setBrandPreviewError] = useState(false);
 
   const [spotlight, setSpotlight] = useState<OperationsFocusRequest | null>(null);
   const authSectionRef = useRef<HTMLElement | null>(null);
@@ -153,13 +148,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
     setRomSanitizeFat32(target.romSanitizeFat32);
     setRomMaxFilenameLen(target.romMaxFilenameLen);
     setDevicePreset(target.devicePreset || 'everdrive');
-    setCustomBrandLogoUrl(target.customBrandLogoUrl || '');
-    setBrandPreviewError(false);
   }, []);
-
-  useEffect(() => {
-    setBrandPreviewError(false);
-  }, [customBrandLogoUrl]);
 
   useEffect(() => {
     if (!isDirtyRef.current) {
@@ -400,7 +389,6 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
     romSanitizeFat32,
     romMaxFilenameLen,
     devicePreset,
-    customBrandLogoUrl: customBrandLogoUrl.trim(),
   });
 
   const namingPreviews = useMemo(() => {
@@ -487,10 +475,6 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
       (devicePreset || 'everdrive') !== (config.devicePreset || 'everdrive');
     if (namingChanged) changedSections.push('ROM Naming & Export');
 
-    const brandingChanged =
-      customBrandLogoUrl.trim() !== (config.customBrandLogoUrl || '').trim();
-    if (brandingChanged) changedSections.push('Interface Branding');
-
     return {
       isDirty: changedSections.length > 0,
       changedSections,
@@ -509,7 +493,6 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
     romSanitizeFat32,
     romMaxFilenameLen,
     devicePreset,
-    customBrandLogoUrl,
     usernameLockedByEnv,
     passwordLockedByEnv,
     downloadDirLockedByEnv,
@@ -544,13 +527,6 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
       setSaveMsg(null);
       return false;
     }
-    try {
-      validateBrandLogoUrl(customBrandLogoUrl);
-    } catch (err) {
-      setSaveErr(err instanceof Error ? err.message : String(err));
-      setSaveMsg(null);
-      return false;
-    }
     if (saveNoticeTimerRef.current !== null) {
       window.clearTimeout(saveNoticeTimerRef.current);
       saveNoticeTimerRef.current = null;
@@ -573,7 +549,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
     } finally {
       setSaving(false);
     }
-  }, [customTypeSelectionEmpty, customBrandLogoUrl, onSaveConfig, buildSavePayload]);
+  }, [customTypeSelectionEmpty, onSaveConfig, buildSavePayload]);
 
   const discardChanges = useCallback(() => {
     resetFormToConfig(config);
@@ -1571,89 +1547,6 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
               </div>
             ))}
           </div>
-        </div>
-      </section>
-
-      {/* Section: Interface Branding (Custom Top-Left Header Logo / Animated Banner) */}
-      <section className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
-        <div aria-hidden="true" className="crt-edge-beam">
-          <span />
-        </div>
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="flex items-start gap-2.5 min-w-0">
-            <ImageIcon className="h-4 w-4 text-crt-phosphor crt-section-icon shrink-0 mt-1" />
-            <div>
-              <h2 className="font-display text-base font-semibold text-crt-text">
-                Interface Branding
-              </h2>
-              <p className="text-xs text-crt-muted">
-                Replace the top-left RetroGameTalk Sync header title with a custom logo or looping animated banner across all browsers.
-              </p>
-            </div>
-          </div>
-          {customBrandLogoUrl.trim() !== '' && (
-            <button
-              type="button"
-              onClick={() => setCustomBrandLogoUrl('')}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <X className="h-3.5 w-3.5" />
-              <span>Restore Default Title</span>
-            </button>
-          )}
-        </div>
-
-        <div className="space-y-2">
-          <label htmlFor="custom-brand-logo-url" className="block text-xs text-crt-muted">
-            Custom Logo / Banner URL
-          </label>
-          <input
-            id="custom-brand-logo-url"
-            type="text"
-            value={customBrandLogoUrl}
-            onChange={(e) => setCustomBrandLogoUrl(e.target.value)}
-            placeholder="https://example.com/retro-banner.gif (leave blank for default title)"
-            className="w-full px-3 py-2 text-xs font-mono bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted/50 focus:outline-none focus:border-crt-phosphor"
-          />
-          <p className="text-[11px] font-mono text-crt-muted">
-            Supports static and looping animated GIF, APNG, WebP, PNG, SVG, or looping MP4 / WebM URLs. Automatically constrained to header height (32px max).
-          </p>
-        </div>
-
-        {/* Simulated Sticky Top Header Preview */}
-        <div className="border border-crt-border bg-crt-bg rounded overflow-hidden">
-          <div className="px-3.5 py-2 border-b border-crt-border/70 flex items-center justify-between gap-2 text-[11px] font-mono text-crt-muted">
-            <span>Top-Left Header Preview</span>
-            <span>
-              {!customBrandLogoUrl.trim()
-                ? 'Default wordmark'
-                : brandPreviewError
-                  ? 'Load failed · falling back to title'
-                  : 'Constrained to 32px height'}
-            </span>
-          </div>
-          <div className="px-4 py-3 flex items-center justify-between gap-4 bg-crt-bg/95">
-            <div className="inline-flex items-center min-h-8">
-              <BrandMark
-                url={customBrandLogoUrl}
-                onMediaLoad={() => setBrandPreviewError(false)}
-                onMediaError={() => setBrandPreviewError(true)}
-              />
-            </div>
-            <div className="hidden sm:flex items-center gap-2 text-[11px] font-mono text-crt-muted/50 select-none">
-              <span>Incremental · Full</span>
-              <span aria-hidden="true">·</span>
-              <span>Run Sync</span>
-            </div>
-          </div>
-          {brandPreviewError && customBrandLogoUrl.trim() !== '' && (
-            <div className="px-3.5 py-2 border-t border-crt-amber/30 bg-crt-amber/5 flex items-center gap-2 text-[11px] font-mono text-crt-amber">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              <span>
-                Could not load this media URL in the browser. Verify the link is reachable and publicly readable—until fixed, the header displays the default title.
-              </span>
-            </div>
-          )}
         </div>
       </section>
 

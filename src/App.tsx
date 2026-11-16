@@ -836,7 +836,7 @@ export default function App() {
       {/* Sticky Top Header & Full Sync Confirmation Container */}
       <div className="sticky top-0 z-30">
         <header className="bg-crt-bg/95 backdrop-blur border-b border-crt-border px-4 lg:px-6 py-3.5 flex flex-wrap md:flex-nowrap items-center justify-between gap-4">
-        {/* Zone 1: Single-line Brand Title or Custom Header Logo/Banner */}
+        {/* Zone 1: Native CSS Animated CRT Brand Banner */}
         <a
           href="#monitor"
           onClick={(e) => {
@@ -844,9 +844,16 @@ export default function App() {
             requestSectionChange('monitor');
           }}
           aria-label="RetroGameTalk Sync"
-          className="inline-flex items-center shrink-0 min-h-8"
+          className="crt-brand-link inline-flex items-center shrink-0 min-h-8 rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-crt-phosphor"
         >
-          <BrandMark url={config?.customBrandLogoUrl ?? ''} />
+          <BrandMark
+            isSyncRunning={Boolean(status?.activeRun)}
+            isDryRun={
+              status?.activeRun
+                ? Boolean(status.activeRun.dryRun || status.activeRun.mode === 'dry_run')
+                : dryRunEnabled
+            }
+          />
         </a>
 
         {/* Sync Scope + Independent Dry Run Toggle + Reserved-Width Run/Stop Action */}
