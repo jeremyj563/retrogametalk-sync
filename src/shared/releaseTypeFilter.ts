@@ -126,6 +126,11 @@ export const RELEASE_TYPE_PRESETS: readonly ReleaseTypePreset[] = [
     label: 'All Fan Translations',
     values: ['translations'],
   },
+  {
+    id: 'modified_community',
+    label: 'Hacks, Translations, Homebrew & Ports',
+    values: [TRANSLATIONS_ALL_KEY, MACHINE_TRANSLATION_KEY, 'hack', 'homebrew', 'port'],
+  },
 ];
 
 const CURATED_LABEL_BY_ID = new Map<string, string>([
