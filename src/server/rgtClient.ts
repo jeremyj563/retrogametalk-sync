@@ -10,6 +10,7 @@ import { CookieJar } from 'tough-cookie';
 import { getCookieJarPath } from './db.ts';
 import type { AdaptiveRateLimiter } from './rateLimiter.ts';
 import { classifyFileRole, decodeHtmlEntities, deriveReleaseTags } from './releaseTags.ts';
+import { filterValidSystemSlugs, isNonSystemSlug } from '../shared/systemCatalog.ts';
 import type {
   AuthSessionStatus,
   AuthTestResult,
@@ -2163,7 +2164,7 @@ export class RetroGameTalkClient {
         { ...probeConfig, systemFilter: '' },
       );
 
-      const sortedSystems = [...systems].sort((a, b) => a.localeCompare(b));
+      const sortedSystems = await this.filterLiveSystems(systems, probeConfig);
       if (!username && !password && sortedSystems.length === 0 && releasePages.length === 0) {
         const msg = `Credentials missing (username and password are empty) and no consoles were discovered at ${repoRes.finalUrl}.`;
         logAuthContainer('WARN', `=== Test Login & Discover Consoles FAILED (${latencyMs}ms): ${msg} ===`);
@@ -2298,7 +2299,7 @@ export class RetroGameTalkClient {
       const relSegs = isUnderRepo ? targetSegs.slice(baseSegs.length) : targetSegs;
       const firstSegLower = (relSegs[0] || '').toLowerCase();
 
-      if (isUnderRepo && IGNORED_REPO_PREFIXES.has(firstSegLower)) return;
+      if (isUnderRepo && (IGNORED_REPO_PREFIXES.has(firstSegLower) || isNonSystemSlug(firstSegLower))) return;
 
       const paramPlatform = resolved.searchParams.get('platform');
       const systemCandidate = paramPlatform
@@ -2396,8 +2397,10 @@ export class RetroGameTalkClient {
 
         // Pagination or top-level system directory (/repo/page/2/, /repo/nes-roms/, /repo/nes-roms/page/2/)
         if (relSegs.length === 1 && firstSegLower !== 'page' && !hasPagingParam) {
-          systems.add(systemCandidate);
-          subPages.add(cleanUrl);
+          if (!isNonSystemSlug(systemCandidate)) {
+            systems.add(systemCandidate);
+            subPages.add(cleanUrl);
+          }
         } else if (isPagination) {
           subPages.add(cleanUrl);
         } else if (relSegs.length >= 2) {
@@ -2987,6 +2990,66 @@ export class RetroGameTalkClient {
     }
 
     throw new Error(`Exceeded max stream retries for ${release.downloadUrl}`);
+  }
+
+  /**
+   * Filters HTML-extracted top-level repo slugs against static non-system rules and live
+   * WordPress `/wp-json/wp/v2/pages` entries so informational pages never appear as ROM consoles.
+   */
+  async filterLiveSystems(
+    systems: Iterable<string>,
+    config: ScraperConfigInternal,
+    signal?: AbortSignal,
+    log?: LoggerFn,
+  ): Promise<string[]> {
+    const valid = filterValidSystemSlugs(systems);
+    if (valid.length === 0) return [];
+
+    const wpStaticPageSlugs = new Set<string>();
+    try {
+      const pagesUrl = new URL(
+        'wp-json/wp/v2/pages?per_page=100&_fields=slug',
+        ensureTrailingSlash(config.baseUrl),
+      ).toString();
+      const { response } = await this.fetchWithRedirects(
+        pagesUrl,
+        config,
+        { method: 'GET', headers: { Accept: 'application/json' } },
+        signal,
+        log,
+      );
+      if (response.ok) {
+        const json = (await response.json()) as unknown;
+        if (Array.isArray(json)) {
+          for (const item of json) {
+            if (item && typeof item === 'object' && 'slug' in item) {
+              const slug = String((item as { slug?: unknown }).slug || '').trim().toLowerCase();
+              if (slug) wpStaticPageSlugs.add(slug);
+            }
+          }
+        }
+      } else {
+        await response.body?.cancel().catch(() => undefined);
+      }
+    } catch (err) {
+      if (signal?.aborted) throw err;
+    }
+
+    if (wpStaticPageSlugs.size === 0) {
+      return valid;
+    }
+
+    const wpTypes = await this.getWpRestTypes(config, signal, log);
+    return valid.filter((slug) => {
+      const lower = slug.trim().toLowerCase();
+      if (!wpStaticPageSlugs.has(lower)) return true;
+      // Preserve if explicitly backed by a registered ROM Custom Post Type
+      return (
+        wpTypes.has(lower) ||
+        wpTypes.has(lower.replace(/-/g, '_')) ||
+        wpTypes.has(lower.replace(/_/g, '-'))
+      );
+    });
   }
 
   private async getWpRestTypes(

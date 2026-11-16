@@ -6,6 +6,7 @@ import { LATEST_SCHEMA_VERSION, runDatabaseMigrations } from './migrations.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import { normalizeCatalogSort } from '../shared/catalogSort.ts';
 import { normalizeAllowedReleaseTypes } from '../shared/releaseTypeFilter.ts';
+import { filterValidSystemSlugs, sanitizeSystemFilterString } from '../shared/systemCatalog.ts';
 import type {
   ActivityLogRecord,
   CatalogFacetCounts,
@@ -358,7 +359,7 @@ export function getInternalConfig(): ScraperConfigInternal {
   try {
     const parsed = JSON.parse(String(row.discovered_systems_json || '[]'));
     if (Array.isArray(parsed)) {
-      discoveredSystems = parsed.map(String).filter(Boolean);
+      discoveredSystems = filterValidSystemSlugs(parsed.map(String));
     }
   } catch {
     discoveredSystems = [];
@@ -428,13 +429,10 @@ export function getPublicConfig(): ScraperConfigPublic {
 }
 
 export function saveDiscoveredSystems(systems: string[]): string[] {
-  const merged = Array.from(
-    new Set(
-      [...getInternalConfig().discoveredSystems, ...systems]
-        .map((s) => s.trim())
-        .filter(Boolean),
-    ),
-  ).sort((a, b) => a.localeCompare(b));
+  const merged = filterValidSystemSlugs([
+    ...getInternalConfig().discoveredSystems,
+    ...systems,
+  ]);
 
   getDb().prepare('UPDATE scraper_config SET discovered_systems_json = ?, updated_at = ? WHERE id = 1').run(
     JSON.stringify(merged),
@@ -618,7 +616,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     Math.max(1, Math.min(4, Number(input.maxConcurrency ?? current.max_concurrency))),
     Math.max(5000, Math.min(180000, Number(input.requestTimeoutMs ?? current.request_timeout_ms))),
     (input.userAgent ?? String(current.user_agent)).trim(),
-    (input.systemFilter ?? String(current.system_filter)).trim(),
+    sanitizeSystemFilterString((input.systemFilter ?? String(current.system_filter)).trim()),
     nextAllowedReleaseTypesJson,
     nextWatermarkAt,
     nextRomNamingTemplate,

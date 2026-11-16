@@ -43,6 +43,7 @@ import {
   formatAllowedReleaseTypesSummary,
   normalizeAllowedReleaseTypes,
 } from '../shared/releaseTypeFilter.ts';
+import { filterValidSystemSlugs } from '../shared/systemCatalog.ts';
 import {
   type DiscoveredRelease,
   type LoggerFn,
@@ -2443,17 +2444,18 @@ export class ScraperOrchestrator extends EventEmitter {
           rootPage.finalUrl,
           { ...cfg, systemFilter: '' },
         );
-        if (rootExtracted.systems.length > 0) {
-          saveDiscoveredSystems(rootExtracted.systems);
+        const liveValidSystems =
+          rootExtracted.systems.length > 0
+            ? await this.client.filterLiveSystems(rootExtracted.systems, cfg, signal, runLogger)
+            : [];
+        if (liveValidSystems.length > 0) {
+          saveDiscoveredSystems(liveValidSystems);
         }
 
-        targetSystems = Array.from(
-          new Set(
-            [...getInternalConfig().discoveredSystems, ...rootExtracted.systems]
-              .map((s) => s.trim().toLowerCase())
-              .filter(Boolean),
-          ),
-        ).sort((a, b) => a.localeCompare(b));
+        targetSystems = filterValidSystemSlugs([
+          ...getInternalConfig().discoveredSystems,
+          ...liveValidSystems,
+        ]).map((s) => s.toLowerCase());
       }
 
       if (targetSystems.length === 0) {
