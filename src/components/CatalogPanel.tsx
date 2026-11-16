@@ -38,7 +38,7 @@ import type {
 import { formatBytes, formatDateTime } from '../utils/format';
 import { isFileSystemAccessSupported, pickSdCardRootDirectory, type SdDirectoryHandle } from '../utils/sdCardFs';
 import { resolveItemTransferProgress } from '../utils/transferProgress';
-import { GameDetailDrawer } from './GameDetailDrawer';
+import { GameDetailDrawer, type GameDetailNavigation } from './GameDetailDrawer';
 import { MultiSelectFilterDropdown, type FilterDropdownOption } from './MultiSelectFilterDropdown';
 import { SdCardExportModal } from './SdCardExportModal';
 
@@ -291,6 +291,8 @@ export function CatalogPanel({
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [failedCovers, setFailedCovers] = useState<Set<number>>(new Set());
   const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
+  const [activeDetailIndex, setActiveDetailIndex] = useState<number | null>(null);
+  const [navigatingDetail, setNavigatingDetail] = useState(false);
 
   const effectiveRetryingId =
     retryingId ??
@@ -386,6 +388,7 @@ export function CatalogPanel({
 
   const catalogReqSeqRef = useRef(0);
   const fsReqSeqRef = useRef(0);
+  const detailReqSeqRef = useRef(0);
   const activeDetailIdRef = useRef<number | null>(null);
   const lastHandledRevisionRef = useRef(catalogRevision);
 
@@ -399,29 +402,52 @@ export function CatalogPanel({
     }
   }, [viewMode]);
 
+  const buildCatalogSearchParams = useCallback(
+    (limit: number, offset: number): URLSearchParams => {
+      const qs = new URLSearchParams({
+        search,
+        sort,
+        limit: String(limit),
+        offset: String(offset),
+      });
+      for (const sys of systems) qs.append('system', sys);
+      for (const st of statuses) qs.append('status', st);
+      for (const t of tags) qs.append('tag', t);
+      if (tags.length > 1) qs.set('tagMode', tagsMode);
+      for (const g of genres) qs.append('genre', g);
+      if (genres.length > 1) qs.set('genreMode', genresMode);
+      for (const r of regions) qs.append('region', r);
+      if (regions.length > 1) qs.set('regionMode', regionsMode);
+      for (const l of languages) qs.append('language', l);
+      if (languages.length > 1) qs.set('languageMode', languagesMode);
+      for (const s of sources) qs.append('source', s);
+      if (sources.length > 1) qs.set('sourceMode', sourcesMode);
+      return qs;
+    },
+    [
+      search,
+      sort,
+      systems,
+      statuses,
+      tags,
+      tagsMode,
+      genres,
+      genresMode,
+      regions,
+      regionsMode,
+      languages,
+      languagesMode,
+      sources,
+      sourcesMode,
+    ],
+  );
+
   const loadCatalog = useCallback(
     async (silent = false) => {
       const reqId = ++catalogReqSeqRef.current;
       if (!silent) setLoading(true);
       try {
-        const qs = new URLSearchParams({
-          search,
-          sort,
-          limit: '150',
-          offset: '0',
-        });
-        for (const sys of systems) qs.append('system', sys);
-        for (const st of statuses) qs.append('status', st);
-        for (const t of tags) qs.append('tag', t);
-        if (tags.length > 1) qs.set('tagMode', tagsMode);
-        for (const g of genres) qs.append('genre', g);
-        if (genres.length > 1) qs.set('genreMode', genresMode);
-        for (const r of regions) qs.append('region', r);
-        if (regions.length > 1) qs.set('regionMode', regionsMode);
-        for (const l of languages) qs.append('language', l);
-        if (languages.length > 1) qs.set('languageMode', languagesMode);
-        for (const s of sources) qs.append('source', s);
-        if (sources.length > 1) qs.set('sourceMode', sourcesMode);
+        const qs = buildCatalogSearchParams(150, 0);
 
         const res = await fetch(`/api/items?${qs.toString()}`);
         if (!res.ok || reqId !== catalogReqSeqRef.current) return;
@@ -512,6 +538,7 @@ export function CatalogPanel({
       }
     },
     [
+      buildCatalogSearchParams,
       viewMode,
       sort,
       search,
@@ -642,22 +669,116 @@ export function CatalogPanel({
     setConfirmFsBulk(false);
   }, [filteredFsNodes]);
 
-  const openDetailItem = async (item: RepositoryItemRecord) => {
-    setActiveDetailItem(item);
-    try {
-      const res = await fetch(`/api/items/${item.id}`);
-      if (res.ok) {
+  const closeDetailDrawer = useCallback(() => {
+    detailReqSeqRef.current += 1;
+    setNavigatingDetail(false);
+    setActiveDetailItem(null);
+    setActiveDetailIndex(null);
+  }, []);
+
+  const openDetailItem = useCallback(
+    async (item: RepositoryItemRecord, indexHint?: number) => {
+      const reqSeq = ++detailReqSeqRef.current;
+      setNavigatingDetail(false);
+      setActiveDetailItem(item);
+      const resolvedIdx =
+        typeof indexHint === 'number' ? indexHint : items.findIndex((row) => row.id === item.id);
+      setActiveDetailIndex(resolvedIdx >= 0 ? resolvedIdx : null);
+      try {
+        const res = await fetch(`/api/items/${item.id}`);
+        if (reqSeq !== detailReqSeqRef.current || !res.ok) return;
         const data = await res.json();
+        if (reqSeq !== detailReqSeqRef.current) return;
         if (data.item) {
           const fresh = data.item as RepositoryItemRecord;
           setActiveDetailItem((current) => (current?.id === fresh.id ? fresh : current));
           setItems((prev) => prev.map((row) => (row.id === fresh.id ? fresh : row)));
         }
+      } catch {
+        // Keep optimistic cached item open on transient error
       }
-    } catch {
-      // Keep optimistic cached item open on transient error
+    },
+    [items],
+  );
+
+  const resolvedDetailIndex = useMemo(() => {
+    if (!activeDetailItem) return -1;
+    const loadedIdx = items.findIndex((row) => row.id === activeDetailItem.id);
+    if (loadedIdx >= 0) return loadedIdx;
+    const effectiveTotal = Math.max(totalItems, items.length);
+    if (
+      activeDetailIndex !== null &&
+      activeDetailIndex >= items.length &&
+      activeDetailIndex < effectiveTotal
+    ) {
+      return activeDetailIndex;
     }
-  };
+    return -1;
+  }, [activeDetailItem, activeDetailIndex, items, totalItems]);
+
+  const navigateDetailBy = useCallback(
+    async (delta: -1 | 1) => {
+      if (!activeDetailItem || resolvedDetailIndex < 0) return;
+      const effectiveTotal = Math.max(totalItems, items.length);
+      const targetIndex = resolvedDetailIndex + delta;
+      if (targetIndex < 0 || targetIndex >= effectiveTotal) return;
+
+      if (targetIndex < items.length && items[targetIndex]) {
+        await openDetailItem(items[targetIndex], targetIndex);
+        return;
+      }
+
+      const reqSeq = ++detailReqSeqRef.current;
+      setNavigatingDetail(true);
+      try {
+        const qs = buildCatalogSearchParams(1, targetIndex);
+        const res = await fetch(`/api/items?${qs.toString()}`);
+        if (reqSeq !== detailReqSeqRef.current || !res.ok) return;
+        const data = await res.json();
+        if (reqSeq !== detailReqSeqRef.current) return;
+        const fetchedItem = (data.items?.[0] ?? null) as RepositoryItemRecord | null;
+        if (typeof data.total === 'number') {
+          setTotalItems(data.total);
+        }
+        if (fetchedItem) {
+          setActiveDetailIndex(targetIndex);
+          setActiveDetailItem(fetchedItem);
+        }
+      } catch {
+        // Ignore transient network errors; keep current item open
+      } finally {
+        if (reqSeq === detailReqSeqRef.current) {
+          setNavigatingDetail(false);
+        }
+      }
+    },
+    [activeDetailItem, buildCatalogSearchParams, items, openDetailItem, resolvedDetailIndex, totalItems],
+  );
+
+  const detailNavigation = useMemo<GameDetailNavigation | null>(() => {
+    if (!activeDetailItem || resolvedDetailIndex < 0) return null;
+    const effectiveTotal = Math.max(totalItems, items.length);
+    if (effectiveTotal <= 0) return null;
+    const prevIdx = resolvedDetailIndex - 1;
+    const nextIdx = resolvedDetailIndex + 1;
+    const sortChoice = CATALOG_SORT_OPTIONS.find((opt) => opt.value === sort);
+    return {
+      currentIndex: resolvedDetailIndex + 1,
+      totalCount: effectiveTotal,
+      canPrev: prevIdx >= 0,
+      canNext: nextIdx < effectiveTotal,
+      loading: navigatingDetail,
+      prevTitle: prevIdx >= 0 && prevIdx < items.length ? items[prevIdx]?.title ?? null : null,
+      nextTitle: nextIdx >= 0 && nextIdx < items.length ? items[nextIdx]?.title ?? null : null,
+      orderLabel: sortChoice ? sortChoice.label.replace(/^Sort:\s*/i, 'Catalog Order: ') : undefined,
+      onPrev: () => {
+        void navigateDetailBy(-1);
+      },
+      onNext: () => {
+        void navigateDetailBy(1);
+      },
+    };
+  }, [activeDetailItem, items, navigateDetailBy, navigatingDetail, resolvedDetailIndex, sort, totalItems]);
 
   const handleItemUpdated = (updated: RepositoryItemRecord) => {
     setActiveDetailItem(updated);
@@ -705,7 +826,7 @@ export function CatalogPanel({
         setSelectedCatalogIds(new Set());
         setConfirmCatalogBulk(false);
         if (activeDetailItem && ids.includes(activeDetailItem.id)) {
-          setActiveDetailItem(null);
+          closeDetailDrawer();
         }
         await Promise.all([loadCatalog(), onRefreshStatus()]);
       }
@@ -1556,7 +1677,7 @@ export function CatalogPanel({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-crt-border text-xs">
-                  {items.map((item) => {
+                  {items.map((item, idx) => {
                     const checked = selectedCatalogIds.has(item.id);
                     const isDeletingThis = deletingKey === `item-${item.id}`;
                     const showCoverThumb = Boolean(item.coverLocalPath) && !failedCovers.has(item.id);
@@ -1583,7 +1704,7 @@ export function CatalogPanel({
                     return (
                       <tr
                         key={item.id}
-                        onClick={() => void openDetailItem(item)}
+                        onClick={() => void openDetailItem(item, idx)}
                         className={`crt-table-row cursor-pointer transition-colors ${
                           checked ? 'bg-crt-phosphor/5' : 'hover:bg-crt-elevated'
                         }`}
@@ -1828,7 +1949,7 @@ export function CatalogPanel({
 
               {/* Box-Art Grid */}
               <div className="p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-                {items.map((item) => {
+                {items.map((item, idx) => {
                   const checked = selectedCatalogIds.has(item.id);
                   const showCover = Boolean(item.coverLocalPath) && !failedCovers.has(item.id);
                   const assetVersion = item.metadata?.fetchedAt
@@ -1853,13 +1974,13 @@ export function CatalogPanel({
                   return (
                     <div
                       key={item.id}
-                      onClick={() => void openDetailItem(item)}
+                      onClick={() => void openDetailItem(item, idx)}
                       role="button"
                       tabIndex={0}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault();
-                          void openDetailItem(item);
+                          void openDetailItem(item, idx);
                         }
                       }}
                       className={`crt-catalog-card group relative border rounded-md overflow-hidden bg-crt-bg cursor-pointer transition-colors flex flex-col text-left focus:outline-none focus:border-crt-phosphor ${
@@ -2207,7 +2328,8 @@ export function CatalogPanel({
         activeTransfer={status.activeTransfer}
         canSync={Boolean(status.auth.hasCompletedLogin)}
         retryingItem={effectiveRetryingId === activeDetailItem?.id}
-        onClose={() => setActiveDetailItem(null)}
+        navigation={detailNavigation}
+        onClose={closeDetailDrawer}
         onItemUpdated={handleItemUpdated}
         onRetryItem={handleRetry}
         onExportToSdCard={(id) => setSdExportIds([id])}
