@@ -38,6 +38,7 @@ interface OverviewPanelProps {
   status: ServiceStatusSnapshot;
   runs: SyncRunRecord[];
   logs: ActivityLogRecord[];
+  logsClearedRevision?: number;
   catalogRevision: number;
   activeRetryItemId?: number | null;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
@@ -48,6 +49,59 @@ interface OverviewPanelProps {
   onRetryAllFailed: (options?: { system?: string; ids?: number[]; dryRun?: boolean }) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
 }
+
+interface LogFilterOption {
+  value: 'all' | LogLevel;
+  label: string;
+  clearLabel: string;
+  emptyLabel: string;
+  activeClass: string;
+}
+
+const LOG_FILTER_OPTIONS: readonly LogFilterOption[] = [
+  {
+    value: 'all',
+    label: 'All Events',
+    clearLabel: 'All',
+    emptyLabel: 'events',
+    activeClass: 'bg-crt-elevated text-crt-phosphor',
+  },
+  {
+    value: 'info',
+    label: 'Info',
+    clearLabel: 'Info',
+    emptyLabel: 'info events',
+    activeClass: 'bg-crt-elevated text-crt-text',
+  },
+  {
+    value: 'download',
+    label: 'Downloads',
+    clearLabel: 'Downloads',
+    emptyLabel: 'download events',
+    activeClass: 'bg-crt-elevated text-crt-phosphor',
+  },
+  {
+    value: 'warn',
+    label: 'Warnings',
+    clearLabel: 'Warnings',
+    emptyLabel: 'warnings',
+    activeClass: 'bg-crt-elevated text-crt-amber',
+  },
+  {
+    value: 'throttle',
+    label: 'Throttle',
+    clearLabel: 'Throttle',
+    emptyLabel: 'throttle events',
+    activeClass: 'bg-crt-elevated text-crt-amber',
+  },
+  {
+    value: 'error',
+    label: 'Errors',
+    clearLabel: 'Errors',
+    emptyLabel: 'errors',
+    activeClass: 'bg-crt-elevated text-crt-crimson',
+  },
+];
 
 function toLocalDateTimeInputValue(date: Date): string {
   if (Number.isNaN(date.getTime())) return '';
@@ -60,6 +114,7 @@ export function OverviewPanel({
   status,
   runs,
   logs,
+  logsClearedRevision = 0,
   catalogRevision,
   activeRetryItemId = null,
   onSaveConfig,
@@ -71,6 +126,11 @@ export function OverviewPanel({
   onRefreshStatus,
 }: OverviewPanelProps) {
   const [logFilter, setLogFilter] = useState<'all' | LogLevel>('all');
+  const [levelHistory, setLevelHistory] = useState<{
+    level: LogLevel;
+    entries: ActivityLogRecord[];
+    clearedRev: number;
+  } | null>(null);
   const [failedQueueOpen, setFailedQueueOpen] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [editingCutoff, setEditingCutoff] = useState(false);
@@ -87,10 +147,59 @@ export function OverviewPanel({
     return () => clearInterval(id);
   }, []);
 
+  // Fetch per-level history when a specific event filter is active so sparse warnings/throttles/errors
+  // beyond the latest 300 mixed stream entries remain visible.
+  useEffect(() => {
+    if (logFilter === 'all') {
+      return;
+    }
+    const controller = new AbortController();
+    const targetLevel = logFilter;
+    const targetRev = logsClearedRevision;
+    void fetch(`/api/logs?level=${encodeURIComponent(targetLevel)}&limit=150`, {
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const data = (await res.json()) as { logs?: ActivityLogRecord[] };
+        if (!controller.signal.aborted) {
+          setLevelHistory({
+            level: targetLevel,
+            entries: data.logs || [],
+            clearedRev: targetRev,
+          });
+        }
+      })
+      .catch(() => {
+        // Ignore abort / transient fetch errors; live buffer still renders
+      });
+    return () => controller.abort();
+  }, [logFilter, logsClearedRevision]);
+
+  const activeFilterOption = useMemo(
+    () => LOG_FILTER_OPTIONS.find((opt) => opt.value === logFilter) ?? LOG_FILTER_OPTIONS[0],
+    [logFilter],
+  );
+
   const filteredLogs = useMemo(() => {
     if (logFilter === 'all') return logs;
-    return logs.filter((l) => l.level === logFilter);
-  }, [logs, logFilter]);
+    const liveMatching = logs.filter((l) => l.level === logFilter);
+    if (
+      !levelHistory ||
+      levelHistory.level !== logFilter ||
+      levelHistory.clearedRev !== logsClearedRevision
+    ) {
+      return liveMatching;
+    }
+    const mergedById = new Map<number, ActivityLogRecord>();
+    for (const entry of levelHistory.entries) {
+      mergedById.set(entry.id, entry);
+    }
+    for (const entry of liveMatching) {
+      mergedById.set(entry.id, entry);
+    }
+    return Array.from(mergedById.values()).sort((a, b) => b.id - a.id);
+  }, [logs, logFilter, levelHistory, logsClearedRevision]);
 
   useEffect(() => {
     if (autoScroll && logContainerRef.current) {
@@ -695,19 +804,25 @@ export function OverviewPanel({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1 p-1 bg-crt-bg border border-crt-border rounded">
-              {(['all', 'download', 'throttle', 'error'] as const).map((lvl) => (
+            <div
+              role="tablist"
+              aria-label="Filter scraper events by type"
+              className="flex flex-wrap items-center gap-1 p-1 bg-crt-bg border border-crt-border rounded"
+            >
+              {LOG_FILTER_OPTIONS.map((opt) => (
                 <button
-                  key={lvl}
+                  key={opt.value}
                   type="button"
-                  onClick={() => setLogFilter(lvl)}
-                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
-                    logFilter === lvl
-                      ? 'bg-crt-elevated text-crt-phosphor'
+                  role="tab"
+                  aria-selected={logFilter === opt.value}
+                  onClick={() => setLogFilter(opt.value)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    logFilter === opt.value
+                      ? opt.activeClass
                       : 'text-crt-muted hover:text-crt-text'
                   }`}
                 >
-                  {lvl === 'all' ? 'All Events' : lvl.charAt(0).toUpperCase() + lvl.slice(1)}
+                  {opt.label}
                 </button>
               ))}
             </div>
@@ -715,7 +830,7 @@ export function OverviewPanel({
             <button
               type="button"
               onClick={() => setAutoScroll((s) => !s)}
-              className={`px-3 py-1.5 text-xs font-mono border rounded transition-colors whitespace-nowrap ${
+              className={`px-3 py-1.5 text-xs font-mono border rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 autoScroll
                   ? 'border-crt-phosphor/50 text-crt-phosphor bg-crt-phosphor/5'
                   : 'border-crt-border text-crt-muted hover:text-crt-text'
@@ -724,18 +839,16 @@ export function OverviewPanel({
               {autoScroll ? 'Auto-Follow: ON' : 'Auto-Follow: OFF'}
             </button>
 
-            <div className="w-[152px] flex justify-end shrink-0">
+            <div className="w-[164px] flex justify-end shrink-0">
               <button
                 type="button"
                 disabled={filteredLogs.length === 0}
                 onClick={() => void onClearLogs(logFilter)}
-                className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-crimson hover:text-crt-crimson text-crt-muted rounded transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
-                title={`Clear ${logFilter === 'all' ? 'all' : logFilter} log entries`}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-crimson hover:text-crt-crimson text-crt-muted rounded transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                title={`Clear ${activeFilterOption.clearLabel.toLowerCase()} log entries`}
               >
                 <Trash2 className="h-3.5 w-3.5" />
-                <span>
-                  Clear {logFilter === 'all' ? 'All' : logFilter.charAt(0).toUpperCase() + logFilter.slice(1)}
-                </span>
+                <span>Clear {activeFilterOption.clearLabel}</span>
               </button>
             </div>
           </div>
@@ -747,7 +860,7 @@ export function OverviewPanel({
         >
           {filteredLogs.length === 0 ? (
             <p className="text-crt-muted py-6 text-center">
-              No matching log entries recorded yet.
+              No {activeFilterOption.emptyLabel} recorded yet.
             </p>
           ) : (
             filteredLogs.map((entry) => (
@@ -756,7 +869,7 @@ export function OverviewPanel({
                   {formatTimeShort(entry.createdAt)}
                 </span>
                 <span
-                  className={`w-16 shrink-0 uppercase ${
+                  className={`w-20 shrink-0 uppercase ${
                     entry.level === 'download'
                       ? 'text-crt-phosphor'
                       : entry.level === 'throttle' || entry.level === 'warn'

@@ -73,6 +73,7 @@ export default function App() {
   const [confirmingFullSync, setConfirmingFullSync] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [catalogRevision, setCatalogRevision] = useState(0);
+  const [logsClearedRevision, setLogsClearedRevision] = useState(0);
   const [activeRetryItemId, setActiveRetryItemId] = useState<number | null>(null);
   const activeRetryRunRef = useRef<{ runId: number; itemId: number } | null>(null);
   const prevActiveRunRef = useRef<SyncRunRecord | null>(null);
@@ -83,7 +84,7 @@ export default function App() {
         fetch('/api/status'),
         fetch('/api/config'),
         fetch('/api/runs?limit=20'),
-        fetch('/api/logs?limit=150'),
+        fetch('/api/logs?limit=300'),
       ]);
 
       let loadedStatus: ServiceStatusSnapshot | null = null;
@@ -254,6 +255,7 @@ export default function App() {
         const payload = JSON.parse((ev as MessageEvent).data) as { level?: string };
         const lvl = payload.level || 'all';
         setLogs((prev) => (lvl === 'all' ? [] : prev.filter((l) => l.level !== lvl)));
+        setLogsClearedRevision((r) => r + 1);
       } catch {
         // Ignore
       }
@@ -325,6 +327,7 @@ export default function App() {
       return;
     }
     setLogs((prev) => (level === 'all' ? [] : prev.filter((l) => l.level !== level)));
+    setLogsClearedRevision((r) => r + 1);
   };
 
   const handleClearRuns = async () => {
@@ -810,6 +813,7 @@ export default function App() {
                   status={status}
                   runs={runs}
                   logs={logs}
+                  logsClearedRevision={logsClearedRevision}
                   catalogRevision={catalogRevision}
                   activeRetryItemId={activeRetryItemId}
                   onSaveConfig={handleSaveConfig}
