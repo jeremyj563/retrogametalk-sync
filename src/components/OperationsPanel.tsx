@@ -682,8 +682,11 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
       {/* Credentials & Local Filesystem Storage Form */}
       <section
         ref={authSectionRef}
-        className="relative scroll-mt-24 border border-crt-border bg-crt-surface rounded-md p-6 space-y-5"
+        className="relative crt-panel-living scroll-mt-24 border border-crt-border bg-crt-surface rounded-md p-6 space-y-5"
       >
+        <div aria-hidden="true" className="crt-edge-beam">
+          <span />
+        </div>
         {spotlight?.target === 'auth' && (
           <div
             key={`auth-${spotlight.nonce}`}
@@ -693,7 +696,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
         )}
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
           <div className="flex items-start gap-3">
-            <KeyRound className="h-5 w-5 text-crt-phosphor mt-0.5 shrink-0" />
+            <KeyRound className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
             <div>
               <h2 className="font-display text-lg font-semibold text-crt-text">
                 Repository Credentials &amp; Local Mirror Path
@@ -708,7 +711,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
             type="button"
             disabled={testingAuth}
             onClick={() => void handleTestAuth()}
-            className="inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-medium border border-crt-phosphor text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap disabled:opacity-50"
+            className="crt-cta-beam inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-medium border border-crt-phosphor text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap disabled:opacity-50"
           >
             <ShieldCheck className="h-3.5 w-3.5" />
             {testingAuth ? 'Probing Repository...' : 'Test Login & Discover Consoles'}
@@ -861,8 +864,11 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
       {/* Console / System Selection Section */}
       <section
         ref={systemsSectionRef}
-        className="relative scroll-mt-24 border border-crt-border bg-crt-surface rounded-md p-6 space-y-5"
+        className="relative crt-panel-living scroll-mt-24 border border-crt-border bg-crt-surface rounded-md p-6 space-y-5"
       >
+        <div aria-hidden="true" className="crt-edge-beam">
+          <span />
+        </div>
         {spotlight?.target === 'systems' && (
           <div
             key={`systems-${spotlight.nonce}`}
@@ -872,7 +878,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
         )}
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
           <div className="flex items-start gap-3">
-            <Gamepad2 className="h-5 w-5 text-crt-phosphor mt-0.5 shrink-0" />
+            <Gamepad2 className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
             <div>
               <h2 className="font-display text-lg font-semibold text-crt-text">
                 Target Consoles &amp; Systems
@@ -1147,8 +1153,11 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
       {/* Allowed Game & ROM Types Section */}
       <section
         ref={releaseTypesSectionRef}
-        className="relative scroll-mt-24 border border-crt-border bg-crt-surface rounded-md p-6 space-y-5"
+        className="relative crt-panel-living scroll-mt-24 border border-crt-border bg-crt-surface rounded-md p-6 space-y-5"
       >
+        <div aria-hidden="true" className="crt-edge-beam">
+          <span />
+        </div>
         {spotlight?.target === 'releaseTypes' && (
           <div
             key={`releaseTypes-${spotlight.nonce}`}
@@ -1158,7 +1167,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
         )}
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
           <div className="flex items-start gap-3">
-            <Filter className="h-5 w-5 text-crt-phosphor mt-0.5 shrink-0" />
+            <Filter className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
             <div>
               <h2 className="font-display text-lg font-semibold text-crt-text">
                 Allowed Game &amp; ROM Types
@@ -1444,10 +1453,13 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
       </section>
 
       {/* Prepared ROM Naming & SD Card Device Export Defaults */}
-      <section className="border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+      <section className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+        <div aria-hidden="true" className="crt-edge-beam">
+          <span />
+        </div>
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
           <div className="flex items-start gap-3">
-            <Usb className="h-5 w-5 text-crt-phosphor mt-0.5 shrink-0" />
+            <Usb className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
             <div>
               <h2 className="font-display text-lg font-semibold text-crt-text">
                 Prepared ROM Naming &amp; SD Card Export
@@ -1563,10 +1575,13 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
       </section>
 
       {/* Section: Interface Branding (Custom Top-Left Header Logo / Animated Banner) */}
-      <section className="border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+      <section className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+        <div aria-hidden="true" className="crt-edge-beam">
+          <span />
+        </div>
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="flex items-start gap-2.5 min-w-0">
-            <ImageIcon className="h-4 w-4 text-crt-phosphor shrink-0 mt-1" />
+            <ImageIcon className="h-4 w-4 text-crt-phosphor crt-section-icon shrink-0 mt-1" />
             <div>
               <h2 className="font-display text-base font-semibold text-crt-text">
                 Interface Branding
@@ -1700,7 +1715,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
                 <button
                   type="submit"
                   disabled={saving || customTypeSelectionEmpty || !dirtyState.isDirty}
-                  className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                  className="crt-cta-beam inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                 >
                   <Save className="h-3.5 w-3.5" />
                   <span>{saving ? 'Saving...' : 'Save Changes'}</span>

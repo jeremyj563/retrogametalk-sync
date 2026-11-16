@@ -4,6 +4,7 @@ import {
   clampCrtPct,
   CRT_PALETTES,
   CRT_PRESETS,
+  CRT_UI_MOTION_LEVELS,
   type CrtDisplaySettings,
   type CrtFxValues,
   type CrtPalette,
@@ -182,6 +183,40 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
                       style={{ backgroundColor: pal.swatch }}
                     />
                     <span>{pal.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Living UI Motion Presets */}
+          <div className="space-y-1.5 pt-1 border-t border-crt-border/70">
+            <div className="flex items-center justify-between text-[10px] font-mono text-crt-muted">
+              <span>Living UI Motion</span>
+              <span className="text-crt-text/85">
+                {CRT_UI_MOTION_LEVELS[settings.uiMotion].label}
+              </span>
+            </div>
+            <div className="grid grid-cols-4 gap-1" role="group" aria-label="Living UI animation level">
+              {(['off', 'low', 'medium', 'high'] as const).map((level) => {
+                const info = CRT_UI_MOTION_LEVELS[level];
+                const active = settings.uiMotion === level;
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    aria-pressed={active}
+                    title={info.description}
+                    onClick={() => onChange({ ...settings, uiMotion: level })}
+                    className={`px-1 py-1 text-[11px] font-mono rounded border transition-colors whitespace-nowrap cursor-pointer ${
+                      active
+                        ? level === 'off'
+                          ? 'border-crt-border-strong bg-crt-elevated text-crt-text font-medium'
+                          : 'border-crt-phosphor/60 bg-crt-elevated text-crt-phosphor font-medium'
+                        : 'border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+                    }`}
+                  >
+                    {info.shortLabel}
                   </button>
                 );
               })}

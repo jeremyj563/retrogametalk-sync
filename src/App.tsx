@@ -1,19 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Activity,
   AlertTriangle,
   Check,
-  Clock,
   FlaskConical,
-  FolderTree,
   HardDrive,
   Play,
-  ServerCog,
   Square,
 } from 'lucide-react';
 import { BrandMark } from './components/BrandMark';
 import { CatalogPanel } from './components/CatalogPanel';
 import { CrtDisplayControl } from './components/CrtDisplayControl';
+import { LivingNavIcon } from './components/LivingNavIcon';
 import {
   OperationsPanel,
   type OperationsDirtyState,
@@ -522,11 +519,11 @@ export default function App() {
     await loadInitialData();
   };
 
-  const navItems: { id: NavSection; label: string; icon: typeof Activity }[] = [
-    { id: 'monitor', label: 'Sync', icon: Activity },
-    { id: 'catalog', label: 'Catalog', icon: FolderTree },
-    { id: 'schedule', label: 'Schedule', icon: Clock },
-    { id: 'operations', label: 'Operations', icon: ServerCog },
+  const navItems: { id: NavSection; label: string }[] = [
+    { id: 'monitor', label: 'Sync' },
+    { id: 'catalog', label: 'Catalog' },
+    { id: 'schedule', label: 'Schedule' },
+    { id: 'operations', label: 'Operations' },
   ];
 
   const syncAllowed = Boolean(status?.auth.hasCompletedLogin);
@@ -828,6 +825,8 @@ export default function App() {
   return (
     <div
       data-crt-palette={crtSettings.palette}
+      data-crt-motion={crtSettings.uiMotion}
+      data-sync-running={status?.activeRun ? 'true' : 'false'}
       style={crtCssVars}
       className={`min-h-screen crt-canvas text-crt-text flex flex-col ${crtSettings.enabled ? 'crt-fx-active' : ''}`}
     >
@@ -924,7 +923,9 @@ export default function App() {
             >
               {dryRunEnabled && <Check className="h-2.5 w-2.5 stroke-[3]" />}
             </span>
-            <FlaskConical className="h-3.5 w-3.5 shrink-0" />
+            <FlaskConical
+              className={`h-3.5 w-3.5 shrink-0 ${dryRunEnabled ? 'crt-dryrun-flask-active' : ''}`}
+            />
             <span>Dry Run</span>
           </button>
 
@@ -934,10 +935,10 @@ export default function App() {
                 type="button"
                 disabled={actionPending || stopRequested}
                 onClick={() => void handleStopRun()}
-                className={`w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 disabled:cursor-not-allowed ${
+                className={`crt-cta-beam w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 disabled:cursor-not-allowed ${
                   stopRequested
                     ? 'bg-crt-amber opacity-85'
-                    : 'bg-crt-crimson hover:brightness-110 disabled:opacity-50'
+                    : 'bg-crt-crimson hover:brightness-110 crt-stop-active-pulse disabled:opacity-50'
                 }`}
               >
                 <Square className="h-3.5 w-3.5 fill-current shrink-0" />
@@ -970,7 +971,7 @@ export default function App() {
                     void handleStartRun(selectedScope, dryRunEnabled);
                   }
                 }}
-                className={`w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed ${
+                className={`crt-cta-beam w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed ${
                   dryRunEnabled
                     ? 'bg-crt-amber hover:brightness-110'
                     : 'bg-crt-phosphor hover:brightness-110'
@@ -1034,7 +1035,7 @@ export default function App() {
               type="button"
               disabled={actionPending}
               onClick={() => void handleStartRun('full', false)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+              className="crt-cta-beam inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
             >
               <Play className="h-3 w-3 fill-current shrink-0" />
               Confirm Full Sync
@@ -1052,21 +1053,21 @@ export default function App() {
             {/* Mobile Section Switcher */}
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-1 gap-1.5">
               {navItems.map((item) => {
-                const Icon = item.icon;
                 const active = section === item.id;
                 return (
                   <button
                     key={item.id}
                     type="button"
+                    data-nav-active={active ? 'true' : 'false'}
                     onClick={() => requestSectionChange(item.id)}
-                    className={`flex items-center justify-between gap-2 px-3 py-2 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
+                    className={`crt-nav-btn flex items-center justify-between gap-2 px-3 py-2 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
                       active
                         ? 'bg-crt-elevated border-crt-border-strong text-crt-phosphor'
                         : 'bg-transparent border-transparent text-crt-muted hover:text-crt-text hover:bg-crt-bg'
                     }`}
                   >
                     <span className="inline-flex items-center gap-2.5 min-w-0">
-                      <Icon className="h-4 w-4 shrink-0" />
+                      <LivingNavIcon section={item.id} />
                       <span>{item.label}</span>
                     </span>
                     {item.id === 'operations' && operationsDirty.isDirty && (
@@ -1090,7 +1091,13 @@ export default function App() {
                   title="Local browser SSE telemetry stream to this app backend (independent of RetroGameTalk login)"
                 >
                   <span>UI Event Stream</span>
-                  <span className={sseConnected ? 'text-crt-phosphor' : 'text-crt-amber'}>
+                  <span
+                    className={
+                      sseConnected
+                        ? 'text-crt-phosphor crt-live-readout'
+                        : 'text-crt-amber'
+                    }
+                  >
                     {sseConnected ? 'Live' : 'Reconnecting'}
                   </span>
                 </div>
@@ -1136,7 +1143,7 @@ export default function App() {
             {status && status.systems.length > 0 && (
               <div className="hidden lg:block border-t border-crt-border pt-4 space-y-2">
                 <div className="flex items-center gap-2 text-xs font-medium text-crt-muted">
-                  <HardDrive className="h-3.5 w-3.5" />
+                  <HardDrive className="h-3.5 w-3.5 crt-drive-activity" />
                   <span>Mirrored Systems</span>
                 </div>
                 <div className="space-y-1 max-h-56 overflow-y-auto pr-1">

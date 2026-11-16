@@ -2,6 +2,7 @@ import type { CSSProperties } from 'react';
 
 export type CrtPalette = 'green' | 'amber' | 'cyan';
 export type CrtPresetId = 'subtle' | 'pvm' | 'arcade';
+export type CrtUiMotionLevel = 'off' | 'low' | 'medium' | 'high';
 
 export interface CrtFxValues {
   scanlines: number;
@@ -15,6 +16,7 @@ export interface CrtDisplaySettings extends CrtFxValues {
   enabled: boolean;
   panelOpen: boolean;
   palette: CrtPalette;
+  uiMotion: CrtUiMotionLevel;
 }
 
 export const CRT_DISPLAY_STORAGE_KEY = 'rgt_sync_crt_display_v1';
@@ -68,10 +70,37 @@ export const CRT_PALETTES: Record<
   cyan: { label: 'Cyan', swatch: '#38d9f5', rgb: '56, 217, 245' },
 };
 
+export const CRT_UI_MOTION_LEVELS: Record<
+  CrtUiMotionLevel,
+  { shortLabel: string; label: string; description: string }
+> = {
+  off: {
+    shortLabel: 'Off',
+    label: 'Off',
+    description: 'Static icons and surfaces with zero continuous UI animations',
+  },
+  low: {
+    shortLabel: 'Low',
+    label: 'Low',
+    description: 'Subtle ambient motion on active indicators plus responsive hover & sync animations',
+  },
+  medium: {
+    shortLabel: 'Med',
+    label: 'Medium',
+    description: 'Balanced living CRT console with KPI breathing, chart sweep, and active panel traces',
+  },
+  high: {
+    shortLabel: 'High',
+    label: 'High',
+    description: 'Full hardware instrumentation with continuous staggered icon kinematics and vivid phosphor bloom',
+  },
+};
+
 export const DEFAULT_CRT_DISPLAY_SETTINGS: CrtDisplaySettings = {
   enabled: true,
   panelOpen: false,
   palette: 'green',
+  uiMotion: 'low',
   ...CRT_PRESETS.subtle.values,
 };
 
@@ -83,6 +112,10 @@ export function clampCrtPct(val: unknown, fallback: number): number {
 
 function isValidPalette(val: unknown): val is CrtPalette {
   return val === 'green' || val === 'amber' || val === 'cyan';
+}
+
+function isValidUiMotionLevel(val: unknown): val is CrtUiMotionLevel {
+  return val === 'off' || val === 'low' || val === 'medium' || val === 'high';
 }
 
 export function loadInitialCrtDisplaySettings(): CrtDisplaySettings {
@@ -97,6 +130,9 @@ export function loadInitialCrtDisplaySettings(): CrtDisplaySettings {
         enabled: typeof parsed.enabled === 'boolean' ? parsed.enabled : true,
         panelOpen: typeof parsed.panelOpen === 'boolean' ? parsed.panelOpen : false,
         palette: isValidPalette(parsed.palette) ? parsed.palette : 'green',
+        uiMotion: isValidUiMotionLevel(parsed.uiMotion)
+          ? parsed.uiMotion
+          : DEFAULT_CRT_DISPLAY_SETTINGS.uiMotion,
         scanlines: clampCrtPct(parsed.scanlines, DEFAULT_CRT_DISPLAY_SETTINGS.scanlines),
         gaussGlow: clampCrtPct(parsed.gaussGlow, DEFAULT_CRT_DISPLAY_SETTINGS.gaussGlow),
         vignette: clampCrtPct(parsed.vignette, DEFAULT_CRT_DISPLAY_SETTINGS.vignette),
@@ -181,6 +217,36 @@ export function computeCrtCssVariables(settings: CrtDisplaySettings): CSSPropert
   const aberrationOffset = rgbT > 0 ? `${(0.3 + rgbT * 1.35).toFixed(2)}px` : '0px';
   const aberrationAlpha = rgbT > 0 ? (0.16 + rgbT * 0.56).toFixed(3) : '0';
 
+  // Living UI Motion variables — coupled directly to Gauss Glow & Phosphor Palette
+  const motionWeight =
+    settings.uiMotion === 'high'
+      ? 1.28
+      : settings.uiMotion === 'medium'
+        ? 0.88
+        : settings.uiMotion === 'low'
+          ? 0.55
+          : 0;
+  const opticalGlowFactor = on ? 0.38 + 0.62 * glowT : 0.3;
+  const bloom = motionWeight * opticalGlowFactor;
+
+  const motionSpeedScale =
+    settings.uiMotion === 'high'
+      ? '0.74'
+      : settings.uiMotion === 'medium'
+        ? '1'
+        : '1.28';
+  const motionGlowSm = bloom > 0 ? `${(1.2 + bloom * 5.2).toFixed(2)}px` : '0px';
+  const motionGlowLg = bloom > 0 ? `${(3.2 + bloom * 13.5).toFixed(2)}px` : '0px';
+  const motionGlowAlpha = bloom > 0 ? Math.min(0.95, 0.2 + bloom * 0.62).toFixed(3) : '0';
+  const motionTailAlpha = bloom > 0 ? Math.min(0.85, 0.14 + bloom * 0.46).toFixed(3) : '0';
+  const motionTraceAlpha = bloom > 0 ? Math.min(0.92, 0.24 + bloom * 0.56).toFixed(3) : '0';
+  const motionSweepAlpha =
+    settings.uiMotion === 'high' || settings.uiMotion === 'medium'
+      ? Math.min(0.5, 0.1 + bloom * 0.26).toFixed(3)
+      : settings.uiMotion === 'low'
+        ? Math.min(0.28, 0.06 + bloom * 0.16).toFixed(3)
+        : '0';
+
   return {
     '--crt-phosphor-rgb': paletteInfo.rgb,
     '--crt-ambient-alpha': ambientAlpha,
@@ -198,5 +264,12 @@ export function computeCrtCssVariables(settings: CrtDisplaySettings): CSSPropert
     '--crt-grille-opacity': grilleOpacity,
     '--crt-aberration-offset': aberrationOffset,
     '--crt-aberration-alpha': aberrationAlpha,
+    '--crt-motion-speed': motionSpeedScale,
+    '--crt-motion-glow-sm': motionGlowSm,
+    '--crt-motion-glow-lg': motionGlowLg,
+    '--crt-motion-glow-alpha': motionGlowAlpha,
+    '--crt-motion-tail-alpha': motionTailAlpha,
+    '--crt-motion-trace-alpha': motionTraceAlpha,
+    '--crt-motion-sweep-alpha': motionSweepAlpha,
   } as CSSProperties;
 }

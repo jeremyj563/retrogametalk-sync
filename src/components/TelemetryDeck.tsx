@@ -399,7 +399,7 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
 
   return (
     <div
-      className="lg:col-span-6 border border-crt-border bg-crt-surface rounded-md p-5 flex flex-col justify-between"
+      className="relative crt-panel-living lg:col-span-6 border border-crt-border bg-crt-surface rounded-md p-5 flex flex-col justify-between"
       onMouseEnter={() => setIsHovering(true)}
       onMouseLeave={() => {
         setIsHovering(false);
@@ -415,6 +415,9 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
         }
       }}
     >
+      <div aria-hidden="true" className="crt-edge-beam">
+        <span />
+      </div>
       {/* Top Header + Navigation Deck Bar */}
       <div className="space-y-3 mb-3.5">
         <div className="flex items-start justify-between gap-3">
@@ -519,6 +522,7 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
 
       {/* Main Interactive Grafana Viewport (Fixed 212px Height to Prevent Layout Shift) */}
       <div className="relative h-[212px] border border-crt-border bg-crt-bg rounded p-2.5 flex flex-col justify-center overflow-hidden select-none">
+        <div aria-hidden="true" className="crt-telemetry-raster" />
         {/* SLIDE 1: PACING */}
         {activeSlide === 'pacing' &&
           (delaySeries.length < 2 ? (
@@ -629,6 +633,14 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                       stroke="var(--color-crt-phosphor)"
                       strokeWidth="2"
                       points={delayPts.join(' ')}
+                      className="crt-chart-trace-glow"
+                    />
+                    <circle
+                      cx={xFor(delaySeries.length - 1)}
+                      cy={yFor(delaySeries[delaySeries.length - 1].delayMs)}
+                      r="2.75"
+                      fill="var(--color-crt-phosphor)"
+                      className="crt-chart-endpoint-pulse"
                     />
 
                     {/* Throttle Event Markers */}
@@ -842,6 +854,14 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                       stroke="var(--color-crt-phosphor)"
                       strokeWidth="2"
                       points={pts.join(' ')}
+                      className="crt-chart-trace-glow"
+                    />
+                    <circle
+                      cx={xFor(transferSeries.length - 1)}
+                      cy={yFor(transferSeries[transferSeries.length - 1].bytesPerSec)}
+                      r="2.75"
+                      fill="var(--color-crt-phosphor)"
+                      className="crt-chart-endpoint-pulse"
                     />
 
                     {hPt && (
@@ -1633,6 +1653,14 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                       stroke="var(--color-crt-phosphor)"
                       strokeWidth="2"
                       points={p50Pts.join(' ')}
+                      className="crt-chart-trace-glow"
+                    />
+                    <circle
+                      cx={xFor(rollingPercentiles.length - 1)}
+                      cy={yFor(rollingPercentiles[rollingPercentiles.length - 1].p50)}
+                      r="2.75"
+                      fill="var(--color-crt-phosphor)"
+                      className="crt-chart-endpoint-pulse"
                     />
 
                     {hPt && (
