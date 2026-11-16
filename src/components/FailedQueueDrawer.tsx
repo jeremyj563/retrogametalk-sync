@@ -49,10 +49,15 @@ export function FailedQueueDrawer({
   const [retryDryRun, setRetryDryRun] = useState(false);
   const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
 
+  const [rendered, setRendered] = useState(open);
+  const [expanded, setExpanded] = useState(false);
+
   const reqSeqRef = useRef(0);
   const activeDetailIdRef = useRef<number | null>(null);
   const lastHandledRevisionRef = useRef(catalogRevision);
   const hasLoadedOnceRef = useRef(false);
+  const accordionRef = useRef<HTMLDivElement | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     activeDetailIdRef.current = activeDetailItem?.id ?? null;
@@ -142,9 +147,70 @@ export function FailedQueueDrawer({
   useEffect(() => {
     if (open) return;
     setConfirmBulkDelete(false);
+    setActiveDetailItem(null);
   }, [open]);
 
-  if (!open) return null;
+  useEffect(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+
+    const prefersReducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    if (open) {
+      setRendered(true);
+      if (prefersReducedMotion) {
+        setExpanded(true);
+        return;
+      }
+      let rafInner = 0;
+      const rafOuter = window.requestAnimationFrame(() => {
+        rafInner = window.requestAnimationFrame(() => {
+          setExpanded(true);
+        });
+      });
+      return () => {
+        window.cancelAnimationFrame(rafOuter);
+        if (rafInner) window.cancelAnimationFrame(rafInner);
+      };
+    }
+
+    setExpanded(false);
+    if (!rendered) return;
+    if (prefersReducedMotion) {
+      setRendered(false);
+      return;
+    }
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      setRendered(false);
+    }, 280);
+
+    return () => {
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
+    };
+  }, [open, rendered]);
+
+  const handleAccordionTransitionEnd = (e: React.TransitionEvent<HTMLDivElement>) => {
+    if (e.target !== accordionRef.current) return;
+    if (e.propertyName !== 'grid-template-rows') return;
+    if (!open) {
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
+      setRendered(false);
+    }
+  };
+
+  if (!rendered) return null;
 
   const allSelected = items.length > 0 && items.every((i) => selectedIds.has(i.id));
 
@@ -249,10 +315,20 @@ export function FailedQueueDrawer({
 
   return (
     <>
-      <section
-        aria-label="Failed Queue Drawer"
-        className="border border-crt-border bg-crt-surface rounded-md overflow-hidden transition-opacity duration-150 motion-reduce:transition-none"
+      <div
+        ref={accordionRef}
+        data-open={expanded ? 'true' : 'false'}
+        aria-hidden={!open}
+        inert={!open}
+        onTransitionEnd={handleAccordionTransitionEnd}
+        className="crt-accordion-grid"
       >
+        <div className="crt-accordion-inner">
+          <div className="pt-6">
+            <section
+              aria-label="Failed Queue Drawer"
+              className="border border-crt-border bg-crt-surface rounded-md overflow-hidden"
+            >
         {/* Drawer Header Bar */}
         <div className="px-5 py-4 border-b border-crt-border flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
           <div className="space-y-0.5 min-w-0">
@@ -688,7 +764,10 @@ export function FailedQueueDrawer({
             </table>
           </div>
         )}
-      </section>
+            </section>
+          </div>
+        </div>
+      </div>
 
       <GameDetailDrawer
         item={activeDetailItem}
