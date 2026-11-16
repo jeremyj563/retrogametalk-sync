@@ -223,6 +223,9 @@ export interface RateLimiterTelemetry {
 
 export interface ActiveTransferState {
   itemId: number | null;
+  fileId?: number | null;
+  fileIndex?: number | null;
+  totalFiles?: number | null;
   filename: string;
   systemName: string;
   remoteUrl: string;
