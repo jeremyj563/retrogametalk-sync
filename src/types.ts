@@ -196,6 +196,7 @@ export interface ActiveTransferState {
   fileId?: number | null;
   fileIndex?: number | null;
   totalFiles?: number | null;
+  completedFiles?: number | null;
   filename: string;
   systemName: string;
   remoteUrl: string;
