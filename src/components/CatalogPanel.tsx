@@ -10,6 +10,7 @@ import {
   FileArchive,
   Folder,
   Gamepad2,
+  HardDrive,
   LayoutGrid,
   List,
   RefreshCw,
@@ -17,7 +18,6 @@ import {
   Search,
   SkipForward,
   Trash2,
-  Usb,
   X,
   XCircle,
 } from 'lucide-react';
@@ -28,6 +28,7 @@ import {
 } from '../shared/catalogSort';
 import type {
   CatalogFacets,
+  CatalogInstalledFilter,
   CatalogSortOption,
   FilterMatchMode,
   FsTreeNode,
@@ -72,6 +73,7 @@ interface CatalogViewPrefs {
   search: string;
   systems: string[];
   statuses: string[];
+  installedFilter: CatalogInstalledFilter;
   tags: string[];
   tagsMode: FilterMatchMode;
   genres: string[];
@@ -102,6 +104,7 @@ const DEFAULT_CATALOG_VIEW_PREFS: CatalogViewPrefs = {
   search: '',
   systems: [],
   statuses: [],
+  installedFilter: 'all',
   tags: [],
   tagsMode: 'any',
   genres: [],
@@ -151,6 +154,11 @@ function sanitizeStoredMatchMode(raw: unknown): FilterMatchMode {
   return raw === 'all' ? 'all' : 'any';
 }
 
+function sanitizeStoredInstalledFilter(raw: unknown): CatalogInstalledFilter {
+  if (raw === 'only' || raw === 'exclude') return raw;
+  return 'all';
+}
+
 function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
   try {
     if (typeof window === 'undefined' || !window.localStorage) {
@@ -169,6 +177,7 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
       search: typeof parsed.search === 'string' ? parsed.search : '',
       systems: sanitizeStoredList(parsed.systems, parsed.systemFilter),
       statuses: sanitizeStoredStatuses(parsed.statuses, parsed.statusFilter),
+      installedFilter: sanitizeStoredInstalledFilter(parsed.installedFilter),
       tags: sanitizeStoredList(parsed.tags, parsed.tagFilter),
       tagsMode: sanitizeStoredMatchMode(parsed.tagsMode),
       genres: sanitizeStoredList(parsed.genres, parsed.genreFilter),
@@ -195,6 +204,7 @@ function buildCatalogQueryKey(
     | 'search'
     | 'systems'
     | 'statuses'
+    | 'installedFilter'
     | 'tags'
     | 'tagsMode'
     | 'genres'
@@ -213,6 +223,7 @@ function buildCatalogQueryKey(
     prefs.search,
     prefs.systems,
     prefs.statuses,
+    prefs.installedFilter,
     prefs.tags,
     prefs.tags.length > 1 ? prefs.tagsMode : 'any',
     prefs.genres,
@@ -272,6 +283,9 @@ export function CatalogPanel({
   const [search, setSearch] = useState(() => memoryCatalogViewPrefs.search);
   const [systems, setSystems] = useState<string[]>(() => memoryCatalogViewPrefs.systems);
   const [statuses, setStatuses] = useState<string[]>(() => memoryCatalogViewPrefs.statuses);
+  const [installedFilter, setInstalledFilter] = useState<CatalogInstalledFilter>(
+    () => memoryCatalogViewPrefs.installedFilter,
+  );
   const [tags, setTags] = useState<string[]>(() => memoryCatalogViewPrefs.tags);
   const [tagsMode, setTagsMode] = useState<FilterMatchMode>(() => memoryCatalogViewPrefs.tagsMode);
   const [genres, setGenres] = useState<string[]>(() => memoryCatalogViewPrefs.genres);
@@ -289,6 +303,7 @@ export function CatalogPanel({
   const [loading, setLoading] = useState(() => !initialMatchedCatalog);
   const [retryingId, setRetryingId] = useState<number | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [markingInstalled, setMarkingInstalled] = useState(false);
   const [failedCovers, setFailedCovers] = useState<Set<number>>(new Set());
   const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
   const [activeDetailIndex, setActiveDetailIndex] = useState<number | null>(null);
@@ -332,7 +347,7 @@ export function CatalogPanel({
       const msg = err instanceof Error ? err.message : String(err);
       setSdMountNotice(
         /cross origin|sub frame|user activation/i.test(msg)
-          ? 'Open the app directly in its own browser tab to mount an SD card folder.'
+          ? 'Open the app directly in its own browser tab to mount a storage device folder.'
           : msg,
       );
     }
@@ -346,6 +361,7 @@ export function CatalogPanel({
       search,
       systems,
       statuses,
+      installedFilter,
       tags,
       tagsMode,
       genres,
@@ -372,6 +388,7 @@ export function CatalogPanel({
     search,
     systems,
     statuses,
+    installedFilter,
     tags,
     tagsMode,
     genres,
@@ -412,6 +429,7 @@ export function CatalogPanel({
       });
       for (const sys of systems) qs.append('system', sys);
       for (const st of statuses) qs.append('status', st);
+      if (installedFilter !== 'all') qs.set('installed', installedFilter);
       for (const t of tags) qs.append('tag', t);
       if (tags.length > 1) qs.set('tagMode', tagsMode);
       for (const g of genres) qs.append('genre', g);
@@ -429,6 +447,7 @@ export function CatalogPanel({
       sort,
       systems,
       statuses,
+      installedFilter,
       tags,
       tagsMode,
       genres,
@@ -463,6 +482,7 @@ export function CatalogPanel({
             search,
             systems,
             statuses,
+            installedFilter,
             tags,
             tagsMode,
             genres,
@@ -544,6 +564,7 @@ export function CatalogPanel({
       search,
       systems,
       statuses,
+      installedFilter,
       tags,
       tagsMode,
       genres,
@@ -597,6 +618,7 @@ export function CatalogPanel({
           search,
           systems,
           statuses,
+          installedFilter,
           tags,
           tagsMode,
           genres,
@@ -622,6 +644,7 @@ export function CatalogPanel({
     search,
     systems,
     statuses,
+    installedFilter,
     tags,
     tagsMode,
     genres,
@@ -789,7 +812,42 @@ export function CatalogPanel({
       next.delete(updated.id);
       return next;
     });
-    void loadCatalog();
+    void loadCatalog(true);
+  };
+
+  const handleModalItemsInstalled = (updatedItems: RepositoryItemRecord[]) => {
+    if (updatedItems.length === 0) return;
+    const byId = new Map(updatedItems.map((row) => [row.id, row]));
+    setItems((prev) => prev.map((row) => byId.get(row.id) ?? row));
+    setActiveDetailItem((current) => (current ? (byId.get(current.id) ?? current) : current));
+    void loadCatalog(true);
+  };
+
+  const handleBulkSetInstalled = async (ids: number[], installed: boolean) => {
+    if (ids.length === 0 || markingInstalled) return;
+    setMarkingInstalled(true);
+    try {
+      const res = await fetch('/api/items/installed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids,
+          installed,
+          deviceLabel: installed ? (sdRootHandle?.name || null) : null,
+        }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { items?: RepositoryItemRecord[] };
+        if (Array.isArray(data.items) && data.items.length > 0) {
+          const byId = new Map(data.items.map((row) => [row.id, row]));
+          setItems((prev) => prev.map((row) => byId.get(row.id) ?? row));
+          setActiveDetailItem((current) => (current ? (byId.get(current.id) ?? current) : current));
+        }
+        await loadCatalog(true);
+      }
+    } finally {
+      setMarkingInstalled(false);
+    }
   };
 
   const handleRetry = async (
@@ -1077,6 +1135,24 @@ export function CatalogPanel({
       });
     }
 
+    if (installedFilter === 'only') {
+      tokens.push({
+        key: 'installed',
+        groupLabel: 'Storage',
+        valueLabel: 'Installed Only',
+        matchAll: false,
+        onRemove: () => setInstalledFilter('all'),
+      });
+    } else if (installedFilter === 'exclude') {
+      tokens.push({
+        key: 'installed',
+        groupLabel: 'Storage',
+        valueLabel: 'Exclude Installed',
+        matchAll: false,
+        onRemove: () => setInstalledFilter('all'),
+      });
+    }
+
     return tokens;
   }, [
     search,
@@ -1092,6 +1168,7 @@ export function CatalogPanel({
     sources,
     sourcesMode,
     statuses,
+    installedFilter,
   ]);
 
   const activeFilterCount = activeFilterTokens.length;
@@ -1101,6 +1178,7 @@ export function CatalogPanel({
     setSearch('');
     setSystems([]);
     setStatuses([]);
+    setInstalledFilter('all');
     setTags([]);
     setTagsMode('any');
     setGenres([]);
@@ -1189,8 +1267,8 @@ export function CatalogPanel({
                 onClick={() => void handleQuickMountSdCard()}
                 title={
                   sdRootHandle
-                    ? `Mounted SD card folder: ${sdRootHandle.name} (click to switch)`
-                    : 'Mount a flash cart, ODE, or handheld SD card root folder'
+                    ? `Mounted storage device: ${sdRootHandle.name} (click to switch)`
+                    : 'Mount a target storage device folder (SD card, HDD, SSD, or USB drive)'
                 }
                 className={`crt-cta-beam inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded transition-colors whitespace-nowrap shrink-0 ${
                   sdRootHandle
@@ -1198,8 +1276,8 @@ export function CatalogPanel({
                     : 'border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-text'
                 }`}
               >
-                <Usb className="h-3.5 w-3.5" />
-                {sdRootHandle ? `SD: ${sdRootHandle.name}` : 'Mount SD Card'}
+                <HardDrive className="h-3.5 w-3.5" />
+                {sdRootHandle ? `Device: ${sdRootHandle.name}` : 'Mount Storage Device'}
               </button>
               <button
                 type="button"
@@ -1371,6 +1449,60 @@ export function CatalogPanel({
                 searchPlaceholder="Filter statuses..."
               />
 
+              <div
+                role="group"
+                aria-label="Filter by storage device installation"
+                className="inline-flex items-center p-0.5 bg-crt-bg border border-crt-border rounded shrink-0"
+              >
+                <button
+                  type="button"
+                  onClick={() => setInstalledFilter('all')}
+                  title="Include both installed and uninstalled games"
+                  className={`px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    installedFilter === 'all'
+                      ? 'bg-crt-elevated text-crt-text border border-crt-border-strong font-medium'
+                      : 'text-crt-muted hover:text-crt-text border border-transparent'
+                  }`}
+                >
+                  All Devices
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setInstalledFilter('only')}
+                  title="Show only games installed to a storage device"
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    installedFilter === 'only'
+                      ? 'bg-crt-phosphor/15 text-crt-phosphor border border-crt-phosphor/60 font-medium'
+                      : 'text-crt-muted hover:text-crt-text border border-transparent'
+                  }`}
+                >
+                  <HardDrive className="h-3 w-3 shrink-0" />
+                  <span>Installed</span>
+                  {facets.counts?.installed && (
+                    <span className="font-mono text-[11px] tabular-nums opacity-80">
+                      ({facets.counts.installed.installed})
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setInstalledFilter('exclude')}
+                  title="Exclude games already installed to a storage device"
+                  className={`px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    installedFilter === 'exclude'
+                      ? 'bg-crt-amber/15 text-crt-amber border border-crt-amber/60 font-medium'
+                      : 'text-crt-muted hover:text-crt-text border border-transparent'
+                  }`}
+                >
+                  <span>Not Installed</span>
+                  {facets.counts?.installed && (
+                    <span className="font-mono text-[11px] tabular-nums opacity-80 ml-1">
+                      ({facets.counts.installed.notInstalled})
+                    </span>
+                  )}
+                </button>
+              </div>
+
               <select
                 value={sort}
                 onChange={(e) => setSort(normalizeCatalogSort(e.target.value))}
@@ -1435,14 +1567,36 @@ export function CatalogPanel({
             </span>
             <div className="flex flex-wrap items-center gap-2">
               {!confirmCatalogBulk && (
-                <button
-                  type="button"
-                  onClick={() => setSdExportIds(Array.from(selectedCatalogIds))}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0"
-                >
-                  <Usb className="h-3.5 w-3.5" />
-                  Send to SD Card ({selectedCatalogIds.size})
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setSdExportIds(Array.from(selectedCatalogIds))}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <HardDrive className="h-3.5 w-3.5" />
+                    Install to Storage Device ({selectedCatalogIds.size})
+                  </button>
+                  {items.some((i) => selectedCatalogIds.has(i.id) && !i.installedAt) && (
+                    <button
+                      type="button"
+                      disabled={markingInstalled}
+                      onClick={() => void handleBulkSetInstalled(Array.from(selectedCatalogIds), true)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border text-crt-text hover:border-crt-phosphor hover:text-crt-phosphor rounded transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
+                    >
+                      Flag Installed
+                    </button>
+                  )}
+                  {items.some((i) => selectedCatalogIds.has(i.id) && Boolean(i.installedAt)) && (
+                    <button
+                      type="button"
+                      disabled={markingInstalled}
+                      onClick={() => void handleBulkSetInstalled(Array.from(selectedCatalogIds), false)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:border-crt-amber hover:text-crt-amber rounded transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
+                    >
+                      Clear Installed
+                    </button>
+                  )}
+                </>
               )}
               {confirmCatalogBulk ? (
                 <>
@@ -1853,23 +2007,36 @@ export function CatalogPanel({
                               )}
                             </div>
                           ) : (
-                            <span
-                              className={`inline-flex items-center gap-1.5 ${
-                                item.status === 'downloaded'
-                                  ? 'text-crt-phosphor'
-                                  : item.status === 'skipped'
-                                    ? 'text-crt-muted'
-                                    : item.status === 'failed'
-                                      ? 'text-crt-crimson'
-                                      : 'text-crt-amber'
-                              }`}
-                            >
-                              {item.status === 'downloaded' && <CheckCircle2 className="h-3.5 w-3.5" />}
-                              {item.status === 'skipped' && <SkipForward className="h-3.5 w-3.5" />}
-                              {item.status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
-                              {item.status === 'partial' && <AlertCircle className="h-3.5 w-3.5" />}
-                              {item.status}
-                            </span>
+                            <div className="space-y-0.5">
+                              <span
+                                className={`inline-flex items-center gap-1.5 ${
+                                  item.status === 'downloaded'
+                                    ? 'text-crt-phosphor'
+                                    : item.status === 'skipped'
+                                      ? 'text-crt-muted'
+                                      : item.status === 'failed'
+                                        ? 'text-crt-crimson'
+                                        : 'text-crt-amber'
+                                }`}
+                              >
+                                {item.status === 'downloaded' && <CheckCircle2 className="h-3.5 w-3.5" />}
+                                {item.status === 'skipped' && <SkipForward className="h-3.5 w-3.5" />}
+                                {item.status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
+                                {item.status === 'partial' && <AlertCircle className="h-3.5 w-3.5" />}
+                                {item.status}
+                              </span>
+                              {item.installedAt && (
+                                <div
+                                  title={`Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`}
+                                  className="flex items-center gap-1.5 text-[11px] text-crt-text/90"
+                                >
+                                  <HardDrive className="h-3 w-3 text-crt-phosphor shrink-0" />
+                                  <span className="truncate max-w-[140px]">
+                                    Installed{item.installedDeviceLabel ? ` · ${item.installedDeviceLabel}` : ''}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
                           )}
                         </td>
                         <td
@@ -2097,6 +2264,17 @@ export function CatalogPanel({
                           </h3>
                           <p className="font-mono text-[11px] text-crt-muted truncate">{subline}</p>
                           <p className="font-mono text-[11px] text-crt-phosphor/90 truncate">{tagsDisplay}</p>
+                          {item.installedAt && (
+                            <p
+                              title={`Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`}
+                              className="flex items-center gap-1.5 font-mono text-[11px] text-crt-text/90 truncate pt-0.5"
+                            >
+                              <HardDrive className="h-3 w-3 text-crt-phosphor shrink-0" />
+                              <span className="truncate">
+                                Installed{item.installedDeviceLabel ? ` · ${item.installedDeviceLabel}` : ''}
+                              </span>
+                            </p>
+                          )}
                         </div>
 
                         {transfer.active ? (
@@ -2338,7 +2516,7 @@ export function CatalogPanel({
         }}
       />
 
-      {/* SD Card Batch / Single Export Modal */}
+      {/* Storage Device Batch / Single Install Modal */}
       <SdCardExportModal
         open={Boolean(sdExportIds && sdExportIds.length > 0)}
         itemIds={sdExportIds || []}
@@ -2346,6 +2524,7 @@ export function CatalogPanel({
         sdRootHandle={sdRootHandle}
         onMountSdHandle={(handle) => setSdRootHandle(handle)}
         onSaveConfig={onSaveConfig}
+        onItemsInstalled={handleModalItemsInstalled}
         onClose={() => setSdExportIds(null)}
       />
 

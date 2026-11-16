@@ -9,6 +9,7 @@ import {
   FileArchive,
   FlaskConical,
   Gamepad2,
+  HardDrive,
   Image as ImageIcon,
   Maximize2,
   Minimize2,
@@ -16,7 +17,6 @@ import {
   RotateCcw,
   SkipForward,
   Trash2,
-  Usb,
   X,
   XCircle,
   ZoomIn,
@@ -94,6 +94,7 @@ export function GameDetailDrawer({
   const [inspection, setInspection] = useState<ArchiveInspectResult | null>(null);
   const [inspectError, setInspectError] = useState<string | null>(null);
   const [preparedNames, setPreparedNames] = useState<Record<string, string>>({});
+  const [togglingInstalled, setTogglingInstalled] = useState(false);
   const autoUpgradedIdsRef = useRef<Set<number>>(new Set());
   const bodyScrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -115,6 +116,7 @@ export function GameDetailDrawer({
     setInspection(null);
     setInspectError(null);
     setPreparedNames({});
+    setTogglingInstalled(false);
     bodyScrollRef.current?.scrollTo({ top: 0, behavior: 'auto' });
   }, [item?.id]);
 
@@ -360,6 +362,24 @@ export function GameDetailDrawer({
     }
   };
 
+  const handleToggleInstalled = async (installed: boolean) => {
+    if (togglingInstalled) return;
+    setTogglingInstalled(true);
+    try {
+      const res = await fetch('/api/items/installed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [item.id], installed }),
+      });
+      const parsed = await readJsonSafely<{ items?: RepositoryItemRecord[] }>(res);
+      if (parsed.ok && parsed.data?.items?.[0]) {
+        onItemUpdated(parsed.data.items[0]);
+      }
+    } finally {
+      setTogglingInstalled(false);
+    }
+  };
+
   const handleInspectPreparedRom = async (fileId: number) => {
     setInspectingFileId(fileId);
     setInspectError(null);
@@ -477,6 +497,20 @@ export function GameDetailDrawer({
                       : item.status
                   : item.status}
               </span>
+              {item.installedAt && (
+                <span
+                  title={`Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`}
+                  className="inline-flex items-center gap-1.5 font-mono text-xs text-crt-text/90"
+                >
+                  <span aria-hidden="true" className="text-crt-muted">
+                    ·
+                  </span>
+                  <HardDrive className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
+                  <span>
+                    Installed{item.installedDeviceLabel ? ` (${item.installedDeviceLabel})` : ''}
+                  </span>
+                </span>
+              )}
             </div>
             <p className="text-xs font-mono text-crt-muted truncate">
               {subtitleParts.join(' · ')}
@@ -749,6 +783,36 @@ export function GameDetailDrawer({
                   <dt className="col-span-4 text-crt-muted font-medium">Mirrored At</dt>
                   <dd className="col-span-8 font-mono text-[11px] text-crt-muted tabular-nums">
                     {formatDateTime(item.downloadedAt || item.discoveredAt)}
+                  </dd>
+                </div>
+                <div className="px-4 py-2 grid grid-cols-12 gap-3 items-baseline">
+                  <dt className="col-span-4 text-crt-muted font-medium">Storage Device</dt>
+                  <dd className="col-span-8 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+                    {item.installedAt ? (
+                      <span className="inline-flex items-center gap-1.5 text-crt-phosphor tabular-nums">
+                        <HardDrive className="h-3 w-3 shrink-0" />
+                        <span>
+                          Installed
+                          {item.installedDeviceLabel ? ` · ${item.installedDeviceLabel}` : ''}
+                          {' · '}
+                          {formatDateTime(item.installedAt)}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="text-crt-muted">Not installed</span>
+                    )}
+                    <button
+                      type="button"
+                      disabled={togglingInstalled}
+                      onClick={() => void handleToggleInstalled(!item.installedAt)}
+                      className="text-[11px] font-mono text-crt-muted hover:text-crt-phosphor underline underline-offset-2 transition-colors disabled:opacity-50 cursor-pointer shrink-0"
+                    >
+                      {togglingInstalled
+                        ? 'Updating...'
+                        : item.installedAt
+                          ? 'Clear flag'
+                          : 'Mark installed'}
+                    </button>
                   </dd>
                 </div>
               </dl>
@@ -1155,8 +1219,8 @@ export function GameDetailDrawer({
                     onClick={() => onExportToSdCard(item.id)}
                     className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap"
                   >
-                    <Usb className="h-3.5 w-3.5" />
-                    Send to SD Card
+                    <HardDrive className="h-3.5 w-3.5" />
+                    Install to Storage Device
                   </button>
                 )}
                 <a

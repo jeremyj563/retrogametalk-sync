@@ -35,7 +35,7 @@ export function isFileSystemAccessSupported(): { supported: boolean; reason?: st
   if (typeof win.showDirectoryPicker !== 'function') {
     return {
       supported: false,
-      reason: 'Direct SD card folder access requires Chrome, Edge, or another Chromium browser. Use Prepared ROM download in Firefox/Safari.',
+      reason: 'Direct storage device folder access requires Chrome, Edge, or another Chromium browser. Use Prepared ROM download in Firefox/Safari.',
     };
   }
   return { supported: true };

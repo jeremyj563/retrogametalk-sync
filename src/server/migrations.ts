@@ -374,6 +374,20 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 13,
+    name: 'catalog_release_storage_install_tracking',
+    description: 'Add installed_at and installed_device_label columns to catalog_releases to track games installed to external storage devices',
+    up: (db) => {
+      if (!tableHasColumn(db, 'catalog_releases', 'installed_at')) {
+        db.prepare(`ALTER TABLE catalog_releases ADD COLUMN installed_at TEXT`).run();
+      }
+      if (!tableHasColumn(db, 'catalog_releases', 'installed_device_label')) {
+        db.prepare(`ALTER TABLE catalog_releases ADD COLUMN installed_device_label TEXT`).run();
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_releases_installed_at ON catalog_releases(installed_at);`);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

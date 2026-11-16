@@ -189,7 +189,7 @@ export const DEVICE_PRESETS: Record<DevicePresetId, DevicePresetDefinition> = {
   custom: {
     id: 'custom',
     name: 'Custom Folder Mapping',
-    description: 'Use your own per-system folder paths relative to the mounted SD root',
+    description: 'Use your own per-system folder paths relative to the mounted storage root',
     discSubfolderMode: 'per_game',
     folderMap: {},
   },
