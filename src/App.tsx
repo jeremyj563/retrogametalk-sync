@@ -41,7 +41,6 @@ export default function App() {
   const [confirmingFullSync, setConfirmingFullSync] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [catalogRevision, setCatalogRevision] = useState(0);
-  const [catalogFocusFailedTick, setCatalogFocusFailedTick] = useState(0);
   const [activeRetryItemId, setActiveRetryItemId] = useState<number | null>(null);
   const activeRetryRunRef = useRef<{ runId: number; itemId: number } | null>(null);
   const prevActiveRunRef = useRef<SyncRunRecord | null>(null);
@@ -632,14 +631,15 @@ export default function App() {
                   status={status}
                   runs={runs}
                   logs={logs}
+                  catalogRevision={catalogRevision}
+                  activeRetryItemId={activeRetryItemId}
                   onSaveConfig={handleSaveConfig}
                   onClearLogs={handleClearLogs}
                   onClearRuns={handleClearRuns}
                   onNavigateToOperations={() => setSection('operations')}
-                  onReviewFailed={() => {
-                    setCatalogFocusFailedTick((t) => t + 1);
-                    setSection('catalog');
-                  }}
+                  onRetryItem={handleRetryItem}
+                  onRetryAllFailed={handleRetryAllFailed}
+                  onRefreshStatus={loadInitialData}
                 />
               )}
               {section === 'catalog' && (
@@ -647,11 +647,9 @@ export default function App() {
                   config={config}
                   status={status}
                   catalogRevision={catalogRevision}
-                  focusFailedSignal={catalogFocusFailedTick}
                   activeRetryItemId={activeRetryItemId}
                   onSaveConfig={handleSaveConfig}
                   onRetryItem={handleRetryItem}
-                  onRetryAllFailed={handleRetryAllFailed}
                   onRefreshStatus={loadInitialData}
                 />
               )}
