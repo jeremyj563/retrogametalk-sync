@@ -98,6 +98,190 @@ export interface DiscoveredRelease {
   metadata?: ReleaseMetadata;
 }
 
+export const SCREENSHOT_FULLRES_VERSION = 1;
+
+const WP_RESIZE_SUFFIX_RE = /-\d{2,4}x\d{2,4}(?=\.(?:jpe?g|png|webp|gif|bmp|avif)$)/i;
+const IMAGE_PATH_EXT_RE = /\.(?:jpe?g|png|webp|gif|bmp|avif)$/i;
+const RESIZE_QUERY_PARAMS = ['resize', 'fit', 'w', 'h', 'width', 'height', 'crop'];
+
+function resolveHttpAssetUrl(raw: string | null | undefined, baseUrl: string): string | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith('#') ||
+    trimmed.toLowerCase().startsWith('data:') ||
+    trimmed.toLowerCase().startsWith('blob:') ||
+    trimmed.toLowerCase().startsWith('javascript:') ||
+    trimmed.toLowerCase().startsWith('mailto:')
+  ) {
+    return null;
+  }
+  try {
+    const resolved = new URL(trimmed, baseUrl);
+    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return null;
+    return resolved.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function isLikelyImageAssetUrl(raw: string | null | undefined, baseUrl: string): boolean {
+  const resolved = resolveHttpAssetUrl(raw, baseUrl);
+  if (!resolved) return false;
+  try {
+    const parsed = new URL(resolved);
+    const pathname = parsed.pathname.toLowerCase();
+    if (IMAGE_PATH_EXT_RE.test(pathname)) return true;
+    if (pathname.includes('/wp-content/uploads/')) return true;
+    for (const val of parsed.searchParams.values()) {
+      if (IMAGE_PATH_EXT_RE.test(val.toLowerCase())) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function parseSrcsetCandidates(rawSrcset: string | null | undefined, baseUrl: string): string[] {
+  if (!rawSrcset || typeof rawSrcset !== 'string') return [];
+  const entries: { url: string; score: number }[] = [];
+  const pattern = /(\S+)(?:\s+(\d+(?:\.\d+)?)([wx]))?\s*(?:,|$)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(rawSrcset)) !== null) {
+    const rawUrl = match[1]?.replace(/,+$/, '');
+    const resolved = resolveHttpAssetUrl(rawUrl, baseUrl);
+    if (!resolved) continue;
+    const num = match[2] ? Number(match[2]) : 1;
+    const unit = (match[3] || 'x').toLowerCase();
+    const score = unit === 'w' ? num : num * 1000;
+    entries.push({ url: resolved, score: Number.isFinite(score) ? score : 0 });
+  }
+  entries.sort((a, b) => b.score - a.score);
+  return Array.from(new Set(entries.map((e) => e.url)));
+}
+
+function stripResizeQueryParams(urlStr: string): string[] {
+  try {
+    const parsed = new URL(urlStr);
+    let mutated = false;
+    for (const key of RESIZE_QUERY_PARAMS) {
+      if (parsed.searchParams.has(key)) {
+        parsed.searchParams.delete(key);
+        mutated = true;
+      }
+    }
+    const results: string[] = [];
+    if (mutated) {
+      results.push(parsed.toString());
+    }
+    // Unwrap Jetpack Photon CDN URLs (e.g. https://i0.wp.com/example.com/wp-content/uploads/...)
+    const photonMatch = parsed.hostname.match(/^i\d\.wp\.com$/i);
+    if (photonMatch && parsed.pathname.length > 1) {
+      results.push(`https://${parsed.pathname.replace(/^\/+/, '')}`);
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+export function expandFullResImageCandidates(
+  rawUrls: (string | null | undefined)[],
+  baseUrl: string,
+): string[] {
+  const resolvedInputs: string[] = [];
+  for (const raw of rawUrls) {
+    const resolved = resolveHttpAssetUrl(raw, baseUrl);
+    if (resolved && !resolvedInputs.includes(resolved)) {
+      resolvedInputs.push(resolved);
+    }
+  }
+  if (resolvedInputs.length === 0) return [];
+
+  // Identify URLs that are already confirmed originals because a sibling URL in rawUrls
+  // strips its -WxH suffix down to that exact pathname (e.g. game-320x240-150x150.png -> game-320x240.png)
+  const confirmedOriginalPathnames = new Set<string>();
+  for (const candidate of resolvedInputs) {
+    try {
+      const u = new URL(candidate);
+      if (WP_RESIZE_SUFFIX_RE.test(u.pathname)) {
+        const strippedPath = u.pathname.replace(WP_RESIZE_SUFFIX_RE, '');
+        for (const other of resolvedInputs) {
+          if (other === candidate) continue;
+          const otherUrl = new URL(other);
+          if (otherUrl.pathname === strippedPath) {
+            confirmedOriginalPathnames.add(otherUrl.pathname);
+          }
+        }
+      }
+    } catch {
+      // Ignore URL parse error
+    }
+  }
+
+  const out: string[] = [];
+  const pushUnique = (u: string | null | undefined) => {
+    if (u && !out.includes(u)) out.push(u);
+  };
+
+  for (const candidate of resolvedInputs) {
+    for (const queryClean of stripResizeQueryParams(candidate)) {
+      try {
+        const qu = new URL(queryClean);
+        if (WP_RESIZE_SUFFIX_RE.test(qu.pathname) && !confirmedOriginalPathnames.has(qu.pathname)) {
+          const origUrl = new URL(queryClean);
+          origUrl.pathname = qu.pathname.replace(WP_RESIZE_SUFFIX_RE, '');
+          pushUnique(origUrl.toString());
+
+          const scaledUrl = new URL(queryClean);
+          scaledUrl.pathname = qu.pathname.replace(WP_RESIZE_SUFFIX_RE, '-scaled');
+          pushUnique(scaledUrl.toString());
+        }
+      } catch {
+        // Ignore
+      }
+      pushUnique(queryClean);
+    }
+
+    try {
+      const u = new URL(candidate);
+      if (WP_RESIZE_SUFFIX_RE.test(u.pathname) && !confirmedOriginalPathnames.has(u.pathname)) {
+        const origUrl = new URL(candidate);
+        origUrl.pathname = u.pathname.replace(WP_RESIZE_SUFFIX_RE, '');
+        origUrl.search = '';
+        pushUnique(origUrl.toString());
+
+        const scaledUrl = new URL(candidate);
+        scaledUrl.pathname = u.pathname.replace(WP_RESIZE_SUFFIX_RE, '-scaled');
+        scaledUrl.search = '';
+        pushUnique(scaledUrl.toString());
+      }
+    } catch {
+      // Ignore
+    }
+
+    pushUnique(candidate);
+  }
+
+  return out;
+}
+
+export function canonicalImageAssetKey(urlStr: string): string {
+  try {
+    const u = new URL(urlStr);
+    let cleanPath = u.pathname.toLowerCase();
+    cleanPath = cleanPath.replace(WP_RESIZE_SUFFIX_RE, '');
+    cleanPath = cleanPath.replace(/-scaled(?=\.(?:jpe?g|png|webp|gif|bmp|avif)$)/i, '');
+    if (cleanPath.includes('/wp-content/uploads/')) {
+      cleanPath = cleanPath.replace(/\.(?:jpe?g|png|webp|gif|bmp|avif)$/i, '');
+    }
+    return `${u.hostname.toLowerCase().replace(/^i\d\.wp\.com$/, '')}${cleanPath}`;
+  } catch {
+    return urlStr.trim().toLowerCase();
+  }
+}
+
 export interface WpPostMetadata {
   wpPostId: number;
   wpPostType: string;
@@ -115,6 +299,8 @@ export interface WpPostMetadata {
   sources: string[];
   formats: string[];
   descriptionHtml: string;
+  coverUrl?: string | null;
+  screenshotUrls?: string[];
   downloadHints: { filename: string; fileSize: string }[];
 }
 
@@ -2927,7 +3113,12 @@ export class RetroGameTalkClient {
     const developers = new Set<string>();
     let releaseYear: string | null = null;
 
-    const embedded = post._embedded as { 'wp:term'?: unknown[] } | undefined;
+    const embedded = post._embedded as
+      | {
+          'wp:term'?: unknown[];
+          'wp:featuredmedia'?: unknown[];
+        }
+      | undefined;
     const termGroups = Array.isArray(embedded?.['wp:term']) ? embedded!['wp:term']! : [];
     for (const group of termGroups) {
       if (!Array.isArray(group)) continue;
@@ -2945,6 +3136,67 @@ export class RetroGameTalkClient {
         else if (tax === 'publisher') publishers.add(name);
         else if (tax === 'developer') developers.add(name);
         else if (tax === 'release-year' && !releaseYear) releaseYear = name;
+      }
+    }
+
+    const extractWpMediaUrl = (val: unknown): string | null => {
+      if (typeof val === 'string' && val.trim().startsWith('http')) {
+        return val.trim();
+      }
+      if (val && typeof val === 'object') {
+        const obj = val as {
+          url?: unknown;
+          source_url?: unknown;
+          media_details?: { sizes?: { full?: { source_url?: unknown } } };
+          sizes?: Record<string, unknown>;
+        };
+        const fullEmbedded = obj.media_details?.sizes?.full?.source_url;
+        if (typeof fullEmbedded === 'string' && fullEmbedded.trim().startsWith('http')) {
+          return fullEmbedded.trim();
+        }
+        if (typeof obj.url === 'string' && obj.url.trim().startsWith('http')) {
+          return obj.url.trim();
+        }
+        if (typeof obj.source_url === 'string' && obj.source_url.trim().startsWith('http')) {
+          return obj.source_url.trim();
+        }
+        if (obj.sizes && typeof obj.sizes === 'object' && typeof obj.sizes.full === 'string') {
+          return obj.sizes.full.trim();
+        }
+      }
+      return null;
+    };
+
+    let wpCoverUrl: string | null = null;
+    if (Array.isArray(embedded?.['wp:featuredmedia']) && embedded!['wp:featuredmedia']!.length > 0) {
+      wpCoverUrl = extractWpMediaUrl(embedded!['wp:featuredmedia']![0]);
+    }
+    if (!wpCoverUrl) {
+      for (const key of ['cover', 'cover_art', 'cover_image', 'box_art', 'featured_image']) {
+        wpCoverUrl = extractWpMediaUrl(acf[key]);
+        if (wpCoverUrl) break;
+      }
+    }
+
+    const wpScreenshotUrls: string[] = [];
+    for (const key of ['screenshots', 'game_screenshots', 'screenshot_gallery', 'gallery', 'images', 'shots']) {
+      const rawGallery = acf[key];
+      if (!Array.isArray(rawGallery)) continue;
+      for (const entry of rawGallery) {
+        const direct = extractWpMediaUrl(entry);
+        if (direct && !wpScreenshotUrls.includes(direct)) {
+          wpScreenshotUrls.push(direct);
+          continue;
+        }
+        if (entry && typeof entry === 'object') {
+          const nested =
+            extractWpMediaUrl((entry as Record<string, unknown>).image) ||
+            extractWpMediaUrl((entry as Record<string, unknown>).screenshot) ||
+            extractWpMediaUrl((entry as Record<string, unknown>).full_image);
+          if (nested && !wpScreenshotUrls.includes(nested)) {
+            wpScreenshotUrls.push(nested);
+          }
+        }
       }
     }
 
@@ -2990,6 +3242,8 @@ export class RetroGameTalkClient {
       sources: Array.from(sources),
       formats: Array.from(formats),
       descriptionHtml: contentRendered,
+      coverUrl: wpCoverUrl,
+      screenshotUrls: wpScreenshotUrls,
       downloadHints,
     };
   }
@@ -3401,35 +3655,166 @@ export class RetroGameTalkClient {
       }
     });
 
-    // Cover art URL
-    let coverUrl: string | null = null;
-    const rawCover =
-      $('.rgt-cover a.rgt-cover-zoom').first().attr('href') ||
-      $('.rgt-cover img').first().attr('src') ||
-      $('.post-thumbnail img').first().attr('src') ||
-      $('article.rgt-game img.wp-post-image').first().attr('src');
-    if (rawCover) {
-      try {
-        coverUrl = new URL(rawCover, pageUrl).toString();
-      } catch {
-        coverUrl = null;
+    // Cover art URL (prioritize full-res zoom links, WP featured media, largest srcset, and unresized originals)
+    const rawCoverUrls: (string | null | undefined)[] = [];
+    if (wpData?.coverUrl) rawCoverUrls.push(wpData.coverUrl);
+
+    const coverZoomHref = $('.rgt-cover a.rgt-cover-zoom, .rgt-cover a[href]').first().attr('href');
+    if (isLikelyImageAssetUrl(coverZoomHref, pageUrl)) {
+      rawCoverUrls.push(coverZoomHref);
+    }
+    const coverDataSrc = $('.rgt-cover [data-src]').first().attr('data-src');
+    if (coverDataSrc) rawCoverUrls.push(coverDataSrc);
+
+    const coverImg = $(
+      '.rgt-cover img, .post-thumbnail img, article.rgt-game img.wp-post-image',
+    ).first();
+    if (coverImg.length) {
+      rawCoverUrls.push(
+        coverImg.attr('data-orig-file'),
+        coverImg.attr('data-full-url'),
+        coverImg.attr('data-large_image'),
+        coverImg.attr('data-zoom-image'),
+      );
+      rawCoverUrls.push(
+        ...parseSrcsetCandidates(coverImg.attr('data-srcset') || coverImg.attr('srcset'), pageUrl),
+      );
+      rawCoverUrls.push(
+        coverImg.attr('data-src'),
+        coverImg.attr('data-lazy-src'),
+        coverImg.attr('data-original'),
+        coverImg.attr('src'),
+      );
+    }
+    const coverCandidates = expandFullResImageCandidates(rawCoverUrls, pageUrl);
+    const coverUrl: string | null = coverCandidates[0] ?? null;
+
+    // Full-resolution screenshot URLs
+    const screenshotByCanonicalKey = new Map<string, string[]>();
+    const addScreenshotCandidates = (rawList: (string | null | undefined)[]) => {
+      const expanded = expandFullResImageCandidates(rawList, pageUrl);
+      if (expanded.length === 0) return;
+      const key = canonicalImageAssetKey(expanded[0]);
+      const existing = screenshotByCanonicalKey.get(key);
+      if (!existing) {
+        screenshotByCanonicalKey.set(key, expanded);
+      } else {
+        for (const u of expanded) {
+          if (!existing.includes(u)) existing.push(u);
+        }
+      }
+    };
+
+    if (wpData?.screenshotUrls?.length) {
+      for (const wpShot of wpData.screenshotUrls) {
+        addScreenshotCandidates([wpShot]);
       }
     }
 
-    // Full-resolution screenshot URLs
-    const shotSet = new Set<string>();
-    $('#lightgallery .game-box-layout, .rgt-shots .game-box-layout').each((_, el) => {
-      const raw =
-        $(el).attr('data-src') ||
-        $(el).find('a[itemprop="screenshot"], a').first().attr('href') ||
-        $(el).find('img').first().attr('src');
-      if (!raw) return;
-      try {
-        shotSet.add(new URL(raw, pageUrl).toString());
-      } catch {
-        // Ignore invalid screenshot URL
+    const gallerySelector =
+      '#lightgallery, .rgt-shots, .rgt-screenshots, .game-screenshots, .screenshots-gallery, article.rgt-game .gallery';
+    const galleryRoots = $(gallerySelector);
+
+    const collectFromImgElement = (imgEl: Parameters<typeof $>[0]) => {
+      const $img = $(imgEl);
+      const rawShotUrls: (string | null | undefined)[] = [
+        $img.attr('data-orig-file'),
+        $img.attr('data-full-url'),
+        $img.attr('data-large_image'),
+        $img.attr('data-zoom-image'),
+      ];
+
+      // Check enclosing <a href="..."> (e.g. <a href="FULL"><div class="game-box-layout"><img src="THUMB"></div></a>)
+      const enclosingHref = $img.closest('a[href]').attr('href');
+      if (isLikelyImageAssetUrl(enclosingHref, pageUrl)) {
+        rawShotUrls.push(enclosingHref);
       }
-    });
+
+      // Check sibling/descendant <a href="..."> inside the same card/figure
+      const cardContainer = $img.closest('.game-box-layout, figure, .gallery-item, .lg-item');
+      if (cardContainer.length) {
+        const innerHref = cardContainer.find('a[itemprop="screenshot"], a[href]').first().attr('href');
+        if (isLikelyImageAssetUrl(innerHref, pageUrl)) {
+          rawShotUrls.push(innerHref);
+        }
+      }
+
+      // Walk ancestors up to (but not including) the gallery root for LightGallery slide data-src
+      let cursor = $img.parent();
+      let depth = 0;
+      while (cursor.length && depth < 6 && !cursor.is(gallerySelector) && !cursor.is('body, html')) {
+        for (const attrName of ['data-src', 'data-large', 'data-full', 'data-url']) {
+          const val = cursor.attr(attrName);
+          if (val) rawShotUrls.push(val);
+        }
+        cursor = cursor.parent();
+        depth += 1;
+      }
+
+      // Parse <picture><source srcset> and <img srcset / data-srcset> sorted largest-first
+      const pictureEl = $img.closest('picture');
+      if (pictureEl.length) {
+        pictureEl.find('source').each((__, srcNode) => {
+          rawShotUrls.push(
+            ...parseSrcsetCandidates($(srcNode).attr('data-srcset') || $(srcNode).attr('srcset'), pageUrl),
+          );
+        });
+      }
+      rawShotUrls.push(
+        ...parseSrcsetCandidates($img.attr('data-srcset') || $img.attr('srcset'), pageUrl),
+      );
+
+      rawShotUrls.push(
+        $img.attr('data-src'),
+        $img.attr('data-lazy-src'),
+        $img.attr('data-original'),
+        $img.attr('src'),
+      );
+
+      addScreenshotCandidates(rawShotUrls);
+    };
+
+    if (galleryRoots.length > 0) {
+      galleryRoots.find('img').each((_, imgEl) => {
+        collectFromImgElement(imgEl);
+      });
+
+      // Also catch LightGallery / anchor items that use CSS background-image without an <img> tag
+      galleryRoots.find('[data-src], a[href]').each((_, el) => {
+        const $el = $(el);
+        if ($el.is(gallerySelector) || $el.find('img').length > 0) return;
+        const rawDataSrc = $el.attr('data-src');
+        const rawHref = $el.attr('href');
+        const candidates: (string | null | undefined)[] = [];
+        if (rawDataSrc) candidates.push(rawDataSrc);
+        if (isLikelyImageAssetUrl(rawHref, pageUrl)) candidates.push(rawHref);
+        if (candidates.length > 0) {
+          addScreenshotCandidates(candidates);
+        }
+      });
+    }
+
+    if (screenshotByCanonicalKey.size === 0) {
+      $('[itemprop="screenshot"]').each((_, el) => {
+        const $el = $(el);
+        if ($el.is('img')) {
+          collectFromImgElement(el);
+        } else {
+          const innerImg = $el.find('img').first();
+          if (innerImg.length) {
+            collectFromImgElement(innerImg[0]);
+          } else {
+            const href = $el.attr('href') || $el.attr('content') || $el.attr('data-src');
+            if (isLikelyImageAssetUrl(href, pageUrl)) {
+              addScreenshotCandidates([href]);
+            }
+          }
+        }
+      });
+    }
+
+    const screenshotCandidates = Array.from(screenshotByCanonicalKey.values());
+    const screenshotUrls = screenshotCandidates.map((cands) => cands[0]);
 
     // Description HTML sanitization (prefer HTML #custom-description, fallback to WP content.rendered)
     const descNode = $('#custom-description').first().length
@@ -3481,8 +3866,10 @@ export class RetroGameTalkClient {
       descriptionText,
       coverUrl,
       coverLocalRelPath: null,
-      screenshotUrls: Array.from(shotSet),
+      screenshotUrls,
       screenshotLocalRelPaths: [],
+      coverCandidates,
+      screenshotCandidates,
       sourcePageUrl: pageUrl,
       fetchedAt: new Date().toISOString(),
     };
@@ -3492,12 +3879,14 @@ export class RetroGameTalkClient {
     const ct = contentType.toLowerCase();
     if (ct.includes('image/png')) return '.png';
     if (ct.includes('image/webp')) return '.webp';
+    if (ct.includes('image/avif')) return '.avif';
     if (ct.includes('image/gif')) return '.gif';
+    if (ct.includes('image/bmp')) return '.bmp';
     if (ct.includes('image/jpeg') || ct.includes('image/jpg')) return '.jpg';
 
     try {
       const ext = path.extname(new URL(urlStr).pathname).toLowerCase();
-      if (['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext)) {
+      if (['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.bmp'].includes(ext)) {
         return ext === '.jpeg' ? '.jpg' : ext;
       }
     } catch {
@@ -3506,64 +3895,105 @@ export class RetroGameTalkClient {
     return '.jpg';
   }
 
-  private async downloadAssetIfMissing(
-    assetUrl: string,
+  private async downloadAssetWithFallback(
+    candidateUrls: string[],
     targetBasePathWithoutExt: string,
     refererUrl: string,
     config: ScraperConfigInternal,
-    signal?: AbortSignal,
-    log?: LoggerFn,
-  ): Promise<string | null> {
-    // Check if any valid image extension already exists on disk
-    for (const ext of ['.jpg', '.png', '.webp', '.gif']) {
-      const candidate = `${targetBasePathWithoutExt}${ext}`;
-      if (fs.existsSync(candidate) && fs.statSync(candidate).size > 0) {
-        return candidate;
+    options: {
+      forceRefresh?: boolean;
+      signal?: AbortSignal;
+      log?: LoggerFn;
+    } = {},
+  ): Promise<{ filePath: string; resolvedUrl: string; downloadedOrVerified: boolean } | null> {
+    const { forceRefresh = false, signal, log } = options;
+    const knownExts = ['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.bmp'];
+
+    if (!forceRefresh) {
+      for (const ext of knownExts) {
+        const candidate = `${targetBasePathWithoutExt}${ext}`;
+        if (fs.existsSync(candidate) && fs.statSync(candidate).size > 0) {
+          return { filePath: candidate, resolvedUrl: candidateUrls[0] || '', downloadedOrVerified: true };
+        }
       }
     }
 
-    try {
-      const { response } = await this.fetchWithRedirects(
-        assetUrl,
-        config,
-        {
-          method: 'GET',
-          headers: {
-            Accept: 'image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5',
-            Referer: refererUrl,
+    let lastFailureDetail: string | null = null;
+    for (const assetUrl of candidateUrls) {
+      if (signal?.aborted) break;
+      if (!assetUrl) continue;
+
+      try {
+        const { response } = await this.fetchWithRedirects(
+          assetUrl,
+          config,
+          {
+            method: 'GET',
+            headers: {
+              Accept: 'image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5',
+              Referer: refererUrl,
+            },
           },
-        },
-        signal,
-        log,
-      );
+          signal,
+          log,
+        );
 
-      if (!response.ok) {
-        await response.body?.cancel().catch(() => undefined);
-        return null;
+        if (!response.ok) {
+          lastFailureDetail = `HTTP ${response.status} for ${assetUrl}`;
+          await response.body?.cancel().catch(() => undefined);
+          continue;
+        }
+
+        const contentType = response.headers.get('content-type') || '';
+        const lowerCt = contentType.toLowerCase();
+        if (lowerCt.includes('text/html') || lowerCt.includes('application/json')) {
+          lastFailureDetail = `Unexpected content-type "${contentType}" for ${assetUrl}`;
+          await response.body?.cancel().catch(() => undefined);
+          continue;
+        }
+
+        const buf = Buffer.from(await response.arrayBuffer());
+        if (buf.length === 0) {
+          lastFailureDetail = `Empty body for ${assetUrl}`;
+          continue;
+        }
+
+        const ext = this.getSafeImageExtension(assetUrl, contentType);
+        const finalPath = `${targetBasePathWithoutExt}${ext}`;
+        const partPath = `${finalPath}.part`;
+
+        fs.mkdirSync(path.dirname(finalPath), { recursive: true });
+        await fs.promises.writeFile(partPath, buf);
+        await fs.promises.rename(partPath, finalPath);
+
+        // Remove stale sibling image files if extension changed (e.g. .jpg thumbnail -> .png full-res)
+        for (const otherExt of knownExts) {
+          const sibling = `${targetBasePathWithoutExt}${otherExt}`;
+          if (sibling !== finalPath && fs.existsSync(sibling)) {
+            await fs.promises.unlink(sibling).catch(() => undefined);
+          }
+        }
+
+        return { filePath: finalPath, resolvedUrl: assetUrl, downloadedOrVerified: true };
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        lastFailureDetail = err instanceof Error ? err.message : String(err);
       }
-
-      const contentType = response.headers.get('content-type') || '';
-      if (contentType.toLowerCase().includes('text/html')) {
-        await response.body?.cancel().catch(() => undefined);
-        return null;
-      }
-
-      const ext = this.getSafeImageExtension(assetUrl, contentType);
-      const finalPath = `${targetBasePathWithoutExt}${ext}`;
-      const partPath = `${finalPath}.part`;
-
-      fs.mkdirSync(path.dirname(finalPath), { recursive: true });
-      const buf = Buffer.from(await response.arrayBuffer());
-      if (buf.length === 0) return null;
-
-      await fs.promises.writeFile(partPath, buf);
-      await fs.promises.rename(partPath, finalPath);
-      return finalPath;
-    } catch (err) {
-      if (signal?.aborted) throw err;
-      log?.('warn', `Failed to mirror artwork ${assetUrl}`, err instanceof Error ? err.message : String(err));
-      return null;
     }
+
+    if (lastFailureDetail && candidateUrls[0]) {
+      log?.('warn', `Failed to mirror artwork ${candidateUrls[0]}`, lastFailureDetail);
+    }
+
+    // If forceRefresh failed (e.g. offline), preserve any existing local file on disk
+    for (const ext of knownExts) {
+      const existing = `${targetBasePathWithoutExt}${ext}`;
+      if (fs.existsSync(existing) && fs.statSync(existing).size > 0) {
+        return { filePath: existing, resolvedUrl: candidateUrls[0] || '', downloadedOrVerified: false };
+      }
+    }
+
+    return null;
   }
 
   async mirrorReleaseAssets(
@@ -3572,6 +4002,7 @@ export class RetroGameTalkClient {
     config: ScraperConfigInternal,
     signal?: AbortSignal,
     log?: LoggerFn,
+    options: { forceRefresh?: boolean } = {},
   ): Promise<{ metadata: ReleaseMetadata; coverAbsPath: string | null; screenshotAbsPaths: string[] }> {
     const resolvedRoot = path.resolve(config.downloadDir);
     const resolvedReleaseDir = path.resolve(releaseDir);
@@ -3581,54 +4012,110 @@ export class RetroGameTalkClient {
 
     fs.mkdirSync(resolvedReleaseDir, { recursive: true });
 
+    // Automatically upgrade legacy thumbnail assets on disk if sidecar predates SCREENSHOT_FULLRES_VERSION
+    let existingSidecarVersion = metadata.screenshotsFullResVersion ?? 0;
+    const metaPath = path.join(resolvedReleaseDir, 'metadata.json');
+    if (existingSidecarVersion < SCREENSHOT_FULLRES_VERSION && fs.existsSync(metaPath)) {
+      try {
+        const parsedSidecar = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as {
+          screenshotsFullResVersion?: number;
+        };
+        if (typeof parsedSidecar.screenshotsFullResVersion === 'number') {
+          existingSidecarVersion = parsedSidecar.screenshotsFullResVersion;
+        }
+      } catch {
+        // Ignore malformed sidecar
+      }
+    }
+    const shouldForceRefresh =
+      Boolean(options.forceRefresh) || existingSidecarVersion < SCREENSHOT_FULLRES_VERSION;
+
+    let anyStaleFallback = false;
     let coverAbsPath: string | null = null;
     let coverLocalRelPath: string | null = null;
-    if (metadata.coverUrl) {
-      coverAbsPath = await this.downloadAssetIfMissing(
-        metadata.coverUrl,
+    let resolvedCoverUrl: string | null = metadata.coverUrl;
+    const coverCandidateList = expandFullResImageCandidates(
+      metadata.coverCandidates?.length ? metadata.coverCandidates : [metadata.coverUrl],
+      metadata.sourcePageUrl,
+    );
+    if (coverCandidateList.length > 0) {
+      const coverSaved = await this.downloadAssetWithFallback(
+        coverCandidateList,
         path.join(resolvedReleaseDir, 'cover'),
         metadata.sourcePageUrl,
         config,
-        signal,
-        log,
+        { forceRefresh: shouldForceRefresh, signal, log },
       );
-      if (coverAbsPath) {
+      if (coverSaved) {
+        if (!coverSaved.downloadedOrVerified) anyStaleFallback = true;
+        coverAbsPath = coverSaved.filePath;
+        if (coverSaved.resolvedUrl) resolvedCoverUrl = coverSaved.resolvedUrl;
         coverLocalRelPath = path.relative(resolvedReleaseDir, coverAbsPath).split(path.sep).join('/');
       }
     }
 
     const screenshotAbsPaths: string[] = [];
     const screenshotLocalRelPaths: string[] = [];
-    if (metadata.screenshotUrls.length > 0) {
+    const resolvedScreenshotUrls: string[] = [];
+    const shotCount = Math.max(
+      metadata.screenshotUrls.length,
+      metadata.screenshotCandidates?.length ?? 0,
+    );
+    if (shotCount > 0) {
       const shotsDir = path.join(resolvedReleaseDir, 'screenshots');
-      for (let i = 0; i < metadata.screenshotUrls.length; i += 1) {
+      for (let i = 0; i < shotCount; i += 1) {
         if (signal?.aborted) break;
-        const shotUrl = metadata.screenshotUrls[i];
+        const cands = expandFullResImageCandidates(
+          metadata.screenshotCandidates?.[i]?.length
+            ? metadata.screenshotCandidates[i]
+            : [metadata.screenshotUrls[i]],
+          metadata.sourcePageUrl,
+        );
+        if (cands.length === 0) continue;
         const indexName = String(i + 1).padStart(2, '0');
-        const shotAbs = await this.downloadAssetIfMissing(
-          shotUrl,
+        const shotSaved = await this.downloadAssetWithFallback(
+          cands,
           path.join(shotsDir, indexName),
           metadata.sourcePageUrl,
           config,
-          signal,
-          log,
+          { forceRefresh: shouldForceRefresh, signal, log },
         );
-        if (shotAbs) {
-          screenshotAbsPaths.push(shotAbs);
-          screenshotLocalRelPaths.push(path.relative(resolvedReleaseDir, shotAbs).split(path.sep).join('/'));
+        if (shotSaved) {
+          if (!shotSaved.downloadedOrVerified) anyStaleFallback = true;
+          screenshotAbsPaths.push(shotSaved.filePath);
+          screenshotLocalRelPaths.push(
+            path.relative(resolvedReleaseDir, shotSaved.filePath).split(path.sep).join('/'),
+          );
+          resolvedScreenshotUrls.push(shotSaved.resolvedUrl || cands[0]);
+        } else {
+          anyStaleFallback = true;
+          resolvedScreenshotUrls.push(cands[0]);
         }
       }
     }
 
+    const { coverCandidates: _cc, screenshotCandidates: _sc, ...cleanMeta } = metadata;
+    void _cc;
+    void _sc;
+
+    const upgradedToFullRes =
+      !anyStaleFallback && (shotCount === 0 || screenshotAbsPaths.length > 0);
+
     const enriched: ReleaseMetadata = {
-      ...metadata,
+      ...cleanMeta,
+      coverUrl: resolvedCoverUrl,
       coverLocalRelPath,
+      screenshotUrls: resolvedScreenshotUrls.length > 0 ? resolvedScreenshotUrls : metadata.screenshotUrls,
       screenshotLocalRelPaths,
+      ...(upgradedToFullRes
+        ? { screenshotsFullResVersion: SCREENSHOT_FULLRES_VERSION }
+        : existingSidecarVersion >= SCREENSHOT_FULLRES_VERSION
+          ? { screenshotsFullResVersion: existingSidecarVersion }
+          : {}),
       fetchedAt: new Date().toISOString(),
     };
 
     try {
-      const metaPath = path.join(resolvedReleaseDir, 'metadata.json');
       await fs.promises.writeFile(metaPath, JSON.stringify(enriched, null, 2), 'utf8');
     } catch {
       // Non-fatal if metadata sidecar write fails

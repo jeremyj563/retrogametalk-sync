@@ -83,6 +83,7 @@ export interface ReleaseMetadata {
   coverLocalRelPath: string | null;
   screenshotUrls: string[];
   screenshotLocalRelPaths: string[];
+  screenshotsFullResVersion?: number;
   sourcePageUrl: string;
   fetchedAt: string;
 }

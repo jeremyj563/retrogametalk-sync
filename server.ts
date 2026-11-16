@@ -183,7 +183,7 @@ async function bootstrap() {
     res.json({ item });
   });
 
-  app.get('/api/items/:id/asset', (req, res) => {
+  app.get('/api/items/:id/asset', async (req, res) => {
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId) || itemId <= 0) {
       res.status(400).json({ error: 'Invalid item ID' });
@@ -191,12 +191,21 @@ async function bootstrap() {
     }
     const kind = req.query.kind === 'screenshot' ? 'screenshot' : 'cover';
     const index = Number(req.query.index || 0);
+    const wantFullRes = req.query.full === '1';
+
+    let item = getRepositoryItemById(itemId);
+    if (wantFullRes && item && (item.metadata?.screenshotsFullResVersion ?? 0) < 1) {
+      item = (await orchestrator.ensureFullResItemAssets(itemId)) ?? item;
+    }
+
     const asset = orchestrator.resolveItemAssetFile(itemId, kind, Number.isNaN(index) ? 0 : index);
     if (!asset) {
       res.status(404).json({ error: 'Artwork asset not found locally' });
       return;
     }
-    res.setHeader('Cache-Control', 'public, max-age=3600');
+
+    const isFullResVerified = (item?.metadata?.screenshotsFullResVersion ?? 0) >= 1;
+    res.setHeader('Cache-Control', isFullResVerified ? 'public, max-age=3600' : 'no-cache');
     res.sendFile(asset.absPath);
   });
 
@@ -392,7 +401,16 @@ async function bootstrap() {
       return;
     }
     try {
-      const item = await orchestrator.fetchItemMetadata(itemId);
+      if (req.query.upgradeAssets === '1') {
+        const item = await orchestrator.ensureFullResItemAssets(itemId);
+        if (!item) {
+          res.status(404).json({ error: 'Catalog item not found' });
+          return;
+        }
+        res.json({ item });
+        return;
+      }
+      const item = await orchestrator.fetchItemMetadata(itemId, { forceRefreshAssets: true });
       res.json({ item });
     } catch (err) {
       res.status(502).json({ error: err instanceof Error ? err.message : String(err) });

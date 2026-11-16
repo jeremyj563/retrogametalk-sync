@@ -40,6 +40,7 @@ import {
   type DiscoveredRelease,
   type LoggerFn,
   RetroGameTalkClient,
+  SCREENSHOT_FULLRES_VERSION,
   type WpPostMetadata,
   resolveMirroredPaths,
 } from './rgtClient.ts';
@@ -138,6 +139,7 @@ export class ScraperOrchestrator extends EventEmitter {
   private abortController: AbortController | null = null;
   private lockRenewTimer: NodeJS.Timeout | null = null;
   private shuttingDown = false;
+  private inFlightAssetUpgrades = new Map<number, Promise<RepositoryItemRecord | null>>();
 
   constructor() {
     super();
@@ -700,7 +702,7 @@ export class ScraperOrchestrator extends EventEmitter {
         try {
           fs.rmSync(path.join(releaseDir, 'metadata.json'), { force: true });
           fs.rmSync(path.join(releaseDir, 'screenshots'), { recursive: true, force: true });
-          for (const ext of ['.jpg', '.jpeg', '.png', '.webp', '.gif']) {
+          for (const ext of ['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.bmp']) {
             fs.rmSync(path.join(releaseDir, `cover${ext}`), { force: true });
           }
           if (fs.existsSync(releaseDir) && fs.readdirSync(releaseDir).length === 0) {
@@ -745,7 +747,7 @@ export class ScraperOrchestrator extends EventEmitter {
       if (item.metadata?.coverLocalRelPath) {
         candidates.push(path.resolve(releaseDir, item.metadata.coverLocalRelPath));
       }
-      for (const ext of ['.jpg', '.png', '.webp', '.gif']) {
+      for (const ext of ['.jpg', '.png', '.webp', '.avif', '.gif', '.bmp']) {
         candidates.push(path.join(releaseDir, `cover${ext}`));
       }
       for (const candidate of candidates) {
@@ -837,7 +839,10 @@ export class ScraperOrchestrator extends EventEmitter {
     });
   }
 
-  async fetchItemMetadata(itemId: number): Promise<RepositoryItemRecord> {
+  async fetchItemMetadata(
+    itemId: number,
+    options: { forceRefreshAssets?: boolean } = {},
+  ): Promise<RepositoryItemRecord> {
     const item = getRepositoryItemById(itemId);
     if (!item) {
       throw new Error(`Catalog item #${itemId} not found`);
@@ -889,6 +894,7 @@ export class ScraperOrchestrator extends EventEmitter {
       cfg,
       undefined,
       runLogger,
+      { forceRefresh: options.forceRefreshAssets ?? true },
     );
 
     const updated = updateCatalogReleaseMetadata(
@@ -904,11 +910,69 @@ export class ScraperOrchestrator extends EventEmitter {
     this.log(
       'info',
       `Mirrored metadata & artwork for ${updated.title}`,
-      `${mirrored.coverAbsPath ? 'cover + ' : ''}${mirrored.screenshotAbsPaths.length} screenshots`,
+      `${mirrored.coverAbsPath ? 'cover + ' : ''}${mirrored.screenshotAbsPaths.length} full-res screenshots`,
     );
     this.emitCatalogUpdated('metadata_updated', updated.id);
     this.emitStatus();
     return updated;
+  }
+
+  async ensureFullResItemAssets(itemId: number): Promise<RepositoryItemRecord | null> {
+    const existing = getRepositoryItemById(itemId);
+    if (!existing) return null;
+    if ((existing.metadata?.screenshotsFullResVersion ?? 0) >= SCREENSHOT_FULLRES_VERSION) {
+      return existing;
+    }
+
+    const activePromise = this.inFlightAssetUpgrades.get(itemId);
+    if (activePromise) {
+      return activePromise;
+    }
+
+    const upgradePromise = (async (): Promise<RepositoryItemRecord | null> => {
+      try {
+        return await this.fetchItemMetadata(itemId, { forceRefreshAssets: true });
+      } catch {
+        // Fallback: if release HTML page couldn't be fetched (e.g. session not logged in yet),
+        // still attempt direct WordPress -WxH un-resizing on any existing stored metadata URLs.
+        const current = getRepositoryItemById(itemId);
+        if (!current?.metadata) return current;
+        try {
+          const cfg = getInternalConfig();
+          const root = path.resolve(cfg.downloadDir);
+          const releaseDir = this.resolveReleaseDir(current, root);
+          if (!releaseDir) return current;
+          const runLogger: LoggerFn = (level, msg, detail) => this.log(level, msg, detail ?? null);
+          const mirrored = await this.client.mirrorReleaseAssets(
+            current.metadata,
+            releaseDir,
+            cfg,
+            undefined,
+            runLogger,
+            { forceRefresh: true },
+          );
+          const updated = updateCatalogReleaseMetadata(
+            current.id,
+            mirrored.metadata,
+            mirrored.coverAbsPath,
+            mirrored.screenshotAbsPaths,
+          );
+          if (updated) {
+            this.emitCatalogUpdated('metadata_updated', updated.id);
+            this.emitStatus();
+            return updated;
+          }
+        } catch {
+          // Non-fatal fallback failure: serve existing local asset
+        }
+        return getRepositoryItemById(itemId);
+      } finally {
+        this.inFlightAssetUpgrades.delete(itemId);
+      }
+    })();
+
+    this.inFlightAssetUpgrades.set(itemId, upgradePromise);
+    return upgradePromise;
   }
 
   deleteFsEntries(relativePaths: string[]): { deletedCount: number; catalogRowsRemoved: number } {
