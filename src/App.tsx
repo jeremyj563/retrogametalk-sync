@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  Check,
   Clock,
+  FlaskConical,
   FolderTree,
   HardDrive,
   Play,
@@ -25,13 +27,34 @@ import type {
   ActiveTransferState,
   LogLevel,
   NavSection,
-  RunMode,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
   SyncRunRecord,
+  SyncScope,
 } from './types';
 import { formatBytes, formatCountdown } from './utils/format';
 import { readJsonSafely } from './utils/http';
+
+const SYNC_SCOPE_STORAGE_KEY = 'rgt_sync_scope_v1';
+const SYNC_DRY_RUN_STORAGE_KEY = 'rgt_sync_dry_run_v1';
+
+function loadInitialSyncScope(): SyncScope {
+  try {
+    const raw = window.localStorage?.getItem(SYNC_SCOPE_STORAGE_KEY);
+    return raw === 'full' ? 'full' : 'incremental';
+  } catch {
+    return 'incremental';
+  }
+}
+
+function loadInitialDryRunEnabled(): boolean {
+  try {
+    const raw = window.localStorage?.getItem(SYNC_DRY_RUN_STORAGE_KEY);
+    return raw === 'true';
+  } catch {
+    return false;
+  }
+}
 
 export default function App() {
   const [section, setSection] = useState<NavSection>('monitor');
@@ -39,7 +62,8 @@ export default function App() {
   const [config, setConfig] = useState<ScraperConfigPublic | null>(null);
   const [runs, setRuns] = useState<SyncRunRecord[]>([]);
   const [logs, setLogs] = useState<ActivityLogRecord[]>([]);
-  const [selectedMode, setSelectedMode] = useState<RunMode>('dry_run');
+  const [selectedScope, setSelectedScope] = useState<SyncScope>(() => loadInitialSyncScope());
+  const [dryRunEnabled, setDryRunEnabled] = useState<boolean>(() => loadInitialDryRunEnabled());
   const [crtSettings, setCrtSettings] = useState<CrtDisplaySettings>(() =>
     loadInitialCrtDisplaySettings(),
   );
@@ -245,7 +269,7 @@ export default function App() {
     };
   }, [loadInitialData]);
 
-  const handleStartRun = async (mode: RunMode) => {
+  const handleStartRun = async (scope: SyncScope, dryRun = dryRunEnabled) => {
     setConfirmingFullSync(false);
     setActionPending(true);
     setStopRequested(false);
@@ -254,7 +278,7 @@ export default function App() {
       const res = await fetch('/api/runs/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify({ mode: scope, dryRun }),
       });
       const parsed = await readJsonSafely<{ run?: SyncRunRecord; error?: string }>(res);
       if (!parsed.ok) {
@@ -310,10 +334,21 @@ export default function App() {
     setRuns((prev) => prev.filter((r) => r.status === 'running'));
   };
 
-  const handleRetryItem = async (itemId: number, fileId?: number) => {
+  const handleRetryItem = async (
+    itemId: number,
+    fileId?: number,
+    options?: { dryRun?: boolean },
+  ) => {
     setErrorBanner(null);
-    const qs = fileId ? `?fileId=${encodeURIComponent(String(fileId))}` : '';
-    const res = await fetch(`/api/items/${itemId}/retry${qs}`, { method: 'POST' });
+    const params = new URLSearchParams();
+    if (fileId) params.set('fileId', String(fileId));
+    if (options?.dryRun) params.set('dryRun', 'true');
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`/api/items/${itemId}/retry${qs}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileId, dryRun: Boolean(options?.dryRun) }),
+    });
     const parsed = await readJsonSafely<{ run?: SyncRunRecord; error?: string }>(res);
     if (!parsed.ok) {
       setErrorBanner(parsed.errorMessage || `Retry failed (HTTP ${res.status})`);
@@ -326,7 +361,11 @@ export default function App() {
     await loadInitialData();
   };
 
-  const handleRetryAllFailed = async (options?: { system?: string; ids?: number[] }) => {
+  const handleRetryAllFailed = async (options?: {
+    system?: string;
+    ids?: number[];
+    dryRun?: boolean;
+  }) => {
     setErrorBanner(null);
     const res = await fetch('/api/items/retry-failed', {
       method: 'POST',
@@ -375,7 +414,27 @@ export default function App() {
         ? `all ${config.discoveredSystems.length} discovered consoles`
         : 'all repository consoles';
   const showFullSyncConfirm =
-    confirmingFullSync && selectedMode === 'full' && !status?.activeRun && syncAllowed;
+    confirmingFullSync &&
+    selectedScope === 'full' &&
+    !dryRunEnabled &&
+    !status?.activeRun &&
+    syncAllowed;
+
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(SYNC_SCOPE_STORAGE_KEY, selectedScope);
+    } catch {
+      // Ignore storage restrictions
+    }
+  }, [selectedScope]);
+
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(SYNC_DRY_RUN_STORAGE_KEY, String(dryRunEnabled));
+    } catch {
+      // Ignore storage restrictions
+    }
+  }, [dryRunEnabled]);
 
   useEffect(() => {
     saveCrtDisplaySettings(crtSettings);
@@ -410,28 +469,35 @@ export default function App() {
           RetroGameTalk Sync
         </a>
 
-        {/* Sync Mode Selector + Reserved-Width Run/Stop Action */}
-        <div className="flex items-center gap-3 shrink-0 ml-auto">
-          <div className="flex items-center gap-0.5 p-0.5 bg-crt-bg border border-crt-border rounded-md shrink-0">
-            {(['dry_run', 'incremental', 'full'] as const).map((id) => {
-              const label =
-                id === 'dry_run'
-                  ? 'Dry Run'
-                  : id === 'incremental'
-                    ? 'Incremental Sync'
-                    : 'Full Sync';
+        {/* Sync Scope + Independent Dry Run Toggle + Reserved-Width Run/Stop Action */}
+        <div className="flex flex-wrap sm:flex-nowrap items-center gap-2.5 shrink-0 ml-auto">
+          {/* 2-Way Sync Scope Selector */}
+          <div
+            role="group"
+            aria-label="Sync scope"
+            className="flex items-center gap-0.5 p-0.5 bg-crt-bg border border-crt-border rounded-md shrink-0"
+          >
+            {(['incremental', 'full'] as const).map((scope) => {
+              const label = scope === 'incremental' ? 'Incremental' : 'Full';
+              const active = selectedScope === scope;
               return (
                 <button
-                  key={id}
+                  key={scope}
                   type="button"
                   disabled={Boolean(status?.activeRun) || !syncAllowed}
-                  title={!syncAllowed ? 'Verify login in Operations before running a sync' : undefined}
+                  title={
+                    !syncAllowed
+                      ? 'Verify login in Operations before running a sync'
+                      : scope === 'incremental'
+                        ? 'Inspect releases created or updated since the Incremental Cutoff'
+                        : 'Inspect every release across target consoles with no date cutoff'
+                  }
                   onClick={() => {
-                    setSelectedMode(id);
-                    if (id !== 'full') setConfirmingFullSync(false);
+                    setSelectedScope(scope);
+                    if (scope !== 'full') setConfirmingFullSync(false);
                   }}
-                  className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
-                    selectedMode === id
+                  className={`px-3 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
+                    active
                       ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
                       : 'text-crt-muted hover:text-crt-text border border-transparent'
                   } disabled:opacity-45 disabled:cursor-not-allowed`}
@@ -442,28 +508,67 @@ export default function App() {
             })}
           </div>
 
-          <div className="w-[172px] flex justify-end shrink-0">
+          {/* Independent Dry Run Simulation Toggle */}
+          <button
+            type="button"
+            aria-pressed={dryRunEnabled}
+            disabled={Boolean(status?.activeRun) || !syncAllowed}
+            title={
+              !syncAllowed
+                ? 'Verify login in Operations before running a sync'
+                : dryRunEnabled
+                  ? `Dry Run ON: ${selectedScope === 'full' ? 'Full Sync' : 'Incremental Sync'} will simulate discovery without downloading files or modifying catalog records`
+                  : `Toggle Dry Run ON to preview what ${selectedScope === 'full' ? 'Full Sync' : 'Incremental Sync'} would download without writing to disk`
+            }
+            onClick={() => {
+              setDryRunEnabled((prev) => {
+                const next = !prev;
+                if (next) setConfirmingFullSync(false);
+                return next;
+              });
+            }}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 ${
+              dryRunEnabled
+                ? 'border-crt-amber/80 bg-crt-amber/12 text-crt-amber'
+                : 'border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+            } disabled:opacity-45 disabled:cursor-not-allowed`}
+          >
+            <span
+              aria-hidden="true"
+              className={`h-3.5 w-3.5 rounded-[3px] border flex items-center justify-center transition-colors shrink-0 ${
+                dryRunEnabled
+                  ? 'border-crt-amber bg-crt-amber text-crt-bg'
+                  : 'border-crt-border-strong bg-crt-surface'
+              }`}
+            >
+              {dryRunEnabled && <Check className="h-2.5 w-2.5 stroke-[3]" />}
+            </span>
+            <FlaskConical className="h-3.5 w-3.5 shrink-0" />
+            <span>Dry Run</span>
+          </button>
+
+          <div className="w-[196px] flex justify-end shrink-0">
             {status?.activeRun ? (
               <button
                 type="button"
                 disabled={actionPending || stopRequested}
                 onClick={() => void handleStopRun()}
-                className={`inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 disabled:cursor-not-allowed ${
+                className={`w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 disabled:cursor-not-allowed ${
                   stopRequested
                     ? 'bg-crt-amber opacity-85'
                     : 'bg-crt-crimson hover:brightness-110 disabled:opacity-50'
                 }`}
               >
-                <Square className="h-3.5 w-3.5 fill-current" />
+                <Square className="h-3.5 w-3.5 fill-current shrink-0" />
                 {stopRequested
                   ? 'Stopping...'
-                  : status.activeRun.triggerType === 'retry'
-                    ? 'Stop Retry'
-                    : status.activeRun.mode === 'dry_run'
-                      ? 'Dry Run'
+                  : status.activeRun.dryRun || status.activeRun.mode === 'dry_run'
+                    ? 'Stop Dry Run'
+                    : status.activeRun.triggerType === 'retry'
+                      ? 'Stop Retry'
                       : status.activeRun.mode === 'full'
-                        ? 'Full Sync'
-                        : 'Incremental Sync'}
+                        ? 'Stop Full Sync'
+                        : 'Stop Incremental'}
               </button>
             ) : (
               <button
@@ -472,21 +577,33 @@ export default function App() {
                 title={
                   !syncAllowed
                     ? 'Login required: test and verify credentials in Operations before syncing'
-                    : undefined
+                    : dryRunEnabled
+                      ? `Simulate ${selectedScope === 'full' ? 'Full Sync' : 'Incremental Sync'} (0 bytes written to disk)`
+                      : undefined
                 }
                 onClick={() => {
-                  if (selectedMode === 'full') {
+                  if (selectedScope === 'full' && !dryRunEnabled) {
                     setConfirmingFullSync((prev) => !prev);
                   } else {
-                    void handleStartRun(selectedMode);
+                    void handleStartRun(selectedScope, dryRunEnabled);
                   }
                 }}
-                className="inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
+                className={`w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed ${
+                  dryRunEnabled
+                    ? 'bg-crt-amber hover:brightness-110'
+                    : 'bg-crt-phosphor hover:brightness-110'
+                }`}
               >
-                <Play className="h-3.5 w-3.5 fill-current" />
-                {selectedMode === 'dry_run'
-                  ? 'Dry Run'
-                  : selectedMode === 'full'
+                {dryRunEnabled ? (
+                  <FlaskConical className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <Play className="h-3.5 w-3.5 fill-current shrink-0" />
+                )}
+                {dryRunEnabled
+                  ? selectedScope === 'full'
+                    ? 'Dry Run Full'
+                    : 'Dry Run Incremental'
+                  : selectedScope === 'full'
                     ? 'Full Sync'
                     : 'Incremental Sync'}
               </button>
@@ -502,10 +619,10 @@ export default function App() {
             <AlertTriangle className="h-4 w-4 text-crt-amber shrink-0" />
             <span>
               <strong className="font-semibold text-crt-amber">Confirm Uncapped Full Sync:</strong>{' '}
-              This run will crawl and mirror every release across {fullSyncScopeSummary} with no page limit. Reserve Full Sync for initial repository stand-up and use Incremental Sync for daily updates.
+              This run will crawl and mirror every release across {fullSyncScopeSummary} with no page limit. You can run a Full Sync Dry Run first to preview missing archives without writing to disk.
             </span>
           </div>
-          <div className="flex items-center gap-2.5 shrink-0 ml-auto">
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0 ml-auto">
             <button
               type="button"
               disabled={actionPending}
@@ -517,10 +634,23 @@ export default function App() {
             <button
               type="button"
               disabled={actionPending}
-              onClick={() => void handleStartRun('full')}
+              onClick={() => {
+                setDryRunEnabled(true);
+                void handleStartRun('full', true);
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-amber/80 bg-crt-amber/12 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+              title="Simulate Full Sync across all target consoles without downloading archives or modifying catalog rows"
+            >
+              <FlaskConical className="h-3.5 w-3.5 shrink-0" />
+              Dry Run Full First
+            </button>
+            <button
+              type="button"
+              disabled={actionPending}
+              onClick={() => void handleStartRun('full', false)}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
             >
-              <Play className="h-3 w-3 fill-current" />
+              <Play className="h-3 w-3 fill-current shrink-0" />
               Confirm Full Sync
             </button>
           </div>

@@ -1,6 +1,7 @@
 export type { CatalogSortOption } from '../shared/catalogSort.ts';
 export type RunTrigger = 'scheduled' | 'manual' | 'retry';
-export type RunMode = 'incremental' | 'full' | 'dry_run';
+export type SyncScope = 'incremental' | 'full';
+export type RunMode = SyncScope | 'dry_run';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'failed';
 export type FileItemStatus = 'queued' | 'downloading' | 'downloaded' | 'skipped' | 'failed';
 export type ItemStatus = FileItemStatus | 'partial';
@@ -67,6 +68,7 @@ export interface SyncRunRecord {
   id: number;
   triggerType: RunTrigger;
   mode: RunMode;
+  dryRun: boolean;
   status: RunStatus;
   startedAt: string;
   finishedAt: string | null;

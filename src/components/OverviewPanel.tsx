@@ -40,8 +40,8 @@ interface OverviewPanelProps {
   onClearLogs: (level: 'all' | LogLevel) => Promise<void>;
   onClearRuns: () => Promise<void>;
   onNavigateToOperations: () => void;
-  onRetryItem: (itemId: number, fileId?: number) => Promise<void>;
-  onRetryAllFailed: (options?: { system?: string; ids?: number[] }) => Promise<void>;
+  onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
+  onRetryAllFailed: (options?: { system?: string; ids?: number[]; dryRun?: boolean }) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
 }
 
@@ -210,8 +210,18 @@ export function OverviewPanel({
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6 items-center">
           <div className="lg:col-span-7 space-y-1.5 min-w-0">
             <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-crt-muted">
-              <span className={status.activeRun ? 'text-crt-phosphor font-medium' : 'text-crt-muted'}>
-                {status.activeRun ? `SYNC ACTIVE · RUN #${status.activeRun.id}` : 'DAEMON STANDBY'}
+              <span
+                className={
+                  status.activeRun
+                    ? status.activeRun.dryRun || status.activeRun.mode === 'dry_run'
+                      ? 'text-crt-amber font-medium'
+                      : 'text-crt-phosphor font-medium'
+                    : 'text-crt-muted'
+                }
+              >
+                {status.activeRun
+                  ? `${status.activeRun.dryRun || status.activeRun.mode === 'dry_run' ? 'DRY RUN ACTIVE' : 'SYNC ACTIVE'} · RUN #${status.activeRun.id}`
+                  : 'DAEMON STANDBY'}
               </span>
               <span aria-hidden="true">·</span>
               <span>Pod {status.podId}</span>
@@ -286,7 +296,7 @@ export function OverviewPanel({
           <div className="mt-4 pt-4 border-t border-crt-border space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <span className="text-crt-muted">
-                Incremental Sync and Dry Run only inspect releases created or updated in RetroGameTalk after this cutoff.
+                Incremental Sync (live or dry-run) inspects releases created or updated after this cutoff. Full Sync (live or dry-run) inspects every release in scope.
               </span>
               <span className="font-mono text-crt-muted tabular-nums">
                 UTC: {resolvedCutoffPreviewIso ?? '—'}
@@ -501,7 +511,7 @@ export function OverviewPanel({
               <Clock className="h-5 w-5 text-crt-muted" />
               <p className="text-sm text-crt-text font-medium">No sync runs recorded yet</p>
               <p className="text-xs text-crt-muted max-w-sm">
-                Select Dry Run, Incremental Sync, or Full Sync in the top header bar to preview or mirror releases.
+                Choose Incremental or Full scope in the top header bar (and toggle Dry Run to simulate safely) to preview or mirror releases.
               </p>
             </div>
           ) : (
@@ -519,39 +529,63 @@ export function OverviewPanel({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-crt-border text-xs font-mono tabular-nums">
-                  {runs.slice(0, 7).map((run) => (
-                    <tr key={run.id} className="h-9 hover:bg-crt-elevated transition-colors">
-                      <td className="px-3 text-crt-text">
-                        #{run.id} <span className="text-crt-muted">· {run.triggerType}</span>
-                      </td>
-                      <td className="px-3 text-crt-muted">{run.mode}</td>
-                      <td className="px-3" title={run.errorSummary || undefined}>
-                        <span
-                          className={`inline-flex items-center gap-1.5 ${
-                            run.status === 'completed'
-                              ? 'text-crt-phosphor'
-                              : run.status === 'running'
-                                ? 'text-crt-amber'
-                                : run.status === 'failed'
-                                  ? 'text-crt-crimson'
-                                  : 'text-crt-muted'
-                          }`}
+                  {runs.slice(0, 7).map((run) => {
+                    const isDry = Boolean(run.dryRun) || run.mode === 'dry_run';
+                    const baseScope =
+                      run.triggerType === 'retry'
+                        ? 'retry'
+                        : run.mode === 'dry_run'
+                          ? 'incremental'
+                          : run.mode;
+                    const wouldDownload = Math.max(0, run.newFound - run.skippedCount - run.failedCount);
+                    return (
+                      <tr key={run.id} className="h-9 hover:bg-crt-elevated transition-colors">
+                        <td className="px-3 text-crt-text whitespace-nowrap">
+                          #{run.id} <span className="text-crt-muted">· {run.triggerType}</span>
+                        </td>
+                        <td className="px-3 text-crt-muted whitespace-nowrap">
+                          <span>{baseScope}</span>
+                          {isDry && <span className="text-crt-amber"> · dry-run</span>}
+                        </td>
+                        <td className="px-3 whitespace-nowrap" title={run.errorSummary || undefined}>
+                          <span
+                            className={`inline-flex items-center gap-1.5 ${
+                              run.status === 'completed'
+                                ? 'text-crt-phosphor'
+                                : run.status === 'running'
+                                  ? 'text-crt-amber'
+                                  : run.status === 'failed'
+                                    ? 'text-crt-crimson'
+                                    : 'text-crt-muted'
+                            }`}
+                          >
+                            {run.status === 'completed' && <CheckCircle2 className="h-3.5 w-3.5" />}
+                            {run.status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
+                            {run.status === 'running' && <Activity className="h-3.5 w-3.5" />}
+                            {run.status === 'stopped' && <Pause className="h-3.5 w-3.5" />}
+                            {run.status}
+                          </span>
+                        </td>
+                        <td
+                          className="px-3 text-right text-crt-text"
+                          title={
+                            isDry
+                              ? `Dry Run: ${wouldDownload} would download · ${run.skippedCount} already on disk`
+                              : undefined
+                          }
                         >
-                          {run.status === 'completed' && <CheckCircle2 className="h-3.5 w-3.5" />}
-                          {run.status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
-                          {run.status === 'running' && <Activity className="h-3.5 w-3.5" />}
-                          {run.status === 'stopped' && <Pause className="h-3.5 w-3.5" />}
-                          {run.status}
-                        </span>
-                      </td>
-                      <td className="px-3 text-right text-crt-text">{run.newFound}</td>
-                      <td className="px-3 text-right text-crt-phosphor">{run.downloadedCount}</td>
-                      <td className="px-3 text-right text-crt-muted">{run.skippedCount}</td>
-                      <td className="px-3 text-right text-crt-muted">
-                        {formatRunDuration(run.startedAt, run.finishedAt)}
-                      </td>
-                    </tr>
-                  ))}
+                          {run.newFound}
+                        </td>
+                        <td className="px-3 text-right text-crt-phosphor">
+                          {isDry ? '—' : run.downloadedCount}
+                        </td>
+                        <td className="px-3 text-right text-crt-muted">{run.skippedCount}</td>
+                        <td className="px-3 text-right text-crt-muted whitespace-nowrap">
+                          {formatRunDuration(run.startedAt, run.finishedAt)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
