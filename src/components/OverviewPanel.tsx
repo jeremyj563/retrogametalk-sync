@@ -223,35 +223,108 @@ export function OverviewPanel({
       ) : null}
 
       {/* Active Runner Phase Status Panel */}
-      <section className="border border-crt-border bg-crt-surface rounded-md p-5">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6 items-center">
-          <div className="lg:col-span-7 space-y-1.5 min-w-0">
-            <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-crt-muted">
-              <span
-                className={
-                  status.activeRun
-                    ? status.activeRun.dryRun || status.activeRun.mode === 'dry_run'
-                      ? 'text-crt-amber font-medium'
-                      : 'text-crt-phosphor font-medium'
-                    : 'text-crt-muted'
-                }
-              >
-                {status.activeRun
-                  ? `${status.activeRun.dryRun || status.activeRun.mode === 'dry_run' ? 'DRY RUN ACTIVE' : 'SYNC ACTIVE'} · RUN #${status.activeRun.id}`
-                  : 'DAEMON STANDBY'}
-              </span>
-              <span aria-hidden="true">·</span>
-              <span>Pod {status.podId}</span>
-              <span aria-hidden="true">·</span>
-              <span>Next Cron: {formatCountdown(status.nextScheduledRunAt)}</span>
-              <span aria-hidden="true">·</span>
+      <section className="border border-crt-border bg-crt-surface rounded-md p-5 space-y-4">
+        {/* Zone 1: Full-Width Phase Header */}
+        <div className="space-y-1.5 min-w-0">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+            <span
+              className={`inline-flex items-center gap-1.5 font-medium ${
+                status.activeRun
+                  ? status.activeRun.dryRun || status.activeRun.mode === 'dry_run'
+                    ? 'text-crt-amber'
+                    : 'text-crt-phosphor'
+                  : 'text-crt-muted'
+              }`}
+            >
+              <Activity className="h-3.5 w-3.5 shrink-0" />
               <span>
-                Incremental Cutoff:{' '}
-                <span className="text-crt-text tabular-nums">
-                  {activeWatermark ? formatDateTime(activeWatermark) : 'Last 24h (auto default)'}
-                </span>
+                {status.activeRun
+                  ? `${status.activeRun.dryRun || status.activeRun.mode === 'dry_run' ? 'Dry Run Active' : 'Sync Active'} · Run #${status.activeRun.id}`
+                  : 'Standby'}
               </span>
-              <span aria-hidden="true">·</span>
+            </span>
+
+            {status.activeRun ? (
+              <span className="text-crt-muted tabular-nums">
+                {formatRunDuration(status.activeRun.startedAt, null)} elapsed
+                {status.activeRun.downloadedCount > 0
+                  ? ` · ${status.activeRun.downloadedCount} downloaded`
+                  : ''}
+              </span>
+            ) : cutoffSavedNotice && !editingCutoff ? (
+              <span className="text-crt-phosphor">{cutoffSavedNotice}</span>
+            ) : null}
+          </div>
+
+          <h1 className="font-display text-lg sm:text-xl font-semibold tracking-tight text-crt-text leading-snug break-words">
+            {status.currentPhase}
+          </h1>
+        </div>
+
+        {/* Zone 2: Dedicated Full-Width Active File Transfer Strip */}
+        {status.activeTransfer && (
+          <div className="pt-3.5 border-t border-crt-border space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+              <div className="flex items-center gap-2 text-crt-text min-w-0">
+                <Download className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
+                <span className="truncate">
+                  {status.activeTransfer.systemName} / {status.activeTransfer.filename}
+                </span>
+                {status.activeTransfer.totalFiles &&
+                  status.activeTransfer.totalFiles > 1 &&
+                  status.activeTransfer.fileIndex && (
+                    <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums">
+                      · File {status.activeTransfer.fileIndex}/{status.activeTransfer.totalFiles}
+                    </span>
+                  )}
+              </div>
+              <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+                <span>
+                  {formatBytes(status.activeTransfer.bytesReceived)}
+                  {status.activeTransfer.totalBytes
+                    ? ` / ${formatBytes(status.activeTransfer.totalBytes)}`
+                    : ''}
+                </span>
+                {status.activeTransfer.bytesPerSec > 0 && (
+                  <span>{formatBytes(status.activeTransfer.bytesPerSec)}/s</span>
+                )}
+                {transferPct !== null && (
+                  <span className="text-crt-phosphor font-semibold">{transferPct}%</span>
+                )}
+              </div>
+            </div>
+            <div
+              role="progressbar"
+              aria-label={`Active download progress for ${status.activeTransfer.filename}`}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={transferPct ?? undefined}
+              className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+            >
+              {transferPct !== null ? (
+                <div
+                  className="h-full bg-crt-phosphor transition-all duration-200"
+                  style={{ width: `${transferPct}%` }}
+                />
+              ) : (
+                <div className="h-full bg-crt-phosphor crt-progress-indeterminate" />
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Zone 3: 4-Column Operational Summary Strip */}
+        <div className="pt-3.5 border-t border-crt-border grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-x-6">
+          <div className="space-y-1 min-w-0">
+            <div className="text-[11px] text-crt-muted">Next Schedule</div>
+            <div className="text-xs font-mono text-crt-text tabular-nums truncate">
+              {formatCountdown(status.nextScheduledRunAt)}
+            </div>
+          </div>
+
+          <div className="space-y-1 min-w-0">
+            <div className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="text-crt-muted">Incremental Cutoff</span>
               <button
                 type="button"
                 disabled={Boolean(status.activeRun)}
@@ -261,83 +334,57 @@ export function OverviewPanel({
                     ? 'Stop or wait for the active sync run before changing cutoff'
                     : 'View or manually override Incremental Sync cutoff timestamp'
                 }
-                className="text-crt-phosphor hover:underline disabled:opacity-45 disabled:no-underline disabled:cursor-not-allowed whitespace-nowrap shrink-0"
+                className="font-mono text-crt-phosphor hover:underline disabled:opacity-45 disabled:no-underline disabled:cursor-not-allowed whitespace-nowrap shrink-0 cursor-pointer"
               >
-                {editingCutoff ? 'Close Cutoff' : 'Edit Cutoff'}
+                {editingCutoff ? 'Close' : 'Edit'}
               </button>
-              {cutoffSavedNotice && !editingCutoff && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span className="text-crt-phosphor">{cutoffSavedNotice}</span>
-                </>
-              )}
             </div>
-            <h1 className="font-display text-xl font-semibold tracking-tight text-crt-text truncate">
-              {status.currentPhase}
-            </h1>
-            {(activeReleaseTypesSummary || activeSystemScopeCount > 0) && (
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-mono text-crt-muted">
-                {activeReleaseTypesSummary && (
-                  <span>
-                    Type Filter:{' '}
-                    <span className="text-crt-amber">{activeReleaseTypesSummary}</span>
-                  </span>
-                )}
-                {activeReleaseTypesSummary && activeSystemScopeCount > 0 && (
-                  <span aria-hidden="true">·</span>
-                )}
-                {activeSystemScopeCount > 0 && (
-                  <span>
-                    Consoles:{' '}
-                    <span className="text-crt-text tabular-nums">{activeSystemScopeCount} selected</span>
-                  </span>
-                )}
-                <span aria-hidden="true">·</span>
-                <button
-                  type="button"
-                  onClick={onNavigateToOperations}
-                  className="text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  Edit Filters
-                </button>
-              </div>
-            )}
+            <div className="text-xs font-mono text-crt-text tabular-nums truncate">
+              {activeWatermark ? formatDateTime(activeWatermark) : 'Last 24h (default)'}
+            </div>
           </div>
 
-          {/* Reserved fixed-height slot so dynamic progress bar never shifts layout below */}
-          <div className="lg:col-span-5 min-w-0 h-[44px] flex flex-col justify-center">
-            {status.activeTransfer && (
-              <div className="border-t lg:border-t-0 lg:border-l border-crt-border pt-2.5 lg:pt-0 lg:pl-5 space-y-2">
-                <div className="flex items-center justify-between gap-3 text-xs font-mono leading-4">
-                  <div className="flex items-center gap-2 text-crt-text min-w-0">
-                    <Download className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
-                    <span className="truncate">
-                      {status.activeTransfer.systemName} / {status.activeTransfer.filename}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
-                    <span>
-                      {formatBytes(status.activeTransfer.bytesReceived)}
-                      {status.activeTransfer.totalBytes ? ` / ${formatBytes(status.activeTransfer.totalBytes)}` : ''}
-                    </span>
-                    <span>{formatBytes(status.activeTransfer.bytesPerSec)}/s</span>
-                    {transferPct !== null && <span className="text-crt-phosphor">{transferPct}%</span>}
-                  </div>
-                </div>
-                <div className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden">
-                  <div
-                    className="h-full bg-crt-phosphor transition-all duration-200"
-                    style={{ width: `${transferPct ?? 35}%` }}
-                  />
-                </div>
-              </div>
-            )}
+          <div className="space-y-1 min-w-0">
+            <div className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="text-crt-muted">Type Filter</span>
+              <button
+                type="button"
+                onClick={onNavigateToOperations}
+                className="font-mono text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Edit
+              </button>
+            </div>
+            <div
+              className={`text-xs font-mono truncate ${
+                activeReleaseTypesSummary ? 'text-crt-amber' : 'text-crt-text'
+              }`}
+              title={activeReleaseTypesSummary || 'All release types'}
+            >
+              {activeReleaseTypesSummary || 'All release types'}
+            </div>
+          </div>
+
+          <div className="space-y-1 min-w-0">
+            <div className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="text-crt-muted">Target Consoles</span>
+              <button
+                type="button"
+                onClick={onNavigateToOperations}
+                className="font-mono text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Edit
+              </button>
+            </div>
+            <div className="text-xs font-mono text-crt-text tabular-nums truncate">
+              {activeSystemScopeCount > 0 ? `${activeSystemScopeCount} selected` : 'All consoles'}
+            </div>
           </div>
         </div>
 
         {/* Inline Incremental Cutoff Timestamp Editor (Single-Elevation Hairline Divider) */}
         {editingCutoff && !status.activeRun && (
-          <div className="mt-4 pt-4 border-t border-crt-border space-y-3">
+          <div className="pt-4 border-t border-crt-border space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <span className="text-crt-muted">
                 Incremental Sync (live or dry-run) inspects releases created or updated after this cutoff. Full Sync (live or dry-run) inspects every release in scope.
