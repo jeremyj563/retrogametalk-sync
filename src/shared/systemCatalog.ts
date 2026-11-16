@@ -3,7 +3,7 @@ export type SystemBrandId =
   | 'sony'
   | 'sega'
   | 'nec_snk'
-  | 'atari_ms_other'
+  | 'other_consoles'
   | 'arcade_computers'
   | 'system_misc';
 
@@ -25,7 +25,7 @@ export const SYSTEM_BRAND_GROUPS: readonly SystemBrandGroupMeta[] = [
   { id: 'sony', label: 'Sony PlayStation', shortLabel: 'Sony' },
   { id: 'sega', label: 'Sega', shortLabel: 'Sega' },
   { id: 'nec_snk', label: 'NEC & SNK', shortLabel: 'NEC & SNK' },
-  { id: 'atari_ms_other', label: 'Atari, Microsoft & Classic Consoles', shortLabel: 'Atari & Classic' },
+  { id: 'other_consoles', label: 'Other Consoles & Handhelds', shortLabel: 'Other Consoles' },
   { id: 'arcade_computers', label: 'Arcade & Home Computers', shortLabel: 'Arcade & PC' },
   { id: 'system_misc', label: 'System BIOS & Other', shortLabel: 'System & Other' },
 ];
@@ -263,44 +263,44 @@ const KNOWN_SYSTEMS: Record<string, SystemCatalogEntry> = {
   'ngpc-roms': { displayName: 'Neo Geo Pocket Color', brandId: 'nec_snk' },
   'neo-geo-pocket-color': { displayName: 'Neo Geo Pocket Color', brandId: 'nec_snk' },
 
-  // Atari, Microsoft & Classic Consoles
-  'atari-2600-roms': { displayName: 'Atari 2600', brandId: 'atari_ms_other' },
-  'atari-2600': { displayName: 'Atari 2600', brandId: 'atari_ms_other' },
-  'atari-5200-roms': { displayName: 'Atari 5200', brandId: 'atari_ms_other' },
-  'atari-5200': { displayName: 'Atari 5200', brandId: 'atari_ms_other' },
-  'atari-7800-roms': { displayName: 'Atari 7800', brandId: 'atari_ms_other' },
-  'atari-7800': { displayName: 'Atari 7800', brandId: 'atari_ms_other' },
-  'atari-lynx': { displayName: 'Atari Lynx', brandId: 'atari_ms_other' },
-  'lynx-roms': { displayName: 'Atari Lynx', brandId: 'atari_ms_other' },
-  lynx: { displayName: 'Atari Lynx', brandId: 'atari_ms_other' },
-  'atari-jaguar': { displayName: 'Atari Jaguar', brandId: 'atari_ms_other' },
-  'jaguar-roms': { displayName: 'Atari Jaguar', brandId: 'atari_ms_other' },
-  jaguar: { displayName: 'Atari Jaguar', brandId: 'atari_ms_other' },
-  'jaguar-cd': { displayName: 'Atari Jaguar CD', brandId: 'atari_ms_other' },
-  xbox: { displayName: 'Microsoft Xbox', brandId: 'atari_ms_other' },
-  'xbox-iso': { displayName: 'Microsoft Xbox', brandId: 'atari_ms_other' },
-  'og-xbox': { displayName: 'Microsoft Xbox', brandId: 'atari_ms_other' },
-  'xbox-360': { displayName: 'Microsoft Xbox 360', brandId: 'atari_ms_other' },
-  xbox360: { displayName: 'Microsoft Xbox 360', brandId: 'atari_ms_other' },
-  '3do-iso': { displayName: 'Panasonic 3DO', brandId: 'atari_ms_other' },
-  '3do': { displayName: 'Panasonic 3DO', brandId: 'atari_ms_other' },
-  colecovision: { displayName: 'ColecoVision', brandId: 'atari_ms_other' },
-  intellivision: { displayName: 'Mattel Intellivision', brandId: 'atari_ms_other' },
-  vectrex: { displayName: 'GCE Vectrex', brandId: 'atari_ms_other' },
-  'odyssey-2': { displayName: 'Magnavox Odyssey 2', brandId: 'atari_ms_other' },
-  odyssey2: { displayName: 'Magnavox Odyssey 2', brandId: 'atari_ms_other' },
-  'cd-i': { displayName: 'Philips CD-i', brandId: 'atari_ms_other' },
-  cdi: { displayName: 'Philips CD-i', brandId: 'atari_ms_other' },
-  'philips-cdi': { displayName: 'Philips CD-i', brandId: 'atari_ms_other' },
-  'ws-roms': { displayName: 'Bandai WonderSwan / Color', brandId: 'atari_ms_other' },
-  wonderswan: { displayName: 'Bandai WonderSwan / Color', brandId: 'atari_ms_other' },
-  'wonderswan-color': { displayName: 'Bandai WonderSwan Color', brandId: 'atari_ms_other' },
-  'fairchild-channel-f': { displayName: 'Fairchild Channel F', brandId: 'atari_ms_other' },
-  'channel-f': { displayName: 'Fairchild Channel F', brandId: 'atari_ms_other' },
-  'watara-supervision': { displayName: 'Watara Supervision', brandId: 'atari_ms_other' },
-  supervision: { displayName: 'Watara Supervision', brandId: 'atari_ms_other' },
-  'n-gage': { displayName: 'Nokia N-Gage', brandId: 'atari_ms_other' },
-  ngage: { displayName: 'Nokia N-Gage', brandId: 'atari_ms_other' },
+  // Other Consoles & Handhelds
+  'atari-2600-roms': { displayName: 'Atari 2600', brandId: 'other_consoles' },
+  'atari-2600': { displayName: 'Atari 2600', brandId: 'other_consoles' },
+  'atari-5200-roms': { displayName: 'Atari 5200', brandId: 'other_consoles' },
+  'atari-5200': { displayName: 'Atari 5200', brandId: 'other_consoles' },
+  'atari-7800-roms': { displayName: 'Atari 7800', brandId: 'other_consoles' },
+  'atari-7800': { displayName: 'Atari 7800', brandId: 'other_consoles' },
+  'atari-lynx': { displayName: 'Atari Lynx', brandId: 'other_consoles' },
+  'lynx-roms': { displayName: 'Atari Lynx', brandId: 'other_consoles' },
+  lynx: { displayName: 'Atari Lynx', brandId: 'other_consoles' },
+  'atari-jaguar': { displayName: 'Atari Jaguar', brandId: 'other_consoles' },
+  'jaguar-roms': { displayName: 'Atari Jaguar', brandId: 'other_consoles' },
+  jaguar: { displayName: 'Atari Jaguar', brandId: 'other_consoles' },
+  'jaguar-cd': { displayName: 'Atari Jaguar CD', brandId: 'other_consoles' },
+  xbox: { displayName: 'Microsoft Xbox', brandId: 'other_consoles' },
+  'xbox-iso': { displayName: 'Microsoft Xbox', brandId: 'other_consoles' },
+  'og-xbox': { displayName: 'Microsoft Xbox', brandId: 'other_consoles' },
+  'xbox-360': { displayName: 'Microsoft Xbox 360', brandId: 'other_consoles' },
+  xbox360: { displayName: 'Microsoft Xbox 360', brandId: 'other_consoles' },
+  '3do-iso': { displayName: 'Panasonic 3DO', brandId: 'other_consoles' },
+  '3do': { displayName: 'Panasonic 3DO', brandId: 'other_consoles' },
+  colecovision: { displayName: 'ColecoVision', brandId: 'other_consoles' },
+  intellivision: { displayName: 'Mattel Intellivision', brandId: 'other_consoles' },
+  vectrex: { displayName: 'GCE Vectrex', brandId: 'other_consoles' },
+  'odyssey-2': { displayName: 'Magnavox Odyssey 2', brandId: 'other_consoles' },
+  odyssey2: { displayName: 'Magnavox Odyssey 2', brandId: 'other_consoles' },
+  'cd-i': { displayName: 'Philips CD-i', brandId: 'other_consoles' },
+  cdi: { displayName: 'Philips CD-i', brandId: 'other_consoles' },
+  'philips-cdi': { displayName: 'Philips CD-i', brandId: 'other_consoles' },
+  'ws-roms': { displayName: 'Bandai WonderSwan / Color', brandId: 'other_consoles' },
+  wonderswan: { displayName: 'Bandai WonderSwan / Color', brandId: 'other_consoles' },
+  'wonderswan-color': { displayName: 'Bandai WonderSwan Color', brandId: 'other_consoles' },
+  'fairchild-channel-f': { displayName: 'Fairchild Channel F', brandId: 'other_consoles' },
+  'channel-f': { displayName: 'Fairchild Channel F', brandId: 'other_consoles' },
+  'watara-supervision': { displayName: 'Watara Supervision', brandId: 'other_consoles' },
+  supervision: { displayName: 'Watara Supervision', brandId: 'other_consoles' },
+  'n-gage': { displayName: 'Nokia N-Gage', brandId: 'other_consoles' },
+  ngage: { displayName: 'Nokia N-Gage', brandId: 'other_consoles' },
 
   // Arcade & Home Computers
   'arcade-roms': { displayName: 'Arcade (MAME / FBNeo)', brandId: 'arcade_computers' },
@@ -412,7 +412,7 @@ function inferBrandId(lowerSlug: string): SystemBrandId {
     return 'nec_snk';
   }
   if (/(atari(?!-st)|lynx|jaguar|xbox|3do|coleco|intellivision|vectrex|odyssey|cd-?i|wonderswan|supervision|channel-?f|n-?gage)/i.test(lowerSlug)) {
-    return 'atari_ms_other';
+    return 'other_consoles';
   }
   if (/(arcade|mame|fbneo|cps[1-3]|naomi|atomiswave|amiga|c64|commodore|msx|spectrum|amstrad|atari-st|\bdos\b|scummvm|x68000|fm-towns|pc-88|pc-98|apple)/i.test(lowerSlug)) {
     return 'arcade_computers';
