@@ -6,6 +6,7 @@ import {
   ArrowUpDown,
   CheckCircle2,
   ChevronRight,
+  Download,
   FileArchive,
   Folder,
   Gamepad2,
@@ -36,6 +37,7 @@ import type {
 } from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
 import { isFileSystemAccessSupported, pickSdCardRootDirectory, type SdDirectoryHandle } from '../utils/sdCardFs';
+import { resolveItemTransferProgress } from '../utils/transferProgress';
 import { GameDetailDrawer } from './GameDetailDrawer';
 import { MultiSelectFilterDropdown, type FilterDropdownOption } from './MultiSelectFilterDropdown';
 import { SdCardExportModal } from './SdCardExportModal';
@@ -1565,6 +1567,7 @@ export function CatalogPanel({
                       .join(' · ');
                     const tagsDisplay =
                       item.releaseTags.length > 0 ? item.releaseTags.join(' · ') : item.releaseType;
+                    const transfer = resolveItemTransferProgress(item.status, item.id, status.activeTransfer);
 
                     return (
                       <tr
@@ -1627,26 +1630,84 @@ export function CatalogPanel({
                           <span className="line-clamp-2">{tagsDisplay}</span>
                         </td>
                         <td className="px-3 py-2 font-mono text-right text-crt-text tabular-nums whitespace-nowrap">
-                          {formatBytes(item.fileSizeBytes)}
+                          {transfer.active
+                            ? transfer.totalBytes
+                              ? formatBytes(transfer.totalBytes)
+                              : item.fileSizeBytes > 0
+                                ? formatBytes(item.fileSizeBytes)
+                                : transfer.bytesReceived > 0
+                                  ? formatBytes(transfer.bytesReceived)
+                                  : 'Pending'
+                            : formatBytes(item.fileSizeBytes)}
                         </td>
                         <td className="px-3 py-2 font-mono whitespace-nowrap">
-                          <span
-                            className={`inline-flex items-center gap-1.5 ${
-                              item.status === 'downloaded'
-                                ? 'text-crt-phosphor'
-                                : item.status === 'skipped'
-                                  ? 'text-crt-muted'
-                                  : item.status === 'failed'
-                                    ? 'text-crt-crimson'
-                                    : 'text-crt-amber'
-                            }`}
-                          >
-                            {item.status === 'downloaded' && <CheckCircle2 className="h-3.5 w-3.5" />}
-                            {item.status === 'skipped' && <SkipForward className="h-3.5 w-3.5" />}
-                            {item.status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
-                            {item.status === 'partial' && <AlertCircle className="h-3.5 w-3.5" />}
-                            {item.status}
-                          </span>
+                          {transfer.active ? (
+                            <div className="min-w-[172px] max-w-[220px] space-y-1">
+                              <div className="flex items-center justify-between gap-2 text-[11px] tabular-nums">
+                                <span
+                                  className={`inline-flex items-center gap-1 font-medium ${
+                                    transfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
+                                  }`}
+                                >
+                                  <Download className="h-3 w-3 shrink-0" />
+                                  <span>
+                                    {transfer.mode === 'preparing'
+                                      ? 'Preparing'
+                                      : transfer.percent !== null
+                                        ? `Downloading · ${transfer.percent}%`
+                                        : 'Downloading'}
+                                  </span>
+                                </span>
+                                {transfer.speedLabel && (
+                                  <span className="text-crt-muted">{transfer.speedLabel}</span>
+                                )}
+                              </div>
+                              <div
+                                role="progressbar"
+                                aria-label={`Download progress for ${item.title}`}
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-valuenow={transfer.percent ?? undefined}
+                                className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+                              >
+                                {transfer.mode === 'determinate' ? (
+                                  <div
+                                    className="h-full bg-crt-phosphor transition-all duration-200"
+                                    style={{ width: `${transfer.percent}%` }}
+                                  />
+                                ) : (
+                                  <div
+                                    className={`h-full crt-progress-indeterminate ${
+                                      transfer.mode === 'preparing' ? 'bg-crt-amber' : 'bg-crt-phosphor'
+                                    }`}
+                                  />
+                                )}
+                              </div>
+                              <div className="text-[10px] text-crt-muted tabular-nums truncate">
+                                {transfer.fileSequenceLabel
+                                  ? `${transfer.fileSequenceLabel} · ${transfer.bytesLabel}`
+                                  : transfer.bytesLabel}
+                              </div>
+                            </div>
+                          ) : (
+                            <span
+                              className={`inline-flex items-center gap-1.5 ${
+                                item.status === 'downloaded'
+                                  ? 'text-crt-phosphor'
+                                  : item.status === 'skipped'
+                                    ? 'text-crt-muted'
+                                    : item.status === 'failed'
+                                      ? 'text-crt-crimson'
+                                      : 'text-crt-amber'
+                              }`}
+                            >
+                              {item.status === 'downloaded' && <CheckCircle2 className="h-3.5 w-3.5" />}
+                              {item.status === 'skipped' && <SkipForward className="h-3.5 w-3.5" />}
+                              {item.status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
+                              {item.status === 'partial' && <AlertCircle className="h-3.5 w-3.5" />}
+                              {item.status}
+                            </span>
+                          )}
                         </td>
                         <td
                           className="px-4 py-2 text-right whitespace-nowrap"
@@ -1740,6 +1801,7 @@ export function CatalogPanel({
                     .join(' · ');
                   const tagsDisplay =
                     item.releaseTags.length > 0 ? item.releaseTags.join(' · ') : item.releaseType;
+                  const transfer = resolveItemTransferProgress(item.status, item.id, status.activeTransfer);
 
                   return (
                     <div
@@ -1776,9 +1838,71 @@ export function CatalogPanel({
                             className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-200"
                           />
                         ) : (
-                          <div className="w-full h-full flex flex-col items-center justify-center p-4 text-center space-y-2">
+                          <div
+                            className={`w-full h-full flex flex-col items-center justify-center p-4 text-center space-y-2 ${
+                              transfer.active ? 'pb-16' : ''
+                            }`}
+                          >
                             <Gamepad2 className="h-8 w-8 text-crt-border-strong" />
                             <span className="font-mono text-[11px] text-crt-muted">{item.systemName}</span>
+                          </div>
+                        )}
+
+                        {transfer.active && (
+                          <div className="absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-crt-bg via-crt-bg/92 to-transparent pt-10 px-3 pb-2.5 space-y-1.5">
+                            <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                              <span
+                                className={`inline-flex items-center gap-1.5 font-medium truncate ${
+                                  transfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
+                                }`}
+                              >
+                                <Download className="h-3 w-3 shrink-0" />
+                                <span className="truncate">
+                                  {transfer.filename ||
+                                    (transfer.mode === 'preparing' ? 'Preparing release…' : 'Downloading…')}
+                                </span>
+                              </span>
+                              {transfer.fileSequenceLabel && (
+                                <span className="text-[10px] text-crt-muted whitespace-nowrap shrink-0 tabular-nums">
+                                  {transfer.fileSequenceLabel}
+                                </span>
+                              )}
+                            </div>
+
+                            <div
+                              role="progressbar"
+                              aria-label={`Download progress for ${item.title}`}
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={transfer.percent ?? undefined}
+                              className="h-1.5 w-full bg-crt-surface/90 border border-crt-border rounded-sm overflow-hidden"
+                            >
+                              {transfer.mode === 'determinate' ? (
+                                <div
+                                  className="h-full bg-crt-phosphor transition-all duration-200"
+                                  style={{ width: `${transfer.percent}%` }}
+                                />
+                              ) : (
+                                <div
+                                  className={`h-full crt-progress-indeterminate ${
+                                    transfer.mode === 'preparing' ? 'bg-crt-amber' : 'bg-crt-phosphor'
+                                  }`}
+                                />
+                              )}
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2 text-[10px] font-mono tabular-nums text-crt-muted">
+                              <span className="truncate text-crt-text/90">{transfer.bytesLabel}</span>
+                              <span className="whitespace-nowrap shrink-0">
+                                {transfer.speedLabel && <span>{transfer.speedLabel}</span>}
+                                {transfer.speedLabel && transfer.percent !== null && (
+                                  <span aria-hidden="true"> · </span>
+                                )}
+                                {transfer.percent !== null && (
+                                  <span className="text-crt-phosphor font-semibold">{transfer.percent}%</span>
+                                )}
+                              </span>
+                            </div>
                           </div>
                         )}
 
@@ -1806,28 +1930,69 @@ export function CatalogPanel({
                           <p className="font-mono text-[11px] text-crt-phosphor/90 truncate">{tagsDisplay}</p>
                         </div>
 
-                        <div className="pt-2 border-t border-crt-border flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
-                          <span className="text-crt-text truncate">
-                            {formatBytes(item.fileSizeBytes)} · {item.filesCount}f
-                          </span>
-                          <span
-                            className={`inline-flex items-center gap-1 shrink-0 ${
-                              item.status === 'downloaded'
-                                ? 'text-crt-phosphor'
-                                : item.status === 'skipped'
-                                  ? 'text-crt-muted'
-                                  : item.status === 'failed'
-                                    ? 'text-crt-crimson'
-                                    : 'text-crt-amber'
-                            }`}
-                          >
-                            {item.status === 'downloaded' && <CheckCircle2 className="h-3 w-3" />}
-                            {item.status === 'skipped' && <SkipForward className="h-3 w-3" />}
-                            {item.status === 'failed' && <XCircle className="h-3 w-3" />}
-                            {item.status === 'partial' && <AlertCircle className="h-3 w-3" />}
-                            {item.status}
-                          </span>
-                        </div>
+                        {transfer.active ? (
+                          <div className="pt-2 border-t border-crt-border space-y-1.5 text-[11px] font-mono tabular-nums">
+                            <div className="h-1 w-full bg-crt-surface border border-crt-border rounded-sm overflow-hidden">
+                              {transfer.mode === 'determinate' ? (
+                                <div
+                                  className="h-full bg-crt-phosphor transition-all duration-200"
+                                  style={{ width: `${transfer.percent}%` }}
+                                />
+                              ) : (
+                                <div
+                                  className={`h-full crt-progress-indeterminate ${
+                                    transfer.mode === 'preparing' ? 'bg-crt-amber' : 'bg-crt-phosphor'
+                                  }`}
+                                />
+                              )}
+                            </div>
+                            <div className="flex items-center justify-between gap-2">
+                              <span
+                                className={`inline-flex items-center gap-1 shrink-0 ${
+                                  transfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
+                                }`}
+                              >
+                                <Download className="h-3 w-3 shrink-0" />
+                                <span>
+                                  {transfer.percent !== null
+                                    ? `${transfer.percent}%`
+                                    : transfer.mode === 'preparing'
+                                      ? 'preparing'
+                                      : 'streaming'}
+                                </span>
+                                {transfer.speedLabel && transfer.mode !== 'preparing' && (
+                                  <span className="text-crt-muted font-normal">· {transfer.speedLabel}</span>
+                                )}
+                              </span>
+                              <span className="text-crt-muted truncate text-[10px]">
+                                {transfer.bytesLabel}
+                              </span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="pt-2 border-t border-crt-border flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
+                            <span className="text-crt-text truncate">
+                              {formatBytes(item.fileSizeBytes)} · {item.filesCount}f
+                            </span>
+                            <span
+                              className={`inline-flex items-center gap-1 shrink-0 ${
+                                item.status === 'downloaded'
+                                  ? 'text-crt-phosphor'
+                                  : item.status === 'skipped'
+                                    ? 'text-crt-muted'
+                                    : item.status === 'failed'
+                                      ? 'text-crt-crimson'
+                                      : 'text-crt-amber'
+                              }`}
+                            >
+                              {item.status === 'downloaded' && <CheckCircle2 className="h-3 w-3" />}
+                              {item.status === 'skipped' && <SkipForward className="h-3 w-3" />}
+                              {item.status === 'failed' && <XCircle className="h-3 w-3" />}
+                              {item.status === 'partial' && <AlertCircle className="h-3 w-3" />}
+                              {item.status}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
@@ -1975,6 +2140,7 @@ export function CatalogPanel({
       <GameDetailDrawer
         item={activeDetailItem}
         activeRun={Boolean(status.activeRun)}
+        activeTransfer={status.activeTransfer}
         canSync={Boolean(status.auth.hasCompletedLogin)}
         retryingItem={effectiveRetryingId === activeDetailItem?.id}
         onClose={() => setActiveDetailItem(null)}

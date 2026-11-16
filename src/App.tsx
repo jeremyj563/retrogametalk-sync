@@ -198,7 +198,11 @@ export default function App() {
     let lastLiveTransferSampleMs = 0;
     source.addEventListener('transfer', (ev) => {
       try {
-        const transfer = JSON.parse((ev as MessageEvent).data) as ActiveTransferState;
+        const transfer = JSON.parse((ev as MessageEvent).data) as ActiveTransferState | null;
+        if (!transfer) {
+          setStatus((prev) => (prev && prev.activeTransfer ? { ...prev, activeTransfer: null } : prev));
+          return;
+        }
         const now = Date.now();
         const isDone =
           transfer.totalBytes !== null &&

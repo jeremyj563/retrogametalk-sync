@@ -1318,7 +1318,8 @@ export class ScraperOrchestrator extends EventEmitter {
       return undefined;
     };
 
-    for (const targetFile of filesToRetry) {
+    for (let fileIdx = 0; fileIdx < filesToRetry.length; fileIdx += 1) {
+      const targetFile = filesToRetry[fileIdx]!;
       if (signal.aborted) break;
       const matched = matchFreshDownload(targetFile);
 
@@ -1393,6 +1394,7 @@ export class ScraperOrchestrator extends EventEmitter {
         runLogger,
         getRepositoryItemById(item.id) || item,
         targetFile.id,
+        { index: fileIdx + 1, total: filesToRetry.length },
       );
       if (outcome.downloaded) downloaded += 1;
       if (outcome.skipped) skipped += 1;
@@ -2088,7 +2090,8 @@ export class ScraperOrchestrator extends EventEmitter {
         }
 
         // Stream or deduplicate all allowed archive files belonging to this release page
-        for (const rel of eligibleReleases) {
+        for (let fileIdx = 0; fileIdx < eligibleReleases.length; fileIdx += 1) {
+          const rel = eligibleReleases[fileIdx]!;
           if (signal.aborted) break;
           processedFileUrls.add(rel.remoteUrl);
           newFound += 1;
@@ -2101,6 +2104,8 @@ export class ScraperOrchestrator extends EventEmitter {
             signal,
             runLogger,
             parent,
+            undefined,
+            { index: fileIdx + 1, total: eligibleReleases.length },
           );
           if (outcome.downloaded) downloadedCount += 1;
           if (outcome.skipped) skippedCount += 1;
@@ -2663,6 +2668,7 @@ export class ScraperOrchestrator extends EventEmitter {
       }
       releaseDistributedLock(lockKey, POD_ID);
       this.activeTransfer = null;
+      this.emit('transfer', null);
       this.activeRun = null;
       this.abortController = null;
       this.currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
@@ -2679,6 +2685,7 @@ export class ScraperOrchestrator extends EventEmitter {
     runLogger: LoggerFn,
     parentContext?: RepositoryItemRecord,
     targetFileId?: number,
+    fileSequence?: { index: number; total: number },
   ): Promise<{ downloaded: boolean; skipped: boolean; failed: boolean; bytes: number }> {
     const mirrored = resolveMirroredPaths(
       cfg.baseUrl,
@@ -2714,6 +2721,9 @@ export class ScraperOrchestrator extends EventEmitter {
     this.currentPhase = `Downloading ${release.systemName} / ${release.filename}`;
     this.activeTransfer = {
       itemId: releaseId,
+      fileId: initial.file.id,
+      fileIndex: fileSequence?.index ?? null,
+      totalFiles: fileSequence?.total ?? null,
       filename: release.filename,
       systemName: release.systemName,
       remoteUrl: release.remoteUrl,
@@ -2722,6 +2732,7 @@ export class ScraperOrchestrator extends EventEmitter {
       totalBytes: null,
       bytesPerSec: 0,
     };
+    this.emit('transfer', this.activeTransfer);
     this.emitCatalogUpdated('file_downloading', releaseId);
     this.emitStatus();
 
@@ -2808,6 +2819,7 @@ export class ScraperOrchestrator extends EventEmitter {
       }
 
       this.activeTransfer = null;
+      this.emit('transfer', null);
 
       if (res.outcome === 'skipped') {
         let existingMtimeIso: string | null = null;
@@ -2859,6 +2871,7 @@ export class ScraperOrchestrator extends EventEmitter {
       return { downloaded: true, skipped: false, failed: false, bytes: res.bytes };
     } catch (err) {
       this.activeTransfer = null;
+      this.emit('transfer', null);
       const errMsg = err instanceof Error ? err.message : String(err);
       upsertReleaseFile({
         releaseId,

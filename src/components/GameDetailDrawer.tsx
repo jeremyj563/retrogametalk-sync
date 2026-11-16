@@ -21,13 +21,15 @@ import {
   XCircle,
   ZoomIn,
 } from 'lucide-react';
-import type { ArchiveInspectResult, RepositoryItemRecord } from '../types';
+import type { ActiveTransferState, ArchiveInspectResult, RepositoryItemRecord } from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
+import { resolveFileTransferProgress, resolveItemTransferProgress } from '../utils/transferProgress';
 
 interface GameDetailDrawerProps {
   item: RepositoryItemRecord | null;
   activeRun: boolean;
+  activeTransfer?: ActiveTransferState | null;
   canSync: boolean;
   retryingItem?: boolean;
   onClose: () => void;
@@ -52,6 +54,7 @@ interface LightboxState {
 export function GameDetailDrawer({
   item,
   activeRun,
+  activeTransfer = null,
   canSync,
   retryingItem = false,
   onClose,
@@ -384,6 +387,8 @@ export function GameDetailDrawer({
     item.releaseTags.length > 0 ? item.releaseTags.join(' · ') : item.releaseType,
   ].filter(Boolean);
 
+  const itemTransfer = resolveItemTransferProgress(item.status, item.id, activeTransfer);
+
   return (
     <>
       <div
@@ -404,8 +409,8 @@ export function GameDetailDrawer({
                 {item.title}
               </h2>
               <span
-                className={`inline-flex items-center gap-1.5 font-mono text-xs ${
-                  item.status === 'downloaded'
+                className={`inline-flex items-center gap-1.5 font-mono text-xs tabular-nums ${
+                  item.status === 'downloaded' || (itemTransfer.active && itemTransfer.mode !== 'preparing')
                     ? 'text-crt-phosphor'
                     : item.status === 'skipped'
                       ? 'text-crt-muted'
@@ -418,7 +423,10 @@ export function GameDetailDrawer({
                 {item.status === 'skipped' && <SkipForward className="h-3.5 w-3.5" />}
                 {item.status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
                 {item.status === 'partial' && <AlertCircle className="h-3.5 w-3.5" />}
-                {item.status}
+                {itemTransfer.active && <Download className="h-3.5 w-3.5" />}
+                {itemTransfer.active && itemTransfer.percent !== null
+                  ? `downloading · ${itemTransfer.percent}%`
+                  : item.status}
               </span>
             </div>
             <p className="text-xs font-mono text-crt-muted truncate">
@@ -435,6 +443,57 @@ export function GameDetailDrawer({
             <X className="h-4 w-4" />
           </button>
         </header>
+
+        {/* Live Transfer Progress Strip */}
+        {itemTransfer.active && (
+          <div className="px-6 py-3 border-b border-crt-border bg-crt-bg/90 space-y-2 shrink-0">
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+              <div
+                className={`flex items-center gap-2 min-w-0 ${
+                  itemTransfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
+                }`}
+              >
+                <Download className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate text-crt-text">
+                  {itemTransfer.filename || 'Preparing release transfer…'}
+                </span>
+                {itemTransfer.fileSequenceLabel && (
+                  <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums">
+                    · {itemTransfer.fileSequenceLabel}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+                <span>{itemTransfer.bytesLabel}</span>
+                {itemTransfer.speedLabel && <span>{itemTransfer.speedLabel}</span>}
+                {itemTransfer.percent !== null && (
+                  <span className="text-crt-phosphor font-semibold">{itemTransfer.percent}%</span>
+                )}
+              </div>
+            </div>
+            <div
+              role="progressbar"
+              aria-label={`Download progress for ${item.title}`}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={itemTransfer.percent ?? undefined}
+              className="h-1.5 w-full bg-crt-surface border border-crt-border rounded-sm overflow-hidden"
+            >
+              {itemTransfer.mode === 'determinate' ? (
+                <div
+                  className="h-full bg-crt-phosphor transition-all duration-200"
+                  style={{ width: `${itemTransfer.percent}%` }}
+                />
+              ) : (
+                <div
+                  className={`h-full crt-progress-indeterminate ${
+                    itemTransfer.mode === 'preparing' ? 'bg-crt-amber' : 'bg-crt-phosphor'
+                  }`}
+                />
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Scrollable Body */}
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
@@ -576,13 +635,14 @@ export function GameDetailDrawer({
                   const isRetryingThis = retryingKey === `file-${file.id}`;
                   const showSecondaryFilename =
                     file.displayLabel && file.displayLabel.trim() !== file.filename.trim();
+                  const fileTransfer = resolveFileTransferProgress(file, item.id, activeTransfer);
 
                   return (
                     <div
                       key={file.id}
                       className="px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
                     >
-                      <div className="min-w-0 space-y-1">
+                      <div className="min-w-0 flex-1 space-y-1">
                         <div className="text-xs font-medium text-crt-text break-words">
                           {file.displayLabel || file.filename}
                         </div>
@@ -594,11 +654,24 @@ export function GameDetailDrawer({
                         <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-crt-muted tabular-nums">
                           <span className="text-crt-phosphor/90">{file.fileRole}</span>
                           <span>·</span>
-                          <span>{file.fileSizeBytes > 0 ? formatBytes(file.fileSizeBytes) : 'Size pending'}</span>
+                          <span>
+                            {fileTransfer.active
+                              ? fileTransfer.totalBytes
+                                ? formatBytes(fileTransfer.totalBytes)
+                                : file.fileSizeBytes > 0
+                                  ? formatBytes(file.fileSizeBytes)
+                                  : fileTransfer.bytesReceived > 0
+                                    ? formatBytes(fileTransfer.bytesReceived)
+                                    : 'Size pending'
+                              : file.fileSizeBytes > 0
+                                ? formatBytes(file.fileSizeBytes)
+                                : 'Size pending'}
+                          </span>
                           <span>·</span>
                           <span
                             className={`inline-flex items-center gap-1 ${
-                              file.status === 'downloaded'
+                              file.status === 'downloaded' ||
+                              (fileTransfer.active && fileTransfer.mode !== 'preparing')
                                 ? 'text-crt-phosphor'
                                 : file.status === 'skipped'
                                   ? 'text-crt-muted'
@@ -610,9 +683,49 @@ export function GameDetailDrawer({
                             {file.status === 'downloaded' && <CheckCircle2 className="h-3 w-3" />}
                             {file.status === 'skipped' && <SkipForward className="h-3 w-3" />}
                             {file.status === 'failed' && <XCircle className="h-3 w-3" />}
+                            {fileTransfer.active && <Download className="h-3 w-3" />}
                             {file.status}
                           </span>
                         </div>
+                        {fileTransfer.active && (
+                          <div className="pt-1 max-w-md space-y-1">
+                            <div
+                              role="progressbar"
+                              aria-label={`Download progress for ${file.filename}`}
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={fileTransfer.percent ?? undefined}
+                              className="h-1.5 w-full bg-crt-surface border border-crt-border rounded-sm overflow-hidden"
+                            >
+                              {fileTransfer.mode === 'determinate' ? (
+                                <div
+                                  className="h-full bg-crt-phosphor transition-all duration-200"
+                                  style={{ width: `${fileTransfer.percent}%` }}
+                                />
+                              ) : (
+                                <div
+                                  className={`h-full crt-progress-indeterminate ${
+                                    fileTransfer.mode === 'preparing' ? 'bg-crt-amber' : 'bg-crt-phosphor'
+                                  }`}
+                                />
+                              )}
+                            </div>
+                            <div className="flex items-center justify-between gap-2 text-[10px] font-mono tabular-nums text-crt-muted">
+                              <span className="truncate">{fileTransfer.bytesLabel}</span>
+                              <span className="whitespace-nowrap shrink-0">
+                                {fileTransfer.speedLabel && <span>{fileTransfer.speedLabel}</span>}
+                                {fileTransfer.speedLabel && fileTransfer.percent !== null && (
+                                  <span aria-hidden="true"> · </span>
+                                )}
+                                {fileTransfer.percent !== null && (
+                                  <span className="text-crt-phosphor font-semibold">
+                                    {fileTransfer.percent}%
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                          </div>
+                        )}
                         {file.errorMessage && (
                           <div className="font-mono text-[11px] text-crt-crimson break-words">
                             {file.errorMessage}
@@ -669,6 +782,16 @@ export function GameDetailDrawer({
                               {isRetryingThis || retryingItem ? 'Retrying...' : 'Retry'}
                             </button>
                           </>
+                        ) : fileTransfer.active ? (
+                          <span
+                            className={`font-mono text-xs font-medium tabular-nums px-2 ${
+                              fileTransfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
+                            }`}
+                          >
+                            {fileTransfer.percent !== null
+                              ? `${fileTransfer.percent}%`
+                              : fileTransfer.speedLabel || 'preparing'}
+                          </span>
                         ) : (
                           <span className="font-mono text-[11px] text-crt-muted px-2">
                             {file.status}
