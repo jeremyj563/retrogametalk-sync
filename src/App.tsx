@@ -11,6 +11,7 @@ import {
   ServerCog,
   Square,
 } from 'lucide-react';
+import { BrandMark } from './components/BrandMark';
 import { CatalogPanel } from './components/CatalogPanel';
 import { CrtDisplayControl } from './components/CrtDisplayControl';
 import {
@@ -836,16 +837,17 @@ export default function App() {
       {/* Sticky Top Header & Full Sync Confirmation Container */}
       <div className="sticky top-0 z-30">
         <header className="bg-crt-bg/95 backdrop-blur border-b border-crt-border px-4 lg:px-6 py-3.5 flex flex-wrap md:flex-nowrap items-center justify-between gap-4">
-        {/* Zone 1: Single-line Brand Title */}
+        {/* Zone 1: Single-line Brand Title or Custom Header Logo/Banner */}
         <a
           href="#monitor"
           onClick={(e) => {
             e.preventDefault();
             requestSectionChange('monitor');
           }}
-          className="font-display text-lg font-bold tracking-tight text-crt-phosphor whitespace-nowrap shrink-0"
+          aria-label="RetroGameTalk Sync"
+          className="inline-flex items-center shrink-0 min-h-8"
         >
-          RetroGameTalk Sync
+          <BrandMark url={config?.customBrandLogoUrl ?? ''} />
         </a>
 
         {/* Sync Scope + Independent Dry Run Toggle + Reserved-Width Run/Stop Action */}

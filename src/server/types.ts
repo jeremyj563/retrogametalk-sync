@@ -34,6 +34,7 @@ export interface ScraperConfigPublic {
   romMaxFilenameLen: number;
   devicePreset: string;
   deviceFolderMap: Record<string, string>;
+  customBrandLogoUrl: string;
   updatedAt: string;
   envOverrides: string[];
 }
@@ -64,6 +65,7 @@ export interface ConfigUpdateInput {
   romMaxFilenameLen?: number;
   devicePreset?: string;
   deviceFolderMap?: Record<string, string>;
+  customBrandLogoUrl?: string;
 }
 
 export interface SyncRunRecord {

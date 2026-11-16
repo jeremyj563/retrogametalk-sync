@@ -352,6 +352,18 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       ).run(JSON.stringify(cleanedSystems), cleanedFilter);
     },
   },
+  {
+    version: 11,
+    name: 'add_custom_brand_logo_url',
+    description: 'Add custom_brand_logo_url column to scraper_config for customizable header branding',
+    up: (db) => {
+      if (!tableHasColumn(db, 'scraper_config', 'custom_brand_logo_url')) {
+        db.prepare(
+          `ALTER TABLE scraper_config ADD COLUMN custom_brand_logo_url TEXT NOT NULL DEFAULT ''`,
+        ).run();
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
