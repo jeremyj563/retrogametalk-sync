@@ -28,6 +28,7 @@ import {
 import type {
   CatalogFacets,
   CatalogSortOption,
+  FilterMatchMode,
   FsTreeNode,
   RepositoryItemRecord,
   ScraperConfigPublic,
@@ -36,6 +37,7 @@ import type {
 import { formatBytes, formatDateTime } from '../utils/format';
 import { isFileSystemAccessSupported, pickSdCardRootDirectory, type SdDirectoryHandle } from '../utils/sdCardFs';
 import { GameDetailDrawer } from './GameDetailDrawer';
+import { MultiSelectFilterDropdown, type FilterDropdownOption } from './MultiSelectFilterDropdown';
 import { SdCardExportModal } from './SdCardExportModal';
 
 interface CatalogPanelProps {
@@ -49,22 +51,46 @@ interface CatalogPanelProps {
 }
 
 const CATALOG_VIEW_STORAGE_KEY = 'rgt_sync_catalog_view_v1';
-const VALID_STATUS_FILTERS = new Set(['all', 'downloaded', 'partial', 'failed', 'needs_retry']);
+const VALID_STATUS_VALUES = new Set(['downloaded', 'partial', 'failed', 'needs_retry', 'queued', 'downloading']);
 const VALID_VIEW_MODES = new Set(['catalog', 'filesystem']);
+
+const STATUS_LABELS: Record<string, string> = {
+  downloaded: 'Downloaded',
+  needs_retry: 'Needs Attention',
+  partial: 'Partial',
+  failed: 'Failed',
+  queued: 'Queued',
+  downloading: 'Downloading',
+};
 
 interface CatalogViewPrefs {
   viewMode: 'catalog' | 'filesystem';
   catalogLayout: 'table' | 'grid';
   sort: CatalogSortOption;
   search: string;
-  systemFilter: string;
-  statusFilter: string;
-  tagFilter: string;
-  genreFilter: string;
-  regionFilter: string;
-  languageFilter: string;
+  systems: string[];
+  statuses: string[];
+  tags: string[];
+  tagsMode: FilterMatchMode;
+  genres: string[];
+  genresMode: FilterMatchMode;
+  regions: string[];
+  regionsMode: FilterMatchMode;
+  languages: string[];
+  languagesMode: FilterMatchMode;
+  sources: string[];
+  sourcesMode: FilterMatchMode;
   fsPath: string;
   fsSearch: string;
+}
+
+interface LegacyCatalogViewPrefs extends Partial<CatalogViewPrefs> {
+  systemFilter?: string;
+  statusFilter?: string;
+  tagFilter?: string;
+  genreFilter?: string;
+  regionFilter?: string;
+  languageFilter?: string;
 }
 
 const DEFAULT_CATALOG_VIEW_PREFS: CatalogViewPrefs = {
@@ -72,15 +98,56 @@ const DEFAULT_CATALOG_VIEW_PREFS: CatalogViewPrefs = {
   catalogLayout: 'table',
   sort: DEFAULT_CATALOG_SORT,
   search: '',
-  systemFilter: 'all',
-  statusFilter: 'all',
-  tagFilter: 'all',
-  genreFilter: 'all',
-  regionFilter: 'all',
-  languageFilter: 'all',
+  systems: [],
+  statuses: [],
+  tags: [],
+  tagsMode: 'any',
+  genres: [],
+  genresMode: 'any',
+  regions: [],
+  regionsMode: 'any',
+  languages: [],
+  languagesMode: 'any',
+  sources: [],
+  sourcesMode: 'any',
   fsPath: '',
   fsSearch: '',
 };
+
+function sanitizeStoredList(arr: unknown, legacySingle?: unknown): string[] {
+  const rawList = Array.isArray(arr)
+    ? arr
+    : typeof legacySingle === 'string' && legacySingle && legacySingle !== 'all'
+      ? [legacySingle]
+      : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of rawList) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed || trimmed === 'all' || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function sanitizeStoredStatuses(arr: unknown, legacySingle?: unknown): string[] {
+  const raw = sanitizeStoredList(arr, legacySingle);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const st of raw) {
+    const mapped = st === 'skipped' ? 'downloaded' : st;
+    if (!VALID_STATUS_VALUES.has(mapped) || seen.has(mapped)) continue;
+    seen.add(mapped);
+    out.push(mapped);
+  }
+  return out;
+}
+
+function sanitizeStoredMatchMode(raw: unknown): FilterMatchMode {
+  return raw === 'all' ? 'all' : 'any';
+}
 
 function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
   try {
@@ -89,7 +156,7 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
     }
     const raw = window.localStorage.getItem(CATALOG_VIEW_STORAGE_KEY);
     if (!raw) return { ...DEFAULT_CATALOG_VIEW_PREFS };
-    const parsed = JSON.parse(raw) as Partial<CatalogViewPrefs>;
+    const parsed = JSON.parse(raw) as LegacyCatalogViewPrefs;
     return {
       viewMode:
         typeof parsed.viewMode === 'string' && VALID_VIEW_MODES.has(parsed.viewMode)
@@ -98,18 +165,18 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
       catalogLayout: parsed.catalogLayout === 'grid' ? 'grid' : 'table',
       sort: normalizeCatalogSort(parsed.sort),
       search: typeof parsed.search === 'string' ? parsed.search : '',
-      systemFilter: typeof parsed.systemFilter === 'string' && parsed.systemFilter ? parsed.systemFilter : 'all',
-      statusFilter:
-        parsed.statusFilter === 'skipped'
-          ? 'downloaded'
-          : typeof parsed.statusFilter === 'string' && VALID_STATUS_FILTERS.has(parsed.statusFilter)
-            ? parsed.statusFilter
-            : 'all',
-      tagFilter: typeof parsed.tagFilter === 'string' && parsed.tagFilter ? parsed.tagFilter : 'all',
-      genreFilter: typeof parsed.genreFilter === 'string' && parsed.genreFilter ? parsed.genreFilter : 'all',
-      regionFilter: typeof parsed.regionFilter === 'string' && parsed.regionFilter ? parsed.regionFilter : 'all',
-      languageFilter:
-        typeof parsed.languageFilter === 'string' && parsed.languageFilter ? parsed.languageFilter : 'all',
+      systems: sanitizeStoredList(parsed.systems, parsed.systemFilter),
+      statuses: sanitizeStoredStatuses(parsed.statuses, parsed.statusFilter),
+      tags: sanitizeStoredList(parsed.tags, parsed.tagFilter),
+      tagsMode: sanitizeStoredMatchMode(parsed.tagsMode),
+      genres: sanitizeStoredList(parsed.genres, parsed.genreFilter),
+      genresMode: sanitizeStoredMatchMode(parsed.genresMode),
+      regions: sanitizeStoredList(parsed.regions, parsed.regionFilter),
+      regionsMode: sanitizeStoredMatchMode(parsed.regionsMode),
+      languages: sanitizeStoredList(parsed.languages, parsed.languageFilter),
+      languagesMode: sanitizeStoredMatchMode(parsed.languagesMode),
+      sources: sanitizeStoredList(parsed.sources),
+      sourcesMode: sanitizeStoredMatchMode(parsed.sourcesMode),
       fsPath: typeof parsed.fsPath === 'string' ? parsed.fsPath : '',
       fsSearch: typeof parsed.fsSearch === 'string' ? parsed.fsSearch : '',
     };
@@ -118,20 +185,42 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
   }
 }
 
-function buildCatalogQueryKey(prefs: Pick<
-  CatalogViewPrefs,
-  'viewMode' | 'sort' | 'search' | 'systemFilter' | 'statusFilter' | 'tagFilter' | 'genreFilter' | 'regionFilter' | 'languageFilter'
->): string {
+function buildCatalogQueryKey(
+  prefs: Pick<
+    CatalogViewPrefs,
+    | 'viewMode'
+    | 'sort'
+    | 'search'
+    | 'systems'
+    | 'statuses'
+    | 'tags'
+    | 'tagsMode'
+    | 'genres'
+    | 'genresMode'
+    | 'regions'
+    | 'regionsMode'
+    | 'languages'
+    | 'languagesMode'
+    | 'sources'
+    | 'sourcesMode'
+  >,
+): string {
   return JSON.stringify([
     prefs.viewMode,
     prefs.sort,
     prefs.search,
-    prefs.systemFilter,
-    prefs.statusFilter,
-    prefs.tagFilter,
-    prefs.genreFilter,
-    prefs.regionFilter,
-    prefs.languageFilter,
+    prefs.systems,
+    prefs.statuses,
+    prefs.tags,
+    prefs.tags.length > 1 ? prefs.tagsMode : 'any',
+    prefs.genres,
+    prefs.genres.length > 1 ? prefs.genresMode : 'any',
+    prefs.regions,
+    prefs.regions.length > 1 ? prefs.regionsMode : 'any',
+    prefs.languages,
+    prefs.languages.length > 1 ? prefs.languagesMode : 'any',
+    prefs.sources,
+    prefs.sources.length > 1 ? prefs.sourcesMode : 'any',
   ]);
 }
 
@@ -179,12 +268,19 @@ export function CatalogPanel({
   const [catalogLayout, setCatalogLayout] = useState<'table' | 'grid'>(() => memoryCatalogViewPrefs.catalogLayout);
   const [sort, setSort] = useState<CatalogSortOption>(() => memoryCatalogViewPrefs.sort);
   const [search, setSearch] = useState(() => memoryCatalogViewPrefs.search);
-  const [systemFilter, setSystemFilter] = useState(() => memoryCatalogViewPrefs.systemFilter);
-  const [statusFilter, setStatusFilter] = useState(() => memoryCatalogViewPrefs.statusFilter);
-  const [tagFilter, setTagFilter] = useState(() => memoryCatalogViewPrefs.tagFilter);
-  const [genreFilter, setGenreFilter] = useState(() => memoryCatalogViewPrefs.genreFilter);
-  const [regionFilter, setRegionFilter] = useState(() => memoryCatalogViewPrefs.regionFilter);
-  const [languageFilter, setLanguageFilter] = useState(() => memoryCatalogViewPrefs.languageFilter);
+  const [systems, setSystems] = useState<string[]>(() => memoryCatalogViewPrefs.systems);
+  const [statuses, setStatuses] = useState<string[]>(() => memoryCatalogViewPrefs.statuses);
+  const [tags, setTags] = useState<string[]>(() => memoryCatalogViewPrefs.tags);
+  const [tagsMode, setTagsMode] = useState<FilterMatchMode>(() => memoryCatalogViewPrefs.tagsMode);
+  const [genres, setGenres] = useState<string[]>(() => memoryCatalogViewPrefs.genres);
+  const [genresMode, setGenresMode] = useState<FilterMatchMode>(() => memoryCatalogViewPrefs.genresMode);
+  const [regions, setRegions] = useState<string[]>(() => memoryCatalogViewPrefs.regions);
+  const [regionsMode, setRegionsMode] = useState<FilterMatchMode>(() => memoryCatalogViewPrefs.regionsMode);
+  const [languages, setLanguages] = useState<string[]>(() => memoryCatalogViewPrefs.languages);
+  const [languagesMode, setLanguagesMode] = useState<FilterMatchMode>(() => memoryCatalogViewPrefs.languagesMode);
+  const [sources, setSources] = useState<string[]>(() => memoryCatalogViewPrefs.sources);
+  const [sourcesMode, setSourcesMode] = useState<FilterMatchMode>(() => memoryCatalogViewPrefs.sourcesMode);
+  const [openFilterId, setOpenFilterId] = useState<string | null>(null);
   const [items, setItems] = useState<RepositoryItemRecord[]>(() => initialMatchedCatalog?.items ?? []);
   const [facets, setFacets] = useState<CatalogFacets>(() => memoryCatalogFacets);
   const [totalItems, setTotalItems] = useState(() => initialMatchedCatalog?.totalItems ?? 0);
@@ -244,12 +340,18 @@ export function CatalogPanel({
       catalogLayout,
       sort,
       search,
-      systemFilter,
-      statusFilter,
-      tagFilter,
-      genreFilter,
-      regionFilter,
-      languageFilter,
+      systems,
+      statuses,
+      tags,
+      tagsMode,
+      genres,
+      genresMode,
+      regions,
+      regionsMode,
+      languages,
+      languagesMode,
+      sources,
+      sourcesMode,
       fsPath,
       fsSearch,
     };
@@ -264,12 +366,18 @@ export function CatalogPanel({
     catalogLayout,
     sort,
     search,
-    systemFilter,
-    statusFilter,
-    tagFilter,
-    genreFilter,
-    regionFilter,
-    languageFilter,
+    systems,
+    statuses,
+    tags,
+    tagsMode,
+    genres,
+    genresMode,
+    regions,
+    regionsMode,
+    languages,
+    languagesMode,
+    sources,
+    sourcesMode,
     fsPath,
     fsSearch,
   ]);
@@ -283,6 +391,12 @@ export function CatalogPanel({
     activeDetailIdRef.current = activeDetailItem?.id ?? null;
   }, [activeDetailItem?.id]);
 
+  useEffect(() => {
+    if (viewMode !== 'catalog') {
+      setOpenFilterId(null);
+    }
+  }, [viewMode]);
+
   const loadCatalog = useCallback(
     async (silent = false) => {
       const reqId = ++catalogReqSeqRef.current;
@@ -290,16 +404,23 @@ export function CatalogPanel({
       try {
         const qs = new URLSearchParams({
           search,
-          system: systemFilter,
-          status: statusFilter,
-          tag: tagFilter,
-          genre: genreFilter,
-          region: regionFilter,
-          language: languageFilter,
           sort,
           limit: '150',
           offset: '0',
         });
+        for (const sys of systems) qs.append('system', sys);
+        for (const st of statuses) qs.append('status', st);
+        for (const t of tags) qs.append('tag', t);
+        if (tags.length > 1) qs.set('tagMode', tagsMode);
+        for (const g of genres) qs.append('genre', g);
+        if (genres.length > 1) qs.set('genreMode', genresMode);
+        for (const r of regions) qs.append('region', r);
+        if (regions.length > 1) qs.set('regionMode', regionsMode);
+        for (const l of languages) qs.append('language', l);
+        if (languages.length > 1) qs.set('languageMode', languagesMode);
+        for (const s of sources) qs.append('source', s);
+        if (sources.length > 1) qs.set('sourceMode', sourcesMode);
+
         const res = await fetch(`/api/items?${qs.toString()}`);
         if (!res.ok || reqId !== catalogReqSeqRef.current) return;
         const data = await res.json();
@@ -312,12 +433,18 @@ export function CatalogPanel({
             viewMode,
             sort,
             search,
-            systemFilter,
-            statusFilter,
-            tagFilter,
-            genreFilter,
-            regionFilter,
-            languageFilter,
+            systems,
+            statuses,
+            tags,
+            tagsMode,
+            genres,
+            genresMode,
+            regions,
+            regionsMode,
+            languages,
+            languagesMode,
+            sources,
+            sourcesMode,
           }),
           items: nextItems,
           totalItems: nextTotal,
@@ -331,6 +458,7 @@ export function CatalogPanel({
             regions: Array.isArray(data.facets.regions) ? data.facets.regions : [],
             languages: Array.isArray(data.facets.languages) ? data.facets.languages : [],
             sources: Array.isArray(data.facets.sources) ? data.facets.sources : [],
+            counts: data.facets.counts && typeof data.facets.counts === 'object' ? data.facets.counts : undefined,
           };
           memoryCatalogFacets = nextFacets;
           setFacets(nextFacets);
@@ -381,7 +509,23 @@ export function CatalogPanel({
         }
       }
     },
-    [viewMode, sort, search, systemFilter, statusFilter, tagFilter, genreFilter, regionFilter, languageFilter],
+    [
+      viewMode,
+      sort,
+      search,
+      systems,
+      statuses,
+      tags,
+      tagsMode,
+      genres,
+      genresMode,
+      regions,
+      regionsMode,
+      languages,
+      languagesMode,
+      sources,
+      sourcesMode,
+    ],
   );
 
   const loadFsTree = useCallback(async (subpath: string, silent = false) => {
@@ -422,12 +566,18 @@ export function CatalogPanel({
           viewMode,
           sort,
           search,
-          systemFilter,
-          statusFilter,
-          tagFilter,
-          genreFilter,
-          regionFilter,
-          languageFilter,
+          systems,
+          statuses,
+          tags,
+          tagsMode,
+          genres,
+          genresMode,
+          regions,
+          regionsMode,
+          languages,
+          languagesMode,
+          sources,
+          sourcesMode,
         });
       void loadCatalog(hasCached);
     } else {
@@ -441,12 +591,18 @@ export function CatalogPanel({
     loadFsTree,
     fsPath,
     search,
-    systemFilter,
-    statusFilter,
-    tagFilter,
-    genreFilter,
-    regionFilter,
-    languageFilter,
+    systems,
+    statuses,
+    tags,
+    tagsMode,
+    genres,
+    genresMode,
+    regions,
+    regionsMode,
+    languages,
+    languagesMode,
+    sources,
+    sourcesMode,
   ]);
 
   // Live background refresh whenever backend emits catalog_updated during sync
@@ -611,24 +767,224 @@ export function CatalogPanel({
     });
   };
 
-  const activeFilterCount =
-    (search.trim() !== '' ? 1 : 0) +
-    (systemFilter !== 'all' ? 1 : 0) +
-    (statusFilter !== 'all' ? 1 : 0) +
-    (tagFilter !== 'all' ? 1 : 0) +
-    (genreFilter !== 'all' ? 1 : 0) +
-    (regionFilter !== 'all' ? 1 : 0) +
-    (languageFilter !== 'all' ? 1 : 0);
+  const systemOptions = useMemo<FilterDropdownOption[]>(
+    () =>
+      status.systems.map((sys) => ({
+        value: sys.systemName,
+        label: sys.systemName,
+        count: sys.totalItems,
+      })),
+    [status.systems],
+  );
+
+  const tagOptions = useMemo<FilterDropdownOption[]>(
+    () =>
+      facets.tags.map((val) => ({
+        value: val,
+        label: val,
+        count: facets.counts?.tags?.[val],
+      })),
+    [facets.tags, facets.counts],
+  );
+
+  const genreOptions = useMemo<FilterDropdownOption[]>(
+    () =>
+      facets.genres.map((val) => ({
+        value: val,
+        label: val,
+        count: facets.counts?.genres?.[val],
+      })),
+    [facets.genres, facets.counts],
+  );
+
+  const regionOptions = useMemo<FilterDropdownOption[]>(
+    () =>
+      facets.regions.map((val) => ({
+        value: val,
+        label: val,
+        count: facets.counts?.regions?.[val],
+      })),
+    [facets.regions, facets.counts],
+  );
+
+  const languageOptions = useMemo<FilterDropdownOption[]>(
+    () =>
+      facets.languages.map((val) => ({
+        value: val,
+        label: val,
+        count: facets.counts?.languages?.[val],
+      })),
+    [facets.languages, facets.counts],
+  );
+
+  const sourceOptions = useMemo<FilterDropdownOption[]>(
+    () =>
+      facets.sources.map((val) => ({
+        value: val,
+        label: val,
+        count: facets.counts?.sources?.[val],
+      })),
+    [facets.sources, facets.counts],
+  );
+
+  const statusOptions = useMemo<FilterDropdownOption[]>(() => {
+    const counts = facets.counts?.statuses;
+    const base: FilterDropdownOption[] = [
+      {
+        value: 'downloaded',
+        label: 'Downloaded',
+        count: counts?.downloaded ?? status.totals.downloadedItems + status.totals.skippedItems,
+      },
+      {
+        value: 'needs_retry',
+        label: 'Needs Attention (Failed & Partial)',
+        count: counts?.needs_retry ?? status.totals.failedItems,
+      },
+      {
+        value: 'partial',
+        label: 'Partial',
+        count: counts?.partial,
+      },
+      {
+        value: 'failed',
+        label: 'Failed',
+        count: counts?.failed,
+      },
+    ];
+    if ((counts?.queued ?? 0) > 0 || statuses.includes('queued')) {
+      base.push({ value: 'queued', label: 'Queued', count: counts?.queued });
+    }
+    if ((counts?.downloading ?? 0) > 0 || statuses.includes('downloading')) {
+      base.push({ value: 'downloading', label: 'Downloading', count: counts?.downloading });
+    }
+    return base;
+  }, [facets.counts, status.totals, statuses]);
+
+  const activeFilterTokens = useMemo(() => {
+    const tokens: {
+      key: string;
+      groupLabel: string;
+      valueLabel: string;
+      matchAll: boolean;
+      onRemove: () => void;
+    }[] = [];
+
+    const trimmedSearch = search.trim();
+    if (trimmedSearch) {
+      tokens.push({
+        key: 'search',
+        groupLabel: 'Search',
+        valueLabel: `"${trimmedSearch}"`,
+        matchAll: false,
+        onRemove: () => setSearch(''),
+      });
+    }
+
+    for (const val of systems) {
+      tokens.push({
+        key: `sys:${val}`,
+        groupLabel: 'System',
+        valueLabel: val,
+        matchAll: false,
+        onRemove: () => setSystems((prev) => prev.filter((v) => v !== val)),
+      });
+    }
+
+    for (const val of tags) {
+      tokens.push({
+        key: `tag:${val}`,
+        groupLabel: 'Type',
+        valueLabel: val,
+        matchAll: tagsMode === 'all' && tags.length > 1,
+        onRemove: () => setTags((prev) => prev.filter((v) => v !== val)),
+      });
+    }
+
+    for (const val of genres) {
+      tokens.push({
+        key: `genre:${val}`,
+        groupLabel: 'Genre',
+        valueLabel: val,
+        matchAll: genresMode === 'all' && genres.length > 1,
+        onRemove: () => setGenres((prev) => prev.filter((v) => v !== val)),
+      });
+    }
+
+    for (const val of regions) {
+      tokens.push({
+        key: `region:${val}`,
+        groupLabel: 'Region',
+        valueLabel: val,
+        matchAll: regionsMode === 'all' && regions.length > 1,
+        onRemove: () => setRegions((prev) => prev.filter((v) => v !== val)),
+      });
+    }
+
+    for (const val of languages) {
+      tokens.push({
+        key: `lang:${val}`,
+        groupLabel: 'Language',
+        valueLabel: val,
+        matchAll: languagesMode === 'all' && languages.length > 1,
+        onRemove: () => setLanguages((prev) => prev.filter((v) => v !== val)),
+      });
+    }
+
+    for (const val of sources) {
+      tokens.push({
+        key: `source:${val}`,
+        groupLabel: 'Source',
+        valueLabel: val,
+        matchAll: sourcesMode === 'all' && sources.length > 1,
+        onRemove: () => setSources((prev) => prev.filter((v) => v !== val)),
+      });
+    }
+
+    for (const val of statuses) {
+      tokens.push({
+        key: `status:${val}`,
+        groupLabel: 'Status',
+        valueLabel: STATUS_LABELS[val] || val,
+        matchAll: false,
+        onRemove: () => setStatuses((prev) => prev.filter((v) => v !== val)),
+      });
+    }
+
+    return tokens;
+  }, [
+    search,
+    systems,
+    tags,
+    tagsMode,
+    genres,
+    genresMode,
+    regions,
+    regionsMode,
+    languages,
+    languagesMode,
+    sources,
+    sourcesMode,
+    statuses,
+  ]);
+
+  const activeFilterCount = activeFilterTokens.length;
   const hasActiveFilters = activeFilterCount > 0;
 
   const clearCatalogFilters = () => {
     setSearch('');
-    setSystemFilter('all');
-    setStatusFilter('all');
-    setTagFilter('all');
-    setGenreFilter('all');
-    setRegionFilter('all');
-    setLanguageFilter('all');
+    setSystems([]);
+    setStatuses([]);
+    setTags([]);
+    setTagsMode('any');
+    setGenres([]);
+    setGenresMode('any');
+    setRegions([]);
+    setRegionsMode('any');
+    setLanguages([]);
+    setLanguagesMode('any');
+    setSources([]);
+    setSourcesMode('any');
+    setOpenFilterId(null);
   };
 
   const breadcrumbs = fsPath ? fsPath.split('/').filter(Boolean) : [];
@@ -765,168 +1121,179 @@ export function CatalogPanel({
 
         {/* Catalog Filter Row */}
         {viewMode === 'catalog' && (
-          <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-crt-border">
-            <div className="relative">
-              <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search title, publisher, file..."
-                className={`pl-8 ${search ? 'pr-7' : 'pr-3'} py-1.5 text-xs bg-crt-bg border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-60 ${
-                  search.trim() ? 'border-crt-phosphor/60' : 'border-crt-border'
-                }`}
+          <div className="space-y-2.5 pt-2 border-t border-crt-border">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative">
+                <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search title, publisher, file..."
+                  className={`pl-8 ${search ? 'pr-7' : 'pr-3'} py-1.5 text-xs bg-crt-bg border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-56 ${
+                    search.trim() ? 'border-crt-phosphor/60' : 'border-crt-border'
+                  }`}
+                />
+                {search && (
+                  <button
+                    type="button"
+                    onClick={() => setSearch('')}
+                    aria-label="Clear search query"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-crt-muted hover:text-crt-text p-0.5 rounded"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+
+              <MultiSelectFilterDropdown
+                id="systems"
+                label="Systems"
+                allLabel="All Systems"
+                options={systemOptions}
+                selected={systems}
+                onChange={setSystems}
+                open={openFilterId === 'systems'}
+                onOpenChange={(open) => setOpenFilterId(open ? 'systems' : null)}
+                searchPlaceholder="Filter consoles..."
               />
-              {search && (
-                <button
-                  type="button"
-                  onClick={() => setSearch('')}
-                  aria-label="Clear search query"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-crt-muted hover:text-crt-text p-0.5 rounded"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
+
+              <MultiSelectFilterDropdown
+                id="tags"
+                label="Types"
+                allLabel="All Types"
+                options={tagOptions}
+                selected={tags}
+                onChange={setTags}
+                matchMode={tagsMode}
+                onMatchModeChange={setTagsMode}
+                open={openFilterId === 'tags'}
+                onOpenChange={(open) => setOpenFilterId(open ? 'tags' : null)}
+                searchPlaceholder="Filter ROM types..."
+              />
+
+              <MultiSelectFilterDropdown
+                id="genres"
+                label="Genres"
+                allLabel="All Genres"
+                options={genreOptions}
+                selected={genres}
+                onChange={setGenres}
+                matchMode={genresMode}
+                onMatchModeChange={setGenresMode}
+                open={openFilterId === 'genres'}
+                onOpenChange={(open) => setOpenFilterId(open ? 'genres' : null)}
+                searchPlaceholder="Filter genres..."
+              />
+
+              <MultiSelectFilterDropdown
+                id="regions"
+                label="Regions"
+                allLabel="All Regions"
+                options={regionOptions}
+                selected={regions}
+                onChange={setRegions}
+                matchMode={regionsMode}
+                onMatchModeChange={setRegionsMode}
+                open={openFilterId === 'regions'}
+                onOpenChange={(open) => setOpenFilterId(open ? 'regions' : null)}
+                searchPlaceholder="Filter regions..."
+              />
+
+              <MultiSelectFilterDropdown
+                id="languages"
+                label="Languages"
+                allLabel="All Languages"
+                options={languageOptions}
+                selected={languages}
+                onChange={setLanguages}
+                matchMode={languagesMode}
+                onMatchModeChange={setLanguagesMode}
+                open={openFilterId === 'languages'}
+                onOpenChange={(open) => setOpenFilterId(open ? 'languages' : null)}
+                searchPlaceholder="Filter languages..."
+              />
+
+              <MultiSelectFilterDropdown
+                id="sources"
+                label="Sources"
+                allLabel="All Sources"
+                options={sourceOptions}
+                selected={sources}
+                onChange={setSources}
+                matchMode={sourcesMode}
+                onMatchModeChange={setSourcesMode}
+                open={openFilterId === 'sources'}
+                onOpenChange={(open) => setOpenFilterId(open ? 'sources' : null)}
+                searchPlaceholder="Filter release sources..."
+              />
+
+              <MultiSelectFilterDropdown
+                id="statuses"
+                label="Status"
+                allLabel="All Statuses"
+                options={statusOptions}
+                selected={statuses}
+                onChange={setStatuses}
+                open={openFilterId === 'statuses'}
+                onOpenChange={(open) => setOpenFilterId(open ? 'statuses' : null)}
+                showTotalOptionCount={false}
+                searchPlaceholder="Filter statuses..."
+              />
+
+              <select
+                value={sort}
+                onChange={(e) => setSort(normalizeCatalogSort(e.target.value))}
+                aria-label="Sort catalog releases"
+                className={`xl:ml-auto px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
+                  sort !== DEFAULT_CATALOG_SORT
+                    ? 'border-crt-phosphor/60 text-crt-phosphor'
+                    : 'border-crt-border text-crt-text'
+                }`}
+              >
+                {CATALOG_SORT_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
             </div>
 
-            <select
-              value={systemFilter}
-              onChange={(e) => setSystemFilter(e.target.value)}
-              aria-label="Filter by console system"
-              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
-                systemFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
-              }`}
-            >
-              <option value="all">All Systems ({status.systems.length})</option>
-              {systemFilter !== 'all' && !status.systems.some((sys) => sys.systemName === systemFilter) && (
-                <option value={systemFilter}>{systemFilter}</option>
-              )}
-              {status.systems.map((sys) => (
-                <option key={sys.systemName} value={sys.systemName}>
-                  {sys.systemName} ({sys.totalItems})
-                </option>
-              ))}
-            </select>
+            {/* Removable Active Filter Summary Bar */}
+            {hasActiveFilters && (
+              <div className="pt-2 border-t border-crt-border/70 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] font-mono text-crt-muted mr-0.5 whitespace-nowrap shrink-0">
+                    Active:
+                  </span>
+                  {activeFilterTokens.map((tok) => (
+                    <button
+                      key={tok.key}
+                      type="button"
+                      onClick={tok.onRemove}
+                      title={`Remove ${tok.groupLabel}: ${tok.valueLabel}`}
+                      className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-mono border border-crt-border-strong bg-crt-bg hover:border-crt-crimson/60 text-crt-text hover:text-crt-crimson rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <span className="text-crt-muted">
+                        {tok.groupLabel}
+                        {tok.matchAll ? ' [ALL]' : ''}:
+                      </span>
+                      <span className="text-crt-phosphor truncate max-w-[12rem]">{tok.valueLabel}</span>
+                      <X className="h-3 w-3 shrink-0 opacity-75" />
+                    </button>
+                  ))}
+                </div>
 
-            <select
-              value={tagFilter}
-              onChange={(e) => setTagFilter(e.target.value)}
-              aria-label="Filter by release type"
-              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
-                tagFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
-              }`}
-            >
-              <option value="all">All Types ({facets.tags.length})</option>
-              {tagFilter !== 'all' && !facets.tags.includes(tagFilter) && (
-                <option value={tagFilter}>{tagFilter}</option>
-              )}
-              {facets.tags.map((tag) => (
-                <option key={tag} value={tag}>
-                  {tag}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={genreFilter}
-              onChange={(e) => setGenreFilter(e.target.value)}
-              aria-label="Filter by genre"
-              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
-                genreFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
-              }`}
-            >
-              <option value="all">All Genres ({facets.genres.length})</option>
-              {genreFilter !== 'all' && !facets.genres.includes(genreFilter) && (
-                <option value={genreFilter}>{genreFilter}</option>
-              )}
-              {facets.genres.map((genre) => (
-                <option key={genre} value={genre}>
-                  {genre}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={regionFilter}
-              onChange={(e) => setRegionFilter(e.target.value)}
-              aria-label="Filter by region"
-              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
-                regionFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
-              }`}
-            >
-              <option value="all">All Regions ({facets.regions.length})</option>
-              {regionFilter !== 'all' && !facets.regions.includes(regionFilter) && (
-                <option value={regionFilter}>{regionFilter}</option>
-              )}
-              {facets.regions.map((region) => (
-                <option key={region} value={region}>
-                  {region}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={languageFilter}
-              onChange={(e) => setLanguageFilter(e.target.value)}
-              aria-label="Filter by language"
-              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
-                languageFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
-              }`}
-            >
-              <option value="all">All Languages ({facets.languages.length})</option>
-              {languageFilter !== 'all' && !facets.languages.includes(languageFilter) && (
-                <option value={languageFilter}>{languageFilter}</option>
-              )}
-              {facets.languages.map((lang) => (
-                <option key={lang} value={lang}>
-                  {lang}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              aria-label="Filter by transfer status"
-              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
-                statusFilter !== 'all' ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
-              }`}
-            >
-              <option value="all">All Statuses</option>
-              <option value="downloaded">Downloaded</option>
-              <option value="needs_retry">Needs Attention (Failed &amp; Partial)</option>
-              <option value="partial">Partial</option>
-              <option value="failed">Failed</option>
-            </select>
-
-            <select
-              value={sort}
-              onChange={(e) => setSort(normalizeCatalogSort(e.target.value))}
-              aria-label="Sort catalog releases"
-              className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
-                sort !== DEFAULT_CATALOG_SORT ? 'border-crt-phosphor/60 text-crt-phosphor' : 'border-crt-border text-crt-text'
-              }`}
-            >
-              {CATALOG_SORT_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-
-            <button
-              type="button"
-              disabled={!hasActiveFilters}
-              onClick={clearCatalogFilters}
-              className={`sm:ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
-                hasActiveFilters
-                  ? 'border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20'
-                  : 'border-crt-border bg-crt-bg text-crt-muted opacity-50 cursor-not-allowed'
-              }`}
-            >
-              <X className="h-3.5 w-3.5" />
-              {hasActiveFilters ? `Clear All Filters (${activeFilterCount})` : 'Clear All Filters'}
-            </button>
+                <button
+                  type="button"
+                  onClick={clearCatalogFilters}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Clear All ({activeFilterCount})
+                </button>
+              </div>
+            )}
           </div>
         )}
 
