@@ -831,6 +831,8 @@ function mapReleaseRow(row: Record<string, unknown>, files: ReleaseFileRecord[])
     screenshotsCount: screenshots.length,
     hasMetadata: Boolean(parsedMeta),
     metadata: parsedMeta,
+    installedAt: row.installed_at ? String(row.installed_at) : null,
+    installedDeviceLabel: row.installed_device_label ? String(row.installed_device_label) : null,
     filesCount: files.length,
     files,
   };
@@ -1390,6 +1392,22 @@ function listStatusFacetCounts(): Record<string, number> {
   };
 }
 
+function listInstalledFacetCounts(): { installed: number; notInstalled: number } {
+  const row = getDb()
+    .prepare(
+      `SELECT
+        SUM(CASE WHEN installed_at IS NOT NULL THEN 1 ELSE 0 END) AS installed_cnt,
+        SUM(CASE WHEN installed_at IS NULL THEN 1 ELSE 0 END) AS not_installed_cnt
+      FROM catalog_releases`,
+    )
+    .get() as { installed_cnt: number | null; not_installed_cnt: number | null } | undefined;
+
+  return {
+    installed: Number(row?.installed_cnt || 0),
+    notInstalled: Number(row?.not_installed_cnt || 0),
+  };
+}
+
 function normalizeFilterList(raw: string | string[] | undefined): string[] {
   if (!raw) return [];
   const list = Array.isArray(raw) ? raw : [raw];
@@ -1453,6 +1471,7 @@ export function queryRepositoryItems(params: {
   search?: string;
   system?: string | string[];
   status?: string | string[];
+  installed?: string;
   tag?: string | string[];
   tagMode?: string;
   genre?: string | string[];
@@ -1525,6 +1544,12 @@ export function queryRepositoryItems(params: {
   appendJsonFacetCondition(conditions, args, 'languages_json', params.language, params.languageMode);
   appendJsonFacetCondition(conditions, args, 'sources_json', params.source, params.sourceMode);
 
+  if (params.installed === 'only') {
+    conditions.push('installed_at IS NOT NULL');
+  } else if (params.installed === 'exclude') {
+    conditions.push('installed_at IS NULL');
+  }
+
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const limit = Math.min(200, Math.max(1, params.limit ?? 50));
   const offset = Math.max(0, params.offset ?? 0);
@@ -1548,6 +1573,7 @@ export function queryRepositoryItems(params: {
   const languagesFacet = listDistinctJsonFacetWithCounts('languages_json');
   const sourcesFacet = listDistinctJsonFacetWithCounts('sources_json');
   const statusCounts = listStatusFacetCounts();
+  const installedCounts = listInstalledFacetCounts();
 
   const counts: CatalogFacetCounts = {
     tags: tagsFacet.counts,
@@ -1556,6 +1582,7 @@ export function queryRepositoryItems(params: {
     languages: languagesFacet.counts,
     sources: sourcesFacet.counts,
     statuses: statusCounts,
+    installed: installedCounts,
   };
 
   const facets: CatalogFacets = {
@@ -1571,6 +1598,56 @@ export function queryRepositoryItems(params: {
     items: rows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || [])),
     total: Number(countRow.count),
     facets,
+  };
+}
+
+export function setCatalogItemsInstalled(options: {
+  ids: number[];
+  installed: boolean;
+  deviceLabel?: string | null;
+}): { updated: number; items: RepositoryItemRecord[] } {
+  const cleanIds = Array.from(
+    new Set(options.ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
+  );
+  if (cleanIds.length === 0) {
+    return { updated: 0, items: [] };
+  }
+
+  const placeholders = cleanIds.map(() => '?').join(', ');
+  let updated = 0;
+
+  if (options.installed) {
+    const now = new Date().toISOString();
+    const label = options.deviceLabel?.trim() ? options.deviceLabel.trim().slice(0, 120) : null;
+    const info = getDb()
+      .prepare(
+        `UPDATE catalog_releases
+         SET installed_at = ?,
+             installed_device_label = COALESCE(?, installed_device_label)
+         WHERE id IN (${placeholders})`,
+      )
+      .run(now, label, ...cleanIds);
+    updated = info.changes;
+  } else {
+    const info = getDb()
+      .prepare(
+        `UPDATE catalog_releases
+         SET installed_at = NULL,
+             installed_device_label = NULL
+         WHERE id IN (${placeholders})`,
+      )
+      .run(...cleanIds);
+    updated = info.changes;
+  }
+
+  const rows = getDb()
+    .prepare(`SELECT * FROM catalog_releases WHERE id IN (${placeholders})`)
+    .all(...cleanIds) as Record<string, unknown>[];
+  const filesMap = loadFilesByReleaseIds(cleanIds);
+
+  return {
+    updated,
+    items: rows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || [])),
   };
 }
 

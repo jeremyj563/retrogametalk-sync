@@ -9,12 +9,12 @@ import {
   EyeOff,
   Filter,
   Gamepad2,
+  HardDrive,
   KeyRound,
   Languages,
   Save,
   Search,
   ShieldCheck,
-  Usb,
   X,
   XCircle,
 } from 'lucide-react';
@@ -1428,20 +1428,20 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
         )}
       </section>
 
-      {/* Prepared ROM Naming & SD Card Device Export Defaults */}
+      {/* Prepared ROM Naming & Storage Device Export Defaults */}
       <section className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
         <div aria-hidden="true" className="crt-edge-beam">
           <span />
         </div>
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
           <div className="flex items-start gap-3">
-            <Usb className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
+            <HardDrive className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
             <div>
               <h2 className="font-display text-lg font-semibold text-crt-text">
-                Prepared ROM Naming &amp; SD Card Export
+                Prepared ROM Naming &amp; Storage Device Export
               </h2>
               <p className="text-xs text-crt-muted">
-                Controls how extracted ROMs are named for flash carts, ODEs, and handhelds while keeping raw archives untouched on disk.
+                Controls how extracted ROMs are named for SD cards, HDDs/SSDs, flash carts, ODEs, and handhelds while keeping raw archives untouched on disk.
               </p>
             </div>
           </div>
@@ -1494,7 +1494,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
 
           <div className="md:col-span-3 space-y-1.5">
             <label className="block text-xs font-medium text-crt-text">
-              Default SD Card Preset
+              Default Storage Device Preset
             </label>
             <select
               value={devicePreset}
@@ -1531,7 +1531,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
                 onChange={(e) => setRomSanitizeFat32(e.target.checked)}
                 className="accent-crt-phosphor"
               />
-              <span>FAT32 / SD-safe characters</span>
+              <span>FAT32 / device-safe characters</span>
             </label>
           </div>
         </div>

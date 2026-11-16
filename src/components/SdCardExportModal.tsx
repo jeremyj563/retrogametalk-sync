@@ -6,13 +6,17 @@ import {
   FolderInput,
   HardDrive,
   RefreshCw,
-  Usb,
   X,
   XCircle,
 } from 'lucide-react';
 import { DEVICE_PRESETS, resolveSystemFolderForDevice, type DevicePresetId } from '../shared/devicePresets';
 import { sanitizeFat32Filename } from '../shared/romNaming';
-import type { ArchiveInspectResult, PlayableExportTarget, ScraperConfigPublic } from '../types';
+import type {
+  ArchiveInspectResult,
+  PlayableExportTarget,
+  RepositoryItemRecord,
+  ScraperConfigPublic,
+} from '../types';
 import { formatBytes } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
 import {
@@ -60,6 +64,7 @@ interface SdCardExportModalProps {
   sdRootHandle: SdDirectoryHandle | null;
   onMountSdHandle: (handle: SdDirectoryHandle | null) => void;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
+  onItemsInstalled?: (updatedItems: RepositoryItemRecord[], deviceLabel: string) => void;
   onClose: () => void;
 }
 
@@ -70,6 +75,7 @@ export function SdCardExportModal({
   sdRootHandle,
   onMountSdHandle,
   onSaveConfig,
+  onItemsInstalled,
   onClose,
 }: SdCardExportModalProps) {
   const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
@@ -281,6 +287,7 @@ export function SdCardExportModal({
     if (!sdRootHandle || writing || totalSelectedTargets === 0) return;
     setWriting(true);
     setMountError(null);
+    const installedItemIds = new Set<number>();
 
     try {
       for (const row of rows) {
@@ -353,6 +360,10 @@ export function SdCardExportModal({
           }
         }
 
+        if (!rowFailed) {
+          installedItemIds.add(row.itemId);
+        }
+
         setRows((prev) =>
           prev.map((r) => {
             if (r.rowKey !== row.rowKey) return r;
@@ -360,7 +371,7 @@ export function SdCardExportModal({
               return { ...r, writeState: 'error', writeDetail: rowFailed };
             }
             if (allSkipped) {
-              return { ...r, writeState: 'skipped', writeDetail: `Already on SD in /${targetFolderRel}` };
+              return { ...r, writeState: 'skipped', writeDetail: `Already on device in /${targetFolderRel}` };
             }
             if (upgradedOldName) {
               return {
@@ -378,6 +389,26 @@ export function SdCardExportModal({
         );
       }
 
+      if (installedItemIds.size > 0) {
+        try {
+          const markRes = await fetch('/api/items/installed', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ids: Array.from(installedItemIds),
+              installed: true,
+              deviceLabel: sdRootHandle.name,
+            }),
+          });
+          const markParsed = await readJsonSafely<{ items?: RepositoryItemRecord[] }>(markRes);
+          if (markParsed.ok && Array.isArray(markParsed.data?.items)) {
+            onItemsInstalled?.(markParsed.data.items, sdRootHandle.name);
+          }
+        } catch {
+          // Non-fatal if install flag sync fails after file write
+        }
+      }
+
       await rescanMountedSdFolders();
     } finally {
       setWriting(false);
@@ -389,7 +420,7 @@ export function SdCardExportModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xs p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="Send Prepared ROMs to SD Card"
+      aria-label="Install Prepared ROMs to Storage Device"
       onClick={(e) => {
         if (e.target === e.currentTarget && !writing) onClose();
       }}
@@ -398,13 +429,13 @@ export function SdCardExportModal({
         {/* Header */}
         <header className="px-6 py-4 border-b border-crt-border bg-crt-bg flex items-center justify-between gap-4 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
-            <Usb className="h-5 w-5 text-crt-phosphor shrink-0" />
+            <HardDrive className="h-5 w-5 text-crt-phosphor shrink-0" />
             <div className="min-w-0">
               <h2 className="font-display text-lg font-semibold text-crt-text truncate">
-                Send Prepared ROMs to SD Card
+                Install Prepared ROMs to Storage Device
               </h2>
               <p className="text-xs text-crt-muted truncate">
-                Extracts playable ROMs &amp; ODE disc sets directly into console folders on your device storage.
+                Extracts playable ROMs &amp; ODE disc sets directly into console folders on your target storage device.
               </p>
             </div>
           </div>
@@ -412,7 +443,7 @@ export function SdCardExportModal({
             type="button"
             disabled={writing}
             onClick={onClose}
-            aria-label="Close SD card exporter"
+            aria-label="Close storage device installer"
             className="p-2 border border-crt-border hover:border-crt-phosphor text-crt-muted hover:text-crt-text rounded transition-colors disabled:opacity-40"
           >
             <X className="h-4 w-4" />
@@ -435,7 +466,7 @@ export function SdCardExportModal({
                   }`}
                 >
                   <HardDrive className="h-3.5 w-3.5" />
-                  {sdRootHandle ? `SD Mounted: ${sdRootHandle.name} (Change)` : 'Mount SD Card / Target Folder'}
+                  {sdRootHandle ? `Device Mounted: ${sdRootHandle.name} (Change)` : 'Mount Storage Device / Target Folder'}
                 </button>
               ) : (
                 <span className="text-xs font-mono text-crt-amber">
@@ -474,7 +505,7 @@ export function SdCardExportModal({
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-muted hover:text-crt-text rounded transition-colors"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${scanningCard ? 'animate-spin' : ''}`} />
-                {scanningCard ? 'Scanning Card...' : 'Rescan Card'}
+                {scanningCard ? 'Scanning Device...' : 'Rescan Device'}
               </button>
             )}
           </div>
@@ -490,7 +521,7 @@ export function SdCardExportModal({
             <div className="pt-3 border-t border-crt-border space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                 <span className="text-crt-muted">
-                  Map each console in this queue to its relative folder on the SD card ({DEVICE_PRESETS[devicePreset as DevicePresetId]?.name || 'Custom'}).
+                  Map each console in this queue to its relative folder on the target storage device ({DEVICE_PRESETS[devicePreset as DevicePresetId]?.name || 'Custom'}).
                 </span>
                 <button
                   type="button"
@@ -640,7 +671,7 @@ export function SdCardExportModal({
                                     ? `ODE subfolder /${folder}/${outName}/`
                                     : `Target: /${folder}/`}
                                   {cardCheck.exactMatch && (
-                                    <span className="text-crt-muted ml-2">· Already on SD card</span>
+                                    <span className="text-crt-muted ml-2">· Already on storage device</span>
                                   )}
                                   {cardCheck.olderEntryName && (
                                     <span className="text-crt-amber ml-2">
@@ -706,14 +737,14 @@ export function SdCardExportModal({
             <button
               type="button"
               disabled={!sdRootHandle || writing || totalSelectedTargets === 0}
-              title={!sdRootHandle ? 'Mount your SD card or target folder first' : undefined}
+              title={!sdRootHandle ? 'Mount your target storage device or folder first' : undefined}
               onClick={() => void handleWriteToSdCard()}
               className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors disabled:opacity-45 disabled:cursor-not-allowed whitespace-nowrap"
             >
               <FolderInput className="h-3.5 w-3.5" />
               {writing
-                ? 'Writing to SD Card...'
-                : `Write ${totalSelectedTargets} Item${totalSelectedTargets === 1 ? '' : 's'} to SD Card`}
+                ? 'Installing to Storage Device...'
+                : `Install ${totalSelectedTargets} Item${totalSelectedTargets === 1 ? '' : 's'} to Storage Device`}
             </button>
           </div>
         </footer>

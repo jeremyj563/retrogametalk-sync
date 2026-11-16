@@ -120,6 +120,7 @@ export interface ReleaseMetadata {
 }
 
 export type FilterMatchMode = 'any' | 'all';
+export type CatalogInstalledFilter = 'all' | 'only' | 'exclude';
 
 export interface CatalogFacetCounts {
   tags: Record<string, number>;
@@ -128,6 +129,10 @@ export interface CatalogFacetCounts {
   languages: Record<string, number>;
   sources: Record<string, number>;
   statuses: Record<string, number>;
+  installed?: {
+    installed: number;
+    notInstalled: number;
+  };
 }
 
 export interface CatalogFacets {
@@ -187,6 +192,8 @@ export interface RepositoryItemRecord {
   screenshotsCount: number;
   hasMetadata: boolean;
   metadata: ReleaseMetadata | null;
+  installedAt: string | null;
+  installedDeviceLabel: string | null;
   filesCount: number;
   files: ReleaseFileRecord[];
 }

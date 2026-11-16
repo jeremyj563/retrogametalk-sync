@@ -10,6 +10,7 @@ import {
   listActivityLogs,
   listSyncRuns,
   queryRepositoryItems,
+  setCatalogItemsInstalled,
 } from './src/server/db.ts';
 import { streamCleanDiscZipToResponse, streamExtractedEntryToResponse } from './src/server/archiveService.ts';
 import { ScraperOrchestrator } from './src/server/orchestrator.ts';
@@ -152,6 +153,7 @@ async function bootstrap() {
       search: typeof req.query.search === 'string' ? req.query.search : undefined,
       system: parseQueryFilterParam(req.query.system),
       status: parseQueryFilterParam(req.query.status),
+      installed: typeof req.query.installed === 'string' ? req.query.installed : undefined,
       tag: parseQueryFilterParam(req.query.tag),
       tagMode: typeof req.query.tagMode === 'string' ? req.query.tagMode : undefined,
       genre: parseQueryFilterParam(req.query.genre),
@@ -461,6 +463,28 @@ async function bootstrap() {
     } catch (err) {
       res.status(409).json({ error: err instanceof Error ? err.message : String(err) });
     }
+  });
+
+  app.post('/api/items/installed', (req, res) => {
+    const rawIds = Array.isArray(req.body?.ids)
+      ? req.body.ids.map(Number).filter((id: number) => Number.isInteger(id) && id > 0)
+      : [];
+    if (rawIds.length === 0) {
+      res.status(400).json({ error: 'Provide one or more valid catalog item IDs' });
+      return;
+    }
+    const installed = req.body?.installed !== false;
+    const deviceLabel =
+      typeof req.body?.deviceLabel === 'string' && req.body.deviceLabel.trim()
+        ? req.body.deviceLabel.trim()
+        : null;
+    res.json(
+      setCatalogItemsInstalled({
+        ids: rawIds,
+        installed,
+        deviceLabel,
+      }),
+    );
   });
 
   app.delete('/api/items', (req, res) => {
