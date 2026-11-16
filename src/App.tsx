@@ -1,19 +1,25 @@
-import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
   Clock,
   FolderTree,
   HardDrive,
-  Monitor,
   Play,
   ServerCog,
   Square,
 } from 'lucide-react';
 import { CatalogPanel } from './components/CatalogPanel';
+import { CrtDisplayControl } from './components/CrtDisplayControl';
 import { OperationsPanel } from './components/OperationsPanel';
 import { OverviewPanel } from './components/OverviewPanel';
 import { SchedulePanel } from './components/SchedulePanel';
+import {
+  computeCrtCssVariables,
+  type CrtDisplaySettings,
+  loadInitialCrtDisplaySettings,
+  saveCrtDisplaySettings,
+} from './shared/crtDisplay';
 import type {
   ActivityLogRecord,
   ActiveTransferState,
@@ -27,46 +33,16 @@ import type {
 import { formatBytes, formatCountdown } from './utils/format';
 import { readJsonSafely } from './utils/http';
 
-const CRT_SCANLINES_STORAGE_KEY = 'rgt_sync_crt_scanlines_v1';
-const DEFAULT_SCANLINE_INTENSITY = 35;
-
-interface CrtScanlinesPref {
-  enabled: boolean;
-  intensity: number;
-}
-
-function clampScanlineIntensity(val: unknown): number {
-  const num = typeof val === 'number' ? val : Number(val);
-  if (!Number.isFinite(num)) return DEFAULT_SCANLINE_INTENSITY;
-  return Math.max(0, Math.min(100, Math.round(num)));
-}
-
-function loadInitialScanlinePref(): CrtScanlinesPref {
-  try {
-    if (typeof window === 'undefined' || !window.localStorage) {
-      return { enabled: true, intensity: DEFAULT_SCANLINE_INTENSITY };
-    }
-    const raw = window.localStorage.getItem(CRT_SCANLINES_STORAGE_KEY);
-    if (!raw) return { enabled: true, intensity: DEFAULT_SCANLINE_INTENSITY };
-    const parsed = JSON.parse(raw) as Partial<CrtScanlinesPref>;
-    const intensity = clampScanlineIntensity(parsed.intensity);
-    const enabled = typeof parsed.enabled === 'boolean' ? parsed.enabled && intensity > 0 : intensity > 0;
-    return { enabled, intensity };
-  } catch {
-    return { enabled: true, intensity: DEFAULT_SCANLINE_INTENSITY };
-  }
-}
-
 export default function App() {
-  const [initialScanlinePref] = useState<CrtScanlinesPref>(() => loadInitialScanlinePref());
   const [section, setSection] = useState<NavSection>('monitor');
   const [status, setStatus] = useState<ServiceStatusSnapshot | null>(null);
   const [config, setConfig] = useState<ScraperConfigPublic | null>(null);
   const [runs, setRuns] = useState<SyncRunRecord[]>([]);
   const [logs, setLogs] = useState<ActivityLogRecord[]>([]);
   const [selectedMode, setSelectedMode] = useState<RunMode>('dry_run');
-  const [scanlinesEnabled, setScanlinesEnabled] = useState<boolean>(initialScanlinePref.enabled);
-  const [scanlineIntensity, setScanlineIntensity] = useState<number>(initialScanlinePref.intensity);
+  const [crtSettings, setCrtSettings] = useState<CrtDisplaySettings>(() =>
+    loadInitialCrtDisplaySettings(),
+  );
   const [sseConnected, setSseConnected] = useState(false);
   const [actionPending, setActionPending] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
@@ -370,49 +346,24 @@ export default function App() {
     confirmingFullSync && selectedMode === 'full' && !status?.activeRun && syncAllowed;
 
   useEffect(() => {
-    try {
-      window.localStorage?.setItem(
-        CRT_SCANLINES_STORAGE_KEY,
-        JSON.stringify({ enabled: scanlinesEnabled, intensity: scanlineIntensity }),
-      );
-    } catch {
-      // Ignore storage quota or sandbox restrictions
-    }
-  }, [scanlinesEnabled, scanlineIntensity]);
+    saveCrtDisplaySettings(crtSettings);
+  }, [crtSettings]);
 
-  const handleToggleScanlines = () => {
-    if (scanlinesEnabled) {
-      setScanlinesEnabled(false);
-    } else {
-      if (scanlineIntensity === 0) {
-        setScanlineIntensity(DEFAULT_SCANLINE_INTENSITY);
-      }
-      setScanlinesEnabled(true);
-    }
-  };
-
-  const handleScanlineSliderChange = (rawVal: number) => {
-    const next = clampScanlineIntensity(rawVal);
-    setScanlineIntensity(next);
-    setScanlinesEnabled(next > 0);
-  };
-
-  const activeScanlineLevel = scanlinesEnabled ? scanlineIntensity : 0;
-  const scanlineRatio = activeScanlineLevel / 100;
-  const scanlineStyle = (
-    activeScanlineLevel > 0
-      ? {
-          '--crt-scanline-alpha': (0.08 + 0.67 * Math.pow(scanlineRatio, 1.45)).toFixed(3),
-          '--crt-scanline-opacity': (0.15 + 0.85 * scanlineRatio).toFixed(3),
-        }
-      : undefined
-  ) as CSSProperties | undefined;
+  const crtCssVars = computeCrtCssVariables(crtSettings);
+  const showScanlines = crtSettings.enabled && crtSettings.scanlines > 0;
+  const showGrille = crtSettings.enabled && crtSettings.apertureGrille > 0;
+  const showVignette =
+    crtSettings.enabled && (crtSettings.vignette > 0 || crtSettings.gaussGlow > 0);
 
   return (
     <div
-      style={scanlineStyle}
-      className={`min-h-screen crt-canvas text-crt-text flex flex-col ${activeScanlineLevel > 0 ? 'crt-scanlines' : ''}`}
+      data-crt-palette={crtSettings.palette}
+      style={crtCssVars}
+      className={`min-h-screen crt-canvas text-crt-text flex flex-col ${crtSettings.enabled ? 'crt-fx-active' : ''}`}
     >
+      {showGrille && <div aria-hidden="true" className="crt-layer-grille" />}
+      {showScanlines && <div aria-hidden="true" className="crt-layer-scanlines" />}
+      {showVignette && <div aria-hidden="true" className="crt-layer-vignette" />}
       {/* Top Header Bar */}
       <header className="sticky top-0 z-30 bg-crt-bg/95 backdrop-blur border-b border-crt-border px-4 lg:px-6 py-3.5 flex flex-wrap md:flex-nowrap items-center justify-between gap-4">
         {/* Zone 1: Single-line Brand Title */}
@@ -644,55 +595,9 @@ export default function App() {
             )}
           </div>
 
-          {/* CRT Scanline Intensity Control & Inconspicuous Build Footer */}
+          {/* CRT Display Studio & Inconspicuous Build Footer */}
           <div className="hidden lg:block border-t border-crt-border pt-4 space-y-2.5">
-            <div className="px-2.5 py-2.5 border border-crt-border bg-crt-bg rounded space-y-2">
-              <div className="flex items-center justify-between gap-1.5 text-xs font-mono">
-                <span className="inline-flex items-center gap-1.5 text-crt-muted min-w-0 truncate">
-                  <Monitor className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">CRT Scanlines</span>
-                </span>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <span
-                    className={`tabular-nums text-[11px] ${
-                      scanlinesEnabled ? 'text-crt-text' : 'text-crt-muted/70'
-                    }`}
-                  >
-                    {scanlineIntensity}%
-                  </span>
-                  <button
-                    type="button"
-                    aria-pressed={scanlinesEnabled}
-                    onClick={handleToggleScanlines}
-                    className={`px-1.5 py-0.5 text-[11px] font-semibold rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      scanlinesEnabled
-                        ? 'border-crt-phosphor/50 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20'
-                        : 'border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text'
-                    }`}
-                  >
-                    {scanlinesEnabled ? 'ON' : 'OFF'}
-                  </button>
-                </div>
-              </div>
-
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={1}
-                value={scanlineIntensity}
-                aria-label="CRT Scanlines intensity"
-                onChange={(e) => handleScanlineSliderChange(Number(e.target.value))}
-                style={
-                  {
-                    '--slider-pct': `${scanlinesEnabled ? scanlineIntensity : 0}%`,
-                    '--crt-range-fill': scanlinesEnabled ? '#38e56b' : '#2c4333',
-                    '--crt-range-thumb': scanlinesEnabled ? '#38e56b' : '#8aa391',
-                  } as CSSProperties
-                }
-                className="crt-range w-full block"
-              />
-            </div>
+            <CrtDisplayControl settings={crtSettings} onChange={setCrtSettings} />
 
             {status?.build && (
               <div

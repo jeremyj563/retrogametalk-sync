@@ -379,7 +379,7 @@ export function OverviewPanel({
       <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 border border-crt-border bg-crt-surface rounded-md divide-y sm:divide-y-0 sm:divide-x divide-crt-border">
         <div className="p-4 space-y-1">
           <p className="text-xs text-crt-muted">Mirrored Files on Disk</p>
-          <p className="font-mono text-2xl font-semibold text-crt-text tabular-nums">
+          <p className="crt-kpi-value font-mono text-2xl font-semibold text-crt-text tabular-nums">
             {status.storage.totalFilesOnDisk.toLocaleString()}
           </p>
           <p className="text-xs font-mono text-crt-muted tabular-nums flex flex-wrap items-center gap-x-1.5 gap-y-1">
@@ -423,7 +423,7 @@ export function OverviewPanel({
 
         <div className="p-4 space-y-1">
           <p className="text-xs text-crt-muted">Local Archive Footprint</p>
-          <p className="font-mono text-2xl font-semibold text-crt-text tabular-nums">
+          <p className="crt-kpi-value font-mono text-2xl font-semibold text-crt-text tabular-nums">
             {formatBytes(status.storage.totalBytesOnDisk)}
           </p>
           <p className="text-xs font-mono text-crt-muted tabular-nums">
@@ -435,7 +435,7 @@ export function OverviewPanel({
 
         <div className="p-4 space-y-1">
           <p className="text-xs text-crt-muted">Adaptive Request Delay</p>
-          <p className="font-mono text-2xl font-semibold text-crt-phosphor tabular-nums">
+          <p className="crt-kpi-value font-mono text-2xl font-semibold text-crt-phosphor tabular-nums">
             {status.rateLimiter.currentDelayMs} ms
           </p>
           <p className="text-xs font-mono text-crt-muted tabular-nums">
@@ -446,7 +446,7 @@ export function OverviewPanel({
         <div className="p-4 space-y-1">
           <p className="text-xs text-crt-muted">Rate Limit Events</p>
           <p
-            className={`font-mono text-2xl font-semibold tabular-nums ${
+            className={`crt-kpi-value font-mono text-2xl font-semibold tabular-nums ${
               status.rateLimiter.rateLimitHits > 0 ? 'text-crt-amber' : 'text-crt-text'
             }`}
           >
@@ -508,7 +508,7 @@ export function OverviewPanel({
                     y1={140 - frac * 125}
                     x2="420"
                     y2={140 - frac * 125}
-                    stroke="#1E2D23"
+                    stroke="var(--color-crt-border)"
                     strokeDasharray="3 3"
                     strokeWidth="1"
                   />
@@ -517,7 +517,7 @@ export function OverviewPanel({
                 {/* Latency polyline */}
                 <polyline
                   fill="none"
-                  stroke="#F59E0B"
+                  stroke="var(--color-crt-amber)"
                   strokeWidth="1.5"
                   strokeOpacity="0.85"
                   points={delaySeries
@@ -532,7 +532,7 @@ export function OverviewPanel({
                 {/* Adaptive Delay polyline */}
                 <polyline
                   fill="none"
-                  stroke="#38E56B"
+                  stroke="var(--color-crt-phosphor)"
                   strokeWidth="2"
                   points={delaySeries
                     .map((pt, i) => {
