@@ -578,8 +578,9 @@ export function OverviewPanel({
         )}
       </section>
 
-      {/* 4-Column KPI Strip */}
-      <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 border border-crt-border bg-crt-surface rounded-md divide-y sm:divide-y-0 sm:divide-x divide-crt-border">
+      {/* 4-Column KPI Strip + Inline Collapsible Failed Queue */}
+      <div>
+        <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 border border-crt-border bg-crt-surface rounded-md divide-y sm:divide-y-0 sm:divide-x divide-crt-border">
         <div className="p-4 space-y-1">
           <p className="text-xs text-crt-muted">Mirrored Files on Disk</p>
           <p className="crt-kpi-value font-mono text-2xl font-semibold text-crt-text tabular-nums">
@@ -663,17 +664,18 @@ export function OverviewPanel({
         </div>
       </section>
 
-      {/* Slide-Down Failed Queue Drawer */}
-      <FailedQueueDrawer
-        open={failedQueueOpen}
-        status={status}
-        catalogRevision={catalogRevision}
-        activeRetryItemId={activeRetryItemId}
-        onClose={() => setFailedQueueOpen(false)}
-        onRetryItem={onRetryItem}
-        onRetryAllFailed={onRetryAllFailed}
-        onRefreshStatus={onRefreshStatus}
-      />
+        {/* Slide-Down Failed Queue Drawer */}
+        <FailedQueueDrawer
+          open={failedQueueOpen}
+          status={status}
+          catalogRevision={catalogRevision}
+          activeRetryItemId={activeRetryItemId}
+          onClose={() => setFailedQueueOpen(false)}
+          onRetryItem={onRetryItem}
+          onRetryAllFailed={onRetryAllFailed}
+          onRefreshStatus={onRefreshStatus}
+        />
+      </div>
 
       {/* Grafana-Style Telemetry Deck & Recent Sync Runs (2-Column Balanced Split) */}
       <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
