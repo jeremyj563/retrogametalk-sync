@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -35,13 +35,19 @@ import {
   groupSystemsByBrand,
   resolveSystemDisplayInfo,
 } from '../shared/systemCatalog';
-import type { AuthTestResult, ScraperConfigPublic, ServiceStatusSnapshot } from '../types';
+import type {
+  AuthTestResult,
+  OperationsFocusRequest,
+  ScraperConfigPublic,
+  ServiceStatusSnapshot,
+} from '../types';
 import { formatBytes } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
 
 interface OperationsPanelProps {
   config: ScraperConfigPublic;
   status: ServiceStatusSnapshot;
+  focusRequest?: OperationsFocusRequest | null;
   onSaveConfig: (patch: Partial<ScraperConfigPublic> & { password?: string }) => Promise<void>;
   onRefreshConfig: () => Promise<void>;
 }
@@ -49,6 +55,7 @@ interface OperationsPanelProps {
 export function OperationsPanel({
   config,
   status,
+  focusRequest = null,
   onSaveConfig,
   onRefreshConfig,
 }: OperationsPanelProps) {
@@ -71,6 +78,11 @@ export function OperationsPanel({
   const [romSanitizeFat32, setRomSanitizeFat32] = useState(config.romSanitizeFat32);
   const [romMaxFilenameLen, setRomMaxFilenameLen] = useState(config.romMaxFilenameLen);
   const [devicePreset, setDevicePreset] = useState(config.devicePreset || 'everdrive');
+
+  const [spotlight, setSpotlight] = useState<OperationsFocusRequest | null>(null);
+  const authSectionRef = useRef<HTMLElement | null>(null);
+  const systemsSectionRef = useRef<HTMLElement | null>(null);
+  const releaseTypesSectionRef = useRef<HTMLElement | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
@@ -448,10 +460,61 @@ export function OperationsPanel({
     }
   };
 
+  useEffect(() => {
+    if (!focusRequest) return;
+
+    const targetMap = {
+      auth: authSectionRef.current,
+      systems: systemsSectionRef.current,
+      releaseTypes: releaseTypesSectionRef.current,
+    } as const;
+    const targetEl = targetMap[focusRequest.target];
+    if (!targetEl) return;
+
+    setSpotlight(focusRequest);
+
+    const prefersReducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    const rafId = window.requestAnimationFrame(() => {
+      const stickyHeader = document.querySelector('header');
+      const headerHeight = stickyHeader ? stickyHeader.getBoundingClientRect().height : 68;
+      const topOffset = headerHeight + 20;
+      const elementTop = targetEl.getBoundingClientRect().top + window.scrollY;
+      window.scrollTo({
+        top: Math.max(0, elementTop - topOffset),
+        behavior: prefersReducedMotion ? 'auto' : 'smooth',
+      });
+    });
+
+    const clearTimer = window.setTimeout(() => {
+      setSpotlight((current) =>
+        current && current.nonce === focusRequest.nonce ? null : current,
+      );
+    }, 2500);
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.clearTimeout(clearTimer);
+    };
+  }, [focusRequest]);
+
   return (
     <form onSubmit={(e) => void handleSave(e)} className="space-y-6 max-w-5xl">
       {/* Credentials & Local Filesystem Storage Form */}
-      <section className="border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+      <section
+        ref={authSectionRef}
+        className="relative scroll-mt-24 border border-crt-border bg-crt-surface rounded-md p-6 space-y-5"
+      >
+        {spotlight?.target === 'auth' && (
+          <div
+            key={`auth-${spotlight.nonce}`}
+            aria-hidden="true"
+            className="pointer-events-none absolute -inset-px rounded-md crt-section-spotlight"
+          />
+        )}
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
           <div className="flex items-start gap-3">
             <KeyRound className="h-5 w-5 text-crt-phosphor mt-0.5 shrink-0" />
@@ -631,7 +694,17 @@ export function OperationsPanel({
       </section>
 
       {/* Console / System Selection Section */}
-      <section className="border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+      <section
+        ref={systemsSectionRef}
+        className="relative scroll-mt-24 border border-crt-border bg-crt-surface rounded-md p-6 space-y-5"
+      >
+        {spotlight?.target === 'systems' && (
+          <div
+            key={`systems-${spotlight.nonce}`}
+            aria-hidden="true"
+            className="pointer-events-none absolute -inset-px rounded-md crt-section-spotlight"
+          />
+        )}
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
           <div className="flex items-start gap-3">
             <Gamepad2 className="h-5 w-5 text-crt-phosphor mt-0.5 shrink-0" />
@@ -905,7 +978,17 @@ export function OperationsPanel({
       </section>
 
       {/* Allowed Game & ROM Types Section */}
-      <section className="border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+      <section
+        ref={releaseTypesSectionRef}
+        className="relative scroll-mt-24 border border-crt-border bg-crt-surface rounded-md p-6 space-y-5"
+      >
+        {spotlight?.target === 'releaseTypes' && (
+          <div
+            key={`releaseTypes-${spotlight.nonce}`}
+            aria-hidden="true"
+            className="pointer-events-none absolute -inset-px rounded-md crt-section-spotlight"
+          />
+        )}
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
           <div className="flex items-start gap-3">
             <Filter className="h-5 w-5 text-crt-phosphor mt-0.5 shrink-0" />

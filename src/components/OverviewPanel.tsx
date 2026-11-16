@@ -19,6 +19,7 @@ import {
 import type {
   ActivityLogRecord,
   LogLevel,
+  OperationsSectionTarget,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
   SyncRunRecord,
@@ -44,7 +45,7 @@ interface OverviewPanelProps {
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
   onClearLogs: (level: 'all' | LogLevel) => Promise<void>;
   onClearRuns: () => Promise<void>;
-  onNavigateToOperations: () => void;
+  onNavigateToOperations: (target?: OperationsSectionTarget) => void;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onRetryAllFailed: (options?: { system?: string; ids?: number[]; dryRun?: boolean }) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
@@ -305,8 +306,8 @@ export function OverviewPanel({
           </div>
           <button
             type="button"
-            onClick={onNavigateToOperations}
-            className="px-3.5 py-1.5 text-xs font-medium text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0"
+            onClick={() => onNavigateToOperations('auth')}
+            className="px-3.5 py-1.5 text-xs font-medium text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Configure Credentials
           </button>
@@ -323,8 +324,8 @@ export function OverviewPanel({
           </div>
           <button
             type="button"
-            onClick={onNavigateToOperations}
-            className="px-3.5 py-1.5 text-xs font-medium text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0"
+            onClick={() => onNavigateToOperations('auth')}
+            className="px-3.5 py-1.5 text-xs font-medium text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Open Operations
           </button>
@@ -458,7 +459,7 @@ export function OverviewPanel({
               <span className="text-crt-muted">Type Filter</span>
               <button
                 type="button"
-                onClick={onNavigateToOperations}
+                onClick={() => onNavigateToOperations('releaseTypes')}
                 className="font-mono text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
               >
                 Edit
@@ -479,7 +480,7 @@ export function OverviewPanel({
               <span className="text-crt-muted">Target Consoles</span>
               <button
                 type="button"
-                onClick={onNavigateToOperations}
+                onClick={() => onNavigateToOperations('systems')}
                 className="font-mono text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
               >
                 Edit
