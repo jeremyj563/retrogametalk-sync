@@ -110,6 +110,9 @@ export interface ReleaseMetadata {
   coverLocalRelPath: string | null;
   screenshotUrls: string[];
   screenshotLocalRelPaths: string[];
+  screenshotsFullResVersion?: number;
+  coverCandidates?: string[];
+  screenshotCandidates?: string[][];
   sourcePageUrl: string;
   fetchedAt: string;
 }

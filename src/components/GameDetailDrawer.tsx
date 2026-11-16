@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -10,6 +10,8 @@ import {
   FlaskConical,
   Gamepad2,
   Image as ImageIcon,
+  Maximize2,
+  Minimize2,
   RefreshCw,
   RotateCcw,
   SkipForward,
@@ -35,8 +37,15 @@ interface GameDetailDrawerProps {
   onExportToSdCard?: (id: number) => void;
 }
 
+interface LightboxSlide {
+  src: string;
+  label: string;
+  kind: 'cover' | 'screenshot';
+  screenshotIndex?: number;
+}
+
 interface LightboxState {
-  slides: { src: string; label: string }[];
+  slides: LightboxSlide[];
   index: number;
 }
 
@@ -52,6 +61,7 @@ export function GameDetailDrawer({
   onExportToSdCard,
 }: GameDetailDrawerProps) {
   const [fetchingMeta, setFetchingMeta] = useState(false);
+  const [upgradingAssets, setUpgradingAssets] = useState(false);
   const [metaError, setMetaError] = useState<string | null>(null);
   const [retryingKey, setRetryingKey] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -59,25 +69,106 @@ export function GameDetailDrawer({
   const [coverFailed, setCoverFailed] = useState(false);
   const [failedScreenshots, setFailedScreenshots] = useState<Set<number>>(new Set());
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
+  const [lightboxScaleMode, setLightboxScaleMode] = useState<'fit' | 'native'>('fit');
+  const [lightboxLoading, setLightboxLoading] = useState(false);
+  const [lightboxDimensions, setLightboxDimensions] = useState<{ width: number; height: number } | null>(null);
   const [inspectingFileId, setInspectingFileId] = useState<number | null>(null);
   const [inspection, setInspection] = useState<ArchiveInspectResult | null>(null);
   const [inspectError, setInspectError] = useState<string | null>(null);
   const [preparedNames, setPreparedNames] = useState<Record<string, string>>({});
+  const autoUpgradedIdsRef = useRef<Set<number>>(new Set());
 
   const assetVersion = item?.metadata?.fetchedAt ? `&v=${encodeURIComponent(item.metadata.fetchedAt)}` : '';
   const screenshotCount = item?.metadata?.screenshotLocalRelPaths?.length ?? item?.screenshotsCount ?? 0;
+  const isFullResVerified = (item?.metadata?.screenshotsFullResVersion ?? 0) >= 1;
 
+  // Reset drawer-scoped UI state only when switching to a different catalog item
   useEffect(() => {
     setMetaError(null);
     setConfirmDelete(false);
     setCoverFailed(false);
     setFailedScreenshots(new Set());
     setLightbox(null);
+    setLightboxDimensions(null);
+    setLightboxLoading(false);
+    setUpgradingAssets(false);
     setInspectingFileId(null);
     setInspection(null);
     setInspectError(null);
     setPreparedNames({});
-  }, [item?.id, item?.metadata?.fetchedAt]);
+  }, [item?.id]);
+
+  // Refresh artwork URLs in place (without closing an open Lightbox) when metadata updates
+  useEffect(() => {
+    if (!item) return;
+    setCoverFailed(false);
+    setFailedScreenshots(new Set());
+    setLightbox((prev) => {
+      if (!prev) return null;
+      const updatedSlides = prev.slides.map((slide) => {
+        if (slide.kind === 'cover') {
+          return {
+            ...slide,
+            src: `/api/items/${item.id}/asset?kind=cover&full=1${assetVersion}`,
+          };
+        }
+        return {
+          ...slide,
+          src: `/api/items/${item.id}/asset?kind=screenshot&index=${slide.screenshotIndex ?? 0}&full=1${assetVersion}`,
+        };
+      });
+      if (updatedSlides.every((s, idx) => s.src === prev.slides[idx]?.src)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        slides: updatedSlides,
+      };
+    });
+  }, [item, assetVersion]);
+
+  // Automatically upgrade legacy small-thumbnail items to full-resolution artwork in the background
+  useEffect(() => {
+    if (!item) return;
+    const hasLocalArtwork = screenshotCount > 0 || Boolean(item.coverLocalPath);
+    if (!item.hasMetadata || !hasLocalArtwork || isFullResVerified) return;
+    if (autoUpgradedIdsRef.current.has(item.id)) return;
+
+    autoUpgradedIdsRef.current.add(item.id);
+    let cancelled = false;
+    setUpgradingAssets(true);
+
+    void (async () => {
+      try {
+        const res = await fetch(`/api/items/${item.id}/metadata?upgradeAssets=1`, { method: 'POST' });
+        const parsed = await readJsonSafely<{ item?: RepositoryItemRecord }>(res);
+        if (!cancelled && parsed.ok && parsed.data?.item) {
+          onItemUpdated(parsed.data.item);
+        }
+      } catch {
+        // Silent fallback: local assets remain viewable even if offline
+      } finally {
+        if (!cancelled) {
+          setUpgradingAssets(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [item, screenshotCount, isFullResVerified, onItemUpdated]);
+
+  const activeLightboxSrc = lightbox?.slides[lightbox.index]?.src ?? null;
+  useEffect(() => {
+    if (!activeLightboxSrc) {
+      setLightboxLoading(false);
+      setLightboxDimensions(null);
+      return;
+    }
+    setLightboxLoading(true);
+    setLightboxDimensions(null);
+  }, [activeLightboxSrc]);
 
   useEffect(() => {
     if (!item) return;
@@ -256,20 +347,28 @@ export function GameDetailDrawer({
   const openCoverLightbox = () => {
     if (!hasCover) return;
     setLightbox({
-      slides: [{ src: coverSrc, label: `${item.title} — Cover Art` }],
+      slides: [
+        {
+          src: `/api/items/${item.id}/asset?kind=cover&full=1${assetVersion}`,
+          label: `${item.title} — Cover Art`,
+          kind: 'cover',
+        },
+      ],
       index: 0,
     });
   };
 
   const openScreenshotLightbox = (startIndex: number) => {
-    const slides: { src: string; label: string }[] = [];
+    const slides: LightboxSlide[] = [];
     let mappedIndex = 0;
     for (let i = 0; i < screenshotCount; i += 1) {
       if (failedScreenshots.has(i)) continue;
       if (i === startIndex) mappedIndex = slides.length;
       slides.push({
-        src: `/api/items/${item.id}/asset?kind=screenshot&index=${i}${assetVersion}`,
+        src: `/api/items/${item.id}/asset?kind=screenshot&index=${i}&full=1${assetVersion}`,
         label: `${item.title} — Screenshot ${i + 1} of ${screenshotCount}`,
+        kind: 'screenshot',
+        screenshotIndex: i,
       });
     }
     if (slides.length > 0) {
@@ -686,13 +785,22 @@ export function GameDetailDrawer({
           {/* Screenshots Gallery */}
           {screenshotCount > 0 && (
             <section className="space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <h3 className="font-display text-sm font-semibold text-crt-text flex items-center gap-2">
                   <ImageIcon className="h-4 w-4 text-crt-phosphor" />
                   Screenshots ({screenshotCount})
                 </h3>
-                <span className="font-mono text-[11px] text-crt-muted">
-                  Stored locally in release folder
+                <span className="font-mono text-[11px] text-crt-muted inline-flex items-center gap-1.5">
+                  {upgradingAssets ? (
+                    <>
+                      <RefreshCw className="h-3 w-3 animate-spin text-crt-phosphor" />
+                      <span className="text-crt-phosphor">Upgrading to full-res...</span>
+                    </>
+                  ) : isFullResVerified ? (
+                    'Full-res stored locally · Click to zoom'
+                  ) : (
+                    'Stored locally · Click for full-res'
+                  )}
                 </span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
@@ -888,21 +996,55 @@ export function GameDetailDrawer({
             if (e.target === e.currentTarget) setLightbox(null);
           }}
         >
-          <div className="w-full max-w-5xl flex items-center justify-between gap-4 mb-3">
-            <span className="font-mono text-xs text-crt-text truncate">
-              {lightbox.slides[lightbox.index].label}
-            </span>
-            <button
-              type="button"
-              onClick={() => setLightbox(null)}
-              aria-label="Close image lightbox"
-              className="p-2 border border-crt-border bg-crt-surface hover:bg-crt-elevated text-crt-text rounded transition-colors"
-            >
-              <X className="h-4 w-4" />
-            </button>
+          <div className="w-full max-w-6xl flex flex-wrap items-center justify-between gap-3 mb-3">
+            <div className="min-w-0 flex items-center gap-3">
+              <span className="font-mono text-xs text-crt-text truncate">
+                {lightbox.slides[lightbox.index].label}
+              </span>
+              {lightboxDimensions && (
+                <span className="font-mono text-[11px] tabular-nums text-crt-phosphor shrink-0">
+                  {lightboxDimensions.width} × {lightboxDimensions.height} px
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() =>
+                  setLightboxScaleMode((prev) => (prev === 'fit' ? 'native' : 'fit'))
+                }
+                title={
+                  lightboxScaleMode === 'fit'
+                    ? 'Switch to 1:1 native pixel size'
+                    : 'Fit image to viewport'
+                }
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 font-mono text-xs border border-crt-border bg-crt-surface hover:bg-crt-elevated text-crt-text rounded transition-colors"
+              >
+                {lightboxScaleMode === 'fit' ? (
+                  <>
+                    <Minimize2 className="h-3.5 w-3.5 text-crt-phosphor" />
+                    1:1 Pixel
+                  </>
+                ) : (
+                  <>
+                    <Maximize2 className="h-3.5 w-3.5 text-crt-phosphor" />
+                    Fit Screen
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setLightbox(null)}
+                aria-label="Close image lightbox"
+                className="p-2 border border-crt-border bg-crt-surface hover:bg-crt-elevated text-crt-text rounded transition-colors"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
 
-          <div className="relative flex-1 w-full max-w-5xl flex items-center justify-center min-h-0">
+          <div className="relative flex-1 w-full max-w-6xl flex items-center justify-center min-h-0">
             {lightbox.slides.length > 1 && (
               <button
                 type="button"
@@ -912,17 +1054,59 @@ export function GameDetailDrawer({
                     prev ? { ...prev, index: (prev.index - 1 + prev.slides.length) % prev.slides.length } : null,
                   )
                 }
-                className="absolute left-2 z-10 p-2.5 border border-crt-border bg-crt-surface/90 hover:bg-crt-elevated text-crt-text rounded transition-colors"
+                className="absolute left-2 z-20 p-2.5 border border-crt-border bg-crt-surface/90 hover:bg-crt-elevated text-crt-text rounded transition-colors"
               >
                 <ChevronLeft className="h-5 w-5" />
               </button>
             )}
 
-            <img
-              src={lightbox.slides[lightbox.index].src}
-              alt={lightbox.slides[lightbox.index].label}
-              className="max-h-[82vh] max-w-full object-contain rounded border border-crt-border bg-crt-bg"
-            />
+            {(lightboxLoading || upgradingAssets) && !lightboxDimensions && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+                <div className="inline-flex items-center gap-2 px-3.5 py-2 border border-crt-border bg-crt-surface/95 rounded font-mono text-xs text-crt-phosphor shadow-lg">
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  {!isFullResVerified
+                    ? 'Fetching full-resolution screenshot...'
+                    : 'Loading full-resolution image...'}
+                </div>
+              </div>
+            )}
+
+            <div
+              className={
+                lightboxScaleMode === 'native'
+                  ? 'max-h-[82vh] max-w-full overflow-auto rounded border border-crt-border bg-crt-bg p-1 flex items-center justify-center'
+                  : 'w-full h-full max-h-[82vh] flex items-center justify-center'
+              }
+            >
+              <img
+                src={lightbox.slides[lightbox.index].src}
+                alt={lightbox.slides[lightbox.index].label}
+                onLoad={(e) => {
+                  const img = e.currentTarget;
+                  setLightboxLoading(false);
+                  if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                    setLightboxDimensions({
+                      width: img.naturalWidth,
+                      height: img.naturalHeight,
+                    });
+                  }
+                }}
+                onError={() => setLightboxLoading(false)}
+                className={
+                  lightboxScaleMode === 'native'
+                    ? `max-w-none block ${
+                        lightboxDimensions && lightboxDimensions.width <= 640
+                          ? '[image-rendering:pixelated]'
+                          : ''
+                      }`
+                    : `w-full h-full max-h-[82vh] object-contain rounded border border-crt-border bg-crt-bg ${
+                        isFullResVerified && lightboxDimensions && lightboxDimensions.width <= 512
+                          ? '[image-rendering:pixelated]'
+                          : ''
+                      }`
+                }
+              />
+            </div>
 
             {lightbox.slides.length > 1 && (
               <button
@@ -933,7 +1117,7 @@ export function GameDetailDrawer({
                     prev ? { ...prev, index: (prev.index + 1) % prev.slides.length } : null,
                   )
                 }
-                className="absolute right-2 z-10 p-2.5 border border-crt-border bg-crt-surface/90 hover:bg-crt-elevated text-crt-text rounded transition-colors"
+                className="absolute right-2 z-20 p-2.5 border border-crt-border bg-crt-surface/90 hover:bg-crt-elevated text-crt-text rounded transition-colors"
               >
                 <ChevronRight className="h-5 w-5" />
               </button>
