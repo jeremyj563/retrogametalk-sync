@@ -401,6 +401,12 @@ export function GameDetailDrawer({
         }}
       >
         <div className="crt-canvas crt-drawer-panel relative w-full max-w-3xl h-full bg-crt-surface border-l border-crt-border-strong flex flex-col shadow-2xl">
+          <div aria-hidden="true" className="crt-edge-beam">
+            <span />
+          </div>
+          <div aria-hidden="true" className="crt-drawer-bezel-beam">
+            <span />
+          </div>
         {/* Drawer Header */}
         <header className="px-6 py-4 border-b border-crt-border bg-crt-bg flex items-start justify-between gap-4 shrink-0">
           <div className="min-w-0 space-y-1">
@@ -577,6 +583,7 @@ export function GameDetailDrawer({
                   className="group relative w-full aspect-[3/4] border border-crt-border bg-crt-bg rounded-md overflow-hidden block focus:outline-none focus:border-crt-phosphor"
                   title="Click to inspect full-resolution cover art"
                 >
+                  <div aria-hidden="true" className="crt-card-holo" />
                   <img
                     src={coverSrc}
                     alt={`${item.title} cover art`}

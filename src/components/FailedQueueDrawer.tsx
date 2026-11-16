@@ -365,8 +365,11 @@ export function FailedQueueDrawer({
             <div className="pt-6">
               <section
                 aria-label="Failed Queue Drawer"
-                className="border border-crt-border bg-crt-surface rounded-md overflow-hidden"
+                className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md overflow-hidden"
               >
+                <div aria-hidden="true" className="crt-edge-beam">
+                  <span />
+                </div>
         {/* Drawer Header Bar */}
         <div className="px-5 py-4 border-b border-crt-border flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
           <div className="space-y-0.5 min-w-0">
@@ -432,7 +435,7 @@ export function FailedQueueDrawer({
                         : 'Retry all failed and partial releases'
               }
               onClick={() => void handleBatchRetry()}
-              className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 tabular-nums disabled:opacity-45 disabled:cursor-not-allowed ${
+              className={`crt-cta-beam inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 tabular-nums disabled:opacity-45 disabled:cursor-not-allowed ${
                 retryDryRun
                   ? 'bg-crt-amber hover:brightness-110'
                   : 'bg-crt-phosphor hover:brightness-110'
@@ -685,7 +688,7 @@ export function FailedQueueDrawer({
                     <tr
                       key={item.id}
                       onClick={() => void openDetailItem(item)}
-                      className={`cursor-pointer transition-colors align-top ${
+                      className={`crt-table-row cursor-pointer transition-colors align-top ${
                         checked ? 'bg-crt-phosphor/5' : 'hover:bg-crt-elevated'
                       }`}
                     >

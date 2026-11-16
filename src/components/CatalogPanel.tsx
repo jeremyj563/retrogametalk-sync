@@ -1417,7 +1417,10 @@ export function CatalogPanel({
 
       {/* Main Content View */}
       {viewMode === 'catalog' ? (
-        <div className="border border-crt-border bg-crt-surface rounded-md overflow-hidden">
+        <div className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md overflow-hidden">
+          <div aria-hidden="true" className="crt-edge-beam">
+            <span />
+          </div>
           {loading ? (
             <div className="p-6 space-y-3">
               {[0, 1, 2, 3, 4].map((row) => (
@@ -1581,7 +1584,7 @@ export function CatalogPanel({
                       <tr
                         key={item.id}
                         onClick={() => void openDetailItem(item)}
-                        className={`cursor-pointer transition-colors ${
+                        className={`crt-table-row cursor-pointer transition-colors ${
                           checked ? 'bg-crt-phosphor/5' : 'hover:bg-crt-elevated'
                         }`}
                       >
@@ -1859,7 +1862,7 @@ export function CatalogPanel({
                           void openDetailItem(item);
                         }
                       }}
-                      className={`group relative border rounded-md overflow-hidden bg-crt-bg cursor-pointer transition-colors flex flex-col text-left focus:outline-none focus:border-crt-phosphor ${
+                      className={`crt-catalog-card group relative border rounded-md overflow-hidden bg-crt-bg cursor-pointer transition-colors flex flex-col text-left focus:outline-none focus:border-crt-phosphor ${
                         checked
                           ? 'border-crt-phosphor bg-crt-phosphor/5'
                           : 'border-crt-border hover:border-crt-border-strong'
@@ -1867,6 +1870,7 @@ export function CatalogPanel({
                     >
                       {/* Cover Art Container */}
                       <div className="relative aspect-[3/4] bg-crt-surface border-b border-crt-border overflow-hidden">
+                        <div aria-hidden="true" className="crt-card-holo" />
                         {showCover ? (
                           <img
                             src={`/api/items/${item.id}/asset?kind=cover${assetVersion}`}
@@ -2059,7 +2063,10 @@ export function CatalogPanel({
           )}
         </div>
       ) : (
-        <div className="border border-crt-border bg-crt-surface rounded-md overflow-hidden">
+        <div className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md overflow-hidden">
+          <div aria-hidden="true" className="crt-edge-beam">
+            <span />
+          </div>
           {/* Breadcrumbs + Select All Header */}
           <div className="px-4 py-2.5 border-b border-crt-border bg-crt-bg flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
             <div className="flex flex-wrap items-center gap-2">
@@ -2138,7 +2145,7 @@ export function CatalogPanel({
                 return (
                   <div
                     key={node.relativePath}
-                    className={`h-10 px-4 flex items-center justify-between gap-4 transition-colors text-xs font-mono ${
+                    className={`crt-table-row h-10 px-4 flex items-center justify-between gap-4 transition-colors text-xs font-mono ${
                       checked ? 'bg-crt-phosphor/5' : 'hover:bg-crt-elevated'
                     }`}
                   >

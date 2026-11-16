@@ -817,10 +817,13 @@ export default function App() {
   };
 
   const crtCssVars = computeCrtCssVariables(crtSettings);
-  const showScanlines = crtSettings.enabled && crtSettings.scanlines > 0;
-  const showGrille = crtSettings.enabled && crtSettings.apertureGrille > 0;
+  const isUltraMotion = crtSettings.uiMotion === 'ultra';
+  const showScanlines = crtSettings.enabled && (crtSettings.scanlines > 0 || isUltraMotion);
+  const showGrille = crtSettings.enabled && (crtSettings.apertureGrille > 0 || isUltraMotion);
   const showVignette =
-    crtSettings.enabled && (crtSettings.vignette > 0 || crtSettings.gaussGlow > 0);
+    crtSettings.enabled &&
+    (crtSettings.vignette > 0 || crtSettings.gaussGlow > 0 || isUltraMotion);
+  const showHumBar = crtSettings.enabled && isUltraMotion;
 
   return (
     <div
@@ -832,10 +835,18 @@ export default function App() {
     >
       {showGrille && <div aria-hidden="true" className="crt-layer-grille" />}
       {showScanlines && <div aria-hidden="true" className="crt-layer-scanlines" />}
+      {showHumBar && (
+        <div aria-hidden="true" className="crt-layer-humbar">
+          <div className="crt-layer-humbar-band" />
+        </div>
+      )}
       {showVignette && <div aria-hidden="true" className="crt-layer-vignette" />}
       {/* Sticky Top Header & Full Sync Confirmation Container */}
       <div className="sticky top-0 z-30">
-        <header className="bg-crt-bg/95 backdrop-blur border-b border-crt-border px-4 lg:px-6 py-3.5 flex flex-wrap md:flex-nowrap items-center justify-between gap-4">
+        <header className="relative bg-crt-bg/95 backdrop-blur border-b border-crt-border px-4 lg:px-6 py-3.5 flex flex-wrap md:flex-nowrap items-center justify-between gap-4">
+          <div aria-hidden="true" className="crt-header-beam">
+            <span />
+          </div>
         {/* Zone 1: Native CSS Animated CRT Brand Banner */}
         <a
           href="#monitor"
@@ -1351,7 +1362,7 @@ export default function App() {
                 type="button"
                 disabled={navGuardSaving}
                 onClick={() => void handleGuardSaveAndLeave()}
-                className="px-4 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+                className="crt-cta-beam px-4 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
               >
                 {navGuardSaving ? 'Saving...' : 'Save & Leave'}
               </button>

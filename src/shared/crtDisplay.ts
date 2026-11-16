@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react';
 
 export type CrtPalette = 'green' | 'amber' | 'cyan';
 export type CrtPresetId = 'subtle' | 'pvm' | 'arcade';
-export type CrtUiMotionLevel = 'off' | 'low' | 'medium' | 'high';
+export type CrtUiMotionLevel = 'off' | 'low' | 'medium' | 'high' | 'ultra';
 
 export interface CrtFxValues {
   scanlines: number;
@@ -94,6 +94,12 @@ export const CRT_UI_MOTION_LEVELS: Record<
     label: 'High',
     description: 'Full hardware instrumentation with continuous staggered icon kinematics and vivid phosphor bloom',
   },
+  ultra: {
+    shortLabel: 'Ultra',
+    label: 'Ultra',
+    description:
+      'Overclocked cathode-ray spectacle: rolling V-sync hum bar, auto-boosted phosphor bloom, dual panel beams & full-app halos',
+  },
 };
 
 export const DEFAULT_CRT_DISPLAY_SETTINGS: CrtDisplaySettings = {
@@ -115,7 +121,13 @@ function isValidPalette(val: unknown): val is CrtPalette {
 }
 
 function isValidUiMotionLevel(val: unknown): val is CrtUiMotionLevel {
-  return val === 'off' || val === 'low' || val === 'medium' || val === 'high';
+  return (
+    val === 'off' ||
+    val === 'low' ||
+    val === 'medium' ||
+    val === 'high' ||
+    val === 'ultra'
+  );
 }
 
 export function loadInitialCrtDisplaySettings(): CrtDisplaySettings {
@@ -190,12 +202,14 @@ export function detectActiveCrtPreset(settings: CrtFxValues): CrtPresetId | 'cus
 export function computeCrtCssVariables(settings: CrtDisplaySettings): CSSProperties {
   const paletteInfo = CRT_PALETTES[settings.palette];
   const on = settings.enabled;
+  const isUltra = settings.uiMotion === 'ultra';
 
-  const scanT = on ? settings.scanlines / 100 : 0;
-  const glowT = on ? settings.gaussGlow / 100 : 0;
-  const vigT = on ? settings.vignette / 100 : 0;
-  const grilleT = on ? settings.apertureGrille / 100 : 0;
-  const rgbT = on ? settings.chromaticAberration / 100 : 0;
+  // Non-destructive optical overdrive in Ultra: boosts effective glow/raster floor without mutating saved slider values
+  const scanT = on ? Math.max(settings.scanlines / 100, isUltra ? 0.58 : 0) : 0;
+  const glowT = on ? Math.max(settings.gaussGlow / 100, isUltra ? 0.82 : 0) : 0;
+  const vigT = on ? Math.max(settings.vignette / 100, isUltra ? 0.48 : 0) : 0;
+  const grilleT = on ? Math.max(settings.apertureGrille / 100, isUltra ? 0.36 : 0) : 0;
+  const rgbT = on ? Math.max(settings.chromaticAberration / 100, isUltra ? 0.28 : 0) : 0;
 
   const scanlineAlpha = scanT > 0 ? (0.08 + 0.67 * Math.pow(scanT, 1.45)).toFixed(3) : '0';
   const scanlineOpacity = scanT > 0 ? (0.15 + 0.85 * scanT).toFixed(3) : '0';
@@ -218,34 +232,40 @@ export function computeCrtCssVariables(settings: CrtDisplaySettings): CSSPropert
   const aberrationAlpha = rgbT > 0 ? (0.16 + rgbT * 0.56).toFixed(3) : '0';
 
   // Living UI Motion variables — coupled directly to Gauss Glow & Phosphor Palette
-  const motionWeight =
-    settings.uiMotion === 'high'
+  const motionWeight = isUltra
+    ? 1.88
+    : settings.uiMotion === 'high'
       ? 1.28
       : settings.uiMotion === 'medium'
         ? 0.88
         : settings.uiMotion === 'low'
           ? 0.55
           : 0;
-  const opticalGlowFactor = on ? 0.38 + 0.62 * glowT : 0.3;
+  const opticalGlowFactor = on ? 0.38 + 0.62 * glowT : isUltra ? 0.82 : 0.3;
   const bloom = motionWeight * opticalGlowFactor;
 
-  const motionSpeedScale =
-    settings.uiMotion === 'high'
+  const motionSpeedScale = isUltra
+    ? '0.52'
+    : settings.uiMotion === 'high'
       ? '0.74'
       : settings.uiMotion === 'medium'
         ? '1'
         : '1.28';
   const motionGlowSm = bloom > 0 ? `${(1.2 + bloom * 5.2).toFixed(2)}px` : '0px';
   const motionGlowLg = bloom > 0 ? `${(3.2 + bloom * 13.5).toFixed(2)}px` : '0px';
-  const motionGlowAlpha = bloom > 0 ? Math.min(0.95, 0.2 + bloom * 0.62).toFixed(3) : '0';
-  const motionTailAlpha = bloom > 0 ? Math.min(0.85, 0.14 + bloom * 0.46).toFixed(3) : '0';
-  const motionTraceAlpha = bloom > 0 ? Math.min(0.92, 0.24 + bloom * 0.56).toFixed(3) : '0';
-  const motionSweepAlpha =
-    settings.uiMotion === 'high' || settings.uiMotion === 'medium'
+  const motionGlowAlpha = bloom > 0 ? Math.min(0.98, 0.2 + bloom * 0.62).toFixed(3) : '0';
+  const motionTailAlpha = bloom > 0 ? Math.min(0.9, 0.14 + bloom * 0.46).toFixed(3) : '0';
+  const motionTraceAlpha = bloom > 0 ? Math.min(0.96, 0.24 + bloom * 0.56).toFixed(3) : '0';
+  const motionSweepAlpha = isUltra
+    ? Math.min(0.72, 0.22 + bloom * 0.32).toFixed(3)
+    : settings.uiMotion === 'high' || settings.uiMotion === 'medium'
       ? Math.min(0.5, 0.1 + bloom * 0.26).toFixed(3)
       : settings.uiMotion === 'low'
         ? Math.min(0.28, 0.06 + bloom * 0.16).toFixed(3)
         : '0';
+
+  const ultraHumAlpha = isUltra && on ? (0.085 + glowT * 0.095).toFixed(3) : '0';
+  const ultraBorderAlpha = isUltra ? (on ? (0.28 + glowT * 0.26).toFixed(3) : '0.28') : '0';
 
   return {
     '--crt-phosphor-rgb': paletteInfo.rgb,
@@ -271,5 +291,7 @@ export function computeCrtCssVariables(settings: CrtDisplaySettings): CSSPropert
     '--crt-motion-tail-alpha': motionTailAlpha,
     '--crt-motion-trace-alpha': motionTraceAlpha,
     '--crt-motion-sweep-alpha': motionSweepAlpha,
+    '--crt-ultra-hum-alpha': ultraHumAlpha,
+    '--crt-ultra-border-alpha': ultraBorderAlpha,
   } as CSSProperties;
 }

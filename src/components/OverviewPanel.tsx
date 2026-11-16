@@ -307,7 +307,7 @@ export function OverviewPanel({
           <button
             type="button"
             onClick={() => onNavigateToOperations('auth')}
-            className="px-3.5 py-1.5 text-xs font-medium text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="crt-cta-beam px-3.5 py-1.5 text-xs font-medium text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Configure Credentials
           </button>
@@ -325,7 +325,7 @@ export function OverviewPanel({
           <button
             type="button"
             onClick={() => onNavigateToOperations('auth')}
-            className="px-3.5 py-1.5 text-xs font-medium text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="crt-cta-beam px-3.5 py-1.5 text-xs font-medium text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Open Operations
           </button>
@@ -565,7 +565,7 @@ export function OverviewPanel({
                   type="button"
                   disabled={cutoffSaving || !resolvedCutoffPreviewIso}
                   onClick={() => void handleSaveCutoff()}
-                  className="px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+                  className="crt-cta-beam px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
                 >
                   {cutoffSaving ? 'Saving...' : 'Save Cutoff'}
                 </button>
@@ -749,7 +749,7 @@ export function OverviewPanel({
                           : run.mode;
                     const wouldDownload = Math.max(0, run.newFound - run.skippedCount - run.failedCount);
                     return (
-                      <tr key={run.id} className="h-9 hover:bg-crt-elevated transition-colors">
+                      <tr key={run.id} className="crt-table-row h-9 hover:bg-crt-elevated transition-colors">
                         <td className="px-3 text-crt-text whitespace-nowrap">
                           #{run.id} <span className="text-crt-muted">· {run.triggerType}</span>
                         </td>
@@ -867,42 +867,45 @@ export function OverviewPanel({
           </div>
         </div>
 
-        <div
-          ref={logContainerRef}
-          className="h-64 overflow-y-auto border border-crt-border bg-crt-bg rounded p-3 font-mono text-xs space-y-1.5"
-        >
-          {filteredLogs.length === 0 ? (
-            <p className="text-crt-muted py-6 text-center">
-              No {activeFilterOption.emptyLabel} recorded yet.
-            </p>
-          ) : (
-            filteredLogs.map((entry) => (
-              <div key={entry.id} className="flex items-start gap-3 leading-relaxed">
-                <span className="text-crt-muted tabular-nums shrink-0">
-                  {formatTimeShort(entry.createdAt)}
-                </span>
-                <span
-                  className={`w-20 shrink-0 uppercase ${
-                    entry.level === 'download'
-                      ? 'text-crt-phosphor'
-                      : entry.level === 'throttle' || entry.level === 'warn'
-                        ? 'text-crt-amber'
-                        : entry.level === 'error'
-                          ? 'text-crt-crimson'
-                          : 'text-crt-muted'
-                  }`}
-                >
-                  [{entry.level}]
-                </span>
-                <div className="min-w-0 text-crt-text break-words">
-                  <span>{entry.message}</span>
-                  {entry.detail && (
-                    <span className="text-crt-muted ml-2">· {entry.detail}</span>
-                  )}
+        <div className="crt-console-shell relative border border-crt-border bg-crt-bg rounded overflow-hidden">
+          <div aria-hidden="true" className="crt-console-scan" />
+          <div
+            ref={logContainerRef}
+            className="h-64 overflow-y-auto p-3 font-mono text-xs space-y-1.5"
+          >
+            {filteredLogs.length === 0 ? (
+              <p className="text-crt-muted py-6 text-center">
+                No {activeFilterOption.emptyLabel} recorded yet.
+              </p>
+            ) : (
+              filteredLogs.map((entry) => (
+                <div key={entry.id} className="flex items-start gap-3 leading-relaxed">
+                  <span className="text-crt-muted tabular-nums shrink-0">
+                    {formatTimeShort(entry.createdAt)}
+                  </span>
+                  <span
+                    className={`w-20 shrink-0 uppercase ${
+                      entry.level === 'download'
+                        ? 'text-crt-phosphor'
+                        : entry.level === 'throttle' || entry.level === 'warn'
+                          ? 'text-crt-amber'
+                          : entry.level === 'error'
+                            ? 'text-crt-crimson'
+                            : 'text-crt-muted'
+                    }`}
+                  >
+                    [{entry.level}]
+                  </span>
+                  <div className="min-w-0 text-crt-text break-words">
+                    <span>{entry.message}</span>
+                    {entry.detail && (
+                      <span className="text-crt-muted ml-2">· {entry.detail}</span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))
-          )}
+              ))
+            )}
+          </div>
         </div>
       </section>
     </div>
