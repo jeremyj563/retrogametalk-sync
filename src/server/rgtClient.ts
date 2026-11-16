@@ -831,6 +831,22 @@ export class RetroGameTalkClient {
     let lastCfChallengeStatus: number | null = null;
     let lastCfRay: string | null = null;
 
+    const summarizeHttpBody = (rawHtml: string): string => {
+      try {
+        const body$ = loadHtml(rawHtml);
+        const title = body$('title').first().text().replace(/\s+/g, ' ').trim();
+        const blockMsg = body$('.blockMessage--error, .blockMessage, #login_error, h1')
+          .first()
+          .text()
+          .replace(/\s+/g, ' ')
+          .trim();
+        const plain = (blockMsg || title || rawHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()).slice(0, 180);
+        return plain || 'empty body';
+      } catch {
+        return rawHtml.replace(/\s+/g, ' ').trim().slice(0, 180) || 'empty body';
+      }
+    };
+
     const tryLoadFormWithCurrentProfile = async (
       approachLabel: string,
     ): Promise<
@@ -856,10 +872,10 @@ export class RetroGameTalkClient {
               cfRay,
             };
           }
+          const candidateHasForm = loadHtml(candidateHtml)('input[type="password"]').length > 0;
           if (
-            candidatePage.response.ok &&
-            (loadHtml(candidateHtml)('input[type="password"]').length > 0 ||
-              this.getSafeCookieCount(config.baseUrl) > 0)
+            (candidatePage.response.ok && (candidateHasForm || this.getSafeCookieCount(config.baseUrl) > 0)) ||
+            (candidatePage.response.status < 500 && candidateHasForm)
           ) {
             logAuthContainer(
               'INFO',
@@ -867,9 +883,11 @@ export class RetroGameTalkClient {
             );
             return { kind: 'ok', page: candidatePage, html: candidateHtml };
           }
+          const serverHdr = candidatePage.response.headers.get('server') || 'unknown';
+          const snippet = candidatePage.response.status >= 400 ? ` · server=${serverHdr} · "${summarizeHttpBody(candidateHtml)}"` : '';
           logAuthContainer(
             'INFO',
-            `${approachLabel}: GET ${parentFormUrl} returned HTTP ${candidatePage.response.status} without password form; falling back to GET ${config.loginUrl}`,
+            `${approachLabel}: GET ${parentFormUrl} returned HTTP ${candidatePage.response.status} without password form${snippet}; falling back to GET ${config.loginUrl}`,
           );
         } catch (err) {
           logAuthContainer(
@@ -895,10 +913,12 @@ export class RetroGameTalkClient {
             cfRay,
           };
         }
-        if (directPage.response.status >= 400) {
+        const directHasForm = loadHtml(directHtml)('input[type="password"]').length > 0;
+        if (directPage.response.status >= 400 && !(directPage.response.status < 500 && directHasForm)) {
+          const serverHdr = directPage.response.headers.get('server') || 'unknown';
           logAuthContainer(
             'WARN',
-            `${approachLabel}: FAILED on GET ${config.loginUrl} — HTTP ${directPage.response.status} (${directPage.finalUrl})`,
+            `${approachLabel}: FAILED on GET ${config.loginUrl} — HTTP ${directPage.response.status} (${directPage.finalUrl}, server=${serverHdr}, body="${summarizeHttpBody(directHtml)}")`,
           );
           return { kind: 'http_err', page: directPage, html: directHtml };
         }
@@ -918,12 +938,55 @@ export class RetroGameTalkClient {
 
     let activeImpitLabel = `Approach 1 [impit:${this.activeBrowserProfile}]`;
     let loadAttempt = await tryLoadFormWithCurrentProfile(activeImpitLabel);
-    if (loadAttempt.kind === 'cf') {
+
+    // If HTTP 4xx (e.g. XenForo/Cloudflare HTTP 400 due to stale cookies or already-signed-in state),
+    // first check if existing cookies already unlock /repo/, otherwise reset stale jar & retry clean.
+    if (loadAttempt.kind === 'http_err' && loadAttempt.page.response.status >= 400 && loadAttempt.page.response.status < 500) {
+      if (this.getSafeCookieCount(config.baseUrl) > 0 || this.getSafeCookieCount(config.loginUrl) > 0) {
+        try {
+          const repoCheck = await this.fetchWithRedirects(config.baseUrl, config, { method: 'GET' }, signal, log);
+          const repoHtml = await repoCheck.response.text();
+          const repo$ = loadHtml(repoHtml);
+          const repoTitle = repo$('title').first().text().trim();
+          const repoOk =
+            repoCheck.response.ok &&
+            !repoCheck.finalUrl.includes('/login') &&
+            repo$('input[name="login"]').length === 0 &&
+            repo$('input[type="password"]').length === 0;
+          if (repoOk) {
+            const cookies = await this.jar.getCookies(config.baseUrl);
+            const msg = `Authenticated as ${username} (${cookies.length} cookies${repoTitle ? ` · "${repoTitle}"` : ''})`;
+            logAuthContainer('INFO', `${activeImpitLabel}: Recovered session directly via ${config.baseUrl} after HTTP ${loadAttempt.page.response.status}`);
+            this.setAuthState({
+              configured: true,
+              authenticated: true,
+              cookieCount: cookies.length,
+              lastMessage: msg,
+            });
+            log?.('info', msg);
+            return { authenticated: true, statusCode: repoCheck.response.status, message: msg };
+          }
+        } catch {
+          // Proceed to clean-cookie retry
+        }
+
+        logAuthContainer(
+          'WARN',
+          `Resetting stale cookie jar ([${this.getSafeCookieNames(config.baseUrl)}]) after HTTP ${loadAttempt.page.response.status} and retrying clean`,
+        );
+        this.jar = new CookieJar();
+        this.saveCookieJar();
+        loadAttempt = await tryLoadFormWithCurrentProfile(`${activeImpitLabel} (clean-cookies)`);
+      }
+    }
+
+    if (loadAttempt.kind === 'cf' || (loadAttempt.kind === 'http_err' && loadAttempt.page.response.status === 400)) {
+      const reasonLabel = loadAttempt.kind === 'cf' ? 'Cloudflare challenge' : `HTTP ${loadAttempt.page.response.status}`;
       const prevProfile = this.activeBrowserProfile;
       const alternateProfile: Browser = prevProfile === 'firefox144' ? 'chrome142' : 'firefox144';
       logAuthContainer(
         'INFO',
-        `Switching impit TLS/HTTP2 browser profile from ${prevProfile} -> ${alternateProfile} after Cloudflare challenge`,
+        `Switching impit TLS/HTTP2 browser profile from ${prevProfile} -> ${alternateProfile} after ${reasonLabel}`,
       );
       this.switchBrowserProfile(alternateProfile);
       activeImpitLabel = `Approach 2 [impit:${alternateProfile}]`;
@@ -969,14 +1032,26 @@ export class RetroGameTalkClient {
     }
 
     if (loadAttempt.kind === 'http_err') {
-      const msg = `Login Endpoint URL returned HTTP ${loadAttempt.page.response.status} (${loadAttempt.page.finalUrl}). Check that the Login Endpoint URL is correct.`;
+      const httpStatus = loadAttempt.page.response.status;
+      if (httpStatus === 400 || httpStatus === 403 || httpStatus === 405 || httpStatus === 429) {
+        logAuthContainer(
+          'WARN',
+          `Both impit browser profiles received HTTP ${httpStatus}; falling back to native curl`,
+        );
+        const curlFallback = await this.tryCurlLoginFallback(config, username, password, parentFormUrl, signal, log);
+        if (curlFallback) {
+          return curlFallback;
+        }
+      }
+      const errSnippet = summarizeHttpBody(loadAttempt.html);
+      const msg = `Login Endpoint URL returned HTTP ${httpStatus} (${loadAttempt.page.finalUrl}${errSnippet && errSnippet !== 'empty body' ? ` · ${errSnippet}` : ''}). Check that the Login Endpoint URL is correct.`;
       this.setAuthState({
         configured: true,
         authenticated: false,
         cookieCount: this.getSafeCookieCount(config.baseUrl),
         lastMessage: msg,
       });
-      return { authenticated: false, statusCode: loadAttempt.page.response.status, message: msg };
+      return { authenticated: false, statusCode: httpStatus, message: msg };
     }
 
     formPage = loadAttempt.page;
@@ -1633,20 +1708,33 @@ export class RetroGameTalkClient {
           `${activeCurlLabel}: SUCCEEDED — ${message} (cookies=[${this.getSafeCookieNames(config.baseUrl)}])`,
         );
       } else {
+        const bodySnippet = (() => {
+          const msg = post$('.blockMessage--error, .blockMessage, #login_error, h1')
+            .first()
+            .text()
+            .replace(/\s+/g, ' ')
+            .trim();
+          const t = (msg || post$('title').first().text() || finalLoginRes.body.replace(/<[^>]+>/g, ' '))
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 180);
+          return t || '';
+        })();
         if (blockError) {
           message = `Login rejected: ${blockError}`;
         } else if (finalLoginRes.status === 401 || finalLoginRes.status === 403) {
           message = `Login rejected (HTTP ${finalLoginRes.status}) at ${finalLoginRes.finalUrl}: invalid credentials or access denied.`;
         } else if (finalLoginRes.status >= 400) {
-          message = `Login Endpoint URL returned HTTP ${finalLoginRes.status} at ${finalLoginRes.finalUrl}. Check that the Login Endpoint URL is valid.`;
+          message = `Login Endpoint URL returned HTTP ${finalLoginRes.status} (${finalLoginRes.finalUrl}${bodySnippet ? ` · ${bodySnippet}` : ''}). Check that the Login Endpoint URL is valid.`;
         } else if (stillOnLoginForm) {
           message = `Invalid username or password: server returned the login form without establishing an authenticated session.`;
         } else {
           message = `Authentication failed (HTTP ${finalLoginRes.status}): no active session cookie returned from ${finalLoginRes.finalUrl}.`;
         }
+        const serverHdr = finalLoginRes.headers.get('server') || 'unknown';
         logAuthContainer(
           'WARN',
-          `${activeCurlLabel}: FAILED — ${message} (HTTP ${finalLoginRes.status}, finalUrl=${finalLoginRes.finalUrl}, cookies=[${this.getSafeCookieNames(config.baseUrl)}])`,
+          `${activeCurlLabel}: FAILED — ${message} (HTTP ${finalLoginRes.status}, server=${serverHdr}, finalUrl=${finalLoginRes.finalUrl}, cookies=[${this.getSafeCookieNames(config.baseUrl)}])`,
         );
       }
 
