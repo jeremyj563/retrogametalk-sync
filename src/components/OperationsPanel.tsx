@@ -43,6 +43,7 @@ import type {
 } from '../types';
 import { formatBytes } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
+import { EnvLockIndicator } from './EnvLockIndicator';
 
 export interface OperationsDirtyState {
   isDirty: boolean;
@@ -124,6 +125,8 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
   const isDirtyRef = useRef(false);
   const saveNoticeTimerRef = useRef<number | null>(null);
 
+  const baseUrlLockedByEnv = config.envOverrides.includes('RGT_BASE_URL');
+  const loginUrlLockedByEnv = config.envOverrides.includes('RGT_LOGIN_URL');
   const usernameLockedByEnv = config.envOverrides.includes('RGT_USERNAME');
   const passwordLockedByEnv = config.envOverrides.includes('RGT_PASSWORD');
   const dataDirLockedByEnv = config.envOverrides.includes('DATA_DIR');
@@ -690,39 +693,38 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">Repository Base URL</label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">Repository Base URL</label>
+              {baseUrlLockedByEnv && <EnvLockIndicator envVar="RGT_BASE_URL" />}
+            </div>
             <input
               type="url"
               value={baseUrl}
-              disabled={config.envOverrides.includes('RGT_BASE_URL')}
+              disabled={baseUrlLockedByEnv}
               onChange={(e) => setBaseUrl(e.target.value)}
               className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             />
-            {config.envOverrides.includes('RGT_BASE_URL') && (
-              <p className="text-[11px] font-mono text-crt-amber">
-                Loaded from RGT_BASE_URL environment variable (read-only).
-              </p>
-            )}
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">Login Endpoint URL</label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">Login Endpoint URL</label>
+              {loginUrlLockedByEnv && <EnvLockIndicator envVar="RGT_LOGIN_URL" />}
+            </div>
             <input
               type="url"
               value={loginUrl}
-              disabled={config.envOverrides.includes('RGT_LOGIN_URL')}
+              disabled={loginUrlLockedByEnv}
               onChange={(e) => setLoginUrl(e.target.value)}
               className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             />
-            {config.envOverrides.includes('RGT_LOGIN_URL') && (
-              <p className="text-[11px] font-mono text-crt-amber">
-                Loaded from RGT_LOGIN_URL environment variable (read-only).
-              </p>
-            )}
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">Repository Username</label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">Repository Username</label>
+              {usernameLockedByEnv && <EnvLockIndicator envVar="RGT_USERNAME" />}
+            </div>
             <input
               type="text"
               value={username}
@@ -731,17 +733,15 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
               placeholder="RetroGameTalk account username"
               className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor disabled:opacity-70"
             />
-            {usernameLockedByEnv && (
-              <p className="text-[11px] font-mono text-crt-amber">
-                Loaded from RGT_USERNAME environment variable (read-only).
-              </p>
-            )}
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              Repository Password
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                Repository Password
+              </label>
+              {passwordLockedByEnv && <EnvLockIndicator envVar="RGT_PASSWORD" />}
+            </div>
             <div className="relative">
               <input
                 type={showPassword ? 'text' : 'password'}
@@ -761,11 +761,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
                 {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
-            {passwordLockedByEnv ? (
-              <p className="text-[11px] font-mono text-crt-amber">
-                Loaded from RGT_PASSWORD environment variable (read-only).
-              </p>
-            ) : (
+            {!passwordLockedByEnv && (
               <p className="text-[11px] font-mono text-crt-muted">
                 {config.hasPassword ? 'Persisted encrypted in SQLite' : 'Not set yet'}
               </p>
@@ -773,20 +769,19 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              Data Directory (SQLite &amp; Sessions)
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                Data Directory (SQLite &amp; Sessions)
+              </label>
+              {dataDirLockedByEnv && <EnvLockIndicator envVar="DATA_DIR" />}
+            </div>
             <input
               type="text"
               value={config.dataDir}
               disabled
               className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none disabled:opacity-70"
             />
-            {dataDirLockedByEnv ? (
-              <p className="text-[11px] font-mono text-crt-amber">
-                Loaded from DATA_DIR environment variable (read-only).
-              </p>
-            ) : (
+            {!dataDirLockedByEnv && (
               <p className="text-[11px] font-mono text-crt-muted">
                 Default /run/repo (configurable via DATA_DIR environment variable).
               </p>
@@ -794,9 +789,12 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              Local Filesystem Mirror Root
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                Local Filesystem Mirror Root
+              </label>
+              {downloadDirLockedByEnv && <EnvLockIndicator envVar="DOWNLOAD_DIR" />}
+            </div>
             <input
               type="text"
               value={downloadDir}
@@ -804,15 +802,9 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
               onChange={(e) => setDownloadDir(e.target.value)}
               className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-70"
             />
-            {downloadDirLockedByEnv ? (
-              <p className="text-[11px] font-mono text-crt-amber">
-                Loaded from DOWNLOAD_DIR environment variable (read-only).
-              </p>
-            ) : (
-              <p className="text-[11px] font-mono text-crt-muted">
-                Status: {status.storage.writable ? 'Writable' : 'Read-Only'} · {formatBytes(status.storage.totalBytesOnDisk)} mirrored across {status.storage.totalFilesOnDisk} files
-              </p>
-            )}
+            <p className="text-[11px] font-mono text-crt-muted">
+              Status: {status.storage.writable ? 'Writable' : 'Read-Only'} · {formatBytes(status.storage.totalBytesOnDisk)} mirrored across {status.storage.totalFilesOnDisk} files
+            </p>
           </div>
         </div>
 
@@ -867,21 +859,23 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
             </div>
           </div>
 
-          <div className="text-xs font-mono text-crt-text tabular-nums">
-            Scope:{' '}
-            <span className={selectedSystems.size > 0 ? 'text-crt-amber' : 'text-crt-phosphor'}>
-              {selectedSystems.size === 0
-                ? 'All Consoles (Unfiltered)'
-                : `${selectedSystems.size} of ${availableSystems.length} selected`}
-            </span>
+          <div className="flex flex-col sm:items-end gap-1 text-xs font-mono text-crt-text tabular-nums shrink-0">
+            <div>
+              Scope:{' '}
+              <span className={selectedSystems.size > 0 ? 'text-crt-amber' : 'text-crt-phosphor'}>
+                {selectedSystems.size === 0
+                  ? 'All Consoles (Unfiltered)'
+                  : `${selectedSystems.size} of ${availableSystems.length} selected`}
+              </span>
+            </div>
+            {filterLockedByEnv && (
+              <EnvLockIndicator
+                envVar="SCRAPER_SYSTEM_FILTER"
+                detail={`Console selection is locked by SCRAPER_SYSTEM_FILTER=${systemFilter} (read-only)`}
+              />
+            )}
           </div>
         </div>
-
-        {filterLockedByEnv && (
-          <p className="text-xs font-mono text-crt-amber">
-            Console selection is locked by the SCRAPER_SYSTEM_FILTER environment variable ({systemFilter}).
-          </p>
-        )}
 
         {availableSystems.length === 0 ? (
           <div className="border border-crt-border bg-crt-bg rounded p-6 text-center space-y-3">
@@ -1151,23 +1145,25 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
             </div>
           </div>
 
-          <div className="text-xs font-mono text-crt-text tabular-nums">
-            Scope:{' '}
-            <span className={releaseTypeMode === 'custom' ? 'text-crt-amber' : 'text-crt-phosphor'}>
-              {releaseTypeMode === 'all'
-                ? 'All Types (Unfiltered)'
-                : customTypeSelectionEmpty
-                  ? 'None Selected'
-                  : formatAllowedReleaseTypesSummary(allowedReleaseTypes)}
-            </span>
+          <div className="flex flex-col sm:items-end gap-1 text-xs font-mono text-crt-text tabular-nums shrink-0">
+            <div>
+              Scope:{' '}
+              <span className={releaseTypeMode === 'custom' ? 'text-crt-amber' : 'text-crt-phosphor'}>
+                {releaseTypeMode === 'all'
+                  ? 'All Types (Unfiltered)'
+                  : customTypeSelectionEmpty
+                    ? 'None Selected'
+                    : formatAllowedReleaseTypesSummary(allowedReleaseTypes)}
+              </span>
+            </div>
+            {typeFilterLockedByEnv && (
+              <EnvLockIndicator
+                envVar="SCRAPER_RELEASE_TYPE_FILTER"
+                detail="Release type filtering is locked by SCRAPER_RELEASE_TYPE_FILTER (read-only)"
+              />
+            )}
           </div>
         </div>
-
-        {typeFilterLockedByEnv && (
-          <p className="text-xs font-mono text-crt-amber">
-            Release type filtering is locked by the SCRAPER_RELEASE_TYPE_FILTER environment variable.
-          </p>
-        )}
 
         {/* Mode Switcher + Quick Presets */}
         <div className="flex flex-wrap items-center justify-between gap-3">

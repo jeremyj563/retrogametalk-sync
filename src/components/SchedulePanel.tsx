@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { CheckCircle2, Clock, Gauge, Save } from 'lucide-react';
 import type { ScraperConfigPublic, ServiceStatusSnapshot } from '../types';
 import { formatDateTime } from '../utils/format';
+import { EnvLockIndicator } from './EnvLockIndicator';
 
 interface SchedulePanelProps {
   config: ScraperConfigPublic;
@@ -32,6 +33,17 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const cronLockedByEnv = config.envOverrides.includes('CRON_SCHEDULE');
+  const scheduleEnabledLockedByEnv = config.envOverrides.includes('SCRAPER_SCHEDULE_ENABLED');
+  const baseDelayLockedByEnv = config.envOverrides.includes('SCRAPER_BASE_DELAY_MS');
+  const minDelayLockedByEnv = config.envOverrides.includes('SCRAPER_MIN_DELAY_MS');
+  const maxDelayLockedByEnv = config.envOverrides.includes('SCRAPER_MAX_DELAY_MS');
+  const backoffLockedByEnv = config.envOverrides.includes('SCRAPER_BACKOFF_MULTIPLIER');
+  const maxRetriesLockedByEnv = config.envOverrides.includes('SCRAPER_MAX_RETRIES');
+  const timeoutLockedByEnv = config.envOverrides.includes('SCRAPER_REQUEST_TIMEOUT_MS');
+  const concurrencyLockedByEnv = config.envOverrides.includes('SCRAPER_MAX_CONCURRENCY');
+  const userAgentLockedByEnv = config.envOverrides.includes('SCRAPER_USER_AGENT');
+
   useEffect(() => {
     setCronSchedule(config.cronSchedule);
     setScheduleEnabled(config.scheduleEnabled);
@@ -52,16 +64,16 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
     setErrorMsg(null);
     try {
       await onSaveConfig({
-        cronSchedule,
-        scheduleEnabled,
-        baseDelayMs,
-        minDelayMs,
-        maxDelayMs,
-        backoffMultiplier,
-        maxRetries,
-        maxConcurrency,
-        requestTimeoutMs,
-        userAgent,
+        ...(!cronLockedByEnv ? { cronSchedule } : {}),
+        ...(!scheduleEnabledLockedByEnv ? { scheduleEnabled } : {}),
+        ...(!baseDelayLockedByEnv ? { baseDelayMs } : {}),
+        ...(!minDelayLockedByEnv ? { minDelayMs } : {}),
+        ...(!maxDelayLockedByEnv ? { maxDelayMs } : {}),
+        ...(!backoffLockedByEnv ? { backoffMultiplier } : {}),
+        ...(!maxRetriesLockedByEnv ? { maxRetries } : {}),
+        ...(!concurrencyLockedByEnv ? { maxConcurrency } : {}),
+        ...(!timeoutLockedByEnv ? { requestTimeoutMs } : {}),
+        ...(!userAgentLockedByEnv ? { userAgent } : {}),
       });
       setSavedNotice('Schedule and rate-limit settings saved');
     } catch (err) {
@@ -88,37 +100,41 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setScheduleEnabled((v) => !v)}
-            className={`px-3.5 py-1.5 text-xs font-mono border rounded transition-colors whitespace-nowrap ${
-              scheduleEnabled
-                ? 'border-crt-phosphor text-crt-phosphor bg-crt-phosphor/10'
-                : 'border-crt-border text-crt-muted bg-crt-bg'
-            }`}
-          >
-            {scheduleEnabled ? 'Schedule: Enabled' : 'Schedule: Paused'}
-          </button>
+          <div className="flex flex-col sm:items-end gap-1.5 shrink-0">
+            <button
+              type="button"
+              disabled={scheduleEnabledLockedByEnv}
+              onClick={() => setScheduleEnabled((v) => !v)}
+              className={`px-3.5 py-1.5 text-xs font-mono border rounded transition-colors whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed ${
+                scheduleEnabled
+                  ? 'border-crt-phosphor text-crt-phosphor bg-crt-phosphor/10'
+                  : 'border-crt-border text-crt-muted bg-crt-bg'
+              }`}
+            >
+              {scheduleEnabled ? 'Schedule: Enabled' : 'Schedule: Paused'}
+            </button>
+            {scheduleEnabledLockedByEnv && (
+              <EnvLockIndicator envVar="SCRAPER_SCHEDULE_ENABLED" />
+            )}
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="space-y-2">
-            <label className="block text-xs font-medium text-crt-text">
-              Cron Expression (5-field UTC/Container time)
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                Cron Expression (5-field UTC/Container time)
+              </label>
+              {cronLockedByEnv && <EnvLockIndicator envVar="CRON_SCHEDULE" />}
+            </div>
             <input
               type="text"
               value={cronSchedule}
-              disabled={config.envOverrides.includes('CRON_SCHEDULE')}
+              disabled={cronLockedByEnv}
               onChange={(e) => setCronSchedule(e.target.value)}
               className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
               placeholder="0 */6 * * *"
             />
-            {config.envOverrides.includes('CRON_SCHEDULE') && (
-              <p className="text-[11px] font-mono text-crt-amber">
-                Managed via CRON_SCHEDULE environment variable.
-              </p>
-            )}
           </div>
 
           <div className="space-y-2">
@@ -128,7 +144,7 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
                 <button
                   key={preset.expr}
                   type="button"
-                  disabled={config.envOverrides.includes('CRON_SCHEDULE')}
+                  disabled={cronLockedByEnv}
                   onClick={() => setCronSchedule(preset.expr)}
                   className={`px-3 py-1.5 text-xs border rounded transition-colors whitespace-nowrap ${
                     cronSchedule === preset.expr
@@ -168,96 +184,120 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              Base Request Delay (ms)
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                Base Request Delay (ms)
+              </label>
+              {baseDelayLockedByEnv && <EnvLockIndicator envVar="SCRAPER_BASE_DELAY_MS" />}
+            </div>
             <input
               type="number"
               min={250}
               max={60000}
               step={50}
               value={baseDelayMs}
+              disabled={baseDelayLockedByEnv}
               onChange={(e) => setBaseDelayMs(Number(e.target.value))}
-              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             />
             <p className="text-[11px] text-crt-muted">Starting spacing with ±15% jitter</p>
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              Minimum Delay Floor (ms)
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                Minimum Delay Floor (ms)
+              </label>
+              {minDelayLockedByEnv && <EnvLockIndicator envVar="SCRAPER_MIN_DELAY_MS" />}
+            </div>
             <input
               type="number"
               min={250}
               max={30000}
               step={50}
               value={minDelayMs}
+              disabled={minDelayLockedByEnv}
               onChange={(e) => setMinDelayMs(Number(e.target.value))}
-              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             />
             <p className="text-[11px] text-crt-muted">Fastest polite crawl interval</p>
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              Max Backoff Ceiling (ms)
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                Max Backoff Ceiling (ms)
+              </label>
+              {maxDelayLockedByEnv && <EnvLockIndicator envVar="SCRAPER_MAX_DELAY_MS" />}
+            </div>
             <input
               type="number"
               min={5000}
               max={300000}
               step={1000}
               value={maxDelayMs}
+              disabled={maxDelayLockedByEnv}
               onChange={(e) => setMaxDelayMs(Number(e.target.value))}
-              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             />
             <p className="text-[11px] text-crt-muted">Upper cap during repeated 429s</p>
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              Backoff Multiplier
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                Backoff Multiplier
+              </label>
+              {backoffLockedByEnv && <EnvLockIndicator envVar="SCRAPER_BACKOFF_MULTIPLIER" />}
+            </div>
             <input
               type="number"
               min={1.2}
               max={5.0}
               step={0.1}
               value={backoffMultiplier}
+              disabled={backoffLockedByEnv}
               onChange={(e) => setBackoffMultiplier(Number(e.target.value))}
-              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             />
             <p className="text-[11px] text-crt-muted">Multiplicative penalty factor</p>
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              Max Retries per Request
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                Max Retries per Request
+              </label>
+              {maxRetriesLockedByEnv && <EnvLockIndicator envVar="SCRAPER_MAX_RETRIES" />}
+            </div>
             <input
               type="number"
               min={0}
               max={15}
               value={maxRetries}
+              disabled={maxRetriesLockedByEnv}
               onChange={(e) => setMaxRetries(Number(e.target.value))}
-              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             />
             <p className="text-[11px] text-crt-muted">Retries on 429/5xx timeouts</p>
           </div>
 
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              Request Timeout (ms)
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                Request Timeout (ms)
+              </label>
+              {timeoutLockedByEnv && <EnvLockIndicator envVar="SCRAPER_REQUEST_TIMEOUT_MS" />}
+            </div>
             <input
               type="number"
               min={5000}
               max={180000}
               step={1000}
               value={requestTimeoutMs}
+              disabled={timeoutLockedByEnv}
               onChange={(e) => setRequestTimeoutMs(Number(e.target.value))}
-              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             />
             <p className="text-[11px] text-crt-muted">Per-request HTTP abort timeout</p>
           </div>
@@ -265,13 +305,17 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5 pt-2">
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              Worker Concurrency
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                Worker Concurrency
+              </label>
+              {concurrencyLockedByEnv && <EnvLockIndicator envVar="SCRAPER_MAX_CONCURRENCY" />}
+            </div>
             <select
               value={maxConcurrency}
+              disabled={concurrencyLockedByEnv}
               onChange={(e) => setMaxConcurrency(Number(e.target.value))}
-              className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             >
               <option value={1}>1 (Sequential · Safest)</option>
               <option value={2}>2 (Moderate)</option>
@@ -280,14 +324,18 @@ export function SchedulePanel({ config, status, onSaveConfig }: SchedulePanelPro
           </div>
 
           <div className="md:col-span-2 space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              HTTP User-Agent Header
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-crt-text">
+                HTTP User-Agent Header
+              </label>
+              {userAgentLockedByEnv && <EnvLockIndicator envVar="SCRAPER_USER_AGENT" />}
+            </div>
             <input
               type="text"
               value={userAgent}
+              disabled={userAgentLockedByEnv}
               onChange={(e) => setUserAgent(e.target.value)}
-              className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+              className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
             />
           </div>
         </div>
