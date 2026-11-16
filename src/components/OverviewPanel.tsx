@@ -3,6 +3,8 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Download,
   Pause,
@@ -24,17 +26,22 @@ import {
   formatRunDuration,
   formatTimeShort,
 } from '../utils/format';
+import { FailedQueueDrawer } from './FailedQueueDrawer';
 
 interface OverviewPanelProps {
   config: ScraperConfigPublic;
   status: ServiceStatusSnapshot;
   runs: SyncRunRecord[];
   logs: ActivityLogRecord[];
+  catalogRevision: number;
+  activeRetryItemId?: number | null;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
   onClearLogs: (level: 'all' | LogLevel) => Promise<void>;
   onClearRuns: () => Promise<void>;
   onNavigateToOperations: () => void;
-  onReviewFailed?: () => void;
+  onRetryItem: (itemId: number, fileId?: number) => Promise<void>;
+  onRetryAllFailed: (options?: { system?: string; ids?: number[] }) => Promise<void>;
+  onRefreshStatus: () => Promise<void>;
 }
 
 function toLocalDateTimeInputValue(date: Date): string {
@@ -48,13 +55,18 @@ export function OverviewPanel({
   status,
   runs,
   logs,
+  catalogRevision,
+  activeRetryItemId = null,
   onSaveConfig,
   onClearLogs,
   onClearRuns,
   onNavigateToOperations,
-  onReviewFailed,
+  onRetryItem,
+  onRetryAllFailed,
+  onRefreshStatus,
 }: OverviewPanelProps) {
   const [logFilter, setLogFilter] = useState<'all' | LogLevel>('all');
+  const [failedQueueOpen, setFailedQueueOpen] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [editingCutoff, setEditingCutoff] = useState(false);
   const [cutoffLocalInput, setCutoffLocalInput] = useState('');
@@ -374,17 +386,35 @@ export function OverviewPanel({
             <span>
               {status.totals.downloadedItems.toLocaleString()} downloaded
             </span>
-            {status.totals.failedItems > 0 && (
+            {(status.totals.failedItems > 0 || failedQueueOpen) && (
               <>
                 <span aria-hidden="true">·</span>
                 <button
                   type="button"
-                  onClick={onReviewFailed}
-                  className="inline-flex items-center gap-1 text-crt-crimson hover:underline whitespace-nowrap shrink-0 cursor-pointer"
-                  title="Open Failed Queue in Catalog to inspect errors and retry downloads"
+                  aria-expanded={failedQueueOpen}
+                  onClick={() => setFailedQueueOpen((prev) => !prev)}
+                  className={`inline-flex items-center gap-1 hover:underline whitespace-nowrap shrink-0 cursor-pointer ${
+                    status.totals.failedItems > 0 ? 'text-crt-crimson' : 'text-crt-phosphor'
+                  }`}
+                  title={
+                    failedQueueOpen
+                      ? 'Hide inline Failed Queue drawer'
+                      : 'Open inline Failed Queue drawer to inspect errors and retry downloads'
+                  }
                 >
-                  <XCircle className="h-3 w-3 shrink-0" />
-                  <span>{status.totals.failedItems} failed · Review</span>
+                  {status.totals.failedItems > 0 ? (
+                    <XCircle className="h-3 w-3 shrink-0" />
+                  ) : (
+                    <CheckCircle2 className="h-3 w-3 shrink-0" />
+                  )}
+                  <span>
+                    {status.totals.failedItems} failed · {failedQueueOpen ? 'Hide' : 'Review'}
+                  </span>
+                  {failedQueueOpen ? (
+                    <ChevronUp className="h-3 w-3 shrink-0" />
+                  ) : (
+                    <ChevronDown className="h-3 w-3 shrink-0" />
+                  )}
                 </button>
               </>
             )}
@@ -429,6 +459,18 @@ export function OverviewPanel({
           </p>
         </div>
       </section>
+
+      {/* Slide-Down Failed Queue Drawer */}
+      <FailedQueueDrawer
+        open={failedQueueOpen}
+        status={status}
+        catalogRevision={catalogRevision}
+        activeRetryItemId={activeRetryItemId}
+        onClose={() => setFailedQueueOpen(false)}
+        onRetryItem={onRetryItem}
+        onRetryAllFailed={onRetryAllFailed}
+        onRefreshStatus={onRefreshStatus}
+      />
 
       {/* Telemetry Chart & Recent Sync Runs (2-Column Balanced Split) */}
       <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
