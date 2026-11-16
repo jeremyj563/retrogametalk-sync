@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
+import { filterValidSystemSlugs, sanitizeSystemFilterString } from '../shared/systemCatalog.ts';
 import type { AppliedMigrationRecord, DatabaseMigrationReport } from './types.ts';
 
 export interface MigrationContext {
@@ -321,6 +322,34 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
           `ALTER TABLE scraper_config ADD COLUMN allowed_release_types_json TEXT NOT NULL DEFAULT '[]'`,
         ).run();
       }
+    },
+  },
+  {
+    version: 10,
+    name: 'prune_non_system_pages_from_config',
+    description: 'Remove non-system WordPress utility slugs (screenshots-wanted, sitemap, user-agreement, etc.) from discovered systems and active system filter',
+    up: (db) => {
+      const row = db
+        .prepare('SELECT discovered_systems_json, system_filter FROM scraper_config WHERE id = 1')
+        .get() as { discovered_systems_json?: string; system_filter?: string } | undefined;
+      if (!row) return;
+
+      let parsedSystems: string[] = [];
+      try {
+        const raw = JSON.parse(String(row.discovered_systems_json || '[]'));
+        if (Array.isArray(raw)) {
+          parsedSystems = raw.map(String);
+        }
+      } catch {
+        parsedSystems = [];
+      }
+
+      const cleanedSystems = filterValidSystemSlugs(parsedSystems);
+      const cleanedFilter = sanitizeSystemFilterString(String(row.system_filter || ''));
+
+      db.prepare(
+        'UPDATE scraper_config SET discovered_systems_json = ?, system_filter = ? WHERE id = 1',
+      ).run(JSON.stringify(cleanedSystems), cleanedFilter);
     },
   },
 ];

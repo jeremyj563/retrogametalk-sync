@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Eye,
   EyeOff,
   Filter,
@@ -13,6 +15,7 @@ import {
   Search,
   ShieldCheck,
   Usb,
+  X,
   XCircle,
 } from 'lucide-react';
 import { DEVICE_PRESETS, type DevicePresetId } from '../shared/devicePresets';
@@ -27,6 +30,11 @@ import {
   normalizeAllowedReleaseTypes,
 } from '../shared/releaseTypeFilter';
 import { formatPreparedRomName, ROM_NAMING_PRESETS } from '../shared/romNaming';
+import {
+  filterValidSystemSlugs,
+  groupSystemsByBrand,
+  resolveSystemDisplayInfo,
+} from '../shared/systemCatalog';
 import type { AuthTestResult, ScraperConfigPublic, ServiceStatusSnapshot } from '../types';
 import { formatBytes } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
@@ -52,6 +60,7 @@ export function OperationsPanel({
   const [downloadDir, setDownloadDir] = useState(config.downloadDir);
   const [systemFilter, setSystemFilter] = useState(config.systemFilter);
   const [consoleSearch, setConsoleSearch] = useState('');
+  const [showAdvancedSystemFilter, setShowAdvancedSystemFilter] = useState(false);
   const [releaseTypeMode, setReleaseTypeMode] = useState<'all' | 'custom'>(
     config.allowedReleaseTypes.length > 0 ? 'custom' : 'all',
   );
@@ -102,30 +111,75 @@ export function OperationsPanel({
     );
   }, [systemFilter]);
 
+  const selectedSystemsLower = useMemo(() => {
+    return new Set(Array.from(selectedSystems).map((s) => s.toLowerCase()));
+  }, [selectedSystems]);
+
   const availableSystems = useMemo(() => {
-    const merged = new Set<string>([
+    return filterValidSystemSlugs([
       ...config.discoveredSystems,
       ...(authResult?.discoveredSystems || []),
       ...Array.from(selectedSystems),
     ]);
-    return Array.from(merged).sort((a, b) => a.localeCompare(b));
   }, [config.discoveredSystems, authResult, selectedSystems]);
+
+  const allBrandGroups = useMemo(
+    () => groupSystemsByBrand(availableSystems),
+    [availableSystems],
+  );
 
   const filteredConsoles = useMemo(() => {
     const q = consoleSearch.trim().toLowerCase();
     if (!q) return availableSystems;
-    return availableSystems.filter((s) => s.toLowerCase().includes(q));
+    return availableSystems.filter((slug) => {
+      const info = resolveSystemDisplayInfo(slug);
+      return (
+        info.slug.toLowerCase().includes(q) ||
+        info.displayName.toLowerCase().includes(q) ||
+        info.brandLabel.toLowerCase().includes(q)
+      );
+    });
   }, [availableSystems, consoleSearch]);
+
+  const filteredBrandGroups = useMemo(
+    () => groupSystemsByBrand(filteredConsoles),
+    [filteredConsoles],
+  );
 
   const toggleConsole = (slug: string) => {
     if (filterLockedByEnv) return;
     const next = new Set(selectedSystems);
-    if (next.has(slug)) {
-      next.delete(slug);
+    const matchingExisting = Array.from(next).find(
+      (s) => s.toLowerCase() === slug.toLowerCase(),
+    );
+    if (matchingExisting) {
+      next.delete(matchingExisting);
     } else {
       next.add(slug);
     }
     setSystemFilter(Array.from(next).sort((a, b) => a.localeCompare(b)).join(','));
+  };
+
+  const setBrandGroupSelection = (brandSlugs: string[], select: boolean) => {
+    if (filterLockedByEnv) return;
+    const targetLower = new Set(brandSlugs.map((s) => s.toLowerCase()));
+    const next = new Set(
+      Array.from(selectedSystems).filter((s) => !targetLower.has(s.toLowerCase())),
+    );
+    if (select) {
+      for (const slug of brandSlugs) {
+        next.add(slug);
+      }
+    }
+    setSystemFilter(Array.from(next).sort((a, b) => a.localeCompare(b)).join(','));
+  };
+
+  const toggleBrandGroup = (brandSlugs: string[]) => {
+    if (filterLockedByEnv) return;
+    const allSelected =
+      brandSlugs.length > 0 &&
+      brandSlugs.every((slug) => selectedSystemsLower.has(slug.toLowerCase()));
+    setBrandGroupSelection(brandSlugs, !allSelected);
   };
 
   const handleSelectAllConsoles = () => {
@@ -586,15 +640,18 @@ export function OperationsPanel({
                 Target Consoles &amp; Systems
               </h2>
               <p className="text-xs text-crt-muted">
-                Choose specific systems to mirror, or leave none selected to mirror the entire repository. Selection persists in SQLite across restarts.
+                Choose specific hardware platforms to mirror, or leave all unchecked to mirror every valid discovered system. Non-system site pages are excluded automatically.
               </p>
             </div>
           </div>
 
           <div className="text-xs font-mono text-crt-text tabular-nums">
-            {selectedSystems.size === 0
-              ? 'Scope: All Consoles (Unfiltered)'
-              : `Scope: ${selectedSystems.size} of ${availableSystems.length} selected`}
+            Scope:{' '}
+            <span className={selectedSystems.size > 0 ? 'text-crt-amber' : 'text-crt-phosphor'}>
+              {selectedSystems.size === 0
+                ? 'All Consoles (Unfiltered)'
+                : `${selectedSystems.size} of ${availableSystems.length} selected`}
+            </span>
           </div>
         </div>
 
@@ -608,21 +665,32 @@ export function OperationsPanel({
           <div className="border border-crt-border bg-crt-bg rounded p-6 text-center space-y-3">
             <p className="text-sm text-crt-text font-medium">No consoles discovered yet</p>
             <p className="text-xs text-crt-muted max-w-md mx-auto">
-              Click &ldquo;Test Login &amp; Discover Consoles&rdquo; above to authenticate and fetch the full list of available systems from RetroGameTalk.
+              Click &ldquo;Test Login &amp; Discover Consoles&rdquo; above to authenticate and fetch the list of available systems from RetroGameTalk.
             </p>
           </div>
         ) : (
           <div className="space-y-4">
+            {/* Search & Global Scope Actions */}
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="relative">
+              <div className="relative flex-1 min-w-[220px] max-w-sm">
                 <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
                   value={consoleSearch}
                   onChange={(e) => setConsoleSearch(e.target.value)}
-                  placeholder="Filter discovered consoles..."
-                  className="pl-8 pr-3 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-64"
+                  placeholder="Search by console name, brand, or slug..."
+                  className="w-full pl-8 pr-8 py-1.5 text-xs bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor"
                 />
+                {consoleSearch && (
+                  <button
+                    type="button"
+                    aria-label="Clear console search"
+                    onClick={() => setConsoleSearch('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-crt-muted hover:text-crt-text"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -630,57 +698,209 @@ export function OperationsPanel({
                   type="button"
                   disabled={filterLockedByEnv}
                   onClick={handleSelectAllConsoles}
-                  className="px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-text rounded transition-colors disabled:opacity-50"
+                  className="px-3 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
                 >
                   Select All ({availableSystems.length})
                 </button>
                 <button
                   type="button"
-                  disabled={filterLockedByEnv}
+                  disabled={filterLockedByEnv || selectedSystems.size === 0}
                   onClick={handleClearConsoleFilter}
-                  className="px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-muted hover:text-crt-text rounded transition-colors disabled:opacity-50"
+                  className="px-3 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
                 >
-                  Mirror All (Unfiltered)
+                  All Consoles (Unfiltered)
                 </button>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 max-h-80 overflow-y-auto pr-1">
-              {filteredConsoles.map((slug) => {
-                const isSelected = selectedSystems.has(slug);
-                return (
-                  <button
-                    key={slug}
-                    type="button"
-                    disabled={filterLockedByEnv}
-                    onClick={() => toggleConsole(slug)}
-                    className={`flex items-center justify-between gap-2 px-3 py-2 text-xs font-mono border rounded text-left transition-colors ${
-                      isSelected
-                        ? 'border-crt-phosphor bg-crt-phosphor/10 text-crt-phosphor'
-                        : 'border-crt-border bg-crt-bg text-crt-text hover:border-crt-border-strong'
-                    } disabled:opacity-60`}
-                  >
-                    <span className="truncate">{slug}</span>
-                    {isSelected && <Check className="h-3.5 w-3.5 shrink-0" />}
-                  </button>
-                );
-              })}
-            </div>
+            {/* Brand Quick-Toggle Strip */}
+            {allBrandGroups.length > 1 && (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-mono text-crt-muted whitespace-nowrap">
+                  Brands:
+                </span>
+                {allBrandGroups.map(({ brand, items }) => {
+                  const brandSlugs = items.map((i) => i.slug);
+                  const selectedInBrand = items.filter((i) =>
+                    selectedSystemsLower.has(i.slug.toLowerCase()),
+                  ).length;
+                  const allInBrandSelected = selectedInBrand === items.length;
+                  const someInBrandSelected = selectedInBrand > 0 && !allInBrandSelected;
+
+                  return (
+                    <button
+                      key={brand.id}
+                      type="button"
+                      disabled={filterLockedByEnv}
+                      onClick={() => toggleBrandGroup(brandSlugs)}
+                      title={
+                        allInBrandSelected
+                          ? `Deselect all ${brand.label} systems`
+                          : `Select all ${items.length} ${brand.label} systems`
+                      }
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono border rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 ${
+                        allInBrandSelected
+                          ? 'border-crt-phosphor bg-crt-phosphor/10 text-crt-phosphor'
+                          : someInBrandSelected
+                            ? 'border-crt-phosphor/45 bg-crt-bg text-crt-text hover:border-crt-phosphor'
+                            : 'border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+                      }`}
+                    >
+                      <span>{brand.shortLabel}</span>
+                      <span className="text-[10px] tabular-nums opacity-80">
+                        {selectedInBrand}/{items.length}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Grouped Hardware Brand Grids */}
+            {filteredBrandGroups.length === 0 ? (
+              <div className="border border-crt-border bg-crt-bg rounded p-6 text-center space-y-2.5">
+                <p className="text-xs font-medium text-crt-text">
+                  No consoles match &ldquo;{consoleSearch}&rdquo;
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setConsoleSearch('')}
+                  className="px-3 py-1 text-xs font-mono border border-crt-border bg-crt-surface hover:border-crt-phosphor text-crt-phosphor rounded transition-colors"
+                >
+                  Clear Search
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4 max-h-[28rem] overflow-y-auto pr-1">
+                {filteredBrandGroups.map(({ brand, items }) => {
+                  const brandSlugs = items.map((i) => i.slug);
+                  const selectedInBrand = items.filter((i) =>
+                    selectedSystemsLower.has(i.slug.toLowerCase()),
+                  ).length;
+                  const allSelected = selectedInBrand === items.length;
+
+                  return (
+                    <div key={brand.id} className="border-t border-crt-border pt-4 space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="font-semibold text-crt-text">{brand.label}</span>
+                          <span className="font-mono text-[11px] text-crt-muted tabular-nums">
+                            · {selectedInBrand} of {items.length} selected
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-3 text-[11px] font-mono">
+                          {!allSelected && (
+                            <button
+                              type="button"
+                              disabled={filterLockedByEnv}
+                              onClick={() => setBrandGroupSelection(brandSlugs, true)}
+                              className="text-crt-phosphor hover:underline whitespace-nowrap disabled:opacity-45 disabled:no-underline"
+                            >
+                              Select {brand.shortLabel}
+                            </button>
+                          )}
+                          {selectedInBrand > 0 && (
+                            <button
+                              type="button"
+                              disabled={filterLockedByEnv}
+                              onClick={() => setBrandGroupSelection(brandSlugs, false)}
+                              className="text-crt-muted hover:text-crt-text hover:underline whitespace-nowrap disabled:opacity-45 disabled:no-underline"
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                        {items.map((info) => {
+                          const isSelected = selectedSystemsLower.has(info.slug.toLowerCase());
+                          return (
+                            <button
+                              key={info.slug}
+                              type="button"
+                              disabled={filterLockedByEnv}
+                              onClick={() => toggleConsole(info.slug)}
+                              className={`flex items-center justify-between gap-3 px-3 py-2.5 border rounded text-left transition-colors disabled:opacity-60 ${
+                                isSelected
+                                  ? 'border-crt-phosphor bg-crt-phosphor/10 text-crt-text'
+                                  : 'border-crt-border bg-crt-bg text-crt-muted hover:border-crt-border-strong hover:text-crt-text'
+                              }`}
+                            >
+                              <div className="min-w-0 space-y-0.5">
+                                <div
+                                  className={`text-xs truncate ${
+                                    isSelected ? 'text-crt-phosphor font-semibold' : 'text-crt-text font-medium'
+                                  }`}
+                                >
+                                  {info.displayName}
+                                </div>
+                                <div className="text-[11px] font-mono text-crt-muted truncate">
+                                  {info.slug}
+                                </div>
+                              </div>
+
+                              <span
+                                aria-hidden="true"
+                                className={`h-4 w-4 shrink-0 rounded-sm border flex items-center justify-center transition-colors ${
+                                  isSelected
+                                    ? 'border-crt-phosphor bg-crt-phosphor text-crt-bg'
+                                    : 'border-crt-border bg-crt-surface'
+                                }`}
+                              >
+                                {isSelected && <Check className="h-3 w-3" />}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
-        <div className="space-y-1.5 pt-2 border-t border-crt-border">
-          <label className="block text-xs font-medium text-crt-text">
-            Active Console Filter String (comma-separated slugs, empty = all systems)
-          </label>
-          <input
-            type="text"
-            value={systemFilter}
-            disabled={filterLockedByEnv}
-            onChange={(e) => setSystemFilter(e.target.value)}
-            placeholder="All systems (unfiltered)"
-            className="w-full px-3 py-2 text-xs font-mono bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
-          />
+        {/* Collapsible Advanced Raw Filter String */}
+        <div className="border-t border-crt-border pt-3 space-y-2.5">
+          <button
+            type="button"
+            aria-expanded={showAdvancedSystemFilter}
+            onClick={() => setShowAdvancedSystemFilter((v) => !v)}
+            className="w-full flex items-center justify-between gap-3 text-left text-xs text-crt-muted hover:text-crt-text transition-colors"
+          >
+            <span className="font-medium">Advanced: Raw Filter String</span>
+            <span className="inline-flex items-center gap-2 font-mono text-[11px] tabular-nums shrink-0">
+              <span>
+                {selectedSystems.size > 0
+                  ? `${selectedSystems.size} slug(s) active`
+                  : 'All systems (unfiltered)'}
+              </span>
+              {showAdvancedSystemFilter ? (
+                <ChevronUp className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronDown className="h-3.5 w-3.5" />
+              )}
+            </span>
+          </button>
+
+          {showAdvancedSystemFilter && (
+            <div className="space-y-1.5 pt-1">
+              <label className="block text-[11px] font-mono text-crt-muted">
+                Comma-separated system slugs (empty = mirror all valid systems)
+              </label>
+              <input
+                type="text"
+                value={systemFilter}
+                disabled={filterLockedByEnv}
+                onChange={(e) => setSystemFilter(e.target.value)}
+                placeholder="All systems (unfiltered)"
+                className="w-full px-3 py-2 text-xs font-mono bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
+              />
+            </div>
+          )}
         </div>
       </section>
 
