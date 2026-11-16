@@ -26,6 +26,7 @@ export interface ScraperConfigPublic {
   requestTimeoutMs: number;
   userAgent: string;
   systemFilter: string;
+  allowedReleaseTypes: string[];
   discoveredSystems: string[];
   lastWatermarkAt: string | null;
   romNamingTemplate: string;

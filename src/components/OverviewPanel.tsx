@@ -12,6 +12,10 @@ import {
   Trash2,
   XCircle,
 } from 'lucide-react';
+import {
+  formatAllowedReleaseTypesSummary,
+  normalizeAllowedReleaseTypes,
+} from '../shared/releaseTypeFilter';
 import type {
   ActivityLogRecord,
   LogLevel,
@@ -101,6 +105,19 @@ export function OverviewPanel({
   }, [status.activeTransfer]);
 
   const activeWatermark = status.lastWatermarkAt ?? config.lastWatermarkAt;
+
+  const activeReleaseTypesSummary = useMemo(() => {
+    const normalized = normalizeAllowedReleaseTypes(config.allowedReleaseTypes);
+    if (normalized.length === 0) return null;
+    return formatAllowedReleaseTypesSummary(normalized);
+  }, [config.allowedReleaseTypes]);
+
+  const activeSystemScopeCount = useMemo(() => {
+    return config.systemFilter
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean).length;
+  }, [config.systemFilter]);
 
   const resolvedCutoffPreviewIso = useMemo(() => {
     if (!cutoffLocalInput.trim()) return null;
@@ -258,6 +275,33 @@ export function OverviewPanel({
             <h1 className="font-display text-xl font-semibold tracking-tight text-crt-text truncate">
               {status.currentPhase}
             </h1>
+            {(activeReleaseTypesSummary || activeSystemScopeCount > 0) && (
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-mono text-crt-muted">
+                {activeReleaseTypesSummary && (
+                  <span>
+                    Type Filter:{' '}
+                    <span className="text-crt-amber">{activeReleaseTypesSummary}</span>
+                  </span>
+                )}
+                {activeReleaseTypesSummary && activeSystemScopeCount > 0 && (
+                  <span aria-hidden="true">·</span>
+                )}
+                {activeSystemScopeCount > 0 && (
+                  <span>
+                    Consoles:{' '}
+                    <span className="text-crt-text tabular-nums">{activeSystemScopeCount} selected</span>
+                  </span>
+                )}
+                <span aria-hidden="true">·</span>
+                <button
+                  type="button"
+                  onClick={onNavigateToOperations}
+                  className="text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Edit Filters
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Reserved fixed-height slot so dynamic progress bar never shifts layout below */}

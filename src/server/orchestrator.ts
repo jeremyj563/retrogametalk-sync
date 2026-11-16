@@ -37,6 +37,13 @@ import {
 import { AdaptiveRateLimiter } from './rateLimiter.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import {
+  classifyFileRoleToTypeKeys,
+  classifyReleaseTagsToTypeKeys,
+  evaluateReleaseTypeMatch,
+  formatAllowedReleaseTypesSummary,
+  normalizeAllowedReleaseTypes,
+} from '../shared/releaseTypeFilter.ts';
+import {
   type DiscoveredRelease,
   type LoggerFn,
   RetroGameTalkClient,
@@ -1807,9 +1814,20 @@ export class ScraperOrchestrator extends EventEmitter {
     let newFound = 0;
     let downloadedCount = 0;
     let skippedCount = 0;
+    let skippedByTypeCount = 0;
     let failedCount = 0;
     let bytesDownloaded = 0;
     let newestReleaseIso: string | null = null;
+    const allowedReleaseTypes = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes);
+    const hasReleaseTypeFilter = allowedReleaseTypes.length > 0;
+
+    const inferSystemFromUrl = (rawUrl: string): string => {
+      try {
+        return resolveMirroredPaths(cfg.baseUrl, rawUrl, cfg.downloadDir, 'probe.zip').systemName;
+      } catch {
+        return '';
+      }
+    };
 
     const recordObservedTimestamp = (raw: string | null | undefined) => {
       if (!raw) return;
@@ -1880,6 +1898,14 @@ export class ScraperOrchestrator extends EventEmitter {
         runLogger('info', 'Full Sync mode active: uncapped mirror of every release in target scope');
       }
 
+      if (hasReleaseTypeFilter) {
+        runLogger(
+          'info',
+          `Release Type Filter active: ${formatAllowedReleaseTypesSummary(allowedReleaseTypes)}`,
+          'Releases and archives outside the enabled categories will be skipped before download link resolution',
+        );
+      }
+
       const visitedPages = new Set<string>();
       const visitedReleasePages = new Set<string>();
       const processedFileUrls = new Set<string>();
@@ -1930,8 +1956,70 @@ export class ScraperOrchestrator extends EventEmitter {
           recordObservedTimestamp(rel.publishedAt);
         }
 
-        if (isDryRun) {
+        // Reconcile releaseTags using all discovered files on the page + WP taxonomy metadata
+        let effectiveMeta = preloadedMeta;
+        if (effectiveMeta) {
+          const fileRoles = uniqueReleases.map((r) =>
+            classifyFileRole(r.filename, r.displayLabel || r.filename, {
+              genres: effectiveMeta!.genres,
+              languages: effectiveMeta!.languages,
+              sources: effectiveMeta!.sources,
+              title: effectiveMeta!.title,
+              systemName,
+            }),
+          );
+          effectiveMeta = {
+            ...effectiveMeta,
+            releaseTags: deriveReleaseTags(
+              {
+                genres: effectiveMeta.genres,
+                languages: effectiveMeta.languages,
+                sources: effectiveMeta.sources,
+                systemName: effectiveMeta.consoleName || systemName,
+              },
+              fileRoles,
+            ),
+          };
+        }
+
+        // Evaluate per-file release type allowlist before creating catalog rows or downloading archives
+        const eligibleReleases: DiscoveredRelease[] = [];
+        if (hasReleaseTypeFilter) {
+          const baseMetaTags = effectiveMeta?.releaseTags || [];
           for (const rel of uniqueReleases) {
+            const role = classifyFileRole(rel.filename, rel.displayLabel || rel.filename, {
+              genres: effectiveMeta?.genres,
+              languages: effectiveMeta?.languages,
+              sources: effectiveMeta?.sources,
+              title: effectiveMeta?.title || rel.title,
+              systemName,
+            });
+            const fileTypeKeys = classifyFileRoleToTypeKeys(role, baseMetaTags, systemName);
+            const match = evaluateReleaseTypeMatch(fileTypeKeys, allowedReleaseTypes);
+            if (!match.allowed) {
+              processedFileUrls.add(rel.remoteUrl);
+              newFound += 1;
+              skippedCount += 1;
+              skippedByTypeCount += 1;
+              runLogger(
+                'info',
+                `${isDryRun ? `[Dry Run · ${dryRunScopeTag}] ` : ''}[Type Filter] Skipped ${rel.filename}`,
+                `Detected type: ${match.detectedLabels.join(', ')} (excluded by policy)`,
+              );
+              persistCounters();
+            } else {
+              eligibleReleases.push(rel);
+            }
+          }
+          if (eligibleReleases.length === 0) {
+            return;
+          }
+        } else {
+          eligibleReleases.push(...uniqueReleases);
+        }
+
+        if (isDryRun) {
+          for (const rel of eligibleReleases) {
             if (signal.aborted) break;
             processedFileUrls.add(rel.remoteUrl);
             newFound += 1;
@@ -1960,39 +2048,13 @@ export class ScraperOrchestrator extends EventEmitter {
           return;
         }
 
-        // Reconcile releaseTags using all discovered files on the page + WP taxonomy metadata
-        let effectiveMeta = preloadedMeta;
-        if (effectiveMeta) {
-          const fileRoles = uniqueReleases.map((r) =>
-            classifyFileRole(r.filename, r.displayLabel || r.filename, {
-              genres: effectiveMeta!.genres,
-              languages: effectiveMeta!.languages,
-              sources: effectiveMeta!.sources,
-              title: effectiveMeta!.title,
-              systemName,
-            }),
-          );
-          effectiveMeta = {
-            ...effectiveMeta,
-            releaseTags: deriveReleaseTags(
-              {
-                genres: effectiveMeta.genres,
-                languages: effectiveMeta.languages,
-                sources: effectiveMeta.sources,
-                systemName: effectiveMeta.consoleName || systemName,
-              },
-              fileRoles,
-            ),
-          };
-        }
-
         let parent = upsertCatalogRelease({
           remoteUrl: canonicalPageUrl,
           remotePath: releaseRemoteDir,
           localPath: releaseLocalDir,
           systemName,
           title: effectiveMeta?.title || sampleRel.title || path.basename(releaseRemoteDir),
-          publishedAt: effectiveMeta?.publishedAt ?? uniqueReleases.find((r) => r.publishedAt)?.publishedAt ?? null,
+          publishedAt: effectiveMeta?.publishedAt ?? eligibleReleases.find((r) => r.publishedAt)?.publishedAt ?? null,
           remoteUpdatedAt: effectiveMeta?.remoteUpdatedAt ?? null,
           status: 'downloading',
           lastRunId: run.id,
@@ -2024,8 +2086,8 @@ export class ScraperOrchestrator extends EventEmitter {
           }
         }
 
-        // Stream or deduplicate all archive files belonging to this release page
-        for (const rel of uniqueReleases) {
+        // Stream or deduplicate all allowed archive files belonging to this release page
+        for (const rel of eligibleReleases) {
           if (signal.aborted) break;
           processedFileUrls.add(rel.remoteUrl);
           newFound += 1;
@@ -2079,7 +2141,22 @@ export class ScraperOrchestrator extends EventEmitter {
                 );
 
           // In delta fallback mode, verify RGT creation/modification timestamp BEFORE resolving download nonces
-          const prelimMeta = this.client.extractReleaseMetadata(relPage.html, relPage.finalUrl, wpData, []);
+          const inferredSys = inferSystemFromUrl(relPage.finalUrl);
+          const prelimHintRoles = (wpData?.downloadHints || []).map((h) =>
+            classifyFileRole(h.filename, '', {
+              genres: wpData?.genres,
+              languages: wpData?.languages,
+              sources: wpData?.sources,
+              title: wpData?.title || undefined,
+              systemName: inferredSys,
+            }),
+          );
+          const prelimMeta = this.client.extractReleaseMetadata(
+            relPage.html,
+            relPage.finalUrl,
+            wpData,
+            prelimHintRoles,
+          );
           if (enforceCutoffMs !== null && enforceCutoffMs !== undefined) {
             const pubMs = prelimMeta.publishedAt ? Date.parse(prelimMeta.publishedAt) : NaN;
             const updMs = prelimMeta.remoteUpdatedAt ? Date.parse(prelimMeta.remoteUpdatedAt) : NaN;
@@ -2090,6 +2167,29 @@ export class ScraperOrchestrator extends EventEmitter {
             if (!Number.isFinite(latestMs) || latestMs <= enforceCutoffMs) {
               persistCounters();
               return { newerThanCutoff: false };
+            }
+          }
+
+          // Pre-nonce Release Type Allowlist gate: skip disallowed releases before resolving download links
+          if (hasReleaseTypeFilter) {
+            const prelimTypeKeys = classifyReleaseTagsToTypeKeys(
+              prelimMeta.releaseTags || [],
+              prelimMeta.consoleName || inferredSys,
+            );
+            const match = evaluateReleaseTypeMatch(prelimTypeKeys, allowedReleaseTypes);
+            if (!match.allowed) {
+              recordObservedTimestamp(prelimMeta.publishedAt);
+              recordObservedTimestamp(prelimMeta.remoteUpdatedAt);
+              newFound += 1;
+              skippedCount += 1;
+              skippedByTypeCount += 1;
+              runLogger(
+                'info',
+                `${isDryRun ? `[Dry Run · ${dryRunScopeTag}] ` : ''}[Type Filter] Skipped ${prelimMeta.title || canonicalRelUrl}`,
+                `Detected type: ${match.detectedLabels.join(', ')} (excluded before resolving download links)`,
+              );
+              persistCounters();
+              return { newerThanCutoff: true };
             }
           }
 
@@ -2390,6 +2490,42 @@ export class ScraperOrchestrator extends EventEmitter {
             },
           });
 
+          const shouldSkipWpPostBeforeHtml = (post: WpPostMetadata): boolean => {
+            if (!hasReleaseTypeFilter) return false;
+            const hintRoles = (post.downloadHints || []).map((h) =>
+              classifyFileRole(h.filename, '', {
+                genres: post.genres,
+                languages: post.languages,
+                sources: post.sources,
+                title: post.title || undefined,
+                systemName: systemSlug,
+              }),
+            );
+            const wpTags = deriveReleaseTags(
+              {
+                genres: post.genres,
+                languages: post.languages,
+                sources: post.sources,
+                systemName: systemSlug,
+              },
+              hintRoles,
+            );
+            const wpTypeKeys = classifyReleaseTagsToTypeKeys(wpTags, systemSlug);
+            const match = evaluateReleaseTypeMatch(wpTypeKeys, allowedReleaseTypes);
+            if (!match.allowed) {
+              newFound += 1;
+              skippedCount += 1;
+              skippedByTypeCount += 1;
+              runLogger(
+                'info',
+                `${isDryRun ? `[Dry Run · ${dryRunScopeTag}] ` : ''}[Type Filter] Skipped ${post.title || post.link || `#${post.wpPostId}`}`,
+                `Detected type: ${match.detectedLabels.join(', ')} (excluded before fetching release page)`,
+              );
+              return true;
+            }
+            return false;
+          };
+
           if (wpRes.supported) {
             if (isDeltaMode) {
               if (wpRes.posts.length > 0) {
@@ -2404,6 +2540,10 @@ export class ScraperOrchestrator extends EventEmitter {
                 if (!post.link) continue;
                 recordObservedTimestamp(post.dateGmt);
                 recordObservedTimestamp(post.modifiedGmt);
+                if (shouldSkipWpPostBeforeHtml(post)) {
+                  persistCounters();
+                  continue;
+                }
                 this.currentPhase = `${isDryRun ? 'Dry Run (Incremental)' : 'Incremental'} · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
                 this.emitStatus();
                 await inspectAndProcessReleasePage(post.link, post, cutoffMs);
@@ -2421,6 +2561,10 @@ export class ScraperOrchestrator extends EventEmitter {
                 if (!post.link) continue;
                 recordObservedTimestamp(post.dateGmt);
                 recordObservedTimestamp(post.modifiedGmt);
+                if (shouldSkipWpPostBeforeHtml(post)) {
+                  persistCounters();
+                  continue;
+                }
                 this.currentPhase = `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
                 this.emitStatus();
                 await inspectAndProcessReleasePage(post.link, post, null);
@@ -2441,7 +2585,7 @@ export class ScraperOrchestrator extends EventEmitter {
             const sysWouldDownload = Math.max(0, sysDiscovered - sysSkipped);
             runLogger(
               'info',
-              `[Dry Run · ${dryRunScopeTag}] ${systemSlug} summary: ${sysWouldDownload} would download, ${sysSkipped} already on disk`,
+              `[Dry Run · ${dryRunScopeTag}] ${systemSlug} summary: ${sysWouldDownload} would download, ${sysSkipped} skipped (on disk or filtered)`,
             );
           }
 
@@ -2483,16 +2627,17 @@ export class ScraperOrchestrator extends EventEmitter {
         avgDelayMs: rl.currentDelayMs,
       });
 
+      const typeSkipDetail = skippedByTypeCount > 0 ? ` (${skippedByTypeCount} filtered by type)` : '';
       if (isDryRun) {
         const wouldDownloadTotal = Math.max(0, newFound - skippedCount);
         runLogger(
           'info',
-          `Run #${run.id} ${finalStatus} (Dry Run · ${dryRunScopeTag}): ${newFound} discovered, ${wouldDownloadTotal} would download, ${skippedCount} already on disk`,
+          `Run #${run.id} ${finalStatus} (Dry Run · ${dryRunScopeTag}): ${newFound} discovered, ${wouldDownloadTotal} would download, ${skippedCount} skipped${typeSkipDetail}`,
         );
       } else {
         runLogger(
           'info',
-          `Run #${run.id} ${finalStatus}: ${downloadedCount} downloaded, ${skippedCount} skipped, ${failedCount} failed`,
+          `Run #${run.id} ${finalStatus}: ${downloadedCount} downloaded, ${skippedCount} skipped${typeSkipDetail}, ${failedCount} failed`,
         );
       }
     } catch (err) {

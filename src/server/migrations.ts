@@ -311,6 +311,18 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `).run();
     },
   },
+  {
+    version: 9,
+    name: 'add_release_type_filter_to_scraper_config',
+    description: 'Add allowed_release_types_json column to scraper_config for global release type allowlist sync filtering',
+    up: (db) => {
+      if (!tableHasColumn(db, 'scraper_config', 'allowed_release_types_json')) {
+        db.prepare(
+          `ALTER TABLE scraper_config ADD COLUMN allowed_release_types_json TEXT NOT NULL DEFAULT '[]'`,
+        ).run();
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

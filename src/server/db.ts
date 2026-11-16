@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { LATEST_SCHEMA_VERSION, runDatabaseMigrations } from './migrations.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import { normalizeCatalogSort } from '../shared/catalogSort.ts';
+import { normalizeAllowedReleaseTypes } from '../shared/releaseTypeFilter.ts';
 import type {
   ActivityLogRecord,
   CatalogFacetCounts,
@@ -160,14 +161,15 @@ export function initDb(): Database.Database {
   const now = new Date().toISOString();
   const existing = db.prepare('SELECT id FROM scraper_config WHERE id = 1').get() as { id: number } | undefined;
   if (!existing) {
+    const envTypes = normalizeAllowedReleaseTypes(process.env.SCRAPER_RELEASE_TYPE_FILTER || '');
     db.prepare(`
       INSERT INTO scraper_config (
         id, base_url, login_url, username, password_enc, download_dir,
         cron_schedule, schedule_enabled, base_delay_ms, min_delay_ms, max_delay_ms,
         backoff_multiplier, max_retries, max_concurrency, request_timeout_ms,
-        user_agent, system_filter, last_watermark_at, updated_at
+        user_agent, system_filter, allowed_release_types_json, last_watermark_at, updated_at
       ) VALUES (
-        1, ?, ?, ?, ?, ?, ?, 0, 1500, 750, 60000, 2.0, 5, 1, 30000, ?, ?, NULL, ?
+        1, ?, ?, ?, ?, ?, ?, 0, 1500, 750, 60000, 2.0, 5, 1, 30000, ?, ?, ?, NULL, ?
       )
     `).run(
       process.env.RGT_BASE_URL || 'https://retrogametalk.com/repo/',
@@ -178,6 +180,7 @@ export function initDb(): Database.Database {
       process.env.CRON_SCHEDULE || '0 */6 * * *',
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
       process.env.SCRAPER_SYSTEM_FILTER || '',
+      JSON.stringify(envTypes),
       now,
     );
   }
@@ -375,6 +378,19 @@ export function getInternalConfig(): ScraperConfigInternal {
     deviceFolderMap = {};
   }
 
+  let allowedReleaseTypes: string[] = [];
+  if (process.env.SCRAPER_RELEASE_TYPE_FILTER !== undefined && process.env.SCRAPER_RELEASE_TYPE_FILTER !== '') {
+    allowedReleaseTypes = normalizeAllowedReleaseTypes(process.env.SCRAPER_RELEASE_TYPE_FILTER);
+    envOverrides.push('SCRAPER_RELEASE_TYPE_FILTER');
+  } else {
+    try {
+      const parsedTypes = JSON.parse(String(row.allowed_release_types_json || '[]'));
+      allowedReleaseTypes = normalizeAllowedReleaseTypes(parsedTypes);
+    } catch {
+      allowedReleaseTypes = [];
+    }
+  }
+
   return {
     baseUrl,
     loginUrl,
@@ -394,6 +410,7 @@ export function getInternalConfig(): ScraperConfigInternal {
     requestTimeoutMs,
     userAgent,
     systemFilter,
+    allowedReleaseTypes,
     discoveredSystems,
     lastWatermarkAt: row.last_watermark_at ? String(row.last_watermark_at) : null,
     romNamingTemplate: String(row.rom_naming_template || '{title}{regionParen}{tagBracket}'),
@@ -550,6 +567,13 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     nextDeviceFolderMapJson = JSON.stringify(cleanMap);
   }
 
+  let nextAllowedReleaseTypesJson = String(current.allowed_release_types_json || '[]');
+  if (input.allowedReleaseTypes !== undefined) {
+    nextAllowedReleaseTypesJson = JSON.stringify(
+      normalizeAllowedReleaseTypes(input.allowedReleaseTypes),
+    );
+  }
+
   getDb().prepare(`
     UPDATE scraper_config SET
       base_url = ?,
@@ -568,6 +592,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       request_timeout_ms = ?,
       user_agent = ?,
       system_filter = ?,
+      allowed_release_types_json = ?,
       last_watermark_at = ?,
       rom_naming_template = ?,
       rom_sanitize_fat32 = ?,
@@ -594,6 +619,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     Math.max(5000, Math.min(180000, Number(input.requestTimeoutMs ?? current.request_timeout_ms))),
     (input.userAgent ?? String(current.user_agent)).trim(),
     (input.systemFilter ?? String(current.system_filter)).trim(),
+    nextAllowedReleaseTypesJson,
     nextWatermarkAt,
     nextRomNamingTemplate,
     nextRomSanitizeFat32,
