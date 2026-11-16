@@ -27,6 +27,8 @@ import type {
   ActiveTransferState,
   LogLevel,
   NavSection,
+  OperationsFocusRequest,
+  OperationsSectionTarget,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
   SyncRunRecord,
@@ -58,6 +60,8 @@ function loadInitialDryRunEnabled(): boolean {
 
 export default function App() {
   const [section, setSection] = useState<NavSection>('monitor');
+  const [operationsFocus, setOperationsFocus] = useState<OperationsFocusRequest | null>(null);
+  const operationsFocusNonceRef = useRef(0);
   const [status, setStatus] = useState<ServiceStatusSnapshot | null>(null);
   const [config, setConfig] = useState<ScraperConfigPublic | null>(null);
   const [runs, setRuns] = useState<SyncRunRecord[]>([]);
@@ -469,6 +473,7 @@ export default function App() {
           href="#monitor"
           onClick={(e) => {
             e.preventDefault();
+            setOperationsFocus(null);
             setSection('monitor');
           }}
           className="font-display text-lg font-bold tracking-tight text-crt-phosphor whitespace-nowrap shrink-0"
@@ -678,7 +683,10 @@ export default function App() {
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => setSection(item.id)}
+                    onClick={() => {
+                      setOperationsFocus(null);
+                      setSection(item.id);
+                    }}
                     className={`flex items-center gap-2.5 px-3 py-2 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
                       active
                         ? 'bg-crt-elevated border-crt-border-strong text-crt-phosphor'
@@ -819,7 +827,18 @@ export default function App() {
                   onSaveConfig={handleSaveConfig}
                   onClearLogs={handleClearLogs}
                   onClearRuns={handleClearRuns}
-                  onNavigateToOperations={() => setSection('operations')}
+                  onNavigateToOperations={(target?: OperationsSectionTarget) => {
+                    if (target) {
+                      operationsFocusNonceRef.current += 1;
+                      setOperationsFocus({
+                        target,
+                        nonce: operationsFocusNonceRef.current,
+                      });
+                    } else {
+                      setOperationsFocus(null);
+                    }
+                    setSection('operations');
+                  }}
                   onRetryItem={handleRetryItem}
                   onRetryAllFailed={handleRetryAllFailed}
                   onRefreshStatus={loadInitialData}
@@ -847,6 +866,7 @@ export default function App() {
                 <OperationsPanel
                   config={config}
                   status={status}
+                  focusRequest={operationsFocus}
                   onSaveConfig={handleSaveConfig}
                   onRefreshConfig={loadInitialData}
                 />

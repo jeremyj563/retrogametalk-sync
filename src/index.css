@@ -236,3 +236,43 @@
   }
 }
 
+@keyframes crt-section-spotlight-fade {
+  0% {
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  42% {
+    opacity: 0.92;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes crt-section-spotlight-reduced {
+  0%,
+  70% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.crt-section-spotlight {
+  border: 1.5px solid var(--color-crt-phosphor);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--color-crt-phosphor) 45%, transparent),
+    0 0 26px -2px color-mix(in srgb, var(--color-crt-phosphor) 45%, transparent),
+    inset 0 0 18px -6px color-mix(in srgb, var(--color-crt-phosphor) 22%, transparent);
+  animation: crt-section-spotlight-fade 2.2s cubic-bezier(0.16, 1, 0.3, 1) 180ms both;
+  will-change: opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crt-section-spotlight {
+    animation: crt-section-spotlight-reduced 1.6s ease-out 0ms both;
+  }
+}

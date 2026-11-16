@@ -1,5 +1,11 @@
 export type { CatalogSortOption } from './shared/catalogSort';
 export type NavSection = 'monitor' | 'catalog' | 'schedule' | 'operations';
+export type OperationsSectionTarget = 'auth' | 'systems' | 'releaseTypes';
+
+export interface OperationsFocusRequest {
+  target: OperationsSectionTarget;
+  nonce: number;
+}
 export type SyncScope = 'incremental' | 'full';
 export type RunMode = SyncScope | 'dry_run';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'failed';
