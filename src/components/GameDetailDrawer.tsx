@@ -387,7 +387,7 @@ export function GameDetailDrawer({
     item.releaseTags.length > 0 ? item.releaseTags.join(' · ') : item.releaseType,
   ].filter(Boolean);
 
-  const itemTransfer = resolveItemTransferProgress(item.status, item.id, activeTransfer);
+  const itemTransfer = resolveItemTransferProgress(item.status, item.id, activeTransfer, item.files);
 
   return (
     <>
@@ -424,8 +424,12 @@ export function GameDetailDrawer({
                 {item.status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
                 {item.status === 'partial' && <AlertCircle className="h-3.5 w-3.5" />}
                 {itemTransfer.active && <Download className="h-3.5 w-3.5" />}
-                {itemTransfer.active && itemTransfer.percent !== null
-                  ? `downloading · ${itemTransfer.percent}%`
+                {itemTransfer.active
+                  ? itemTransfer.overall.show
+                    ? `downloading · ${itemTransfer.overall.percent}%`
+                    : itemTransfer.percent !== null
+                      ? `downloading · ${itemTransfer.percent}%`
+                      : item.status
                   : item.status}
               </span>
             </div>
@@ -446,51 +450,81 @@ export function GameDetailDrawer({
 
         {/* Live Transfer Progress Strip */}
         {itemTransfer.active && (
-          <div className="px-6 py-3 border-b border-crt-border bg-crt-bg/90 space-y-2 shrink-0">
-            <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
-              <div
-                className={`flex items-center gap-2 min-w-0 ${
-                  itemTransfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
-                }`}
-              >
-                <Download className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate text-crt-text">
-                  {itemTransfer.filename || 'Preparing release transfer…'}
-                </span>
-                {itemTransfer.fileSequenceLabel && (
-                  <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums">
-                    · {itemTransfer.fileSequenceLabel}
+          <div className="px-6 py-3 border-b border-crt-border bg-crt-bg/90 space-y-2.5 shrink-0">
+            {itemTransfer.overall.show && (
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+                  <span className="text-crt-muted">
+                    Overall Catalog Item · {itemTransfer.overall.completedFiles} of{' '}
+                    {itemTransfer.overall.totalFiles} files complete
                   </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
-                <span>{itemTransfer.bytesLabel}</span>
-                {itemTransfer.speedLabel && <span>{itemTransfer.speedLabel}</span>}
-                {itemTransfer.percent !== null && (
-                  <span className="text-crt-phosphor font-semibold">{itemTransfer.percent}%</span>
-                )}
-              </div>
-            </div>
-            <div
-              role="progressbar"
-              aria-label={`Download progress for ${item.title}`}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={itemTransfer.percent ?? undefined}
-              className="h-1.5 w-full bg-crt-surface border border-crt-border rounded-sm overflow-hidden"
-            >
-              {itemTransfer.mode === 'determinate' ? (
+                  <span className="text-crt-phosphor font-semibold tabular-nums">
+                    {itemTransfer.overall.percent}%
+                  </span>
+                </div>
                 <div
-                  className="h-full bg-crt-phosphor transition-all duration-200"
-                  style={{ width: `${itemTransfer.percent}%` }}
-                />
-              ) : (
+                  role="progressbar"
+                  aria-label={`Overall catalog item progress for ${item.title}`}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={itemTransfer.overall.percent}
+                  className="h-1.5 w-full bg-crt-surface border border-crt-border rounded-sm overflow-hidden"
+                >
+                  <div
+                    className="h-full bg-crt-phosphor/80 transition-all duration-200"
+                    style={{ width: `${itemTransfer.overall.percent}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className={itemTransfer.overall.show ? 'pt-2 border-t border-crt-border/70 space-y-1.5' : 'space-y-2'}>
+              <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
                 <div
-                  className={`h-full crt-progress-indeterminate ${
-                    itemTransfer.mode === 'preparing' ? 'bg-crt-amber' : 'bg-crt-phosphor'
+                  className={`flex items-center gap-2 min-w-0 ${
+                    itemTransfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
                   }`}
-                />
-              )}
+                >
+                  <Download className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate text-crt-text">
+                    {itemTransfer.overall.show ? 'Current File: ' : ''}
+                    {itemTransfer.filename || 'Preparing release transfer…'}
+                  </span>
+                  {itemTransfer.fileSequenceLabel && (
+                    <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums">
+                      · {itemTransfer.fileSequenceLabel}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+                  <span>{itemTransfer.bytesLabel}</span>
+                  {itemTransfer.speedLabel && <span>{itemTransfer.speedLabel}</span>}
+                  {itemTransfer.percent !== null && (
+                    <span className="text-crt-phosphor font-semibold">{itemTransfer.percent}%</span>
+                  )}
+                </div>
+              </div>
+              <div
+                role="progressbar"
+                aria-label={`Current file download progress for ${item.title}`}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={itemTransfer.percent ?? undefined}
+                className="h-1.5 w-full bg-crt-surface border border-crt-border rounded-sm overflow-hidden"
+              >
+                {itemTransfer.mode === 'determinate' ? (
+                  <div
+                    className="h-full bg-crt-phosphor transition-all duration-200"
+                    style={{ width: `${itemTransfer.percent}%` }}
+                  />
+                ) : (
+                  <div
+                    className={`h-full crt-progress-indeterminate ${
+                      itemTransfer.mode === 'preparing' ? 'bg-crt-amber' : 'bg-crt-phosphor'
+                    }`}
+                  />
+                )}
+              </div>
             </div>
           </div>
         )}

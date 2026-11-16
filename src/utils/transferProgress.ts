@@ -3,6 +3,13 @@ import { formatBytes } from './format';
 
 export type TransferProgressMode = 'idle' | 'preparing' | 'determinate' | 'indeterminate';
 
+export interface OverallItemProgress {
+  show: boolean;
+  completedFiles: number;
+  totalFiles: number;
+  percent: number;
+}
+
 export interface ResolvedTransferProgress {
   active: boolean;
   mode: TransferProgressMode;
@@ -14,7 +21,15 @@ export interface ResolvedTransferProgress {
   speedLabel: string;
   filename: string;
   fileSequenceLabel: string | null;
+  overall: OverallItemProgress;
 }
+
+const DEFAULT_OVERALL: OverallItemProgress = {
+  show: false,
+  completedFiles: 0,
+  totalFiles: 1,
+  percent: 0,
+};
 
 const IDLE_PROGRESS: ResolvedTransferProgress = {
   active: false,
@@ -27,20 +42,65 @@ const IDLE_PROGRESS: ResolvedTransferProgress = {
   speedLabel: '',
   filename: '',
   fileSequenceLabel: null,
+  overall: DEFAULT_OVERALL,
 };
+
+function resolveOverallProgress(
+  transfer: ActiveTransferState | null,
+  fileMode: TransferProgressMode,
+  bytesReceived: number,
+  totalBytes: number | null,
+  itemFiles?: readonly Pick<ReleaseFileRecord, 'id' | 'status'>[],
+): OverallItemProgress {
+  const dbTotal = itemFiles?.length ?? 0;
+  const totalFiles = Math.max(transfer?.totalFiles ?? 0, dbTotal, 1);
+
+  if (totalFiles <= 1) {
+    return DEFAULT_OVERALL;
+  }
+
+  const dbCompleted = itemFiles
+    ? itemFiles.filter(
+        (f) =>
+          (!transfer || transfer.fileId == null || f.id !== transfer.fileId) &&
+          (f.status === 'downloaded' || f.status === 'skipped'),
+      ).length
+    : 0;
+
+  const completedFiles = Math.min(
+    totalFiles,
+    Math.max(0, transfer?.completedFiles ?? dbCompleted),
+  );
+
+  const currentFraction =
+    fileMode === 'determinate' && totalBytes !== null && totalBytes > 0
+      ? Math.min(1, Math.max(0, bytesReceived / totalBytes))
+      : 0;
+
+  const percent = Math.min(100, Math.round(((completedFiles + currentFraction) / totalFiles) * 100));
+
+  return {
+    show: true,
+    completedFiles,
+    totalFiles,
+    percent,
+  };
+}
 
 function buildActiveProgress(
   transfer: ActiveTransferState,
   fallbackFilename?: string,
+  itemFiles?: readonly Pick<ReleaseFileRecord, 'id' | 'status'>[],
 ): ResolvedTransferProgress {
   const bytesReceived = Math.max(0, transfer.bytesReceived || 0);
   const totalBytes =
     transfer.totalBytes !== null && transfer.totalBytes > 0 ? transfer.totalBytes : null;
   const bytesPerSec = Math.max(0, transfer.bytesPerSec || 0);
   const filename = transfer.filename || fallbackFilename || '';
+  const totalFilesCount = Math.max(transfer.totalFiles ?? 0, itemFiles?.length ?? 0);
   const fileSequenceLabel =
-    transfer.totalFiles && transfer.totalFiles > 1 && transfer.fileIndex
-      ? `File ${transfer.fileIndex}/${transfer.totalFiles}`
+    totalFilesCount > 1 && transfer.fileIndex
+      ? `File ${transfer.fileIndex}/${totalFilesCount}`
       : null;
 
   if (totalBytes !== null) {
@@ -56,6 +116,7 @@ function buildActiveProgress(
       speedLabel: bytesPerSec > 0 ? `${formatBytes(bytesPerSec)}/s` : 'Starting…',
       filename,
       fileSequenceLabel,
+      overall: resolveOverallProgress(transfer, 'determinate', bytesReceived, totalBytes, itemFiles),
     };
   }
 
@@ -71,6 +132,7 @@ function buildActiveProgress(
       speedLabel: bytesPerSec > 0 ? `${formatBytes(bytesPerSec)}/s` : '',
       filename,
       fileSequenceLabel,
+      overall: resolveOverallProgress(transfer, 'indeterminate', bytesReceived, null, itemFiles),
     };
   }
 
@@ -85,10 +147,14 @@ function buildActiveProgress(
     speedLabel: '',
     filename,
     fileSequenceLabel,
+    overall: resolveOverallProgress(transfer, 'preparing', 0, null, itemFiles),
   };
 }
 
-function buildPreparingProgress(filename = ''): ResolvedTransferProgress {
+function buildPreparingProgress(
+  filename = '',
+  itemFiles?: readonly Pick<ReleaseFileRecord, 'id' | 'status'>[],
+): ResolvedTransferProgress {
   return {
     active: true,
     mode: 'preparing',
@@ -100,6 +166,7 @@ function buildPreparingProgress(filename = ''): ResolvedTransferProgress {
     speedLabel: '',
     filename,
     fileSequenceLabel: null,
+    overall: resolveOverallProgress(null, 'preparing', 0, null, itemFiles),
   };
 }
 
@@ -107,12 +174,13 @@ export function resolveItemTransferProgress(
   itemStatus: string,
   itemId: number,
   activeTransfer: ActiveTransferState | null,
+  itemFiles?: readonly Pick<ReleaseFileRecord, 'id' | 'status'>[],
 ): ResolvedTransferProgress {
   if (activeTransfer && activeTransfer.itemId === itemId) {
-    return buildActiveProgress(activeTransfer);
+    return buildActiveProgress(activeTransfer, undefined, itemFiles);
   }
   if (itemStatus === 'downloading') {
-    return buildPreparingProgress();
+    return buildPreparingProgress('', itemFiles);
   }
   return IDLE_PROGRESS;
 }

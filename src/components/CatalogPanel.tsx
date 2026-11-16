@@ -1567,7 +1567,12 @@ export function CatalogPanel({
                       .join(' · ');
                     const tagsDisplay =
                       item.releaseTags.length > 0 ? item.releaseTags.join(' · ') : item.releaseType;
-                    const transfer = resolveItemTransferProgress(item.status, item.id, status.activeTransfer);
+                    const transfer = resolveItemTransferProgress(
+                      item.status,
+                      item.id,
+                      status.activeTransfer,
+                      item.files,
+                    );
 
                     return (
                       <tr
@@ -1642,52 +1647,83 @@ export function CatalogPanel({
                         </td>
                         <td className="px-3 py-2 font-mono whitespace-nowrap">
                           {transfer.active ? (
-                            <div className="min-w-[172px] max-w-[220px] space-y-1">
-                              <div className="flex items-center justify-between gap-2 text-[11px] tabular-nums">
-                                <span
-                                  className={`inline-flex items-center gap-1 font-medium ${
-                                    transfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
-                                  }`}
-                                >
-                                  <Download className="h-3 w-3 shrink-0" />
-                                  <span>
-                                    {transfer.mode === 'preparing'
-                                      ? 'Preparing'
-                                      : transfer.percent !== null
-                                        ? `Downloading · ${transfer.percent}%`
-                                        : 'Downloading'}
-                                  </span>
-                                </span>
-                                {transfer.speedLabel && (
-                                  <span className="text-crt-muted">{transfer.speedLabel}</span>
-                                )}
-                              </div>
-                              <div
-                                role="progressbar"
-                                aria-label={`Download progress for ${item.title}`}
-                                aria-valuemin={0}
-                                aria-valuemax={100}
-                                aria-valuenow={transfer.percent ?? undefined}
-                                className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
-                              >
-                                {transfer.mode === 'determinate' ? (
-                                  <div
-                                    className="h-full bg-crt-phosphor transition-all duration-200"
-                                    style={{ width: `${transfer.percent}%` }}
-                                  />
-                                ) : (
-                                  <div
-                                    className={`h-full crt-progress-indeterminate ${
-                                      transfer.mode === 'preparing' ? 'bg-crt-amber' : 'bg-crt-phosphor'
+                            <div className="min-w-[180px] max-w-[230px] space-y-1.5">
+                              <div className="space-y-1">
+                                <div className="flex items-center justify-between gap-2 text-[11px] tabular-nums">
+                                  <span
+                                    className={`inline-flex items-center gap-1 font-medium ${
+                                      transfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
                                     }`}
-                                  />
-                                )}
+                                    title={transfer.filename || undefined}
+                                  >
+                                    <Download className="h-3 w-3 shrink-0" />
+                                    <span>
+                                      {transfer.mode === 'preparing'
+                                        ? 'Preparing'
+                                        : transfer.fileSequenceLabel
+                                          ? transfer.percent !== null
+                                            ? `${transfer.fileSequenceLabel} · ${transfer.percent}%`
+                                            : transfer.fileSequenceLabel
+                                          : transfer.percent !== null
+                                            ? `Downloading · ${transfer.percent}%`
+                                            : 'Downloading'}
+                                    </span>
+                                  </span>
+                                  {transfer.speedLabel && (
+                                    <span className="text-crt-muted">{transfer.speedLabel}</span>
+                                  )}
+                                </div>
+                                <div
+                                  role="progressbar"
+                                  aria-label={`Current file download progress for ${item.title}`}
+                                  aria-valuemin={0}
+                                  aria-valuemax={100}
+                                  aria-valuenow={transfer.percent ?? undefined}
+                                  className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+                                >
+                                  {transfer.mode === 'determinate' ? (
+                                    <div
+                                      className="h-full bg-crt-phosphor transition-all duration-200"
+                                      style={{ width: `${transfer.percent}%` }}
+                                    />
+                                  ) : (
+                                    <div
+                                      className={`h-full crt-progress-indeterminate ${
+                                        transfer.mode === 'preparing' ? 'bg-crt-amber' : 'bg-crt-phosphor'
+                                      }`}
+                                    />
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-crt-muted tabular-nums truncate">
+                                  {transfer.bytesLabel}
+                                </div>
                               </div>
-                              <div className="text-[10px] text-crt-muted tabular-nums truncate">
-                                {transfer.fileSequenceLabel
-                                  ? `${transfer.fileSequenceLabel} · ${transfer.bytesLabel}`
-                                  : transfer.bytesLabel}
-                              </div>
+
+                              {transfer.overall.show && (
+                                <div className="pt-1 border-t border-crt-border/70 space-y-1">
+                                  <div className="flex items-center justify-between gap-2 text-[10px] tabular-nums">
+                                    <span className="text-crt-muted">
+                                      Overall · {transfer.overall.completedFiles}/{transfer.overall.totalFiles} files
+                                    </span>
+                                    <span className="text-crt-phosphor font-semibold">
+                                      {transfer.overall.percent}%
+                                    </span>
+                                  </div>
+                                  <div
+                                    role="progressbar"
+                                    aria-label={`Overall catalog item progress for ${item.title}`}
+                                    aria-valuemin={0}
+                                    aria-valuemax={100}
+                                    aria-valuenow={transfer.overall.percent}
+                                    className="h-1 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+                                  >
+                                    <div
+                                      className="h-full bg-crt-phosphor/80 transition-all duration-200"
+                                      style={{ width: `${transfer.overall.percent}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           ) : (
                             <span
@@ -1801,7 +1837,12 @@ export function CatalogPanel({
                     .join(' · ');
                   const tagsDisplay =
                     item.releaseTags.length > 0 ? item.releaseTags.join(' · ') : item.releaseType;
-                  const transfer = resolveItemTransferProgress(item.status, item.id, status.activeTransfer);
+                  const transfer = resolveItemTransferProgress(
+                    item.status,
+                    item.id,
+                    status.activeTransfer,
+                    item.files,
+                  );
 
                   return (
                     <div
@@ -1871,7 +1912,7 @@ export function CatalogPanel({
 
                             <div
                               role="progressbar"
-                              aria-label={`Download progress for ${item.title}`}
+                              aria-label={`Current file download progress for ${item.title}`}
                               aria-valuemin={0}
                               aria-valuemax={100}
                               aria-valuenow={transfer.percent ?? undefined}
@@ -1931,22 +1972,41 @@ export function CatalogPanel({
                         </div>
 
                         {transfer.active ? (
-                          <div className="pt-2 border-t border-crt-border space-y-1.5 text-[11px] font-mono tabular-nums">
-                            <div className="h-1 w-full bg-crt-surface border border-crt-border rounded-sm overflow-hidden">
-                              {transfer.mode === 'determinate' ? (
+                          transfer.overall.show ? (
+                            <div className="pt-2 border-t border-crt-border space-y-1.5 text-[11px] font-mono tabular-nums">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-crt-muted truncate">
+                                  Overall · {transfer.overall.completedFiles}/{transfer.overall.totalFiles} files
+                                </span>
+                                <span className="text-crt-phosphor font-semibold shrink-0">
+                                  {transfer.overall.percent}%
+                                </span>
+                              </div>
+                              <div
+                                role="progressbar"
+                                aria-label={`Overall catalog item progress for ${item.title}`}
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-valuenow={transfer.overall.percent}
+                                className="h-1.5 w-full bg-crt-surface border border-crt-border rounded-sm overflow-hidden"
+                              >
                                 <div
-                                  className="h-full bg-crt-phosphor transition-all duration-200"
-                                  style={{ width: `${transfer.percent}%` }}
+                                  className="h-full bg-crt-phosphor/80 transition-all duration-200"
+                                  style={{ width: `${transfer.overall.percent}%` }}
                                 />
-                              ) : (
-                                <div
-                                  className={`h-full crt-progress-indeterminate ${
-                                    transfer.mode === 'preparing' ? 'bg-crt-amber' : 'bg-crt-phosphor'
-                                  }`}
-                                />
-                              )}
+                              </div>
                             </div>
-                            <div className="flex items-center justify-between gap-2">
+                          ) : (
+                            <div className="pt-2 border-t border-crt-border flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
+                              <span className="text-crt-text truncate">
+                                {transfer.totalBytes
+                                  ? formatBytes(transfer.totalBytes)
+                                  : item.fileSizeBytes > 0
+                                    ? formatBytes(item.fileSizeBytes)
+                                    : transfer.bytesReceived > 0
+                                      ? formatBytes(transfer.bytesReceived)
+                                      : 'Pending'}
+                              </span>
                               <span
                                 className={`inline-flex items-center gap-1 shrink-0 ${
                                   transfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
@@ -1958,17 +2018,11 @@ export function CatalogPanel({
                                     ? `${transfer.percent}%`
                                     : transfer.mode === 'preparing'
                                       ? 'preparing'
-                                      : 'streaming'}
+                                      : 'downloading'}
                                 </span>
-                                {transfer.speedLabel && transfer.mode !== 'preparing' && (
-                                  <span className="text-crt-muted font-normal">· {transfer.speedLabel}</span>
-                                )}
-                              </span>
-                              <span className="text-crt-muted truncate text-[10px]">
-                                {transfer.bytesLabel}
                               </span>
                             </div>
-                          </div>
+                          )
                         ) : (
                           <div className="pt-2 border-t border-crt-border flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
                             <span className="text-crt-text truncate">

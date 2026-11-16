@@ -1385,6 +1385,9 @@ export class ScraperOrchestrator extends EventEmitter {
         continue;
       }
 
+      const latestRetryItem = getRepositoryItemById(item.id) || item;
+      const retryFoundIdx = latestRetryItem.files.findIndex((f) => f.id === targetFile.id);
+      const retryItemTotal = Math.max(latestRetryItem.files.length, filesToRetry.length, 1);
       const outcome = await this.downloadReleaseFile(
         item.id,
         release,
@@ -1392,9 +1395,12 @@ export class ScraperOrchestrator extends EventEmitter {
         runId,
         signal,
         runLogger,
-        getRepositoryItemById(item.id) || item,
+        latestRetryItem,
         targetFile.id,
-        { index: fileIdx + 1, total: filesToRetry.length },
+        {
+          index: retryFoundIdx >= 0 ? retryFoundIdx + 1 : fileIdx + 1,
+          total: retryItemTotal,
+        },
       );
       if (outcome.downloaded) downloaded += 1;
       if (outcome.skipped) skipped += 1;
@@ -2090,12 +2096,19 @@ export class ScraperOrchestrator extends EventEmitter {
         }
 
         // Stream or deduplicate all allowed archive files belonging to this release page
+        const knownParentFiles = (getRepositoryItemById(parent.id) || parent).files;
+        const releaseTotalFiles = new Set<string>([
+          ...knownParentFiles.map((f) => f.remoteUrl),
+          ...eligibleReleases.map((r) => r.remoteUrl),
+        ]).size;
+
         for (let fileIdx = 0; fileIdx < eligibleReleases.length; fileIdx += 1) {
           const rel = eligibleReleases[fileIdx]!;
           if (signal.aborted) break;
           processedFileUrls.add(rel.remoteUrl);
           newFound += 1;
 
+          const currentParent = getRepositoryItemById(parent.id) || parent;
           const outcome = await this.downloadReleaseFile(
             parent.id,
             rel,
@@ -2103,9 +2116,9 @@ export class ScraperOrchestrator extends EventEmitter {
             run.id,
             signal,
             runLogger,
-            parent,
+            currentParent,
             undefined,
-            { index: fileIdx + 1, total: eligibleReleases.length },
+            { index: fileIdx + 1, total: Math.max(releaseTotalFiles, eligibleReleases.length) },
           );
           if (outcome.downloaded) downloadedCount += 1;
           if (outcome.skipped) skippedCount += 1;
@@ -2718,12 +2731,18 @@ export class ScraperOrchestrator extends EventEmitter {
       lastRunId: runId,
     });
 
+    const completedInItem = initial.release.files.filter(
+      (f) => f.id !== initial.file.id && (f.status === 'downloaded' || f.status === 'skipped'),
+    ).length;
+    const totalInItem = Math.max(fileSequence?.total ?? 0, initial.release.files.length, 1);
+
     this.currentPhase = `Downloading ${release.systemName} / ${release.filename}`;
     this.activeTransfer = {
       itemId: releaseId,
       fileId: initial.file.id,
       fileIndex: fileSequence?.index ?? null,
-      totalFiles: fileSequence?.total ?? null,
+      totalFiles: totalInItem,
+      completedFiles: completedInItem,
       filename: release.filename,
       systemName: release.systemName,
       remoteUrl: release.remoteUrl,
