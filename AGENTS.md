@@ -1,5 +1,10 @@
 # Repository Agent Conventions
 
+## Source of Truth (`/docs` Policy)
+
+- **Codebase Is the Sole Source of Truth**: Always inspect and rely on the live source code, database migrations, and configuration—never treat files under `/docs/` as an architectural or implementation specification.
+- **Historical Changelog Only**: Everything under `/docs/` exists strictly as a point-in-time historical archive for human readers to understand how the app evolved; earlier archived plans may be superseded by later changes and are intentionally not retroactively rewritten.
+
 ## Archiving Plan Documents (`/docs/plans`)
 
 Whenever executing an approved implementation plan (or when asked to archive a reviewed plan without implementing it):
