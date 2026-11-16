@@ -831,7 +831,6 @@ export function recomputeReleaseRollup(releaseId: number): RepositoryItemRecord 
 
   let totalBytes = 0;
   let downloadedCount = 0;
-  let skippedCount = 0;
   let failedCount = 0;
   let downloadingCount = 0;
   let firstError: string | null = null;
@@ -839,8 +838,7 @@ export function recomputeReleaseRollup(releaseId: number): RepositoryItemRecord 
 
   for (const file of files) {
     if (file.fileSizeBytes > 0) totalBytes += file.fileSizeBytes;
-    if (file.status === 'downloaded') downloadedCount += 1;
-    else if (file.status === 'skipped') skippedCount += 1;
+    if (file.status === 'downloaded' || file.status === 'skipped') downloadedCount += 1;
     else if (file.status === 'failed') {
       failedCount += 1;
       if (!firstError && file.errorMessage) firstError = `${file.filename}: ${file.errorMessage}`;
@@ -856,10 +854,8 @@ export function recomputeReleaseRollup(releaseId: number): RepositoryItemRecord 
   if (files.length > 0) {
     if (downloadingCount > 0) status = 'downloading';
     else if (failedCount === files.length) status = 'failed';
-    else if (failedCount > 0 || downloadedCount + skippedCount < files.length) {
-      status = downloadedCount + skippedCount > 0 ? 'partial' : 'queued';
-    } else if (skippedCount === files.length) {
-      status = 'skipped';
+    else if (failedCount > 0 || downloadedCount < files.length) {
+      status = downloadedCount > 0 ? 'partial' : 'queued';
     } else {
       status = 'downloaded';
     }
@@ -1029,6 +1025,7 @@ export function upsertReleaseFile(input: {
   errorMessage?: string | null;
   lastRunId?: number | null;
   downloadedAt?: string | null;
+  preserveExistingDownloadedAt?: boolean;
 }): { file: ReleaseFileRecord; release: RepositoryItemRecord } {
   const now = new Date().toISOString();
   const displayLabel = input.displayLabel || input.filename;
@@ -1072,7 +1069,7 @@ export function upsertReleaseFile(input: {
           status = ?,
           error_message = ?,
           last_run_id = COALESCE(?, last_run_id),
-          downloaded_at = COALESCE(?, downloaded_at)
+          downloaded_at = ${input.preserveExistingDownloadedAt ? 'COALESCE(downloaded_at, ?)' : 'COALESCE(?, downloaded_at)'}
         WHERE id = ?
       `).run(
         input.releaseId,

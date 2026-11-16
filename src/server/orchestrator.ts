@@ -2251,6 +2251,12 @@ export class ScraperOrchestrator extends EventEmitter {
       this.activeTransfer = null;
 
       if (res.outcome === 'skipped') {
+        let existingMtimeIso: string | null = null;
+        try {
+          existingMtimeIso = fs.statSync(res.localPath).mtime.toISOString();
+        } catch {
+          existingMtimeIso = null;
+        }
         upsertReleaseFile({
           releaseId,
           remoteUrl: release.remoteUrl,
@@ -2261,11 +2267,13 @@ export class ScraperOrchestrator extends EventEmitter {
           displayLabel,
           fileRole,
           fileSizeBytes: res.bytes,
-          status: 'skipped',
+          status: 'downloaded',
           errorMessage: null,
           lastRunId: runId,
+          downloadedAt: existingMtimeIso || new Date().toISOString(),
+          preserveExistingDownloadedAt: true,
         });
-        runLogger('info', `Skipped existing file: ${res.remotePath}`);
+        runLogger('info', `Verified existing file on disk (kept as Downloaded): ${res.remotePath}`);
         this.emitCatalogUpdated('file_skipped', releaseId);
         return { downloaded: false, skipped: true, failed: false, bytes: 0 };
       }

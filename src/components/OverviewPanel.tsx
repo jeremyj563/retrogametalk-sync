@@ -372,7 +372,7 @@ export function OverviewPanel({
           </p>
           <p className="text-xs font-mono text-crt-muted tabular-nums flex flex-wrap items-center gap-x-1.5 gap-y-1">
             <span>
-              {status.totals.downloadedItems} synced · {status.totals.skippedItems} deduped
+              {status.totals.downloadedItems.toLocaleString()} downloaded
             </span>
             {status.totals.failedItems > 0 && (
               <>

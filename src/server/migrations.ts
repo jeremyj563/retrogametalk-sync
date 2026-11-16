@@ -275,6 +275,27 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `);
     },
   },
+  {
+    version: 7,
+    name: 'convert_skipped_catalog_items_to_downloaded',
+    description: 'Convert existing skipped catalog release and file statuses to downloaded while preserving per-run skipped_count history',
+    up: (db) => {
+      db.prepare(`
+        UPDATE catalog_release_files
+        SET
+          status = 'downloaded',
+          downloaded_at = COALESCE(downloaded_at, discovered_at)
+        WHERE status = 'skipped'
+      `).run();
+      db.prepare(`
+        UPDATE catalog_releases
+        SET
+          status = 'downloaded',
+          downloaded_at = COALESCE(downloaded_at, discovered_at)
+        WHERE status = 'skipped'
+      `).run();
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
