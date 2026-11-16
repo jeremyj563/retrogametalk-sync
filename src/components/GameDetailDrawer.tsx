@@ -277,16 +277,17 @@ export function GameDetailDrawer({
   ].filter(Boolean);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex justify-end bg-black/75 backdrop-blur-xs"
-      role="dialog"
-      aria-modal="true"
-      aria-label={item.title}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="relative w-full max-w-3xl h-full bg-crt-surface border-l border-crt-border-strong flex flex-col shadow-2xl">
+    <>
+      <div
+        className="fixed inset-0 z-50 flex justify-end bg-black/75 backdrop-blur-xs"
+        role="dialog"
+        aria-modal="true"
+        aria-label={item.title}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onClose();
+        }}
+      >
+        <div className="crt-canvas crt-drawer-panel relative w-full max-w-3xl h-full bg-crt-surface border-l border-crt-border-strong flex flex-col shadow-2xl">
         {/* Drawer Header */}
         <header className="px-6 py-4 border-b border-crt-border bg-crt-bg flex items-start justify-between gap-4 shrink-0">
           <div className="min-w-0 space-y-1">
@@ -835,12 +836,13 @@ export function GameDetailDrawer({
             )}
           </div>
         </footer>
+        </div>
       </div>
 
-      {/* Screenshot & Cover Lightbox Overlay */}
+      {/* Screenshot & Cover Lightbox Overlay (sibling above z-[60..62] CRT glass so zoomed art stays clean) */}
       {lightbox && lightbox.slides[lightbox.index] && (
         <div
-          className="fixed inset-0 z-[60] bg-black/90 flex flex-col items-center justify-center p-4 sm:p-8"
+          className="crt-lightbox-clean fixed inset-0 z-[80] bg-black/92 flex flex-col items-center justify-center p-4 sm:p-8"
           onClick={(e) => {
             if (e.target === e.currentTarget) setLightbox(null);
           }}
@@ -898,6 +900,6 @@ export function GameDetailDrawer({
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }

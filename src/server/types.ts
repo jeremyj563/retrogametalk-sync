@@ -223,12 +223,28 @@ export interface StorageStats {
   diskTotalBytes: number | null;
 }
 
+export interface TransferSpeedSample {
+  timestamp: string;
+  bytesPerSec: number;
+  bytesReceived: number;
+  totalBytes: number | null;
+  filename: string;
+  systemName: string;
+}
+
 export interface SystemBreakdown {
   systemName: string;
   totalItems: number;
   downloadedItems: number;
   skippedItems: number;
   failedItems: number;
+  totalBytes: number;
+}
+
+export interface ReleaseTypeBreakdown {
+  typeName: string;
+  downloadedItems: number;
+  totalItems: number;
   totalBytes: number;
 }
 
@@ -250,6 +266,7 @@ export interface ServiceStatusSnapshot {
   };
   activeRun: SyncRunRecord | null;
   activeTransfer: ActiveTransferState | null;
+  transferHistory: TransferSpeedSample[];
   currentPhase: string;
   nextScheduledRunAt: string | null;
   scheduleEnabled: boolean;
@@ -267,6 +284,7 @@ export interface ServiceStatusSnapshot {
     totalRuns: number;
   };
   systems: SystemBreakdown[];
+  releaseTypes: ReleaseTypeBreakdown[];
 }
 
 export interface AuthTestResult {

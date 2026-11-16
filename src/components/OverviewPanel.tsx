@@ -27,6 +27,7 @@ import {
   formatTimeShort,
 } from '../utils/format';
 import { FailedQueueDrawer } from './FailedQueueDrawer';
+import { TelemetryDeck } from './TelemetryDeck';
 
 interface OverviewPanelProps {
   config: ScraperConfigPublic;
@@ -98,15 +99,6 @@ export function OverviewPanel({
     if (!t || !t.totalBytes || t.totalBytes <= 0) return null;
     return Math.min(100, Math.round((t.bytesReceived / t.totalBytes) * 100));
   }, [status.activeTransfer]);
-
-  const delaySeries = status.rateLimiter.history;
-  const maxDelayPlot = useMemo(() => {
-    if (delaySeries.length === 0) return status.rateLimiter.baseDelayMs;
-    return Math.max(
-      status.rateLimiter.baseDelayMs * 1.5,
-      ...delaySeries.map((s) => Math.max(s.delayMs, s.latencyMs)),
-    );
-  }, [delaySeries, status.rateLimiter.baseDelayMs]);
 
   const activeWatermark = status.lastWatermarkAt ?? config.lastWatermarkAt;
 
@@ -472,96 +464,12 @@ export function OverviewPanel({
         onRefreshStatus={onRefreshStatus}
       />
 
-      {/* Telemetry Chart & Recent Sync Runs (2-Column Balanced Split) */}
+      {/* Grafana-Style Telemetry Deck & Recent Sync Runs (2-Column Balanced Split) */}
       <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-        {/* Adaptive Rate Limiter Telemetry Chart */}
-        <div className="lg:col-span-5 border border-crt-border bg-crt-surface rounded-md p-5 flex flex-col justify-between">
-          <div className="flex items-center justify-between gap-4 mb-4">
-            <div>
-              <h2 className="font-display text-base font-semibold text-crt-text">
-                Adaptive Rate Limiter Pacing
-              </h2>
-              <p className="text-xs text-crt-muted">
-                AIMD request spacing (green) vs upstream latency (amber)
-              </p>
-            </div>
-            <span className="font-mono text-xs text-crt-muted tabular-nums whitespace-nowrap">
-              {delaySeries.length} samples
-            </span>
-          </div>
-
-          <div className="flex-1 min-h-[180px] border border-crt-border bg-crt-bg rounded p-3 flex items-center justify-center">
-            {delaySeries.length < 2 ? (
-              <div className="text-center space-y-1.5 py-8">
-                <Activity className="h-5 w-5 text-crt-muted mx-auto" />
-                <p className="text-xs text-crt-muted">
-                  Awaiting HTTP requests to plot AIMD pacing telemetry.
-                </p>
-              </div>
-            ) : (
-              <svg viewBox="0 0 420 150" className="w-full h-40 overflow-visible" aria-label="Rate limiter delay chart">
-                {/* Horizontal reference gridlines */}
-                {[0.25, 0.5, 0.75, 1].map((frac) => (
-                  <line
-                    key={frac}
-                    x1="0"
-                    y1={140 - frac * 125}
-                    x2="420"
-                    y2={140 - frac * 125}
-                    stroke="var(--color-crt-border)"
-                    strokeDasharray="3 3"
-                    strokeWidth="1"
-                  />
-                ))}
-
-                {/* Latency polyline */}
-                <polyline
-                  fill="none"
-                  stroke="var(--color-crt-amber)"
-                  strokeWidth="1.5"
-                  strokeOpacity="0.85"
-                  points={delaySeries
-                    .map((pt, i) => {
-                      const x = (i / Math.max(1, delaySeries.length - 1)) * 420;
-                      const y = 140 - Math.min(1, pt.latencyMs / maxDelayPlot) * 125;
-                      return `${x.toFixed(1)},${y.toFixed(1)}`;
-                    })
-                    .join(' ')}
-                />
-
-                {/* Adaptive Delay polyline */}
-                <polyline
-                  fill="none"
-                  stroke="var(--color-crt-phosphor)"
-                  strokeWidth="2"
-                  points={delaySeries
-                    .map((pt, i) => {
-                      const x = (i / Math.max(1, delaySeries.length - 1)) * 420;
-                      const y = 140 - Math.min(1, pt.delayMs / maxDelayPlot) * 125;
-                      return `${x.toFixed(1)},${y.toFixed(1)}`;
-                    })
-                    .join(' ')}
-                />
-
-                {/* Throttle markers */}
-                {delaySeries.map((pt, i) => {
-                  if (!pt.throttled) return null;
-                  const x = (i / Math.max(1, delaySeries.length - 1)) * 420;
-                  const y = 140 - Math.min(1, pt.delayMs / maxDelayPlot) * 125;
-                  return <circle key={i} cx={x} cy={y} r="3.5" fill="#EF4444" />;
-                })}
-              </svg>
-            )}
-          </div>
-
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-crt-muted tabular-nums">
-            <span>Min {status.rateLimiter.minDelayMs}ms · Base {status.rateLimiter.baseDelayMs}ms</span>
-            <span>Max {status.rateLimiter.maxDelayMs}ms · {status.rateLimiter.backoffMultiplier}x backoff</span>
-          </div>
-        </div>
+        <TelemetryDeck status={status} runs={runs} />
 
         {/* Recent Sync Runs Table */}
-        <div className="lg:col-span-7 border border-crt-border bg-crt-surface rounded-md p-5 flex flex-col">
+        <div className="lg:col-span-6 border border-crt-border bg-crt-surface rounded-md p-5 flex flex-col">
           <div className="flex items-center justify-between gap-4 mb-4">
             <div>
               <h2 className="font-display text-base font-semibold text-crt-text">
