@@ -1734,16 +1734,30 @@ export function getCatalogTotalsAndSystems(): {
   const runsRow = getDb().prepare('SELECT COUNT(*) as count FROM sync_runs').get() as { count: number };
 
   const systemRows = getDb().prepare(`
+    WITH file_counts AS (
+      SELECT
+        r2.system_name,
+        COUNT(f.id) AS mirrored_files
+      FROM catalog_release_files f
+      INNER JOIN catalog_releases r2 ON r2.id = f.release_id
+      WHERE f.status IN ('downloaded', 'skipped')
+      GROUP BY r2.system_name
+    )
     SELECT
-      system_name,
+      r.system_name,
       COUNT(*) as total_items,
-      SUM(CASE WHEN status = 'downloaded' THEN 1 ELSE 0 END) as downloaded_items,
-      SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_items,
-      SUM(CASE WHEN status IN ('failed', 'partial') THEN 1 ELSE 0 END) as failed_items,
-      COALESCE(SUM(CASE WHEN status IN ('downloaded', 'skipped', 'partial') THEN file_size_bytes ELSE 0 END), 0) as total_bytes
-    FROM catalog_releases
-    GROUP BY system_name
-    ORDER BY total_items DESC, system_name ASC
+      SUM(CASE WHEN r.status = 'downloaded' THEN 1 ELSE 0 END) as downloaded_items,
+      SUM(CASE WHEN r.status = 'skipped' THEN 1 ELSE 0 END) as skipped_items,
+      SUM(CASE WHEN r.status IN ('failed', 'partial') THEN 1 ELSE 0 END) as failed_items,
+      SUM(CASE WHEN r.status IN ('queued', 'downloading') THEN 1 ELSE 0 END) as queued_items,
+      SUM(CASE WHEN r.installed_at IS NOT NULL THEN 1 ELSE 0 END) as installed_items,
+      COALESCE(SUM(CASE WHEN r.status IN ('downloaded', 'skipped', 'partial') THEN r.file_size_bytes ELSE 0 END), 0) as total_bytes,
+      MAX(COALESCE(r.downloaded_at, r.discovered_at)) as last_activity_at,
+      COALESCE(fc.mirrored_files, 0) as mirrored_files
+    FROM catalog_releases r
+    LEFT JOIN file_counts fc ON fc.system_name = r.system_name
+    GROUP BY r.system_name
+    ORDER BY total_items DESC, r.system_name ASC
   `).all() as Record<string, unknown>[];
 
   const releaseTypeRows = getDb().prepare(`
@@ -1782,14 +1796,23 @@ export function getCatalogTotalsAndSystems(): {
       totalBytesMirrored: Number(totalsRow.total_bytes || 0),
       totalRuns: Number(runsRow.count || 0),
     },
-    systems: systemRows.map((r) => ({
-      systemName: String(r.system_name),
-      totalItems: Number(r.total_items),
-      downloadedItems: Number(r.downloaded_items),
-      skippedItems: Number(r.skipped_items),
-      failedItems: Number(r.failed_items),
-      totalBytes: Number(r.total_bytes),
-    })),
+    systems: systemRows.map((r) => {
+      const downloadedItems = Number(r.downloaded_items || 0);
+      const skippedItems = Number(r.skipped_items || 0);
+      const rawMirroredFiles = Number(r.mirrored_files || 0);
+      return {
+        systemName: String(r.system_name),
+        totalItems: Number(r.total_items || 0),
+        downloadedItems,
+        skippedItems,
+        failedItems: Number(r.failed_items || 0),
+        queuedItems: Number(r.queued_items || 0),
+        installedItems: Number(r.installed_items || 0),
+        mirroredFiles: Math.max(rawMirroredFiles, downloadedItems + skippedItems),
+        totalBytes: Number(r.total_bytes || 0),
+        lastActivityAt: r.last_activity_at ? String(r.last_activity_at) : null,
+      };
+    }),
     releaseTypes: releaseTypeRows.map((r) => ({
       typeName: String(r.type_name),
       downloadedItems: Number(r.downloaded_items || 0),

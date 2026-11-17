@@ -240,6 +240,19 @@ export interface ReleaseTypeBreakdown {
   totalBytes: number;
 }
 
+export interface SystemBreakdown {
+  systemName: string;
+  totalItems: number;
+  downloadedItems: number;
+  skippedItems: number;
+  failedItems: number;
+  queuedItems: number;
+  installedItems: number;
+  mirroredFiles: number;
+  totalBytes: number;
+  lastActivityAt: string | null;
+}
+
 export interface ServiceStatusSnapshot {
   podId: string;
   build: {
@@ -282,14 +295,7 @@ export interface ServiceStatusSnapshot {
     totalBytesMirrored: number;
     totalRuns: number;
   };
-  systems: {
-    systemName: string;
-    totalItems: number;
-    downloadedItems: number;
-    skippedItems: number;
-    failedItems: number;
-    totalBytes: number;
-  }[];
+  systems: SystemBreakdown[];
   releaseTypes: ReleaseTypeBreakdown[];
 }
 
