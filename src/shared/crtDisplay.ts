@@ -81,23 +81,26 @@ export const CRT_UI_MOTION_LEVELS: Record<
   low: {
     shortLabel: 'Low',
     label: 'Low',
-    description: 'Subtle ambient motion on active indicators plus responsive hover & sync animations',
+    description:
+      'Tactile console heartbeat: active icon & banner motion, live readout breathe, hover holo covers, table laser edge & focus glow',
   },
   medium: {
     shortLabel: 'Med',
     label: 'Medium',
-    description: 'Balanced living CRT console with KPI breathing, chart sweep, and active panel traces',
+    description:
+      'Living studio monitor: header laser sweep, staggered panel & popover beams, console & drawer traces, KPI breathe & glowing active tabs',
   },
   high: {
     shortLabel: 'High',
     label: 'High',
-    description: 'Full hardware instrumentation with continuous staggered icon kinematics and vivid phosphor bloom',
+    description:
+      'Broadcast PVM suite: subtle V-sync hum bar, dual counter-beams, dual chart sweeps, ambient holo box-art, periodic CTA sheen & full icon kinematics',
   },
   ultra: {
     shortLabel: 'Ultra',
     label: 'Ultra',
     description:
-      'Overclocked cathode-ray spectacle: rolling V-sync hum bar, auto-boosted phosphor bloom, dual panel beams & full-app halos',
+      'Overclocked arcade spectacle: CRT degauss surge, flyback retrace + hum bar, live RGB convergence pulse, sidebar data-bus lasers, top/bottom perimeter beams & boosted bloom',
   },
 };
 
@@ -261,8 +264,23 @@ export function computeCrtCssVariables(settings: CrtDisplaySettings): CSSPropert
         ? Math.min(0.28, 0.06 + bloom * 0.16).toFixed(3)
         : '0';
 
-  const ultraHumAlpha = isUltra && on ? (0.085 + glowT * 0.095).toFixed(3) : '0';
-  const ultraBorderAlpha = isUltra ? (on ? (0.28 + glowT * 0.26).toFixed(3) : '0.28') : '0';
+  const isHigh = settings.uiMotion === 'high';
+  const ultraHumAlpha = on
+    ? isUltra
+      ? (0.1 + glowT * 0.105).toFixed(3)
+      : isHigh
+        ? (0.042 + glowT * 0.048).toFixed(3)
+        : '0'
+    : '0';
+  const ultraBorderAlpha = isUltra
+    ? on
+      ? (0.32 + glowT * 0.28).toFixed(3)
+      : '0.30'
+    : isHigh
+      ? on
+        ? (0.16 + glowT * 0.16).toFixed(3)
+        : '0.16'
+      : '0';
 
   return {
     '--crt-phosphor-rgb': paletteInfo.rgb,
