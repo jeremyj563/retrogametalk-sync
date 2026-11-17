@@ -8,6 +8,7 @@ import { load as loadHtml } from 'cheerio';
 import { type Browser, type HttpMethod, Impit, type ImpitResponse } from 'impit';
 import { CookieJar } from 'tough-cookie';
 import { getCookieJarPath } from './db.ts';
+import { formatErrorDetails, isDebugLoggingEnabled, logServer } from './logger.ts';
 import type { AdaptiveRateLimiter } from './rateLimiter.ts';
 import { classifyFileRole, decodeHtmlEntities, deriveReleaseTags } from './releaseTags.ts';
 import { filterValidSystemSlugs, isNonSystemSlug } from '../shared/systemCatalog.ts';
@@ -476,12 +477,17 @@ function formatCookieNamesForLog(names: string[]): string {
   return `${shown.join(', ')}, ... (+${omitted} more, total=${names.length})`;
 }
 
-function logAuthContainer(level: 'INFO' | 'WARN' | 'ERROR', message: string): void {
+function logAuthContainer(level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR', message: string): void {
+  if (level === 'DEBUG' && !isDebugLoggingEnabled()) {
+    return;
+  }
   const line = `[${new Date().toISOString()}] [AUTH] [${level}] ${message}`;
   if (level === 'ERROR') {
     console.error(line);
   } else if (level === 'WARN') {
     console.warn(line);
+  } else if (level === 'DEBUG') {
+    console.debug(line);
   } else {
     console.log(line);
   }
@@ -571,18 +577,20 @@ export class RetroGameTalkClient {
         if (prunedCount > 0) {
           try {
             fs.writeFileSync(jarPath, JSON.stringify(jar.serializeSync()), { mode: 0o600 });
-          } catch {
-            // Non-fatal
+          } catch (pruneWriteErr) {
+            logAuthContainer('DEBUG', `Failed writing pruned cookie jar ${jarPath}: ${formatErrorDetails(pruneWriteErr)}`);
           }
           logAuthContainer(
             'INFO',
             `Pruned ${prunedCount} accumulated "downloaded-*" tracking cookie(s) from persisted cookie jar to prevent HTTP 400 header bloat`,
           );
         }
+        logAuthContainer('DEBUG', `Loaded persisted cookie jar from ${jarPath}`);
         return jar;
       }
-    } catch {
+    } catch (loadErr) {
       // Ignore corrupt cookie jar and start fresh
+      logAuthContainer('DEBUG', `Failed loading cookie jar ${jarPath}; starting fresh: ${formatErrorDetails(loadErr)}`);
     }
     return new CookieJar();
   }
@@ -592,8 +600,8 @@ export class RetroGameTalkClient {
     try {
       fs.mkdirSync(path.dirname(jarPath), { recursive: true });
       fs.writeFileSync(jarPath, JSON.stringify(this.jar.serializeSync()), { mode: 0o600 });
-    } catch {
-      // Non-fatal
+    } catch (saveErr) {
+      logAuthContainer('DEBUG', `Failed persisting cookie jar ${jarPath}: ${formatErrorDetails(saveErr)}`);
     }
   }
 
@@ -909,7 +917,14 @@ export class RetroGameTalkClient {
         const latency = performance.now() - started;
         if (signal?.aborted) throw err;
         this.rateLimiter.recordError(latency);
-        if (this.isNonRetryableNetworkError(err)) {
+        const nonRetryable = this.isNonRetryableNetworkError(err);
+        const errDetails = formatErrorDetails(err);
+        log?.(
+          'debug',
+          `[HTTP] Request exception after ${Math.round(latency)}ms: ${(init.method || 'GET').toUpperCase()} ${currentUrl}`,
+          `nonRetryable=${nonRetryable}, attempt=${attempt}/${config.maxRetries}, ${errDetails}`,
+        );
+        if (nonRetryable) {
           throw err;
         }
         attempt += 1;
@@ -935,8 +950,8 @@ export class RetroGameTalkClient {
         try {
           await this.jar.setCookie(rawCookie, currentUrl);
           storedCookies += 1;
-        } catch {
-          // Skip malformed cookie
+        } catch (cookieErr) {
+          logAuthContainer('DEBUG', `Skipped malformed Set-Cookie "${cookieName}" from ${currentUrl}: ${formatErrorDetails(cookieErr)}`);
         }
       }
       if (storedCookies > 0) {
@@ -967,6 +982,7 @@ export class RetroGameTalkClient {
           throw new Error(`Too many redirects while fetching ${url}`);
         }
         const nextUrl = new URL(res.headers.get('location')!, currentUrl).toString();
+        logServer('HTTP', 'debug', `Redirect HTTP ${res.status} -> ${nextUrl}`, `from=${currentUrl}`);
         currentUrl = nextUrl;
         maxRedirects -= 1;
         if (res.status === 301 || res.status === 302 || res.status === 303) {
@@ -980,6 +996,7 @@ export class RetroGameTalkClient {
         await res.body?.cancel().catch(() => undefined);
         this.rateLimiter.recordError(latency);
         attempt += 1;
+        log?.('debug', `[HTTP] Server HTTP ${res.status} on ${currentUrl}`, `attempt=${attempt}/${config.maxRetries}, latency=${Math.round(latency)}ms`);
         if (attempt > config.maxRetries) {
           throw new Error(`Target server error HTTP ${res.status} at ${currentUrl}`);
         }
@@ -987,6 +1004,12 @@ export class RetroGameTalkClient {
         continue;
       }
 
+      logServer(
+        'HTTP',
+        'debug',
+        `${(init.method || 'GET').toUpperCase()} ${currentUrl} -> HTTP ${res.status} (${Math.round(latency)}ms)`,
+        storedCookies > 0 ? `storedCookies=${storedCookies}` : null,
+      );
       this.rateLimiter.recordSuccess(latency);
       return { response: res, finalUrl: currentUrl, latencyMs: latency };
     }
@@ -2506,8 +2529,12 @@ export class RetroGameTalkClient {
         const body = await res.response.text();
         if (this.isCloudflareChallenge(res.response.status, res.response.headers, body)) {
           sawCloudflareChallenge = true;
+          log?.('debug', `[Scrape] Cloudflare challenge detected on dynamic download AJAX (${ajaxUrl})`, `status=${res.response.status}, postId=${postId}`);
         } else if (looksLikeAuthWall(res.response.status, res.finalUrl, body)) {
           authFailureDetected = true;
+          log?.('debug', `[Scrape] Auth wall detected on dynamic download AJAX (${ajaxUrl})`, `status=${res.response.status}, finalUrl=${res.finalUrl}, snippet=${body.trim().slice(0, 140)}`);
+        } else if (!body.includes('download.php') && !body.includes('dl-btn-')) {
+          log?.('debug', `[Scrape] Dynamic AJAX returned HTTP ${res.response.status} without download links`, `postId=${postId}, len=${body.length}, snippet=${body.replace(/\s+/g, ' ').trim().slice(0, 160)}`);
         }
         return body;
       };
@@ -2515,6 +2542,7 @@ export class RetroGameTalkClient {
       let ajaxHtml = await fetchAjaxHtml(nonce);
       if (!ajaxHtml.includes('download.php') && !ajaxHtml.includes('dl-btn-') && !sawCloudflareChallenge) {
         // Refresh cached nonce via cdr_nonce endpoint
+        log?.('debug', `[Scrape] Initial nonce produced no links for postId=${postId}; refreshing via cdr_nonce`, nonceUrl);
         const nonceRes = await this.fetchWithRedirects(
           `${nonceUrl}${nonceUrl.includes('?') ? '&' : '?'}post_id=${encodeURIComponent(postId)}`,
           config,
@@ -2525,11 +2553,15 @@ export class RetroGameTalkClient {
         const freshNonce = (await nonceRes.response.text()).trim();
         if (this.isCloudflareChallenge(nonceRes.response.status, nonceRes.response.headers, freshNonce)) {
           sawCloudflareChallenge = true;
+          log?.('debug', `[Scrape] Cloudflare challenge on cdr_nonce endpoint`, `status=${nonceRes.response.status}`);
         } else if (looksLikeAuthWall(nonceRes.response.status, nonceRes.finalUrl, freshNonce)) {
           authFailureDetected = true;
+          log?.('debug', `[Scrape] Auth wall on cdr_nonce endpoint`, `status=${nonceRes.response.status}, body=${freshNonce.slice(0, 80)}`);
         } else if (freshNonce && freshNonce !== '0' && freshNonce !== '-1') {
           nonce = freshNonce;
           ajaxHtml = await fetchAjaxHtml(nonce);
+        } else {
+          log?.('debug', `[Scrape] cdr_nonce returned empty/rejected token for postId=${postId}`, `status=${nonceRes.response.status}, body="${freshNonce.slice(0, 80)}"`);
         }
       }
 
@@ -2616,9 +2648,13 @@ export class RetroGameTalkClient {
         }
         if (looksLikeAuthWall(urlRes.response.status, urlRes.finalUrl, dlHref)) {
           authFailureDetected = true;
+          log?.('debug', `[Scrape] DLC button postId=${postId} row=${row} hit auth wall`, `status=${urlRes.response.status}`);
           continue;
         }
-        if (!dlHref.startsWith('http')) continue;
+        if (!dlHref.startsWith('http')) {
+          log?.('debug', `[Scrape] DLC button postId=${postId} row=${row} returned non-URL response`, `status=${urlRes.response.status}, body="${dlHref.slice(0, 120)}"`);
+          continue;
+        }
 
         const dlUrl = new URL(dlHref);
         const btnLabel = btn.text().replace(/\s+/g, ' ').trim();
@@ -2709,6 +2745,11 @@ export class RetroGameTalkClient {
 
     // If redirected to /login/, HTTP 401/403, or served an inline login form mid-crawl, refresh session and retry once
     if ((initialRedirectedToLogin || htmlLooksLikeLoginGate) && config.username && config.password) {
+      log?.(
+        'debug',
+        `[Auth] Mid-crawl auth gate detected fetching ${url}`,
+        `status=${response.status}, finalUrl=${finalUrl}, redirectedToLogin=${initialRedirectedToLogin}, inlineForm=${htmlLooksLikeLoginGate}`,
+      );
       log?.('warn', 'Session expired or unauthorized mid-crawl; re-authenticating');
       const auth = await this.login(config, signal, log);
       if (!auth.authenticated) {
@@ -2771,6 +2812,7 @@ export class RetroGameTalkClient {
     if (fs.existsSync(expectedLocalPath)) {
       const stat = fs.statSync(expectedLocalPath);
       if (stat.size > 0) {
+        log?.('debug', `[Download] Deduplicated existing archive before request: ${release.remotePath}`, `${stat.size} bytes at "${expectedLocalPath}"`);
         return {
           outcome: 'skipped',
           localPath: expectedLocalPath,
@@ -2792,6 +2834,11 @@ export class RetroGameTalkClient {
 
       let partPath: string | null = null;
       try {
+        log?.(
+          'debug',
+          `[Download] Starting transfer attempt ${streamAttempt}/${maxStreamAttempts} for "${release.filename}"`,
+          `url=${release.downloadUrl}, timeoutMs=${streamTimeoutMs}`,
+        );
         const { response, finalUrl } = await this.fetchWithRedirects(
           release.downloadUrl,
           config,
@@ -2809,6 +2856,11 @@ export class RetroGameTalkClient {
 
         if (!response.ok) {
           const bodySnippet = await response.text().catch(() => '');
+          log?.(
+            'debug',
+            `[Download] Non-OK HTTP ${response.status} for "${release.filename}"`,
+            `finalUrl=${finalUrl}, body=${bodySnippet.replace(/\s+/g, ' ').trim().slice(0, 180)}`,
+          );
           if (this.isCloudflareChallenge(response.status, response.headers, bodySnippet)) {
             const msg = `Blocked by Cloudflare bot protection (HTTP ${response.status}) downloading ${release.downloadUrl}`;
             this.setAuthState({
@@ -2833,6 +2885,11 @@ export class RetroGameTalkClient {
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
         if (contentType.includes('text/html') && !contentType.includes('octet-stream')) {
           const htmlSnippet = await response.text().catch(() => '');
+          log?.(
+            'debug',
+            `[Download] Received HTML instead of archive binary for "${release.filename}"`,
+            `status=${response.status}, finalUrl=${finalUrl}, contentType=${contentType}, snippet=${htmlSnippet.replace(/\s+/g, ' ').trim().slice(0, 180)}`,
+          );
           if (
             finalUrl.includes('/login') ||
             finalUrl.includes('wp-login.php') ||
@@ -2849,7 +2906,8 @@ export class RetroGameTalkClient {
         }
 
         // 2. Resolve exact filename from Content-Disposition or query param/path
-        const headerFilename = parseContentDispositionFilename(response.headers.get('content-disposition'));
+        const rawDisposition = response.headers.get('content-disposition');
+        const headerFilename = parseContentDispositionFilename(rawDisposition);
         const finalFilename = headerFilename
           ? sanitizePathSegment(headerFilename)
           : release.filename;
@@ -2869,6 +2927,7 @@ export class RetroGameTalkClient {
           const stat = fs.statSync(finalLocalPath);
           if (stat.size > 0) {
             await response.body?.cancel().catch(() => undefined);
+            log?.('debug', `[Download] Deduplicated existing archive after Content-Disposition: ${finalRemotePath}`, `${stat.size} bytes`);
             return {
               outcome: 'skipped',
               localPath: finalLocalPath,
@@ -2880,10 +2939,22 @@ export class RetroGameTalkClient {
         }
 
         // 4. Atomic streaming write to .part -> rename
-        fs.mkdirSync(path.dirname(finalLocalPath), { recursive: true });
+        const targetDir = path.dirname(finalLocalPath);
+        try {
+          fs.mkdirSync(targetDir, { recursive: true });
+        } catch (mkdirErr) {
+          log?.('debug', `[Download] Failed creating target directory "${targetDir}"`, formatErrorDetails(mkdirErr));
+          throw mkdirErr;
+        }
         partPath = `${finalLocalPath}.part`;
         const totalBytesHeader = response.headers.get('content-length');
         const totalBytes = totalBytesHeader ? Number(totalBytesHeader) : null;
+
+        log?.(
+          'debug',
+          `[Download] Writing stream to disk "${partPath}"`,
+          `final="${finalLocalPath}", contentLength=${totalBytes ?? 'unknown'}, contentType="${contentType || 'unset'}", disposition="${rawDisposition || 'none'}"`,
+        );
 
         if (!response.body) {
           throw new Error(`Empty response stream for ${release.downloadUrl}`);
@@ -2920,12 +2991,14 @@ export class RetroGameTalkClient {
 
           nodeReadable.on('error', (err) => {
             signal.removeEventListener('abort', onAbort);
+            log?.('debug', `[Download] Upstream readable stream error writing "${partPath}" after ${bytesReceived} bytes`, formatErrorDetails(err));
             writeStream.destroy();
             reject(err);
           });
 
           writeStream.on('error', (err) => {
             signal.removeEventListener('abort', onAbort);
+            log?.('debug', `[Download] Disk WriteStream error writing "${partPath}" after ${bytesReceived} bytes`, formatErrorDetails(err));
             nodeReadable.destroy();
             reject(err);
           });
@@ -2938,13 +3011,35 @@ export class RetroGameTalkClient {
           nodeReadable.pipe(writeStream);
         });
 
-        await fs.promises.rename(partPath, finalLocalPath);
+        if (totalBytes !== null && Number.isFinite(totalBytes) && totalBytes > 0 && bytesReceived !== totalBytes) {
+          log?.(
+            'debug',
+            `[Download] Byte count differs from Content-Length for "${finalFilename}"`,
+            `received=${bytesReceived}, contentLength=${totalBytes}`,
+          );
+        }
+
+        try {
+          await fs.promises.rename(partPath, finalLocalPath);
+        } catch (renameErr) {
+          log?.(
+            'debug',
+            `[Download] Atomic rename failed: "${partPath}" -> "${finalLocalPath}"`,
+            formatErrorDetails(renameErr),
+          );
+          throw renameErr;
+        }
         partPath = null;
         onProgress({
           bytesReceived,
           totalBytes: totalBytes ?? bytesReceived,
           bytesPerSec: Math.round(bytesReceived / Math.max(0.1, (Date.now() - startedAt) / 1000)),
         });
+
+        log?.(
+          'debug',
+          `[Download] Completed atomic write "${finalLocalPath}" (${bytesReceived} bytes in ${Date.now() - startedAt}ms)`,
+        );
 
         return {
           outcome: 'downloaded',
@@ -2955,12 +3050,19 @@ export class RetroGameTalkClient {
         };
       } catch (err) {
         if (partPath) {
-          await fs.promises.unlink(partPath).catch(() => undefined);
+          await fs.promises.unlink(partPath).catch((unlinkErr) => {
+            log?.('debug', `[Download] Failed cleaning up partial file "${partPath}"`, formatErrorDetails(unlinkErr));
+          });
         }
         if (signal.aborted) {
           throw err;
         }
         const canRetryStream = streamAttempt < maxStreamAttempts && this.isRetryableStreamError(err);
+        log?.(
+          'debug',
+          `[Download] Stream attempt ${streamAttempt}/${maxStreamAttempts} caught error for "${release.filename}"`,
+          `retryable=${canRetryStream}, ${formatErrorDetails(err)}`,
+        );
         if (!canRetryStream) {
           throw err;
         }
@@ -3403,6 +3505,7 @@ export class RetroGameTalkClient {
 
       if (response.status === 400 && page === 1 && useModifiedAfterParam) {
         await response.body?.cancel().catch(() => undefined);
+        log?.('debug', `[WP REST] "${restBase}" rejected modified_after parameter (HTTP 400); falling back to orderby=modified`);
         useModifiedAfterParam = false;
         fallbackClientCutoffMode = true;
         continue;
@@ -3410,18 +3513,21 @@ export class RetroGameTalkClient {
 
       if (response.status === 400 && page === 1 && fallbackClientCutoffMode && fallbackOrderBy === 'modified') {
         await response.body?.cancel().catch(() => undefined);
+        log?.('debug', `[WP REST] "${restBase}" rejected orderby=modified (HTTP 400); falling back to orderby=date`);
         fallbackOrderBy = 'date';
         continue;
       }
 
       if (response.status === 400 && page > 1) {
         await response.body?.cancel().catch(() => undefined);
+        log?.('debug', `[WP REST] "${restBase}" reached pagination end at page ${page} (HTTP 400)`);
         break;
       }
 
       if (response.status === 404) {
         await response.body?.cancel().catch(() => undefined);
         if (page === 1) {
+          log?.('debug', `[WP REST] "${restBase}" endpoint returned HTTP 404 on page 1; marking unsupported`);
           return { supported: false, posts: [] };
         }
         log?.('warn', `WP REST pagination for ${restBase} stopped early at page ${page}/${totalPages} (HTTP 404)`);
@@ -3434,6 +3540,7 @@ export class RetroGameTalkClient {
           throw new Error(`Blocked by Cloudflare bot protection (HTTP ${response.status}) at ${finalUrl}`);
         }
         if (page === 1) {
+          log?.('debug', `[WP REST] "${restBase}" returned HTTP ${response.status} on page 1; marking unsupported`, errBody.replace(/\s+/g, ' ').trim().slice(0, 140));
           return { supported: false, posts: [] };
         }
         log?.('warn', `WP REST pagination for ${restBase} stopped early at page ${page}/${totalPages} (HTTP ${response.status})`);
@@ -3444,6 +3551,7 @@ export class RetroGameTalkClient {
       if (!contentType.includes('json')) {
         await response.body?.cancel().catch(() => undefined);
         if (page === 1) {
+          log?.('debug', `[WP REST] "${restBase}" returned non-JSON content-type "${contentType}" on page 1`);
           return { supported: false, posts: [] };
         }
         log?.('warn', `WP REST pagination for ${restBase} returned non-JSON at page ${page}/${totalPages}`);
@@ -3554,16 +3662,21 @@ export class RetroGameTalkClient {
       );
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
+        log?.('debug', `[WP REST] Metadata lookup failed (HTTP ${response.status}) for ${endpoint}`);
         return null;
       }
 
       const raw = (await response.json()) as Record<string, unknown> | Record<string, unknown>[];
       const post = Array.isArray(raw) ? raw[0] : raw;
-      if (!post || typeof post !== 'object' || !post.id) return null;
+      if (!post || typeof post !== 'object' || !post.id) {
+        log?.('debug', `[WP REST] Metadata lookup returned empty payload for ${endpoint}`);
+        return null;
+      }
 
       return this.parseWpPostObject(post, restBase);
     } catch (err) {
       if (signal?.aborted) throw err;
+      log?.('debug', `[WP REST] Metadata lookup exception for ${pageUrl}`, formatErrorDetails(err));
       return null;
     }
   }
@@ -4040,7 +4153,8 @@ export class RetroGameTalkClient {
         return { filePath: finalPath, resolvedUrl: assetUrl, downloadedOrVerified: true };
       } catch (err) {
         if (signal?.aborted) throw err;
-        lastFailureDetail = err instanceof Error ? err.message : String(err);
+        lastFailureDetail = formatErrorDetails(err);
+        log?.('debug', `[Asset] Failed candidate artwork ${assetUrl}`, lastFailureDetail);
       }
     }
 
@@ -4086,8 +4200,8 @@ export class RetroGameTalkClient {
         if (typeof parsedSidecar.screenshotsFullResVersion === 'number') {
           existingSidecarVersion = parsedSidecar.screenshotsFullResVersion;
         }
-      } catch {
-        // Ignore malformed sidecar
+      } catch (sidecarErr) {
+        log?.('debug', `[Asset] Ignoring malformed sidecar "${metaPath}"`, formatErrorDetails(sidecarErr));
       }
     }
     const shouldForceRefresh =
@@ -4180,8 +4294,8 @@ export class RetroGameTalkClient {
 
     try {
       await fs.promises.writeFile(metaPath, JSON.stringify(enriched, null, 2), 'utf8');
-    } catch {
-      // Non-fatal if metadata sidecar write fails
+    } catch (metaWriteErr) {
+      log?.('debug', `[Asset] Failed writing metadata sidecar "${metaPath}"`, formatErrorDetails(metaWriteErr));
     }
 
     return {

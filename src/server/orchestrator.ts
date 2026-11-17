@@ -54,6 +54,7 @@ import {
   resolveMirroredPaths,
 } from './rgtClient.ts';
 import { inspectArchiveForItem } from './archiveService.ts';
+import { formatErrorDetails, isDebugLoggingEnabled, logServer } from './logger.ts';
 import type {
   ActiveTransferState,
   ArchiveInspectResult,
@@ -191,7 +192,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
     const schemaReport = getSchemaMigrationReport();
     console.log(
-      `[${new Date().toISOString()}] [STARTUP] [INFO] Persistence initialized — DATA_DIR="${getDataDir()}", DOWNLOAD_DIR="${refreshedCfg.downloadDir}", schema=v${schemaReport.currentVersion}/v${schemaReport.targetVersion}, auth=${authLabel} (hasCompletedLogin=${authSnap.hasCompletedLogin}, cookies=[${hydrated.cookieNames}]), discoveredSystems=${refreshedCfg.discoveredSystems.length}, catalogReleases=${totals.totalCatalogItems} (reconciledFromDisk=${reconciled.releasesImported})`,
+      `[${new Date().toISOString()}] [STARTUP] [INFO] Persistence initialized — DATA_DIR="${getDataDir()}", DOWNLOAD_DIR="${refreshedCfg.downloadDir}", schema=v${schemaReport.currentVersion}/v${schemaReport.targetVersion}, auth=${authLabel} (hasCompletedLogin=${authSnap.hasCompletedLogin}, cookies=[${hydrated.cookieNames}]), discoveredSystems=${refreshedCfg.discoveredSystems.length}, catalogReleases=${totals.totalCatalogItems} (reconciledFromDisk=${reconciled.releasesImported}), debugLogging=${isDebugLoggingEnabled() ? 'enabled' : 'disabled'}`,
     );
 
     this.reconfigureScheduler(refreshedCfg);
@@ -256,7 +257,12 @@ export class ScraperOrchestrator extends EventEmitter {
           if (fs.existsSync(metaPath)) {
             try {
               meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as ReleaseMetadata;
-            } catch {
+            } catch (metaErr) {
+              this.log(
+                'debug',
+                `Disk reconciliation skipped malformed metadata.json in ${systemName}/${releaseSlug}`,
+                formatErrorDetails(metaErr),
+              );
               meta = null;
             }
           }
@@ -353,7 +359,12 @@ export class ScraperOrchestrator extends EventEmitter {
               const st = fs.statSync(absFile);
               sizeBytes = st.size;
               mtimeIso = st.mtime.toISOString();
-            } catch {
+            } catch (statErr) {
+              this.log(
+                'debug',
+                `Disk reconciliation failed to stat file ${absFile}`,
+                formatErrorDetails(statErr),
+              );
               continue;
             }
 
@@ -372,8 +383,13 @@ export class ScraperOrchestrator extends EventEmitter {
             });
             filesImported += 1;
           }
-        } catch {
+        } catch (dirErr) {
           // Skip malformed on-disk directory without blocking startup
+          this.log(
+            'debug',
+            `Disk reconciliation skipped directory ${systemName}/${releaseSlug}`,
+            formatErrorDetails(dirErr),
+          );
         }
       }
     }
@@ -394,7 +410,19 @@ export class ScraperOrchestrator extends EventEmitter {
   }
 
   private log(level: LogLevel, message: string, detail: string | null = null, runId: number | null = null): void {
+    if (level === 'debug') {
+      if (!isDebugLoggingEnabled()) return;
+      logServer('SCRAPER', 'debug', message, detail);
+    }
     const entry = appendActivityLog(level, message, detail, runId);
+    this.emit('log', entry);
+  }
+
+  recordClientDebugLog(scope: string, message: string, detail: string | null = null): void {
+    if (!isDebugLoggingEnabled()) return;
+    const cleanScope = scope.trim().toUpperCase() || 'CLIENT';
+    logServer(cleanScope, 'debug', message, detail);
+    const entry = appendActivityLog('debug', `[${cleanScope}] ${message}`, detail, this.activeRun?.id ?? null);
     this.emit('log', entry);
   }
 
@@ -746,8 +774,8 @@ export class ScraperOrchestrator extends EventEmitter {
           try {
             fs.rmSync(target, { recursive: true, force: true });
             filesRemoved += 1;
-          } catch {
-            // Ignore filesystem removal error if already gone
+          } catch (rmErr) {
+            this.log('debug', `Non-fatal error deleting catalog file ${target}`, formatErrorDetails(rmErr));
           }
         }
       }
@@ -768,8 +796,8 @@ export class ScraperOrchestrator extends EventEmitter {
           if (fs.existsSync(releaseDir) && fs.readdirSync(releaseDir).length === 0) {
             fs.rmdirSync(releaseDir);
           }
-        } catch {
-          // Non-fatal cleanup
+        } catch (cleanupErr) {
+          this.log('debug', `Non-fatal error cleaning release directory ${releaseDir}`, formatErrorDetails(cleanupErr));
         }
       }
     }
@@ -876,10 +904,33 @@ export class ScraperOrchestrator extends EventEmitter {
         null;
     }
 
-    if (!targetFile || !targetFile.localPath) return null;
+    if (!targetFile || !targetFile.localPath) {
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `resolveItemFileContext: no target file with localPath (itemId=${itemId}, fileId=${fileId ?? 'default'}, files=${item.files.length})`,
+      );
+      return null;
+    }
     const absPath = path.resolve(targetFile.localPath);
-    if (!absPath.startsWith(root + path.sep)) return null;
-    if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) return null;
+    if (!absPath.startsWith(root + path.sep)) {
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `resolveItemFileContext: rejected path outside DOWNLOAD_DIR`,
+        `itemId=${itemId}, fileId=${targetFile.id}, absPath="${absPath}", root="${root}"`,
+      );
+      return null;
+    }
+    if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) {
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `resolveItemFileContext: file missing or not regular file on disk`,
+        `itemId=${itemId}, fileId=${targetFile.id}, absPath="${absPath}"`,
+      );
+      return null;
+    }
     return { item, file: targetFile, absPath, cfg };
   }
 
@@ -892,11 +943,21 @@ export class ScraperOrchestrator extends EventEmitter {
   async inspectItemArchive(itemId: number, fileId?: number): Promise<ArchiveInspectResult | null> {
     const ctx = this.resolveItemFileContext(itemId, fileId);
     if (!ctx) return null;
-    return inspectArchiveForItem(ctx.item, ctx.file, ctx.absPath, {
-      romNamingTemplate: ctx.cfg.romNamingTemplate,
-      romSanitizeFat32: ctx.cfg.romSanitizeFat32,
-      romMaxFilenameLen: ctx.cfg.romMaxFilenameLen,
-    });
+    try {
+      return await inspectArchiveForItem(ctx.item, ctx.file, ctx.absPath, {
+        romNamingTemplate: ctx.cfg.romNamingTemplate,
+        romSanitizeFat32: ctx.cfg.romSanitizeFat32,
+        romMaxFilenameLen: ctx.cfg.romMaxFilenameLen,
+      });
+    } catch (err) {
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `inspectItemArchive failed for "${ctx.file.filename}" (itemId=${itemId}, fileId=${ctx.file.id})`,
+        formatErrorDetails(err),
+      );
+      throw err;
+    }
   }
 
   async fetchItemMetadata(
@@ -1137,6 +1198,7 @@ export class ScraperOrchestrator extends EventEmitter {
     return {
       podId: POD_ID,
       uptimeSeconds: Math.max(0, Math.floor(process.uptime())),
+      debugLogging: isDebugLoggingEnabled(),
       schemaVersion: getSchemaMigrationReport().currentVersion,
       build: resolveRuntimeBuildInfo(),
       activeRun: this.activeRun,
@@ -1393,6 +1455,13 @@ export class ScraperOrchestrator extends EventEmitter {
       const targetAlreadyOnDisk = Boolean(
         targetFile.localPath && fs.existsSync(targetFile.localPath) && fs.statSync(targetFile.localPath).size > 0,
       );
+      if (!matched) {
+        runLogger(
+          'debug',
+          `[Retry] No exact fresh link match for "${targetFile.filename}" on ${pageUrl}`,
+          `freshCandidates=${freshDownloads.length} [${freshDownloads.map((d) => d.filename).slice(0, 6).join(', ')}], onDisk=${targetAlreadyOnDisk}`,
+        );
+      }
       if (!matched && !targetAlreadyOnDisk && (!storedUrlClean.startsWith('http') || storedUrlClean === pageUrl)) {
         if (isDryRun) {
           runLogger(
@@ -2208,6 +2277,11 @@ export class ScraperOrchestrator extends EventEmitter {
           const relPage = await this.client.fetchPageHtml(canonicalRelUrl, cfg, signal, runLogger);
           pagesCrawled += 1;
           if (relPage.status >= 400) {
+            runLogger(
+              'debug',
+              `[Scrape] Skipping release page ${canonicalRelUrl} (HTTP ${relPage.status})`,
+              `finalUrl=${relPage.finalUrl}`,
+            );
             persistCounters();
             return { newerThanCutoff: false };
           }
@@ -2249,6 +2323,11 @@ export class ScraperOrchestrator extends EventEmitter {
               Number.isNaN(updMs) ? -Infinity : updMs,
             );
             if (!Number.isFinite(latestMs) || latestMs <= enforceCutoffMs) {
+              runLogger(
+                'debug',
+                `[Scrape] Release older than cutoff: ${prelimMeta.title || canonicalRelUrl}`,
+                `published=${prelimMeta.publishedAt ?? 'null'}, modified=${prelimMeta.remoteUpdatedAt ?? 'null'}, cutoff=${new Date(enforceCutoffMs).toISOString()}`,
+              );
               persistCounters();
               return { newerThanCutoff: false };
             }
@@ -2314,6 +2393,11 @@ export class ScraperOrchestrator extends EventEmitter {
           if (combined.length > 0) {
             await processDiscoveredReleasePage(relPage.finalUrl, combined, releaseMeta);
           } else {
+            runLogger(
+              'debug',
+              `[Scrape] Release page yielded 0 dynamic/HTML download links: ${canonicalRelUrl}`,
+              `wpPostId=${wpData?.wpPostId ?? 'none'}, dynamic=${dynamicReleases.length}, htmlLinks=${relExtracted.downloads.length}, htmlLen=${relPage.html.length}`,
+            );
             persistCounters();
           }
 
@@ -2324,6 +2408,7 @@ export class ScraperOrchestrator extends EventEmitter {
           if (/Cloudflare|Authentication|Re-authentication/i.test(errMsg)) {
             throw err;
           }
+          runLogger('debug', `[Scrape] Exception inspecting release page ${canonicalRelUrl}`, formatErrorDetails(err));
           runLogger('warn', `Error inspecting ${canonicalRelUrl}`, errMsg);
           return { newerThanCutoff: false };
         }
@@ -2361,6 +2446,7 @@ export class ScraperOrchestrator extends EventEmitter {
               if (signal.aborted) break;
               const errMsg = err instanceof Error ? err.message : String(err);
               lastCrawlError = errMsg;
+              runLogger('debug', `[Crawl] Exception fetching listing page ${pageUrl}`, formatErrorDetails(err));
               if (
                 pageUrl === cfg.baseUrl ||
                 /Cloudflare|Authentication|Re-authentication/i.test(errMsg)
@@ -2541,6 +2627,12 @@ export class ScraperOrchestrator extends EventEmitter {
         ]).map((s) => s.toLowerCase());
       }
 
+      runLogger(
+        'debug',
+        `[Crawl] Resolved ${targetSystems.length} target system(s)`,
+        `systems=[${targetSystems.join(', ')}], mode=${run.mode}, dryRun=${isDryRun}, cutoff=${effectiveCutoffIso ?? 'none'}`,
+      );
+
       if (targetSystems.length === 0) {
         await crawlHtmlScope([cfg.baseUrl], null, preloadedRootPage);
       } else {
@@ -2574,6 +2666,12 @@ export class ScraperOrchestrator extends EventEmitter {
               persistCounters();
             },
           });
+
+          runLogger(
+            'debug',
+            `[Crawl] System "${systemSlug}" WP REST scan`,
+            `supported=${wpRes.supported}, posts=${wpRes.posts.length}`,
+          );
 
           const shouldSkipWpPostBeforeHtml = (post: WpPostMetadata): boolean => {
             if (!hasReleaseTypeFilter) return false;
@@ -2657,10 +2755,12 @@ export class ScraperOrchestrator extends EventEmitter {
             } else {
               // Console CPT returned 0 posts; verify HTML listing in Full Sync in case of static links
               const consoleHtmlUrl = new URL(`${encodeURIComponent(systemSlug)}/`, baseWithSlash).toString();
+              runLogger('debug', `[Crawl] "${systemSlug}" WP REST returned 0 posts in Full Sync; falling back to HTML`, consoleHtmlUrl);
               await crawlHtmlScope([consoleHtmlUrl], systemSlug);
             }
           } else {
             const consoleHtmlUrl = new URL(`${encodeURIComponent(systemSlug)}/`, baseWithSlash).toString();
+            runLogger('debug', `[Crawl] "${systemSlug}" has no WP REST CPT; falling back to HTML crawl`, consoleHtmlUrl);
             await crawlHtmlScope([consoleHtmlUrl], systemSlug);
           }
 
@@ -2847,6 +2947,11 @@ export class ScraperOrchestrator extends EventEmitter {
           !isCloudflareErr &&
           pageUrl.startsWith('http') &&
           (isAuthOrExpiredErr || /timed ?out|timedout|body|decode|econnreset|socket/i.test(firstMsg));
+        runLogger(
+          'debug',
+          `[Download] First attempt failed for "${release.filename}"`,
+          `canRefreshLink=${canRefreshLink}, isAuthOrExpired=${isAuthOrExpiredErr}, error=${formatErrorDetails(firstErr)}`,
+        );
         if (!canRefreshLink) {
           throw firstErr;
         }
@@ -2865,6 +2970,7 @@ export class ScraperOrchestrator extends EventEmitter {
         // Re-fetch release page to mint a fresh nonce & signed download key, then retry once
         const pageData = await this.client.fetchPageHtml(pageUrl, cfg, signal, runLogger);
         if (pageData.status >= 400) {
+          runLogger('debug', `[Download] Link refresh aborted for "${release.filename}" (page HTTP ${pageData.status})`, pageUrl);
           throw firstErr;
         }
         const dynamic = await this.client.extractDynamicReleaseDownloads(
@@ -2882,6 +2988,11 @@ export class ScraperOrchestrator extends EventEmitter {
           (freshCandidates.length === 1 ? freshCandidates[0] : undefined);
 
         if (!matchedFresh || (!didReauthenticate && matchedFresh.downloadUrl === activeRelease.downloadUrl)) {
+          runLogger(
+            'debug',
+            `[Download] Link refresh found no updated URL for "${release.filename}"`,
+            `candidates=${freshCandidates.length}, matched=${Boolean(matchedFresh)}, didReauth=${didReauthenticate}`,
+          );
           throw firstErr;
         }
 
@@ -2972,6 +3083,7 @@ export class ScraperOrchestrator extends EventEmitter {
         lastRunId: runId,
       });
       if (!signal.aborted) {
+        runLogger('debug', `[Download] Failure details for "${release.filename}"`, `localPath="${expectedLocalPath}", ${formatErrorDetails(err)}`);
         runLogger('error', `Failed ${release.filename}: ${errMsg}`, release.downloadUrl);
       }
       this.emitCatalogUpdated('file_failed', releaseId);

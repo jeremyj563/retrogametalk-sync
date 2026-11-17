@@ -56,6 +56,7 @@ export async function resolveOrCreateSubdirectory(
   rootHandle: SdDirectoryHandle,
   relativePath: string,
   create: boolean,
+  onDebug?: (message: string, detail?: string) => void,
 ): Promise<SdDirectoryHandle | null> {
   const segments = relativePath
     .split('/')
@@ -66,7 +67,17 @@ export async function resolveOrCreateSubdirectory(
   for (const seg of segments) {
     try {
       current = await current.getDirectoryHandle(seg, { create });
-    } catch {
+    } catch (err) {
+      const detail =
+        err instanceof DOMException
+          ? `${err.name}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      onDebug?.(
+        `Failed ${create ? 'creating' : 'resolving'} subdirectory segment "${seg}" under "${relativePath}"`,
+        detail,
+      );
       return null;
     }
   }
@@ -164,17 +175,41 @@ export async function streamHttpPayloadToSdFile(
   url: string,
   dirHandle: SdDirectoryHandle,
   filename: string,
-  options?: { signal?: AbortSignal; hadExistingFile?: boolean },
+  options?: {
+    signal?: AbortSignal;
+    hadExistingFile?: boolean;
+    onDebug?: (message: string, detail?: string) => void;
+  },
 ): Promise<number> {
   const signal = options?.signal;
+  const onDebug = options?.onDebug;
   if (signal?.aborted) {
     throw new DOMException('Installation canceled by user.', 'AbortError');
   }
 
-  const res = await fetch(url, { signal });
+  onDebug?.(`Extracting & streaming "${filename}"`, url);
+
+  let res: Response;
+  try {
+    res = await fetch(url, { signal });
+  } catch (fetchErr) {
+    if (isAbortError(fetchErr)) throw fetchErr;
+    const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+    onDebug?.(`HTTP fetch error for "${filename}"`, `${msg} · ${url}`);
+    throw new Error(`Network fetch failed for "${filename}": ${msg}`);
+  }
+
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(errText || `Extraction failed (HTTP ${res.status})`);
+    let cleanErr = errText;
+    try {
+      const parsed = JSON.parse(errText) as { error?: string };
+      if (parsed?.error) cleanErr = parsed.error;
+    } catch {
+      // Keep raw text when not JSON
+    }
+    onDebug?.(`HTTP ${res.status} extracting "${filename}"`, cleanErr || url);
+    throw new Error(cleanErr || `Extraction failed (HTTP ${res.status})`);
   }
 
   let existedBefore = Boolean(options?.hadExistingFile);
@@ -187,13 +222,38 @@ export async function streamHttpPayloadToSdFile(
     }
   }
 
-  const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
-  const writable = await fileHandle.createWritable({ keepExistingData: false });
+  let fileHandle: SdFileHandle;
+  try {
+    fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+  } catch (handleErr) {
+    const msg =
+      handleErr instanceof DOMException
+        ? `${handleErr.name}: ${handleErr.message}`
+        : handleErr instanceof Error
+          ? handleErr.message
+          : String(handleErr);
+    onDebug?.(`Failed opening destination file handle "${filename}"`, msg);
+    throw new Error(`Cannot create file "${filename}" on device: ${msg}`);
+  }
 
+  let writable: SdFileWritableStream;
+  try {
+    writable = await fileHandle.createWritable({ keepExistingData: false });
+  } catch (writableErr) {
+    const msg =
+      writableErr instanceof DOMException
+        ? `${writableErr.name}: ${writableErr.message}`
+        : writableErr instanceof Error
+          ? writableErr.message
+          : String(writableErr);
+    onDebug?.(`Failed creating writable stream for "${filename}"`, msg);
+    throw new Error(`Cannot open write stream for "${filename}": ${msg}`);
+  }
+
+  let written = 0;
   try {
     if (res.body) {
       const reader = res.body.getReader();
-      let written = 0;
       while (true) {
         if (signal?.aborted) {
           await reader.cancel().catch(() => undefined);
@@ -211,6 +271,7 @@ export async function streamHttpPayloadToSdFile(
         }
       }
       await writable.close();
+      onDebug?.(`Wrote "${filename}" (${written} bytes)`);
       return written;
     }
 
@@ -219,9 +280,20 @@ export async function streamHttpPayloadToSdFile(
       throw new DOMException('Installation canceled by user.', 'AbortError');
     }
     await writable.write(buf);
+    written = buf.byteLength;
     await writable.close();
-    return buf.byteLength;
+    onDebug?.(`Wrote "${filename}" (${written} bytes)`);
+    return written;
   } catch (err) {
+    if (!isAbortError(err)) {
+      const msg =
+        err instanceof DOMException
+          ? `${err.name}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      onDebug?.(`Stream write error on "${filename}" after ${written} bytes`, msg);
+    }
     try {
       if (typeof writable.abort === 'function') {
         await writable.abort();
@@ -235,8 +307,11 @@ export async function streamHttpPayloadToSdFile(
     if (!existedBefore) {
       try {
         await dirHandle.removeEntry(filename);
-      } catch {
-        // Non-fatal
+      } catch (cleanupErr) {
+        onDebug?.(
+          `Failed removing incomplete file "${filename}"`,
+          cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+        );
       }
     }
     throw err;

@@ -11,7 +11,7 @@ export type RunMode = SyncScope | 'dry_run';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'failed';
 export type FileItemStatus = 'queued' | 'downloading' | 'downloaded' | 'skipped' | 'failed';
 export type ItemStatus = FileItemStatus | 'partial';
-export type LogLevel = 'info' | 'download' | 'throttle' | 'warn' | 'error';
+export type LogLevel = 'debug' | 'info' | 'download' | 'throttle' | 'warn' | 'error';
 
 export interface ScraperConfigPublic {
   baseUrl: string;
@@ -301,6 +301,7 @@ export interface ServiceStatusSnapshot {
   podId: string;
   uptimeSeconds: number;
   schemaVersion: number;
+  debugLogging: boolean;
   build: {
     version: string;
     gitSha: string;

@@ -26,6 +26,7 @@ data:
   {{- if .Values.scraper.userAgent }}
   SCRAPER_USER_AGENT: {{ .Values.scraper.userAgent | quote }}
   {{- end }}
+  SCRAPER_DEBUG: {{ .Values.scraper.debug | quote }}
   {{- if ne (toString .Values.scraper.rateLimit.baseDelayMs) "" }}
   SCRAPER_BASE_DELAY_MS: {{ .Values.scraper.rateLimit.baseDelayMs | quote }}
   {{- end }}

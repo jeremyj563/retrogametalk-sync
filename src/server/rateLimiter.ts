@@ -1,3 +1,4 @@
+import { logServer } from './logger.ts';
 import type { RateLimitSample, RateLimiterTelemetry } from './types.ts';
 
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
@@ -93,6 +94,14 @@ export class AdaptiveRateLimiter {
       }
 
       if (waitMs > 0) {
+        if (waitMs >= 1500) {
+          logServer(
+            'RATE_LIMITER',
+            'debug',
+            `Pacing request for ${waitMs}ms`,
+            `currentDelayMs=${this.currentDelayMs}, cooldownActive=${Boolean(this.cooldownUntilMs && this.cooldownUntilMs > now)}`,
+          );
+        }
         await sleepWithAbort(waitMs, signal);
       }
 
@@ -112,9 +121,16 @@ export class AdaptiveRateLimiter {
 
     // Gentle additive tightening after sustained healthy responses
     if (this.consecutiveSuccesses >= 5 && this.currentDelayMs > this.minDelayMs) {
+      const prevDelay = this.currentDelayMs;
       const step = Math.max(50, Math.round((this.currentDelayMs - this.minDelayMs) * 0.15));
       this.currentDelayMs = Math.max(this.minDelayMs, this.currentDelayMs - step);
       this.consecutiveSuccesses = 0;
+      logServer(
+        'RATE_LIMITER',
+        'debug',
+        `AIMD delay tightened ${prevDelay}ms -> ${this.currentDelayMs}ms`,
+        `latency=${Math.round(latencyMs)}ms`,
+      );
     }
 
     this.pushSample(latencyMs, false);
@@ -126,6 +142,7 @@ export class AdaptiveRateLimiter {
     this.consecutiveSuccesses = 0;
     this.rateLimitHits += 1;
 
+    const prevDelay = this.currentDelayMs;
     const multiplied = Math.round(Math.max(this.baseDelayMs, this.currentDelayMs) * this.backoffMultiplier);
     const retryMs = retryAfterSeconds ? Math.round(retryAfterSeconds * 1000) : 0;
     const nextDelay = Math.min(this.maxDelayMs, Math.max(multiplied, retryMs));
@@ -133,6 +150,13 @@ export class AdaptiveRateLimiter {
     this.currentDelayMs = nextDelay;
     const cooldownMs = Math.max(nextDelay, retryMs || nextDelay);
     this.cooldownUntilMs = Date.now() + cooldownMs;
+
+    logServer(
+      'RATE_LIMITER',
+      'debug',
+      `AIMD throttle backoff ${prevDelay}ms -> ${this.currentDelayMs}ms (cooldown=${cooldownMs}ms)`,
+      `retryAfter=${retryAfterSeconds ?? 'none'}s, hits=${this.rateLimitHits}`,
+    );
 
     this.pushSample(latencyMs, true);
     return cooldownMs;
@@ -142,7 +166,14 @@ export class AdaptiveRateLimiter {
     this.totalRequests += 1;
     this.totalLatencyMs += latencyMs;
     this.consecutiveSuccesses = 0;
+    const prevDelay = this.currentDelayMs;
     this.currentDelayMs = Math.min(this.maxDelayMs, Math.round(this.currentDelayMs * 1.4));
+    logServer(
+      'RATE_LIMITER',
+      'debug',
+      `AIMD error backoff ${prevDelay}ms -> ${this.currentDelayMs}ms`,
+      `latency=${Math.round(latencyMs)}ms`,
+    );
     this.pushSample(latencyMs, false);
   }
 
