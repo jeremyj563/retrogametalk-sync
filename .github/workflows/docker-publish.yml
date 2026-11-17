@@ -32,6 +32,7 @@ jobs:
       release_tag: ${{ steps.mint.outputs.release_tag }}
       semver_full: ${{ steps.mint.outputs.semver_full }}
       semver_minor: ${{ steps.mint.outputs.semver_minor }}
+      release_date: ${{ steps.mint.outputs.release_date }}
       minted: ${{ steps.mint.outputs.minted }}
 
     steps:
@@ -75,9 +76,11 @@ jobs:
 
           if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
             echo "Tag ${TAG} already exists; skipping duplicate tag/release creation."
+            EXISTING_DATE="$(git show -s --format=%cI "refs/tags/${TAG}^{commit}" 2>/dev/null || git show -s --format=%cI HEAD)"
             echo "release_tag=" >> "$GITHUB_OUTPUT"
             echo "semver_full=" >> "$GITHUB_OUTPUT"
             echo "semver_minor=" >> "$GITHUB_OUTPUT"
+            echo "release_date=${EXISTING_DATE}" >> "$GITHUB_OUTPUT"
             echo "minted=false" >> "$GITHUB_OUTPUT"
           else
             git config user.name "github-actions[bot]"
@@ -95,9 +98,11 @@ jobs:
                 --generate-notes
             fi
 
+            RELEASE_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
             echo "release_tag=${TAG}" >> "$GITHUB_OUTPUT"
             echo "semver_full=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
             echo "semver_minor=${MAJOR}.${MINOR}" >> "$GITHUB_OUTPUT"
+            echo "release_date=${RELEASE_DATE}" >> "$GITHUB_OUTPUT"
             echo "minted=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -123,6 +128,7 @@ jobs:
           MINTED_TAG: ${{ needs.release.outputs.release_tag }}
           MINTED_SEMVER_FULL: ${{ needs.release.outputs.semver_full }}
           MINTED_SEMVER_MINOR: ${{ needs.release.outputs.semver_minor }}
+          MINTED_RELEASE_DATE: ${{ needs.release.outputs.release_date }}
         run: |
           set -euo pipefail
 
@@ -147,10 +153,17 @@ jobs:
             APP_VERSION="${{ github.head_ref || github.ref_name }}"
           fi
 
+          if [ -n "$MINTED_RELEASE_DATE" ]; then
+            BUILT_AT="$MINTED_RELEASE_DATE"
+          else
+            BUILT_AT="$(git show -s --format=%cI HEAD 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          fi
+
           echo "git_tag=${GIT_TAG}" >> "$GITHUB_OUTPUT"
           echo "semver_full=${SEMVER_FULL}" >> "$GITHUB_OUTPUT"
           echo "semver_minor=${SEMVER_MINOR}" >> "$GITHUB_OUTPUT"
           echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "built_at=${BUILT_AT}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -189,5 +202,6 @@ jobs:
             GIT_SHA=${{ github.sha }}
             APP_VERSION=${{ steps.version.outputs.app_version }}
             GIT_URL=${{ github.server_url }}/${{ github.repository }}
+            BUILT_AT=${{ steps.version.outputs.built_at }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

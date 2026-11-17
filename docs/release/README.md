@@ -49,7 +49,7 @@ Because AI Studio commits externally to GitHub without a local git CLI inside th
      - **Already-tagged version**: Logs a notice and skips duplicate tag/release creation safely so rolling `main` builds still succeed.
 2. **Job 2 — `build-and-push` (`needs: [release]`, `packages: write`)**
    - Chained directly behind `release` so newly minted tags immediately trigger the container build without needing a custom Personal Access Token (GitHub Actions suppresses downstream `on: push: tags:` triggers from `GITHUB_TOKEN` pushes).
-   - Builds the Docker image with `APP_VERSION=X.Y.Z`, `GIT_SHA`, and `GIT_URL`, and pushes to `ghcr.io/<owner>/retrogametalk-sync` with the following tags:
+   - Builds the Docker image with `APP_VERSION=X.Y.Z`, `GIT_SHA`, `GIT_URL`, and `BUILT_AT`, and pushes to `ghcr.io/<owner>/retrogametalk-sync` with the following tags:
      - `X.Y.Z` *(exact SemVer release tag when minted or pushed)*
      - `X.Y` *(floating minor tag when minted or pushed)*
      - `latest` *(on `main`)*

@@ -77,12 +77,21 @@ import type {
 
 const POD_ID = process.env.HOSTNAME || os.hostname() || 'rgt-sync-pod';
 
-let cachedLocalGitFallback: { version: string; gitSha: string } | null = null;
+let cachedLocalGitFallback: { version: string; gitSha: string; builtAt: string | null } | null = null;
 
-function getLocalGitFallback(): { version: string; gitSha: string } {
+function normalizeBuildTimestamp(raw: string | null | undefined): string | null {
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  if (!trimmed) return null;
+  const parsed = Date.parse(trimmed);
+  if (Number.isNaN(parsed)) return null;
+  return new Date(parsed).toISOString();
+}
+
+function getLocalGitFallback(): { version: string; gitSha: string; builtAt: string | null } {
   if (cachedLocalGitFallback) return cachedLocalGitFallback;
   let version = 'dev';
   let gitSha = 'unknown';
+  let builtAt: string | null = null;
   try {
     const tag = execFileSync('git', ['tag', '--points-at', 'HEAD'], {
       encoding: 'utf8',
@@ -116,7 +125,16 @@ function getLocalGitFallback(): { version: string; gitSha: string } {
   } catch {
     // No local git repository available
   }
-  cachedLocalGitFallback = { version, gitSha };
+  try {
+    const commitDate = execFileSync('git', ['show', '-s', '--format=%cI', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    builtAt = normalizeBuildTimestamp(commitDate);
+  } catch {
+    // No local git repository available
+  }
+  cachedLocalGitFallback = { version, gitSha, builtAt };
   return cachedLocalGitFallback;
 }
 
@@ -139,12 +157,23 @@ function getPackageVersionFallback(): string | null {
   return null;
 }
 
-function resolveRuntimeBuildInfo(): { version: string; gitSha: string; gitUrl: string | null } {
+function resolveRuntimeBuildInfo(): {
+  version: string;
+  gitSha: string;
+  gitUrl: string | null;
+  builtAt: string | null;
+} {
   const envVersion = (process.env.APP_VERSION || '').trim();
   const envSha = (process.env.GIT_SHA || '').trim();
   const gitUrl = normalizeGitRepoUrl(process.env.GIT_URL);
+  const envBuiltAt = normalizeBuildTimestamp(
+    process.env.BUILT_AT ||
+      process.env.RELEASE_DATE ||
+      process.env.BUILD_TIMESTAMP ||
+      process.env.BUILD_DATE,
+  );
   const fallback =
-    !envVersion || envVersion === 'dev' || !envSha || envSha === 'unknown'
+    !envVersion || envVersion === 'dev' || !envSha || envSha === 'unknown' || !envBuiltAt
       ? getLocalGitFallback()
       : null;
   const pkgVersion =
@@ -166,6 +195,7 @@ function resolveRuntimeBuildInfo(): { version: string; gitSha: string; gitUrl: s
           ? fallback.gitSha
           : envSha || 'unknown',
     gitUrl,
+    builtAt: envBuiltAt ?? fallback?.builtAt ?? null,
   };
 }
 
