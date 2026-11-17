@@ -89,6 +89,8 @@ jobs:
             echo "release_date=${EXISTING_DATE}" >> "$GITHUB_OUTPUT"
             echo "minted=false" >> "$GITHUB_OUTPUT"
           else
+            PREV_TAG="$(git tag --sort=-v:refname | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -98,10 +100,53 @@ jobs:
             if gh release view "${TAG}" >/dev/null 2>&1; then
               echo "GitHub Release ${TAG} already exists; skipping creation."
             else
+              NOTES_FILE="$(mktemp)"
+              TAG="$TAG" PREV_TAG="$PREV_TAG" REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" IMAGE_REF="ghcr.io/${GITHUB_REPOSITORY}:${TAG}" node -e '
+                const fs = require("node:fs");
+                const { execFileSync } = require("node:child_process");
+                const tag = process.env.TAG;
+                const prevTag = (process.env.PREV_TAG || "").trim();
+                const repoUrl = process.env.REPO_URL;
+                const imageRef = process.env.IMAGE_REF;
+
+                let section = "";
+                if (fs.existsSync("CHANGELOG.md")) {
+                  const raw = fs.readFileSync("CHANGELOG.md", "utf8");
+                  const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                  const headingRe = new RegExp(`^##\\s+\\[?v?${escaped}\\]?(?:\\s+-\\s+.*)?$`, "m");
+                  const match = headingRe.exec(raw);
+                  if (match) {
+                    const afterHeading = raw.slice(match.index + match[0].length);
+                    const nextHeading = afterHeading.search(/^##\s+/m);
+                    section = (nextHeading === -1 ? afterHeading : afterHeading.slice(0, nextHeading)).trim();
+                  }
+                }
+
+                if (!section) {
+                  try {
+                    const range = prevTag ? `${prevTag}..HEAD` : "-n 10";
+                    const args = prevTag
+                      ? ["log", range, "--no-merges", "--pretty=format:- %s (%h)"]
+                      : ["log", "-n", "10", "--no-merges", "--pretty=format:- %s (%h)"];
+                    section = execFileSync("git", args, { encoding: "utf8" }).trim();
+                  } catch {
+                    section = "";
+                  }
+                }
+
+                const parts = ["## Summary of Changes", "", section || `- Release ${tag}`];
+                parts.push("", "---", `**Container Image:** \`${imageRef}\``);
+                if (prevTag && prevTag !== tag) {
+                  parts.push(`**Full Changelog:** ${repoUrl}/compare/${prevTag}...${tag}`);
+                }
+                process.stdout.write(parts.join("\n") + "\n");
+              ' > "$NOTES_FILE"
+
               gh release create "${TAG}" \
                 --target "${GITHUB_SHA}" \
                 --title "${TAG}" \
-                --generate-notes
+                --notes-file "${NOTES_FILE}"
+              rm -f "$NOTES_FILE"
             fi
 
             RELEASE_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
