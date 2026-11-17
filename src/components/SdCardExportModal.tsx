@@ -1,241 +1,139 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowDown,
+  Check,
   CheckCircle2,
   Download,
   FolderInput,
   HardDrive,
+  Loader2,
   RefreshCw,
+  Square,
   X,
   XCircle,
 } from 'lucide-react';
-import { DEVICE_PRESETS, resolveSystemFolderForDevice, type DevicePresetId } from '../shared/devicePresets';
-import { sanitizeFat32Filename } from '../shared/romNaming';
-import type {
-  ArchiveInspectResult,
-  PlayableExportTarget,
-  RepositoryItemRecord,
-  ScraperConfigPublic,
-} from '../types';
-import { formatBytes } from '../utils/format';
-import { readJsonSafely } from '../utils/http';
+import type { BulkStorageInstallerController } from '../hooks/useBulkStorageInstaller';
 import {
-  findUpgradeCandidateOnCard,
-  isFileSystemAccessSupported,
-  pickSdCardRootDirectory,
-  resolveOrCreateSubdirectory,
-  scanTargetFolder,
-  streamHttpPayloadToSdFile,
-  type SdDirectoryHandle,
-  type SdScanFolderResult,
-} from '../utils/sdCardFs';
-
-export interface SdExportBatchItemResult {
-  itemId: number;
-  title: string;
-  systemName: string;
-  inspections: ArchiveInspectResult[];
-  error: string | null;
-}
-
-interface ExportQueueRow {
-  rowKey: string;
-  itemId: number;
-  fileId: number;
-  title: string;
-  systemName: string;
-  sourceFilename: string;
-  targets: PlayableExportTarget[];
-  selectedTargetIds: string[];
-  outputNamesByTargetId: Record<string, string>;
-  replaceOlderByTargetId: Record<string, boolean>;
-  overwriteExisting: boolean;
-  error: string | null;
-  patchOnly: boolean;
-  ignoredEntriesCount: number;
-  writeState: 'pending' | 'writing' | 'written' | 'upgraded' | 'skipped' | 'error';
-  writeDetail: string | null;
-}
+  DEVICE_PRESETS,
+  resolveSystemFolderForDevice,
+  type DevicePresetId,
+} from '../shared/devicePresets';
+import type { ScraperConfigPublic } from '../types';
+import { formatBytes } from '../utils/format';
+import { findUpgradeCandidateOnCard, isFileSystemAccessSupported } from '../utils/sdCardFs';
 
 interface SdCardExportModalProps {
-  open: boolean;
-  itemIds: number[];
+  installer: BulkStorageInstallerController;
   config: ScraperConfigPublic;
-  sdRootHandle: SdDirectoryHandle | null;
-  onMountSdHandle: (handle: SdDirectoryHandle | null) => void;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
-  onItemsInstalled?: (updatedItems: RepositoryItemRecord[], deviceLabel: string) => void;
-  onClose: () => void;
 }
 
 export function SdCardExportModal({
-  open,
-  itemIds,
+  installer,
   config,
-  sdRootHandle,
-  onMountSdHandle,
   onSaveConfig,
-  onItemsInstalled,
-  onClose,
 }: SdCardExportModalProps) {
-  const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
-  const [mountError, setMountError] = useState<string | null>(null);
-  const [inspecting, setInspecting] = useState(false);
-  const [inspectError, setInspectError] = useState<string | null>(null);
-  const [rows, setRows] = useState<ExportQueueRow[]>([]);
-  const [folderScans, setFolderScans] = useState<Record<string, SdScanFolderResult>>({});
-  const [scanningCard, setScanningCard] = useState(false);
-  const [writing, setWriting] = useState(false);
+  const {
+    modalOpen,
+    closeModal,
+    job,
+    metrics,
+    isBusy,
+    sdRootHandle,
+    promptMountSdCard,
+    mountError,
+    devicePreset,
+    setDevicePreset,
+    folderMapDraft,
+    setFolderMapDraft,
+    folderScans,
+    scanningCard,
+    rescanMountedSdFolders,
+    startReviewWrite,
+    cancelInstall,
+    dismissJob,
+    toggleTargetSelection,
+    selectAllVariantsForRow,
+    autoPickSmartPrimaries,
+    updateRowTargetName,
+  } = installer;
 
-  const [devicePreset, setDevicePreset] = useState<string>(config.devicePreset || 'everdrive');
-  const [folderMapDraft, setFolderMapDraft] = useState<Record<string, string>>(config.deviceFolderMap || {});
+  const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
   const [showFolderEditor, setShowFolderEditor] = useState(false);
   const [savingDevicePrefs, setSavingDevicePrefs] = useState(false);
 
-  useEffect(() => {
-    setDevicePreset(config.devicePreset || 'everdrive');
-    setFolderMapDraft(config.deviceFolderMap || {});
-  }, [config.devicePreset, config.deviceFolderMap]);
-
-  const loadInspectionBatch = useCallback(async () => {
-    if (!open || itemIds.length === 0) return;
-    setInspecting(true);
-    setInspectError(null);
-    try {
-      const res = await fetch('/api/items/inspect-batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: itemIds }),
-      });
-      const parsed = await readJsonSafely<{ results?: SdExportBatchItemResult[]; error?: string }>(res);
-      if (!parsed.ok || !parsed.data?.results) {
-        throw new Error(parsed.errorMessage || `Inspection failed (HTTP ${res.status})`);
-      }
-
-      const nextRows: ExportQueueRow[] = [];
-      for (const entry of parsed.data.results) {
-        if (entry.inspections.length === 0) {
-          nextRows.push({
-            rowKey: `${entry.itemId}-empty`,
-            itemId: entry.itemId,
-            fileId: 0,
-            title: entry.title,
-            systemName: entry.systemName,
-            sourceFilename: '—',
-            targets: [],
-            selectedTargetIds: [],
-            outputNamesByTargetId: {},
-            replaceOlderByTargetId: {},
-            overwriteExisting: false,
-            error: entry.error || 'No downloadable archive found',
-            patchOnly: false,
-            ignoredEntriesCount: 0,
-            writeState: 'error',
-            writeDetail: entry.error || 'Unavailable',
-          });
-          continue;
-        }
-
-        for (const insp of entry.inspections) {
-          const namesMap: Record<string, string> = {};
-          const replaceMap: Record<string, boolean> = {};
-          for (const t of insp.playableTargets) {
-            namesMap[t.id] = t.suggestedFilename;
-            replaceMap[t.id] = true;
-          }
-          const initialSelected =
-            insp.playableTargets.length === 1 ? [insp.playableTargets[0].id] : [];
-
-          nextRows.push({
-            rowKey: `${entry.itemId}-${insp.fileId}`,
-            itemId: entry.itemId,
-            fileId: insp.fileId,
-            title: entry.title,
-            systemName: entry.systemName,
-            sourceFilename: insp.sourceFilename,
-            targets: insp.playableTargets,
-            selectedTargetIds: initialSelected,
-            outputNamesByTargetId: namesMap,
-            replaceOlderByTargetId: replaceMap,
-            overwriteExisting: false,
-            error: insp.playableTargets.length === 0
-              ? (insp.patchOnly ? 'Patch-only archive (no ROM payload)' : 'No playable ROM found')
-              : null,
-            patchOnly: insp.patchOnly,
-            ignoredEntriesCount: insp.ignoredEntriesCount,
-            writeState: insp.playableTargets.length === 0 ? 'skipped' : 'pending',
-            writeDetail: null,
-          });
-        }
-      }
-
-      setRows(nextRows);
-    } catch (err) {
-      setInspectError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setInspecting(false);
-    }
-  }, [open, itemIds]);
+  // Spotlight & round-robin jump state for unresolved multi-ROM items
+  const rowElementRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const jumpCursorRef = useRef(-1);
+  const spotlightNonceRef = useRef(0);
+  const [spotlightItem, setSpotlightItem] = useState<{ itemId: number; nonce: number } | null>(null);
 
   useEffect(() => {
-    if (open) {
-      void loadInspectionBatch();
-    } else {
-      setRows([]);
-      setMountError(null);
-      setInspectError(null);
-    }
-  }, [open, loadInspectionBatch]);
+    jumpCursorRef.current = -1;
+    setSpotlightItem(null);
+  }, [job?.jobId]);
+
+  useEffect(() => {
+    if (!modalOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeModal();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [modalOpen, closeModal]);
+
+  const rows = job?.rows || [];
 
   const uniqueSystemsInQueue = useMemo(() => {
-    return Array.from(new Set(rows.map((r) => r.systemName).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+    return Array.from(new Set(rows.map((r) => r.systemName).filter(Boolean))).sort((a, b) =>
+      a.localeCompare(b),
+    );
   }, [rows]);
 
-  const rescanMountedSdFolders = useCallback(async () => {
-    if (!sdRootHandle || uniqueSystemsInQueue.length === 0) {
-      setFolderScans({});
-      return;
+  // Compute unresolved multi-ROM items (items with >1 competing playable variants and 0 currently checked)
+  const unresolvedMultiItems = useMemo(() => {
+    const selectedByItem = new Map<number, number>();
+    const firstRowKeyByItem = new Map<number, string>();
+    const multiItemOrder: number[] = [];
+    const seenMulti = new Set<number>();
+
+    for (const row of rows) {
+      selectedByItem.set(
+        row.itemId,
+        (selectedByItem.get(row.itemId) || 0) + row.selectedTargetIds.length,
+      );
+      if (row.isMultiChoiceItem && !seenMulti.has(row.itemId)) {
+        seenMulti.add(row.itemId);
+        multiItemOrder.push(row.itemId);
+        firstRowKeyByItem.set(row.itemId, row.rowKey);
+      }
     }
-    setScanningCard(true);
-    try {
-      const nextScans: Record<string, SdScanFolderResult> = {};
-      for (const sys of uniqueSystemsInQueue) {
-        const folder = resolveSystemFolderForDevice(sys, devicePreset, folderMapDraft);
-        if (!nextScans[folder]) {
-          nextScans[folder] = await scanTargetFolder(sdRootHandle, folder);
+
+    const out: { itemId: number; firstRowKey: string }[] = [];
+    for (const itemId of multiItemOrder) {
+      if ((selectedByItem.get(itemId) || 0) === 0) {
+        const firstRowKey = firstRowKeyByItem.get(itemId);
+        if (firstRowKey) {
+          out.push({ itemId, firstRowKey });
         }
       }
-      setFolderScans(nextScans);
-    } catch (err) {
-      setMountError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setScanningCard(false);
     }
-  }, [sdRootHandle, uniqueSystemsInQueue, devicePreset, folderMapDraft]);
+    return out;
+  }, [rows]);
 
-  useEffect(() => {
-    if (open && sdRootHandle) {
-      void rescanMountedSdFolders();
-    }
-  }, [open, sdRootHandle, rescanMountedSdFolders]);
+  if (!modalOpen || !job) return null;
 
-  if (!open) return null;
+  const isInspecting = job.phase === 'inspecting';
+  const isRunning = job.phase === 'running' || job.phase === 'canceling';
+  const isCanceling = job.phase === 'canceling';
+  const isFinished =
+    job.phase === 'completed' || job.phase === 'canceled' || job.phase === 'error';
 
-  const handleMountSdCard = async () => {
-    setMountError(null);
-    try {
-      const handle = await pickSdCardRootDirectory();
-      onMountSdHandle(handle);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      const msg = err instanceof Error ? err.message : String(err);
-      setMountError(
-        /cross origin|sub frame|user activation/i.test(msg)
-          ? 'Browser blocked folder picker inside this embedded frame. Open the app directly in its own tab or use Prepared ROM browser downloads.'
-          : msg,
-      );
-    }
-  };
+  const totalSelectedTargets = rows.reduce((acc, r) => acc + r.selectedTargetIds.length, 0);
 
   const handleSaveDevicePrefs = async () => {
     setSavingDevicePrefs(true);
@@ -249,170 +147,17 @@ export function SdCardExportModal({
     }
   };
 
-  const toggleTargetSelection = (rowKey: string, targetId: string) => {
-    setRows((prev) =>
-      prev.map((row) => {
-        if (row.rowKey !== rowKey) return row;
-        const exists = row.selectedTargetIds.includes(targetId);
-        const nextIds = exists
-          ? row.selectedTargetIds.filter((id) => id !== targetId)
-          : [...row.selectedTargetIds, targetId];
-        return { ...row, selectedTargetIds: nextIds };
-      }),
-    );
-  };
-
-  const selectAllVariantsForRow = (rowKey: string) => {
-    setRows((prev) =>
-      prev.map((row) =>
-        row.rowKey === rowKey ? { ...row, selectedTargetIds: row.targets.map((t) => t.id) } : row,
-      ),
-    );
-  };
-
-  const updateRowTargetName = (rowKey: string, targetId: string, nextName: string) => {
-    setRows((prev) =>
-      prev.map((row) =>
-        row.rowKey === rowKey
-          ? { ...row, outputNamesByTargetId: { ...row.outputNamesByTargetId, [targetId]: nextName } }
-          : row,
-      ),
-    );
-  };
-
-  const totalSelectedTargets = rows.reduce((acc, r) => acc + r.selectedTargetIds.length, 0);
-  const unresolvedMultiRows = rows.filter((r) => r.targets.length > 1 && r.selectedTargetIds.length === 0).length;
-
-  const handleWriteToSdCard = async () => {
-    if (!sdRootHandle || writing || totalSelectedTargets === 0) return;
-    setWriting(true);
-    setMountError(null);
-    const installedItemIds = new Set<number>();
-
-    try {
-      for (const row of rows) {
-        if (row.selectedTargetIds.length === 0) continue;
-
-        setRows((prev) =>
-          prev.map((r) =>
-            r.rowKey === row.rowKey ? { ...r, writeState: 'writing', writeDetail: 'Extracting...' } : r,
-          ),
-        );
-
-        const targetFolderRel = resolveSystemFolderForDevice(row.systemName, devicePreset, folderMapDraft);
-        const systemDirHandle = await resolveOrCreateSubdirectory(sdRootHandle, targetFolderRel, true);
-        if (!systemDirHandle) {
-          setRows((prev) =>
-            prev.map((r) =>
-              r.rowKey === row.rowKey
-                ? { ...r, writeState: 'error', writeDetail: `Could not create folder ${targetFolderRel}` }
-                : r,
-            ),
-          );
-          continue;
-        }
-
-        const scan = folderScans[targetFolderRel];
-        let rowBytes = 0;
-        let upgradedOldName: string | null = null;
-        let allSkipped = true;
-        let rowFailed: string | null = null;
-
-        for (const targetId of row.selectedTargetIds) {
-          const target = row.targets.find((t) => t.id === targetId);
-          if (!target) continue;
-          const rawDesiredName = (row.outputNamesByTargetId[targetId] || target.suggestedFilename).trim();
-          const finalName = config.romSanitizeFat32
-            ? sanitizeFat32Filename(rawDesiredName, config.romMaxFilenameLen)
-            : rawDesiredName;
-
-          const cardStatus = findUpgradeCandidateOnCard(finalName, scan);
-          if (cardStatus.exactMatch && !row.overwriteExisting) {
-            continue;
-          }
-          allSkipped = false;
-
-          try {
-            if (target.kind === 'disc_set') {
-              const discFolderName = finalName.replace(/\.zip$/i, '');
-              const discDir = await systemDirHandle.getDirectoryHandle(discFolderName, { create: true });
-              for (const entryPath of target.entryPaths) {
-                const leaf = entryPath.split('/').pop() || entryPath;
-                const cleanLeaf = config.romSanitizeFat32 ? sanitizeFat32Filename(leaf, config.romMaxFilenameLen) : leaf;
-                const url = `/api/items/${row.itemId}/extract-entry?fileId=${row.fileId}&entry=${encodeURIComponent(entryPath)}&name=${encodeURIComponent(cleanLeaf)}`;
-                rowBytes += await streamHttpPayloadToSdFile(url, discDir, cleanLeaf);
-              }
-            } else {
-              const url = `/api/items/${row.itemId}/extract-entry?fileId=${row.fileId}&entry=${encodeURIComponent(target.primaryEntry)}&name=${encodeURIComponent(finalName)}`;
-              rowBytes += await streamHttpPayloadToSdFile(url, systemDirHandle, finalName);
-            }
-
-            if (cardStatus.olderEntryName && row.replaceOlderByTargetId[targetId] !== false) {
-              try {
-                await systemDirHandle.removeEntry(cardStatus.olderEntryName, { recursive: true });
-                upgradedOldName = cardStatus.olderEntryName;
-              } catch {
-                // Non-fatal if older file could not be deleted
-              }
-            }
-          } catch (err) {
-            rowFailed = err instanceof Error ? err.message : String(err);
-          }
-        }
-
-        if (!rowFailed) {
-          installedItemIds.add(row.itemId);
-        }
-
-        setRows((prev) =>
-          prev.map((r) => {
-            if (r.rowKey !== row.rowKey) return r;
-            if (rowFailed) {
-              return { ...r, writeState: 'error', writeDetail: rowFailed };
-            }
-            if (allSkipped) {
-              return { ...r, writeState: 'skipped', writeDetail: `Already on device in /${targetFolderRel}` };
-            }
-            if (upgradedOldName) {
-              return {
-                ...r,
-                writeState: 'upgraded',
-                writeDetail: `Updated in /${targetFolderRel} (replaced ${upgradedOldName}) · ${formatBytes(rowBytes)}`,
-              };
-            }
-            return {
-              ...r,
-              writeState: 'written',
-              writeDetail: `Saved to /${targetFolderRel} · ${formatBytes(rowBytes)}`,
-            };
-          }),
-        );
-      }
-
-      if (installedItemIds.size > 0) {
-        try {
-          const markRes = await fetch('/api/items/installed', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              ids: Array.from(installedItemIds),
-              installed: true,
-              deviceLabel: sdRootHandle.name,
-            }),
-          });
-          const markParsed = await readJsonSafely<{ items?: RepositoryItemRecord[] }>(markRes);
-          if (markParsed.ok && Array.isArray(markParsed.data?.items)) {
-            onItemsInstalled?.(markParsed.data.items, sdRootHandle.name);
-          }
-        } catch {
-          // Non-fatal if install flag sync fails after file write
-        }
-      }
-
-      await rescanMountedSdFolders();
-    } finally {
-      setWriting(false);
+  const handleJumpToNextUnresolved = () => {
+    if (unresolvedMultiItems.length === 0) return;
+    const nextIdx = (jumpCursorRef.current + 1) % unresolvedMultiItems.length;
+    jumpCursorRef.current = nextIdx;
+    const target = unresolvedMultiItems[nextIdx];
+    const el = rowElementRefs.current[target.firstRowKey];
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
+    const nextNonce = ++spotlightNonceRef.current;
+    setSpotlightItem({ itemId: target.itemId, nonce: nextNonce });
   };
 
   return (
@@ -422,7 +167,7 @@ export function SdCardExportModal({
       aria-modal="true"
       aria-label="Install Prepared ROMs to Storage Device"
       onClick={(e) => {
-        if (e.target === e.currentTarget && !writing) onClose();
+        if (e.target === e.currentTarget) closeModal();
       }}
     >
       <div className="crt-canvas crt-drawer-panel w-full max-w-4xl max-h-[90vh] bg-crt-surface border border-crt-border-strong rounded-md flex flex-col shadow-2xl overflow-hidden">
@@ -432,19 +177,23 @@ export function SdCardExportModal({
             <HardDrive className="h-5 w-5 text-crt-phosphor shrink-0" />
             <div className="min-w-0">
               <h2 className="font-display text-lg font-semibold text-crt-text truncate">
-                Install Prepared ROMs to Storage Device
+                {job.mode === 'express'
+                  ? 'Express Storage Device Installer'
+                  : 'Install Prepared ROMs to Storage Device'}
               </h2>
               <p className="text-xs text-crt-muted truncate">
-                Extracts playable ROMs &amp; ODE disc sets directly into console folders on your target storage device.
+                {isBusy
+                  ? 'Transfers continue in the background if you close this window.'
+                  : 'Extracts playable ROMs & ODE disc sets directly into console folders on your target storage device.'}
               </p>
             </div>
           </div>
           <button
             type="button"
-            disabled={writing}
-            onClick={onClose}
+            onClick={closeModal}
             aria-label="Close storage device installer"
-            className="p-2 border border-crt-border hover:border-crt-phosphor text-crt-muted hover:text-crt-text rounded transition-colors disabled:opacity-40"
+            title={isBusy ? 'Hide window (installation continues in background)' : 'Close window'}
+            className="p-2 border border-crt-border hover:border-crt-phosphor text-crt-muted hover:text-crt-text rounded transition-colors cursor-pointer"
           >
             <X className="h-4 w-4" />
           </button>
@@ -457,29 +206,29 @@ export function SdCardExportModal({
               {fsSupport.supported ? (
                 <button
                   type="button"
-                  disabled={writing}
-                  onClick={() => void handleMountSdCard()}
-                  className={`inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded border transition-colors whitespace-nowrap ${
+                  disabled={isRunning}
+                  onClick={() => void promptMountSdCard()}
+                  className={`inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
                     sdRootHandle
                       ? 'border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/15'
                       : 'border-crt-phosphor bg-crt-phosphor text-crt-bg hover:brightness-110'
                   }`}
                 >
-                  <HardDrive className="h-3.5 w-3.5" />
-                  {sdRootHandle ? `Device Mounted: ${sdRootHandle.name} (Change)` : 'Mount Storage Device / Target Folder'}
+                  <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                  {sdRootHandle
+                    ? `Device Mounted: ${sdRootHandle.name} (Change)`
+                    : 'Mount Storage Device / Target Folder'}
                 </button>
               ) : (
-                <span className="text-xs font-mono text-crt-amber">
-                  {fsSupport.reason}
-                </span>
+                <span className="text-xs font-mono text-crt-amber">{fsSupport.reason}</span>
               )}
 
               <select
                 value={devicePreset}
-                disabled={writing}
+                disabled={isRunning}
                 onChange={(e) => setDevicePreset(e.target.value)}
                 aria-label="Select target device folder preset"
-                className="px-3 py-2 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+                className="px-3 py-2 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-50"
               >
                 {Object.values(DEVICE_PRESETS).map((preset) => (
                   <option key={preset.id} value={preset.id}>
@@ -490,8 +239,9 @@ export function SdCardExportModal({
 
               <button
                 type="button"
+                disabled={isRunning}
                 onClick={() => setShowFolderEditor((v) => !v)}
-                className="px-3 py-2 text-xs border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap"
+                className="px-3 py-2 text-xs border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
               >
                 {showFolderEditor ? 'Hide Folder Map' : 'Edit Folder Map'}
               </button>
@@ -500,11 +250,11 @@ export function SdCardExportModal({
             {sdRootHandle && (
               <button
                 type="button"
-                disabled={scanningCard || writing}
+                disabled={scanningCard || isRunning}
                 onClick={() => void rescanMountedSdFolders()}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-muted hover:text-crt-text rounded transition-colors"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
               >
-                <RefreshCw className={`h-3.5 w-3.5 ${scanningCard ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${scanningCard ? 'animate-spin' : ''}`} />
                 {scanningCard ? 'Scanning Device...' : 'Rescan Device'}
               </button>
             )}
@@ -517,17 +267,62 @@ export function SdCardExportModal({
             </div>
           )}
 
+          {/* Live progress summary bar when actively running or finished */}
+          {(isRunning || isFinished) && (
+            <div className="pt-2 border-t border-crt-border space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono tabular-nums">
+                <span className="text-crt-text">
+                  {isCanceling
+                    ? 'Stopping active transfer...'
+                    : isRunning
+                      ? `Installing ${metrics.completedItems} / ${metrics.totalItems} games`
+                      : job.phase === 'canceled'
+                        ? `Stopped at ${metrics.completedItems} / ${metrics.totalItems} games`
+                        : job.phase === 'error'
+                          ? `Error after ${metrics.completedItems} / ${metrics.totalItems} games`
+                          : `Completed ${metrics.completedItems} / ${metrics.totalItems} games`}
+                  {job.currentTitle && isRunning ? ` · ${job.currentTitle}` : ''}
+                </span>
+                <span className="text-crt-muted">
+                  {[
+                    metrics.writtenItems > 0 ? `${metrics.writtenItems} written` : null,
+                    metrics.upgradedItems > 0 ? `${metrics.upgradedItems} upgraded` : null,
+                    metrics.skippedItems > 0 ? `${metrics.skippedItems} already on device` : null,
+                    metrics.failedItems > 0 ? `${metrics.failedItems} failed` : null,
+                    metrics.canceledItems > 0 ? `${metrics.canceledItems} canceled` : null,
+                    metrics.totalBytesWritten > 0 ? formatBytes(metrics.totalBytesWritten) : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </span>
+              </div>
+              <progress
+                max={100}
+                value={isRunning && metrics.progressPercent === 0 ? 3 : metrics.progressPercent}
+                aria-label="Storage installation progress"
+                className={`block h-1.5 w-full overflow-hidden rounded-xs bg-crt-bg [&::-webkit-progress-bar]:bg-crt-bg [&::-webkit-progress-value]:transition-all [&::-webkit-progress-value]:duration-200 ${
+                  job.phase === 'error'
+                    ? '[&::-webkit-progress-value]:bg-crt-crimson [&::-moz-progress-bar]:bg-crt-crimson'
+                    : job.phase === 'canceled'
+                      ? '[&::-webkit-progress-value]:bg-crt-amber [&::-moz-progress-bar]:bg-crt-amber'
+                      : '[&::-webkit-progress-value]:bg-crt-phosphor [&::-moz-progress-bar]:bg-crt-phosphor'
+                }`}
+              />
+            </div>
+          )}
+
           {showFolderEditor && uniqueSystemsInQueue.length > 0 && (
             <div className="pt-3 border-t border-crt-border space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                 <span className="text-crt-muted">
-                  Map each console in this queue to its relative folder on the target storage device ({DEVICE_PRESETS[devicePreset as DevicePresetId]?.name || 'Custom'}).
+                  Map each console in this queue to its relative folder on the target storage device (
+                  {DEVICE_PRESETS[devicePreset as DevicePresetId]?.name || 'Custom'}).
                 </span>
                 <button
                   type="button"
                   disabled={savingDevicePrefs}
                   onClick={() => void handleSaveDevicePrefs()}
-                  className="px-2.5 py-1 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors"
+                  className="px-2.5 py-1 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   {savingDevicePrefs ? 'Saving...' : 'Save Mapping Defaults'}
                 </button>
@@ -559,42 +354,63 @@ export function SdCardExportModal({
 
         {/* Queue Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-3">
-          {inspecting ? (
-            <div className="space-y-2.5">
-              {[0, 1, 2].map((idx) => (
-                <div key={idx} className="h-16 border border-crt-border bg-crt-bg rounded animate-pulse" />
-              ))}
-            </div>
-          ) : inspectError ? (
+          {job.errorMessage && (
             <div className="border border-crt-crimson/50 bg-crt-crimson/10 p-4 rounded text-xs font-mono text-crt-crimson">
-              {inspectError}
+              {job.errorMessage}
             </div>
-          ) : rows.length === 0 ? (
+          )}
+
+          {rows.length === 0 ? (
             <div className="p-10 text-center text-xs text-crt-muted border border-crt-border bg-crt-bg rounded">
-              No archived releases queued for export.
+              No archived releases queued for installation.
             </div>
           ) : (
             rows.map((row) => {
-              const folder = resolveSystemFolderForDevice(row.systemName, devicePreset, folderMapDraft);
+              const folder = row.systemName
+                ? resolveSystemFolderForDevice(row.systemName, devicePreset, folderMapDraft)
+                : 'ROMs';
               const scan = folderScans[folder];
-              const isMulti = row.targets.length > 1;
+              const isMulti = row.targets.length > 1 || row.isMultiChoiceItem;
+              const isSpotlighted = spotlightItem?.itemId === row.itemId;
 
               return (
                 <div
                   key={row.rowKey}
-                  className="border border-crt-border bg-crt-bg rounded p-4 space-y-3"
+                  ref={(node) => {
+                    rowElementRefs.current[row.rowKey] = node;
+                  }}
+                  className="relative scroll-mt-4 border border-crt-border bg-crt-bg rounded p-4 space-y-3"
                 >
+                  {isSpotlighted && spotlightItem && (
+                    <div
+                      key={`multi-spotlight-${row.rowKey}-${spotlightItem.nonce}`}
+                      aria-hidden="true"
+                      className="pointer-events-none absolute -inset-px rounded crt-section-spotlight"
+                    />
+                  )}
+
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0 space-y-0.5">
                       <div className="flex flex-wrap items-center gap-2 text-xs">
                         <span className="font-display font-semibold text-crt-text">{row.title}</span>
-                        <span className="font-mono text-crt-muted">·</span>
-                        <span className="font-mono text-crt-phosphor">/{folder}/</span>
+                        {row.systemName && (
+                          <>
+                            <span className="font-mono text-crt-muted">·</span>
+                            <span className="font-mono text-crt-phosphor">/{folder}/</span>
+                          </>
+                        )}
+                        {row.fileRole && row.fileRole !== 'ROM' && (
+                          <>
+                            <span className="font-mono text-crt-muted">·</span>
+                            <span className="font-mono text-[11px] text-crt-muted">{row.fileRole}</span>
+                          </>
+                        )}
                         {row.ignoredEntriesCount > 0 && (
                           <>
                             <span className="font-mono text-crt-muted">·</span>
                             <span className="font-mono text-[11px] text-crt-muted">
-                              strips {row.ignoredEntriesCount} junk file{row.ignoredEntriesCount === 1 ? '' : 's'}
+                              strips {row.ignoredEntriesCount} junk file
+                              {row.ignoredEntriesCount === 1 ? '' : 's'}
                             </span>
                           </>
                         )}
@@ -607,42 +423,76 @@ export function SdCardExportModal({
                     <div className="flex items-center gap-2 font-mono text-[11px] shrink-0">
                       {row.writeState === 'written' || row.writeState === 'upgraded' ? (
                         <span className="inline-flex items-center gap-1 text-crt-phosphor">
-                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
                           {row.writeDetail}
                         </span>
                       ) : row.writeState === 'error' ? (
                         <span className="inline-flex items-center gap-1 text-crt-crimson">
-                          <XCircle className="h-3.5 w-3.5" />
+                          <XCircle className="h-3.5 w-3.5 shrink-0" />
                           {row.writeDetail || row.error}
                         </span>
+                      ) : row.writeState === 'canceled' ? (
+                        <span className="text-crt-amber">{row.writeDetail || 'Canceled'}</span>
                       ) : row.writeState === 'skipped' ? (
-                        <span className="text-crt-muted">{row.writeDetail || row.error || 'Skipped'}</span>
-                      ) : row.writeState === 'writing' ? (
-                        <span className="text-crt-amber">{row.writeDetail || 'Writing...'}</span>
-                      ) : null}
+                        <span className="text-crt-muted">
+                          {row.writeDetail || row.error || 'Skipped'}
+                        </span>
+                      ) : row.writeState === 'writing' || row.writeState === 'inspecting' ? (
+                        <span className="inline-flex items-center gap-1.5 text-crt-amber">
+                          <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                          {row.writeDetail || 'Working...'}
+                        </span>
+                      ) : (
+                        <span className="text-crt-muted">{row.writeDetail || ''}</span>
+                      )}
                     </div>
                   </div>
 
                   {row.targets.length > 0 && (
                     <div className="space-y-2 pt-2 border-t border-crt-border">
-                      {isMulti && (
+                      {isMulti && !isRunning && (
                         <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                           <span className="text-crt-amber font-mono">
-                            {row.targets.length} playable files inside archive — pick variant(s) to export:
+                            {row.targets.length > 1
+                              ? `${row.targets.length} playable files inside archive — pick variant(s) to install:`
+                              : 'Multi-file release variant — confirm selection:'}
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => selectAllVariantsForRow(row.rowKey)}
-                            className="text-xs font-mono text-crt-phosphor hover:underline"
-                          >
-                            Export All Variants
-                          </button>
+                          <div className="flex items-center gap-3">
+                            {row.recommendedTargetIds.length > 0 &&
+                              row.selectedTargetIds.length === 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    for (const recId of row.recommendedTargetIds) {
+                                      if (!row.selectedTargetIds.includes(recId)) {
+                                        toggleTargetSelection(row.rowKey, recId);
+                                      }
+                                    }
+                                  }}
+                                  className="text-xs font-mono text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                                >
+                                  Select Smart Primary
+                                </button>
+                              )}
+                            {row.targets.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => selectAllVariantsForRow(row.rowKey)}
+                                className="text-xs font-mono text-crt-muted hover:text-crt-text hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                              >
+                                Select All Variants
+                              </button>
+                            )}
+                          </div>
                         </div>
                       )}
 
                       {row.targets.map((target) => {
                         const checked = row.selectedTargetIds.includes(target.id);
-                        const outName = row.outputNamesByTargetId[target.id] ?? target.suggestedFilename;
+                        const isRecommended = row.recommendedTargetIds.includes(target.id);
+                        const smartReason = row.smartReasonsByTargetId[target.id];
+                        const outName =
+                          row.outputNamesByTargetId[target.id] ?? target.suggestedFilename;
                         const cardCheck = findUpgradeCandidateOnCard(outName, scan);
                         const browserDownloadHref = `/api/items/${row.itemId}/download-rom?fileId=${row.fileId}&targetId=${encodeURIComponent(target.id)}&name=${encodeURIComponent(outName)}`;
 
@@ -655,7 +505,7 @@ export function SdCardExportModal({
                               <input
                                 type="checkbox"
                                 checked={checked}
-                                disabled={writing}
+                                disabled={isBusy}
                                 onChange={() => toggleTargetSelection(row.rowKey, target.id)}
                                 className="accent-crt-phosphor mt-1 shrink-0"
                               />
@@ -666,17 +516,37 @@ export function SdCardExportModal({
                                     ({formatBytes(target.sizeBytes)})
                                   </span>
                                 </div>
-                                <div className="font-mono text-[11px] text-crt-muted">
-                                  {target.kind === 'disc_set'
-                                    ? `ODE subfolder /${folder}/${outName}/`
-                                    : `Target: /${folder}/`}
+                                <div className="font-mono text-[11px] text-crt-muted flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                                  <span>
+                                    {target.kind === 'disc_set'
+                                      ? `ODE subfolder /${folder}/${outName}/`
+                                      : `Target: /${folder}/`}
+                                  </span>
+                                  {target.detectedVersion && (
+                                    <>
+                                      <span aria-hidden="true">·</span>
+                                      <span className="text-crt-text">{target.detectedVersion}</span>
+                                    </>
+                                  )}
+                                  {isRecommended && smartReason && (
+                                    <>
+                                      <span aria-hidden="true">·</span>
+                                      <span className="text-crt-phosphor">{smartReason}</span>
+                                    </>
+                                  )}
                                   {cardCheck.exactMatch && (
-                                    <span className="text-crt-muted ml-2">· Already on storage device</span>
+                                    <>
+                                      <span aria-hidden="true">·</span>
+                                      <span>Already on storage device</span>
+                                    </>
                                   )}
                                   {cardCheck.olderEntryName && (
-                                    <span className="text-crt-amber ml-2">
-                                      · Replaces older: {cardCheck.olderEntryName}
-                                    </span>
+                                    <>
+                                      <span aria-hidden="true">·</span>
+                                      <span className="text-crt-amber">
+                                        Replaces older: {cardCheck.olderEntryName}
+                                      </span>
+                                    </>
                                   )}
                                 </div>
                               </div>
@@ -686,10 +556,12 @@ export function SdCardExportModal({
                               <input
                                 type="text"
                                 value={outName}
-                                disabled={writing}
+                                disabled={isBusy}
                                 aria-label={`Output filename for ${target.displayName}`}
-                                onChange={(e) => updateRowTargetName(row.rowKey, target.id, e.target.value)}
-                                className="w-72 sm:w-80 px-2.5 py-1 text-xs font-mono bg-crt-surface border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
+                                onChange={(e) =>
+                                  updateRowTargetName(row.rowKey, target.id, e.target.value)
+                                }
+                                className="w-72 sm:w-80 px-2.5 py-1 text-xs font-mono bg-crt-surface border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
                               />
                               <a
                                 href={browserDownloadHref}
@@ -713,39 +585,104 @@ export function SdCardExportModal({
 
         {/* Footer */}
         <footer className="px-6 py-3.5 border-t border-crt-border bg-crt-bg flex flex-wrap items-center justify-between gap-3 shrink-0">
-          <div className="text-xs font-mono text-crt-muted tabular-nums">
-            {unresolvedMultiRows > 0 ? (
+          <div className="flex flex-wrap items-center gap-2 text-xs font-mono tabular-nums">
+            {!isRunning && !isInspecting && unresolvedMultiItems.length > 0 ? (
+              <>
+                <button
+                  type="button"
+                  onClick={handleJumpToNextUnresolved}
+                  title="Scroll to the next multi-ROM item awaiting variant selection"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 border border-crt-amber/70 bg-crt-amber/10 hover:bg-crt-amber/20 text-crt-amber rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <span>
+                    {unresolvedMultiItems.length} multi-ROM item
+                    {unresolvedMultiItems.length === 1 ? '' : 's'} awaiting variant selection
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-semibold">Next</span>
+                  <ArrowDown className="h-3.5 w-3.5 shrink-0" />
+                </button>
+                <button
+                  type="button"
+                  onClick={autoPickSmartPrimaries}
+                  title="Automatically select the latest context-matched Primary ROM for all unresolved items"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 border border-crt-phosphor/60 bg-crt-phosphor/10 hover:bg-crt-phosphor/20 text-crt-phosphor rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <Check className="h-3.5 w-3.5 shrink-0" />
+                  <span>Auto-Pick Smart Primaries</span>
+                </button>
+              </>
+            ) : isInspecting ? (
               <span className="text-crt-amber">
-                {unresolvedMultiRows} multi-ROM item{unresolvedMultiRows === 1 ? '' : 's'} awaiting variant selection
+                Inspecting archives ({rows.filter((r) => !r.isPlaceholder).length} / {rows.length})...
+              </span>
+            ) : isRunning ? (
+              <span className="text-crt-phosphor">
+                {metrics.completedItems} / {metrics.totalItems} games processed
               </span>
             ) : (
-              <span>
+              <span className="text-crt-muted">
                 {totalSelectedTargets} playable target{totalSelectedTargets === 1 ? '' : 's'} ready
               </span>
             )}
           </div>
 
-          <div className="flex items-center gap-2.5">
-            <button
-              type="button"
-              disabled={writing}
-              onClick={onClose}
-              className="px-3.5 py-2 text-xs border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text rounded transition-colors"
-            >
-              Close
-            </button>
-            <button
-              type="button"
-              disabled={!sdRootHandle || writing || totalSelectedTargets === 0}
-              title={!sdRootHandle ? 'Mount your target storage device or folder first' : undefined}
-              onClick={() => void handleWriteToSdCard()}
-              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors disabled:opacity-45 disabled:cursor-not-allowed whitespace-nowrap"
-            >
-              <FolderInput className="h-3.5 w-3.5" />
-              {writing
-                ? 'Installing to Storage Device...'
-                : `Install ${totalSelectedTargets} Item${totalSelectedTargets === 1 ? '' : 's'} to Storage Device`}
-            </button>
+          <div className="flex flex-wrap items-center gap-2.5">
+            {isBusy ? (
+              <>
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  className="px-3.5 py-2 text-xs border border-crt-border bg-crt-surface text-crt-text hover:border-crt-phosphor rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Run in Background
+                </button>
+                <button
+                  type="button"
+                  disabled={isCanceling}
+                  onClick={cancelInstall}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold border border-crt-crimson/70 bg-crt-crimson/15 hover:bg-crt-crimson/25 text-crt-crimson rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+                >
+                  <Square className="h-3 w-3 fill-current shrink-0" />
+                  {isCanceling ? 'Canceling...' : 'Cancel Install'}
+                </button>
+              </>
+            ) : (
+              <>
+                {isFinished && (
+                  <button
+                    type="button"
+                    onClick={dismissJob}
+                    className="px-3.5 py-2 text-xs border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Clear Queue
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  className="px-3.5 py-2 text-xs border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Close
+                </button>
+                {job.mode === 'review' && job.phase !== 'completed' && (
+                  <button
+                    type="button"
+                    disabled={totalSelectedTargets === 0}
+                    title={
+                      !sdRootHandle
+                        ? 'Prompts to mount your target storage device and begins installing'
+                        : undefined
+                    }
+                    onClick={() => void startReviewWrite()}
+                    className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors disabled:opacity-45 disabled:cursor-not-allowed whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <FolderInput className="h-3.5 w-3.5 shrink-0" />
+                    {`Install ${totalSelectedTargets} Item${totalSelectedTargets === 1 ? '' : 's'} to Storage Device`}
+                  </button>
+                )}
+              </>
+            )}
           </div>
         </footer>
       </div>

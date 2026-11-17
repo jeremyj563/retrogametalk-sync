@@ -1467,7 +1467,7 @@ const CATALOG_SORT_ORDER_BY: Record<CatalogSortOption, string> = {
   system_desc: 'system_name COLLATE NOCASE DESC, title COLLATE NOCASE ASC, id DESC',
 };
 
-export function queryRepositoryItems(params: {
+export interface CatalogQueryFilterParams {
   search?: string;
   system?: string | string[];
   status?: string | string[];
@@ -1483,9 +1483,13 @@ export function queryRepositoryItems(params: {
   source?: string | string[];
   sourceMode?: string;
   sort?: string;
-  limit?: number;
-  offset?: number;
-}): { items: RepositoryItemRecord[]; total: number; facets: CatalogFacets } {
+}
+
+function buildCatalogWhereAndOrder(params: CatalogQueryFilterParams): {
+  where: string;
+  args: unknown[];
+  orderBy: string;
+} {
   const conditions: string[] = [];
   const args: unknown[] = [];
 
@@ -1551,11 +1555,47 @@ export function queryRepositoryItems(params: {
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  const limit = Math.min(200, Math.max(1, params.limit ?? 50));
-  const offset = Math.max(0, params.offset ?? 0);
-
   const sortKey = normalizeCatalogSort(params.sort);
   const orderBy = CATALOG_SORT_ORDER_BY[sortKey];
+  return { where, args, orderBy };
+}
+
+export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
+  ids: number[];
+  downloadableIds: number[];
+  total: number;
+} {
+  const { where, args, orderBy } = buildCatalogWhereAndOrder(params);
+  const rows = getDb()
+    .prepare(`SELECT id, status FROM catalog_releases ${where} ORDER BY ${orderBy}`)
+    .all(...args) as { id: number; status: string }[];
+
+  const ids: number[] = [];
+  const downloadableIds: number[] = [];
+  for (const row of rows) {
+    const numId = Number(row.id);
+    ids.push(numId);
+    if (row.status === 'downloaded' || row.status === 'skipped' || row.status === 'partial') {
+      downloadableIds.push(numId);
+    }
+  }
+
+  return {
+    ids,
+    downloadableIds,
+    total: ids.length,
+  };
+}
+
+export function queryRepositoryItems(
+  params: CatalogQueryFilterParams & {
+    limit?: number;
+    offset?: number;
+  },
+): { items: RepositoryItemRecord[]; total: number; facets: CatalogFacets } {
+  const { where, args, orderBy } = buildCatalogWhereAndOrder(params);
+  const limit = Math.min(200, Math.max(1, params.limit ?? 50));
+  const offset = Math.max(0, params.offset ?? 0);
 
   const countRow = getDb().prepare(`SELECT COUNT(*) as count FROM catalog_releases ${where}`).get(...args) as {
     count: number;

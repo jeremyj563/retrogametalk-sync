@@ -9,10 +9,12 @@ import {
   Download,
   FileArchive,
   Folder,
+  FolderInput,
   Gamepad2,
   HardDrive,
   LayoutGrid,
   List,
+  Loader2,
   RefreshCw,
   RotateCcw,
   Search,
@@ -21,11 +23,16 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
+import type {
+  BulkInstallKnownItemMeta,
+  BulkStorageInstallerController,
+} from '../hooks/useBulkStorageInstaller';
 import {
   CATALOG_SORT_OPTIONS,
   DEFAULT_CATALOG_SORT,
   normalizeCatalogSort,
 } from '../shared/catalogSort';
+import type { SmartRomFilterContext } from '../shared/smartRomPicker';
 import type {
   CatalogFacets,
   CatalogInstalledFilter,
@@ -37,18 +44,16 @@ import type {
   ServiceStatusSnapshot,
 } from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
-import { isFileSystemAccessSupported, pickSdCardRootDirectory, type SdDirectoryHandle } from '../utils/sdCardFs';
 import { resolveItemTransferProgress } from '../utils/transferProgress';
 import { GameDetailDrawer, type GameDetailNavigation } from './GameDetailDrawer';
 import { MultiSelectFilterDropdown, type FilterDropdownOption } from './MultiSelectFilterDropdown';
-import { SdCardExportModal } from './SdCardExportModal';
 
 interface CatalogPanelProps {
   config: ScraperConfigPublic;
   status: ServiceStatusSnapshot;
+  installer: BulkStorageInstallerController;
   catalogRevision?: number;
   activeRetryItemId?: number | null;
-  onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
 }
@@ -258,9 +263,9 @@ let memoryFsSnapshot: {
 export function CatalogPanel({
   config,
   status,
+  installer,
   catalogRevision = 0,
   activeRetryItemId = null,
-  onSaveConfig,
   onRetryItem,
   onRefreshStatus,
 }: CatalogPanelProps) {
@@ -304,6 +309,7 @@ export function CatalogPanel({
   const [retryingId, setRetryingId] = useState<number | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [markingInstalled, setMarkingInstalled] = useState(false);
+  const [selectingAllMatching, setSelectingAllMatching] = useState(false);
   const [failedCovers, setFailedCovers] = useState<Set<number>>(new Set());
   const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
   const [activeDetailIndex, setActiveDetailIndex] = useState<number | null>(null);
@@ -315,14 +321,11 @@ export function CatalogPanel({
       ? (activeRetryItemId ?? status.activeTransfer?.itemId ?? null)
       : null);
 
-  // Selection state for Indexed Catalog
+  // Selection state for Indexed Catalog (supports both current-page and cross-page filtered selection)
   const [selectedCatalogIds, setSelectedCatalogIds] = useState<Set<number>>(new Set());
   const [confirmCatalogBulk, setConfirmCatalogBulk] = useState(false);
 
-  // SD Card Export state
-  const [sdRootHandle, setSdRootHandle] = useState<SdDirectoryHandle | null>(null);
-  const [sdExportIds, setSdExportIds] = useState<number[] | null>(null);
-  const [sdMountNotice, setSdMountNotice] = useState<string | null>(null);
+  const { sdRootHandle } = installer;
 
   // Local Disk Tree state + search filter + selection
   const [fsPath, setFsPath] = useState(() => memoryCatalogViewPrefs.fsPath);
@@ -332,26 +335,49 @@ export function CatalogPanel({
   const [selectedFsPaths, setSelectedFsPaths] = useState<Set<string>>(new Set());
   const [confirmFsBulk, setConfirmFsBulk] = useState(false);
 
-  const handleQuickMountSdCard = async () => {
-    setSdMountNotice(null);
-    const support = isFileSystemAccessSupported();
-    if (!support.supported) {
-      setSdMountNotice(support.reason || 'Folder picker not supported in this browser.');
-      return;
+  const filterSelectionKey = useMemo(
+    () =>
+      JSON.stringify([
+        search.trim(),
+        systems,
+        statuses,
+        installedFilter,
+        tags,
+        tags.length > 1 ? tagsMode : 'any',
+        genres,
+        genres.length > 1 ? genresMode : 'any',
+        regions,
+        regions.length > 1 ? regionsMode : 'any',
+        languages,
+        languages.length > 1 ? languagesMode : 'any',
+        sources,
+        sources.length > 1 ? sourcesMode : 'any',
+      ]),
+    [
+      search,
+      systems,
+      statuses,
+      installedFilter,
+      tags,
+      tagsMode,
+      genres,
+      genresMode,
+      regions,
+      regionsMode,
+      languages,
+      languagesMode,
+      sources,
+      sourcesMode,
+    ],
+  );
+  const prevFilterSelectionKeyRef = useRef(filterSelectionKey);
+  useEffect(() => {
+    if (prevFilterSelectionKeyRef.current !== filterSelectionKey) {
+      prevFilterSelectionKeyRef.current = filterSelectionKey;
+      setSelectedCatalogIds(new Set());
+      setConfirmCatalogBulk(false);
     }
-    try {
-      const handle = await pickSdCardRootDirectory();
-      setSdRootHandle(handle);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      const msg = err instanceof Error ? err.message : String(err);
-      setSdMountNotice(
-        /cross origin|sub frame|user activation/i.test(msg)
-          ? 'Open the app directly in its own browser tab to mount a storage device folder.'
-          : msg,
-      );
-    }
-  };
+  }, [filterSelectionKey]);
 
   useEffect(() => {
     const nextPrefs: CatalogViewPrefs = {
@@ -527,16 +553,18 @@ export function CatalogPanel({
           });
         }
 
-        // Keep selection scoped strictly to visible/filtered items
-        const visibleIds = new Set(nextItems.map((i) => i.id));
-        setSelectedCatalogIds((prev) => {
-          if (prev.size === 0) return prev;
-          const pruned = new Set<number>();
-          prev.forEach((id) => {
-            if (visibleIds.has(id)) pruned.add(id);
+        // If all matching items fit on this page, prune deleted IDs; otherwise preserve multi-page selection
+        if (nextTotal <= nextItems.length) {
+          const visibleIds = new Set(nextItems.map((i) => i.id));
+          setSelectedCatalogIds((prev) => {
+            if (prev.size === 0) return prev;
+            const pruned = new Set<number>();
+            prev.forEach((id) => {
+              if (visibleIds.has(id)) pruned.add(id);
+            });
+            return pruned.size === prev.size ? prev : pruned;
           });
-          return pruned;
-        });
+        }
 
         // Also live-update the open slide-over detail drawer if visible
         const openId = activeDetailIdRef.current;
@@ -815,12 +843,52 @@ export function CatalogPanel({
     void loadCatalog(true);
   };
 
-  const handleModalItemsInstalled = (updatedItems: RepositoryItemRecord[]) => {
-    if (updatedItems.length === 0) return;
-    const byId = new Map(updatedItems.map((row) => [row.id, row]));
-    setItems((prev) => prev.map((row) => byId.get(row.id) ?? row));
-    setActiveDetailItem((current) => (current ? (byId.get(current.id) ?? current) : current));
-    void loadCatalog(true);
+  const currentSmartFilterContext = useMemo<SmartRomFilterContext>(
+    () => ({
+      tags,
+      languages,
+      regions,
+      search,
+      syncIncludeTags: config.allowedReleaseTypes,
+    }),
+    [tags, languages, regions, search, config.allowedReleaseTypes],
+  );
+
+  const knownItemMetaMap = useMemo(() => {
+    const map = new Map<number, BulkInstallKnownItemMeta>();
+    for (const item of items) {
+      map.set(item.id, { title: item.title, systemName: item.systemName });
+    }
+    if (activeDetailItem && !map.has(activeDetailItem.id)) {
+      map.set(activeDetailItem.id, {
+        title: activeDetailItem.title,
+        systemName: activeDetailItem.systemName,
+      });
+    }
+    return map;
+  }, [items, activeDetailItem]);
+
+  const handleSelectAllMatching = async () => {
+    if (selectingAllMatching || totalItems <= 0) return;
+    if (totalItems <= items.length) {
+      setConfirmCatalogBulk(false);
+      setSelectedCatalogIds(new Set(items.map((i) => i.id)));
+      return;
+    }
+    setSelectingAllMatching(true);
+    setConfirmCatalogBulk(false);
+    try {
+      const qs = buildCatalogSearchParams(1, 0);
+      const res = await fetch(`/api/items/ids?${qs.toString()}`);
+      if (res.ok) {
+        const data = (await res.json()) as { ids?: number[] };
+        if (Array.isArray(data.ids) && data.ids.length > 0) {
+          setSelectedCatalogIds(new Set(data.ids));
+        }
+      }
+    } finally {
+      setSelectingAllMatching(false);
+    }
   };
 
   const handleBulkSetInstalled = async (ids: number[], installed: boolean) => {
@@ -1261,30 +1329,52 @@ export function CatalogPanel({
           </div>
 
           {viewMode === 'catalog' ? (
-            <div className="flex items-center gap-2 self-start lg:self-auto">
+            <div className="flex flex-wrap items-center gap-2 self-start lg:self-auto">
+              {totalItems > 0 && selectedCatalogIds.size < totalItems && (
+                <button
+                  type="button"
+                  disabled={selectingAllMatching}
+                  onClick={() => void handleSelectAllMatching()}
+                  title={
+                    hasActiveFilters
+                      ? `Select all ${totalItems} catalog releases matching your active filters across all pages`
+                      : `Select all ${totalItems} indexed catalog releases across all pages`
+                  }
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+                >
+                  {selectingAllMatching ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                  ) : null}
+                  <span>
+                    {hasActiveFilters
+                      ? `Select All Filtered (${totalItems})`
+                      : `Select All (${totalItems})`}
+                  </span>
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => void handleQuickMountSdCard()}
+                onClick={() => void installer.promptMountSdCard()}
                 title={
                   sdRootHandle
                     ? `Mounted storage device: ${sdRootHandle.name} (click to switch)`
                     : 'Mount a target storage device folder (SD card, HDD, SSD, or USB drive)'
                 }
-                className={`crt-cta-beam inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded transition-colors whitespace-nowrap shrink-0 ${
+                className={`crt-cta-beam inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   sdRootHandle
                     ? 'border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/15'
                     : 'border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-text'
                 }`}
               >
-                <HardDrive className="h-3.5 w-3.5" />
+                <HardDrive className="h-3.5 w-3.5 shrink-0" />
                 {sdRootHandle ? `Device: ${sdRootHandle.name}` : 'Mount Storage Device'}
               </button>
               <button
                 type="button"
                 onClick={() => void loadCatalog()}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
-                <RefreshCw className="h-3.5 w-3.5" />
+                <RefreshCw className="h-3.5 w-3.5 shrink-0" />
                 Refresh
               </button>
             </div>
@@ -1562,36 +1652,81 @@ export function CatalogPanel({
         {/* Contextual Bulk Selection Bar (Indexed Catalog) */}
         {viewMode === 'catalog' && selectedCatalogIds.size > 0 && (
           <div className="pt-3 border-t border-crt-border flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
-            <span className="text-crt-phosphor tabular-nums">
-              {selectedCatalogIds.size} item{selectedCatalogIds.size === 1 ? '' : 's'} selected
-            </span>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="text-crt-phosphor tabular-nums whitespace-nowrap shrink-0">
+                {selectedCatalogIds.size} item{selectedCatalogIds.size === 1 ? '' : 's'} selected
+                {selectedCatalogIds.size > items.length ? ' across all pages' : ''}
+              </span>
+              {totalItems > selectedCatalogIds.size && (
+                <button
+                  type="button"
+                  disabled={selectingAllMatching}
+                  onClick={() => void handleSelectAllMatching()}
+                  className="text-xs font-mono text-crt-amber hover:underline whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+                >
+                  {selectingAllMatching
+                    ? 'Selecting all...'
+                    : `Select all ${totalItems} matching`}
+                </button>
+              )}
+            </div>
             <div className="flex flex-wrap items-center gap-2">
               {!confirmCatalogBulk && (
                 <>
                   <button
                     type="button"
-                    onClick={() => setSdExportIds(Array.from(selectedCatalogIds))}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0"
+                    disabled={installer.isBusy}
+                    title={
+                      installer.isBusy
+                        ? 'A storage installation is currently running in the background'
+                        : 'Mount device if needed, auto-select latest context-matched Primary ROMs, and dump immediately in background'
+                    }
+                    onClick={() =>
+                      void installer.startExpressInstall(
+                        Array.from(selectedCatalogIds),
+                        currentSmartFilterContext,
+                        knownItemMetaMap,
+                      )
+                    }
+                    className="crt-cta-beam inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                   >
-                    <HardDrive className="h-3.5 w-3.5" />
+                    <FolderInput className="h-3.5 w-3.5 shrink-0" />
+                    Express Install ({selectedCatalogIds.size})
+                  </button>
+                  <button
+                    type="button"
+                    disabled={installer.isBusy}
+                    title="Open interactive installer queue to review variants or customize filenames before installing"
+                    onClick={() =>
+                      void installer.openReviewQueue(
+                        Array.from(selectedCatalogIds),
+                        currentSmartFilterContext,
+                        knownItemMetaMap,
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    <HardDrive className="h-3.5 w-3.5 shrink-0" />
                     Install to Storage Device ({selectedCatalogIds.size})
                   </button>
-                  {items.some((i) => selectedCatalogIds.has(i.id) && !i.installedAt) && (
+                  {(selectedCatalogIds.size > items.length ||
+                    items.some((i) => selectedCatalogIds.has(i.id) && !i.installedAt)) && (
                     <button
                       type="button"
                       disabled={markingInstalled}
                       onClick={() => void handleBulkSetInstalled(Array.from(selectedCatalogIds), true)}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border text-crt-text hover:border-crt-phosphor hover:text-crt-phosphor rounded transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border text-crt-text hover:border-crt-phosphor hover:text-crt-phosphor rounded transition-colors disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
                     >
                       Flag Installed
                     </button>
                   )}
-                  {items.some((i) => selectedCatalogIds.has(i.id) && Boolean(i.installedAt)) && (
+                  {(selectedCatalogIds.size > items.length ||
+                    items.some((i) => selectedCatalogIds.has(i.id) && Boolean(i.installedAt))) && (
                     <button
                       type="button"
                       disabled={markingInstalled}
                       onClick={() => void handleBulkSetInstalled(Array.from(selectedCatalogIds), false)}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:border-crt-amber hover:text-crt-amber rounded transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:border-crt-amber hover:text-crt-amber rounded transition-colors disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
                     >
                       Clear Installed
                     </button>
@@ -1604,15 +1739,15 @@ export function CatalogPanel({
                     type="button"
                     disabled={deletingKey === 'catalog-bulk'}
                     onClick={() => void handleDeleteCatalogItems(Array.from(selectedCatalogIds))}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-crt-bg bg-crt-crimson hover:brightness-110 rounded transition-colors disabled:opacity-50"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-crt-bg bg-crt-crimson hover:brightness-110 rounded transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
+                    <Trash2 className="h-3.5 w-3.5 shrink-0" />
                     {deletingKey === 'catalog-bulk' ? 'Deleting...' : `Confirm Delete (${selectedCatalogIds.size})`}
                   </button>
                   <button
                     type="button"
                     onClick={() => setConfirmCatalogBulk(false)}
-                    className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors"
+                    className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0"
                   >
                     Cancel
                   </button>
@@ -1622,15 +1757,15 @@ export function CatalogPanel({
                   <button
                     type="button"
                     onClick={() => setConfirmCatalogBulk(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-crimson/60 text-crt-crimson hover:bg-crt-crimson/10 rounded transition-colors"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-crimson/60 text-crt-crimson hover:bg-crt-crimson/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
+                    <Trash2 className="h-3.5 w-3.5 shrink-0" />
                     Delete Selected ({selectedCatalogIds.size})
                   </button>
                   <button
                     type="button"
                     onClick={() => setSelectedCatalogIds(new Set())}
-                    className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors"
+                    className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     Clear Selection
                   </button>
@@ -2100,17 +2235,31 @@ export function CatalogPanel({
           ) : (
             <div>
               {/* Grid Header Bar */}
-              <div className="px-4 py-2.5 border-b border-crt-border bg-crt-bg flex items-center justify-between text-xs font-mono text-crt-muted">
-                <label className="inline-flex items-center gap-2 cursor-pointer text-crt-text">
-                  <input
-                    type="checkbox"
-                    checked={allCatalogSelected}
-                    onChange={toggleAllCatalog}
-                    aria-label="Select all filtered catalog items"
-                    className="accent-crt-phosphor cursor-pointer"
-                  />
-                  <span>Select all visible ({items.length})</span>
-                </label>
+              <div className="px-4 py-2.5 border-b border-crt-border bg-crt-bg flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-crt-muted">
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="inline-flex items-center gap-2 cursor-pointer text-crt-text">
+                    <input
+                      type="checkbox"
+                      checked={allCatalogSelected}
+                      onChange={toggleAllCatalog}
+                      aria-label="Select all visible catalog items"
+                      className="accent-crt-phosphor cursor-pointer"
+                    />
+                    <span>Select visible ({items.length})</span>
+                  </label>
+                  {totalItems > items.length && selectedCatalogIds.size < totalItems && (
+                    <button
+                      type="button"
+                      disabled={selectingAllMatching}
+                      onClick={() => void handleSelectAllMatching()}
+                      className="text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      {selectingAllMatching
+                        ? 'Selecting all...'
+                        : `Select all ${totalItems} matching`}
+                    </button>
+                  )}
+                </div>
                 <span>Click any release to inspect artwork, specs &amp; ROMs</span>
               </div>
 
@@ -2510,31 +2659,21 @@ export function CatalogPanel({
         onClose={closeDetailDrawer}
         onItemUpdated={handleItemUpdated}
         onRetryItem={handleRetry}
-        onExportToSdCard={(id) => setSdExportIds([id])}
+        onExportToSdCard={(id) =>
+          void installer.openReviewQueue([id], currentSmartFilterContext, knownItemMetaMap)
+        }
         onDeleteItem={async (id) => {
           await handleDeleteCatalogItems([id]);
         }}
       />
 
-      {/* Storage Device Batch / Single Install Modal */}
-      <SdCardExportModal
-        open={Boolean(sdExportIds && sdExportIds.length > 0)}
-        itemIds={sdExportIds || []}
-        config={config}
-        sdRootHandle={sdRootHandle}
-        onMountSdHandle={(handle) => setSdRootHandle(handle)}
-        onSaveConfig={onSaveConfig}
-        onItemsInstalled={handleModalItemsInstalled}
-        onClose={() => setSdExportIds(null)}
-      />
-
-      {sdMountNotice && (
+      {installer.mountError && !installer.modalOpen && (
         <div className="fixed bottom-4 right-4 z-40 max-w-md border border-crt-amber/60 bg-crt-surface px-4 py-3 rounded text-xs font-mono text-crt-amber shadow-lg flex items-center justify-between gap-3">
-          <span>{sdMountNotice}</span>
+          <span>{installer.mountError}</span>
           <button
             type="button"
-            onClick={() => setSdMountNotice(null)}
-            className="text-crt-muted hover:text-crt-text shrink-0"
+            onClick={installer.clearMountError}
+            className="text-crt-muted hover:text-crt-text shrink-0 cursor-pointer"
           >
             Dismiss
           </button>
