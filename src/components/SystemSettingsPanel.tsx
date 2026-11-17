@@ -1039,7 +1039,7 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
                         <option value={4}>4 (Fastest · 4 chunks)</option>
                       </select>
                       <p className="text-[11px] text-crt-muted">
-                        Parallel byte-range streams after URL gate; shares 429 cooldown across chunks
+                        Parallel byte-range streams after URL gate; auto-steps down to 1x if a mirror limits concurrent connections
                       </p>
                     </div>
 

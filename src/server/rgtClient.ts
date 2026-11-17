@@ -346,6 +346,39 @@ class RangeThrottleError extends Error {
   }
 }
 
+function isThrottleErrorPageUrl(urlStr: string): boolean {
+  try {
+    const pathname = new URL(urlStr).pathname.toLowerCase();
+    return /(?:^|\/)(?:429|503)(?:\.html?)?$/.test(pathname);
+  } catch {
+    return /(?:^|\/)(?:429|503)(?:\.html?)?(?:[?#]|$)/i.test(urlStr);
+  }
+}
+
+function inferThrottleStatusFromUrl(urlStr: string): number {
+  try {
+    const pathname = new URL(urlStr).pathname.toLowerCase();
+    return /(?:^|\/)429(?:\.html?)?$/.test(pathname) ? 429 : 503;
+  } catch {
+    return /429/i.test(urlStr) ? 429 : 503;
+  }
+}
+
+function isHtmlThrottleBody(bodySnippet: string): boolean {
+  const sample = bodySnippet.slice(0, 4000).toLowerCase();
+  return /\b(?:503|429)\b|service unavailable|too many requests|too many connections|connection limit|rate limit(?:ed)?|temporarily unavailable|temporarily busy|server\s+(?:is\s+)?(?:temporarily\s+)?busy|please try again/i.test(
+    sample,
+  );
+}
+
+function safeHostname(urlStr: string): string {
+  try {
+    return new URL(urlStr).hostname;
+  } catch {
+    return 'mirror';
+  }
+}
+
 function createLinkedAbortController(parentSignal: AbortSignal): {
   controller: AbortController;
   dispose: () => void;
@@ -586,6 +619,7 @@ export class RetroGameTalkClient {
   private rateLimiter: AdaptiveRateLimiter;
   private wpTypesCache: Map<string, string> | null = null;
   private wpTypesCacheBaseUrl: string | null = null;
+  private hostChunkCaps = new Map<string, { maxChunks: number; updatedAt: number }>();
   private authStatus: AuthSessionStatus = {
     configured: false,
     authenticated: false,
@@ -603,6 +637,27 @@ export class RetroGameTalkClient {
       browser: this.activeBrowserProfile,
       followRedirects: false,
     });
+  }
+
+  private getEffectiveHostChunkConcurrency(urlStr: string, configured: number): number {
+    const host = safeHostname(urlStr);
+    const entry = this.hostChunkCaps.get(host);
+    if (!entry) return configured;
+    // Expire learned mirror ceiling after 15 minutes so capacity can re-probe in future runs
+    if (Date.now() - entry.updatedAt > 15 * 60_000) {
+      this.hostChunkCaps.delete(host);
+      return configured;
+    }
+    return Math.max(1, Math.min(configured, entry.maxChunks));
+  }
+
+  private recordHostChunkCap(urlStr: string, maxChunks: number): void {
+    const host = safeHostname(urlStr);
+    const clamped = Math.max(1, Math.min(4, Math.round(maxChunks)));
+    const existing = this.hostChunkCaps.get(host);
+    if (!existing || Date.now() - existing.updatedAt > 15 * 60_000 || clamped < existing.maxChunks) {
+      this.hostChunkCaps.set(host, { maxChunks: clamped, updatedAt: Date.now() });
+    }
   }
 
   private switchBrowserProfile(profile: Browser): void {
@@ -1031,10 +1086,25 @@ export class RetroGameTalkClient {
       // Handle redirects manually so cookies across XenForo -> WordPress rgt_gate -> /repo/ are preserved
       if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
         await res.body?.cancel().catch(() => undefined);
+        const nextUrl = new URL(res.headers.get('location')!, currentUrl).toString();
+        if (isThrottleErrorPageUrl(nextUrl)) {
+          const inferredStatus = inferThrottleStatusFromUrl(nextUrl);
+          const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
+          const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency);
+          attempt += 1;
+          log?.(
+            'throttle',
+            `HTTP ${inferredStatus} throttle redirect (${new URL(nextUrl).pathname}) from ${safeHostname(currentUrl)}; backing off ${Math.round(cooldownMs / 1000)}s`,
+            `Attempt ${attempt}/${config.maxRetries}${retryAfterSec ? ` · Retry-After: ${retryAfterSec}s` : ''}`,
+          );
+          if (attempt > config.maxRetries) {
+            throw new RangeThrottleError(inferredStatus, cooldownMs, retryAfterSec, safeHostname(currentUrl));
+          }
+          continue;
+        }
         if (maxRedirects <= 0) {
           throw new Error(`Too many redirects while fetching ${url}`);
         }
-        const nextUrl = new URL(res.headers.get('location')!, currentUrl).toString();
         logServer('HTTP', 'debug', `Redirect HTTP ${res.status} -> ${nextUrl}`, `from=${currentUrl}`);
         currentUrl = nextUrl;
         maxRedirects -= 1;
@@ -2942,20 +3012,20 @@ export class RetroGameTalkClient {
       await res.body?.cancel().catch(() => undefined);
       const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
       const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency);
-      const hostname = (() => {
-        try {
-          return new URL(targetUrl).hostname;
-        } catch {
-          return 'mirror';
-        }
-      })();
-      throw new RangeThrottleError(res.status, cooldownMs, retryAfterSec, hostname);
+      throw new RangeThrottleError(res.status, cooldownMs, retryAfterSec, safeHostname(targetUrl));
     }
 
     if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
       const redirectLocation = new URL(res.headers.get('location')!, targetUrl).toString();
       await res.body?.cancel().catch(() => undefined);
-      return this.fetchWithRedirects(
+      if (isThrottleErrorPageUrl(redirectLocation)) {
+        const inferredStatus = inferThrottleStatusFromUrl(redirectLocation);
+        const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
+        const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency);
+        throw new RangeThrottleError(inferredStatus, cooldownMs, retryAfterSec, safeHostname(targetUrl));
+      }
+      logServer('HTTP', 'debug', `Redirect HTTP ${res.status} -> ${redirectLocation}`, `from=${targetUrl}`);
+      const redirected = await this.fetchWithRedirects(
         redirectLocation,
         config,
         {
@@ -2971,6 +3041,13 @@ export class RetroGameTalkClient {
         6,
         timeoutMs,
       );
+      if (isThrottleErrorPageUrl(redirected.finalUrl)) {
+        await redirected.response.body?.cancel().catch(() => undefined);
+        const inferredStatus = inferThrottleStatusFromUrl(redirected.finalUrl);
+        const cooldownMs = this.rateLimiter.recordThrottle(undefined, redirected.latencyMs);
+        throw new RangeThrottleError(inferredStatus, cooldownMs, undefined, safeHostname(redirected.finalUrl));
+      }
+      return redirected;
     }
 
     this.rateLimiter.recordSuccess(latency);
@@ -3011,6 +3088,7 @@ export class RetroGameTalkClient {
     const maxStreamAttempts = Math.min(4, Math.max(1, (config.maxRetries ?? 2) + 1));
     const configuredChunkConcurrency = Math.max(1, Math.min(4, Math.round(config.downloadChunkConcurrency ?? 3)));
     const chunkThresholdBytes = Math.max(4, Math.min(64, Math.round(config.downloadChunkMinSizeMb ?? 8))) * 1024 * 1024;
+    let effectiveChunks = this.getEffectiveHostChunkConcurrency(release.downloadUrl, configuredChunkConcurrency);
     let disableResumeForFreshRestart = false;
 
     for (let streamAttempt = 1; streamAttempt <= maxStreamAttempts; streamAttempt += 1) {
@@ -3049,20 +3127,20 @@ export class RetroGameTalkClient {
           } else {
             const firstMissing = missing[0]!;
             const probeEnd =
-              configuredChunkConcurrency > 1
+              effectiveChunks > 1
                 ? Math.min(firstMissing[1], firstMissing[0] + chunkThresholdBytes - 1)
                 : firstMissing[1];
             initialRangeHeader = `bytes=${firstMissing[0]}-${probeEnd}`;
             initialIfRangeHeader = pickIfRangeValidator(preExistingMeta);
           }
-        } else if (configuredChunkConcurrency > 1) {
+        } else if (effectiveChunks > 1) {
           initialRangeHeader = `bytes=0-${chunkThresholdBytes - 1}`;
         }
 
         log?.(
           'debug',
           `[Download] Starting transfer attempt ${streamAttempt}/${maxStreamAttempts} for "${release.filename}"`,
-          `url=${release.downloadUrl}, chunks=${configuredChunkConcurrency}, thresholdMb=${Math.round(chunkThresholdBytes / (1024 * 1024))}, initialRange=${initialRangeHeader ?? 'none'}`,
+          `url=${release.downloadUrl}, chunks=${effectiveChunks}${effectiveChunks < configuredChunkConcurrency ? ` (mirror-capped from ${configuredChunkConcurrency})` : ''}, thresholdMb=${Math.round(chunkThresholdBytes / (1024 * 1024))}, initialRange=${initialRangeHeader ?? 'none'}`,
         );
 
         const requestHeaders: Record<string, string> = {
@@ -3133,6 +3211,18 @@ export class RetroGameTalkClient {
             `[Download] Received HTML instead of archive binary for "${release.filename}"`,
             `status=${response.status}, finalUrl=${finalUrl}, contentType=${contentType}, snippet=${htmlSnippet.replace(/\s+/g, ' ').trim().slice(0, 180)}`,
           );
+          if (isThrottleErrorPageUrl(finalUrl) || isHtmlThrottleBody(htmlSnippet)) {
+            const inferredStatus = inferThrottleStatusFromUrl(finalUrl);
+            const retryAfterSec = parseRetryAfter(response.headers.get('retry-after'));
+            const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, 0);
+            effectiveChunks = 1;
+            this.recordHostChunkCap(finalUrl, 1);
+            if (fs.existsSync(expectedPartPath)) {
+              partPath = expectedPartPath;
+              keepPartialOnError = true;
+            }
+            throw new RangeThrottleError(inferredStatus, cooldownMs, retryAfterSec, safeHostname(finalUrl));
+          }
           if (
             finalUrl.includes('/login') ||
             finalUrl.includes('wp-login.php') ||
@@ -3144,6 +3234,10 @@ export class RetroGameTalkClient {
               cookieCount: this.getSafeCookieCount(config.baseUrl),
               lastMessage: `Session expired while downloading (${finalUrl})`,
             });
+          }
+          if (fs.existsSync(expectedPartPath)) {
+            partPath = expectedPartPath;
+            keepPartialOnError = true;
           }
           throw new Error(`Expected archive binary but received HTML (${finalUrl}); session or nonce may have expired`);
         }
@@ -3241,7 +3335,7 @@ export class RetroGameTalkClient {
           let committedRanges: ByteRange[] = mergeByteRanges(priorCompletedRanges);
           const inFlightWritten = new Map<number, [number, number]>();
           let activeWorkersCount = 1;
-          let effectiveChunks = configuredChunkConcurrency;
+          effectiveChunks = this.getEffectiveHostChunkConcurrency(finalUrl, effectiveChunks);
           let lastEmitAt = 0;
           let lastMetaFlushBytes = 0;
 
@@ -3363,15 +3457,18 @@ export class RetroGameTalkClient {
                 (initialSlice === null || totalBytes >= chunkThresholdBytes) &&
                 remainingRangesForQueue.length > 0;
 
-              const workerTargetCount = canFanOut
-                ? Math.min(effectiveChunks, Math.max(1, remainingRangesForQueue.length + (initialSlice ? 1 : 0)))
+              const minSliceBytes = Math.max(2 * 1024 * 1024, Math.floor(chunkThresholdBytes / 2));
+              const totalQueueBytes = sumByteRanges(remainingRangesForQueue);
+              const queueBudget = Math.max(1, effectiveChunks - (initialSlice ? 1 : 0));
+              const queueWorkerCount = canFanOut
+                ? Math.min(queueBudget, Math.max(1, Math.ceil(totalQueueBytes / minSliceBytes)))
                 : 1;
 
               const sliceQueue = remainingRangesForQueue.length > 0
                 ? splitMissingRangesIntoSlices(
                     remainingRangesForQueue,
-                    Math.max(2 * 1024 * 1024, Math.floor(chunkThresholdBytes / 2)),
-                    workerTargetCount,
+                    minSliceBytes,
+                    queueWorkerCount,
                   )
                 : [];
 
@@ -3420,7 +3517,7 @@ export class RetroGameTalkClient {
                 }
 
                 const ifRangeVal = pickIfRangeValidator(metaState);
-                const { response: sliceRes } = await this.fetchRangeSlice(
+                const { response: sliceRes, finalUrl: sliceFinalUrl, latencyMs: sliceLatency } = await this.fetchRangeSlice(
                   finalUrl,
                   release.pageUrl || config.baseUrl,
                   slice,
@@ -3431,8 +3528,27 @@ export class RetroGameTalkClient {
                   log,
                 );
 
+                const sliceContentType = (sliceRes.headers.get('content-type') || '').toLowerCase();
+                if (sliceContentType.includes('text/html') && !sliceContentType.includes('octet-stream')) {
+                  const htmlSnippet = await sliceRes.text().catch(() => '');
+                  log?.(
+                    'debug',
+                    `[Download] Slice ${slice[0]}-${slice[1]} received HTML instead of binary`,
+                    `status=${sliceRes.status}, finalUrl=${sliceFinalUrl}, snippet=${htmlSnippet.replace(/\s+/g, ' ').trim().slice(0, 160)}`,
+                  );
+                  if (isThrottleErrorPageUrl(sliceFinalUrl) || isHtmlThrottleBody(htmlSnippet)) {
+                    const inferredStatus = inferThrottleStatusFromUrl(sliceFinalUrl);
+                    const retryAfterSec = parseRetryAfter(sliceRes.headers.get('retry-after'));
+                    const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, sliceLatency);
+                    throw new RangeThrottleError(inferredStatus, cooldownMs, retryAfterSec, safeHostname(sliceFinalUrl));
+                  }
+                  throw new Error(`Expected archive binary on range slice but received HTML (${sliceFinalUrl}); session or nonce may have expired`);
+                }
+
                 if (sliceRes.status === 200) {
                   await sliceRes.body?.cancel().catch(() => undefined);
+                  effectiveChunks = 1;
+                  this.recordHostChunkCap(finalUrl, 1);
                   throw new Error(`Range request downgraded to HTTP 200 (If-Range mismatch or unsupported)`);
                 }
                 if (!sliceRes.ok || !sliceRes.body) {
@@ -3511,10 +3627,12 @@ export class RetroGameTalkClient {
               if (waveThrottleError) {
                 const throttleErr = waveThrottleError as RangeThrottleError;
                 currentWaveThrottleRetries += 1;
-                effectiveChunks = Math.max(1, Math.floor(effectiveChunks / 2));
+                effectiveChunks = activeWorkersCount > 2 ? 2 : 1;
+                this.recordHostChunkCap(finalUrl, effectiveChunks);
+                this.recordHostChunkCap(release.downloadUrl, effectiveChunks);
                 log?.(
                   'throttle',
-                  `HTTP ${throttleErr.status} rate limit on chunk transfer for ${finalFilename}; pausing all chunks (${Math.round(throttleErr.cooldownMs / 1000)}s, next wave ${effectiveChunks}x)`,
+                  `HTTP ${throttleErr.status} limit on chunk transfer for ${finalFilename}; pausing all chunks (${Math.round(throttleErr.cooldownMs / 1000)}s, stepping down to ${effectiveChunks}x)`,
                   `Wave throttle ${currentWaveThrottleRetries}/${maxWaveThrottleRetries}${throttleErr.retryAfterSec ? ` · Retry-After: ${throttleErr.retryAfterSec}s` : ''}`,
                 );
                 if (currentWaveThrottleRetries > maxWaveThrottleRetries) {
@@ -3689,6 +3807,9 @@ export class RetroGameTalkClient {
           `Stream interrupted for ${release.filename}; ${keepPartialOnError ? 'resuming' : 'retrying'} (${streamAttempt}/${maxStreamAttempts - 1})`,
           errMsg,
         );
+        if (err instanceof RangeThrottleError) {
+          await this.rateLimiter.waitForCooldown(signal);
+        }
         const retryWaitMs = Math.min(2000, Math.max(100, config.minDelayMs) * streamAttempt);
         await new Promise<void>((resolve, reject) => {
           if (signal.aborted) {

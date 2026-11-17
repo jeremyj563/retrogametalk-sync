@@ -3199,8 +3199,10 @@ export class ScraperOrchestrator extends EventEmitter {
         const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
         const pageUrl = (release.pageUrl || '').split('#')[0];
         const isCloudflareErr = /cloudflare/i.test(firstMsg);
+        const isRateLimitErr = /\b(?:429|503)\b|rate limit/i.test(firstMsg);
         const isAuthOrExpiredErr =
           !isCloudflareErr &&
+          !isRateLimitErr &&
           /401|403|unauthorized|forbidden|authentication|login|nonce may have expired|expected archive binary/i.test(
             firstMsg,
           );

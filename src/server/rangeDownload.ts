@@ -121,6 +121,9 @@ export function splitMissingRangesIntoSlices(
 ): ByteRange[] {
   const totalMissing = missingRanges.reduce((acc, [s, e]) => acc + (e - s + 1), 0);
   if (totalMissing <= 0) return [];
+  if (workerCount <= 1) {
+    return missingRanges.map(([s, e]) => [s, e] as ByteRange);
+  }
 
   const targetSliceCount = Math.min(16, Math.max(workerCount * 2, workerCount));
   const idealSliceSize = Math.ceil(totalMissing / targetSliceCount);
