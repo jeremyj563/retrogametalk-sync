@@ -47,41 +47,122 @@ function encodeGitRefPath(ref: string): string {
     .join('/');
 }
 
-function detectGitHostFlavor(baseUrl: string): 'gitlab' | 'bitbucket' | 'standard' {
+function detectGitHostFlavor(baseUrl: string): 'gitlab' | 'bitbucket' | 'gitea' | 'github' {
   try {
     const host = new URL(baseUrl).hostname.toLowerCase();
     if (host.includes('gitlab')) return 'gitlab';
     if (host === 'bitbucket.org' || host.endsWith('.bitbucket.org')) return 'bitbucket';
+    if (host === 'codeberg.org' || host.includes('gitea') || host.includes('forgejo')) {
+      return 'gitea';
+    }
   } catch {
-    // Fallback to standard GitHub / Gitea / Forgejo / Codeberg tree & commit paths
+    // Fallback to GitHub-compatible routes
   }
-  return 'standard';
+  return 'github';
+}
+
+export type GitRefKind = 'release' | 'branch' | 'pr';
+
+export interface GitRefDestination {
+  url: string;
+  kind: GitRefKind;
+  refName: string;
+}
+
+const SEMVER_TAG_PATTERN = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const PR_REF_PATTERN = /^(?:refs\/)?(?:pull|merge-requests)\/(\d+)(?:\/.*)?$/i;
+
+/**
+ * Classifies a GIT_REF (e.g. "refs/tags/1.0.2", "refs/heads/main", "refs/pull/42/merge",
+ * "1.0.2", or "feature/xyz") and resolves the appropriate upstream web URL on top of GIT_URL.
+ */
+export function resolveGitRefDestination(
+  baseRepoUrl: string | null | undefined,
+  gitRef: string | null | undefined,
+  fallbackVersion?: string | null | undefined,
+): GitRefDestination | null {
+  const base = normalizeGitRepoUrl(baseRepoUrl);
+  if (!base) return null;
+
+  const rawRef =
+    (typeof gitRef === 'string' && gitRef.trim()) ||
+    (typeof fallbackVersion === 'string' && fallbackVersion.trim()) ||
+    '';
+  if (
+    !rawRef ||
+    rawRef === 'unknown' ||
+    rawRef === 'local' ||
+    rawRef === 'dev' ||
+    rawRef === 'HEAD'
+  ) {
+    return null;
+  }
+
+  const flavor = detectGitHostFlavor(base);
+
+  const prMatch = PR_REF_PATTERN.exec(rawRef);
+  if (prMatch) {
+    const prNum = prMatch[1];
+    const url =
+      flavor === 'gitlab'
+        ? `${base}/-/merge_requests/${prNum}`
+        : flavor === 'bitbucket'
+          ? `${base}/pull-requests/${prNum}`
+          : `${base}/pull/${prNum}`;
+    return { url, kind: 'pr', refName: `#${prNum}` };
+  }
+
+  let kind: GitRefKind;
+  let refName: string;
+
+  if (rawRef.startsWith('refs/tags/')) {
+    kind = 'release';
+    refName = rawRef.slice('refs/tags/'.length).trim();
+  } else if (rawRef.startsWith('refs/heads/')) {
+    kind = 'branch';
+    refName = rawRef.slice('refs/heads/'.length).trim();
+  } else if (rawRef.startsWith('refs/remotes/')) {
+    const afterRemotes = rawRef.slice('refs/remotes/'.length).replace(/^[^/]+\//, '').trim();
+    kind = 'branch';
+    refName = afterRemotes;
+  } else if (SEMVER_TAG_PATTERN.test(rawRef)) {
+    kind = 'release';
+    refName = rawRef;
+  } else {
+    kind = 'branch';
+    refName = rawRef.startsWith('refs/') ? rawRef.replace(/^refs\/[^/]+\//, '').trim() : rawRef;
+  }
+
+  const encodedRef = encodeGitRefPath(refName);
+  if (!encodedRef) return null;
+
+  if (kind === 'release') {
+    const url =
+      flavor === 'gitlab'
+        ? `${base}/-/tags/${encodedRef}`
+        : flavor === 'bitbucket'
+          ? `${base}/src/${encodedRef}`
+          : `${base}/releases/tag/${encodedRef}`;
+    return { url, kind: 'release', refName };
+  }
+
+  const url =
+    flavor === 'gitlab'
+      ? `${base}/-/tree/${encodedRef}`
+      : flavor === 'bitbucket'
+        ? `${base}/branch/${encodedRef}`
+        : `${base}/tree/${encodedRef}`;
+  return { url, kind: 'branch', refName };
 }
 
 /**
- * Dynamically builds the branch/tag URL on top of the configured GIT_URL base.
+ * Dynamically builds the release, branch, or PR URL on top of the configured GIT_URL base.
  */
 export function buildGitBranchUrl(
   baseRepoUrl: string | null | undefined,
   branchOrTag: string | null | undefined,
 ): string | null {
-  const base = normalizeGitRepoUrl(baseRepoUrl);
-  if (!base) return null;
-
-  const ref = typeof branchOrTag === 'string' ? branchOrTag.trim() : '';
-  if (!ref || ref === 'unknown' || ref === 'local') return null;
-
-  const encodedRef = encodeGitRefPath(ref);
-  if (!encodedRef) return null;
-
-  const flavor = detectGitHostFlavor(base);
-  if (flavor === 'gitlab') {
-    return `${base}/-/tree/${encodedRef}`;
-  }
-  if (flavor === 'bitbucket') {
-    return `${base}/branch/${encodedRef}`;
-  }
-  return `${base}/tree/${encodedRef}`;
+  return resolveGitRefDestination(baseRepoUrl, branchOrTag)?.url ?? null;
 }
 
 /**

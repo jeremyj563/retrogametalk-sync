@@ -24,7 +24,7 @@ import {
   loadInitialCrtDisplaySettings,
   saveCrtDisplaySettings,
 } from './shared/crtDisplay';
-import { buildGitBranchUrl, buildGitCommitUrl } from './shared/gitUrl';
+import { buildGitCommitUrl, resolveGitRefDestination } from './shared/gitUrl';
 import type {
   ActivityLogRecord,
   ActiveTransferState,
@@ -67,16 +67,23 @@ function BuildFooterMeta({
 }) {
   const [activeTarget, setActiveTarget] = useState<'version' | 'sha' | null>(null);
   const tooltipId = useId();
-  const branchUrl = buildGitBranchUrl(build.gitUrl, build.version);
+  const refDest = resolveGitRefDestination(build.gitUrl, build.gitRef, build.version);
+  const branchUrl = refDest?.url ?? null;
   const commitUrl = buildGitCommitUrl(build.gitUrl, build.gitSha);
   const hasRealSha = Boolean(build.gitSha && build.gitSha !== 'unknown');
   const shortSha = hasRealSha ? build.gitSha.slice(0, 7) : 'local';
   const displaySha = hasRealSha ? build.gitSha.slice(0, 12) : 'local (untracked)';
-  const isSemverRelease = /^\d+\.\d+\.\d+(?:[-+].+)?$/.test(build.version.trim());
+  const isSemverRelease =
+    refDest?.kind === 'release' || /^\d+\.\d+\.\d+(?:[-+].+)?$/.test(build.version.trim());
+  const showDistinctGitRef = Boolean(build.gitRef && build.gitRef !== build.version);
   const builtInfo = formatLocalDateTimeWithAge(build.builtAt);
   const activeLinkHint =
-    activeTarget === 'version' && branchUrl
-      ? 'Click to open ref in repository'
+    activeTarget === 'version' && refDest
+      ? refDest.kind === 'release'
+        ? `Click to open release ${refDest.refName}`
+        : refDest.kind === 'pr'
+          ? `Click to open pull request ${refDest.refName}`
+          : `Click to open branch ${refDest.refName}`
       : activeTarget === 'sha' && commitUrl
         ? 'Click to open commit in repository'
         : null;
@@ -158,7 +165,13 @@ function BuildFooterMeta({
               Build &amp; Release Provenance
             </div>
             <div className="text-[11px] font-mono text-crt-muted truncate">
-              {activeTarget === 'version' ? 'Version / Release Tag' : 'Commit / Revision Hash'}
+              {activeTarget === 'version'
+                ? refDest?.kind === 'release'
+                  ? 'Version / Release Tag'
+                  : refDest?.kind === 'pr'
+                    ? 'Version / Pull Request Ref'
+                    : 'Version / Git Ref'
+                : 'Commit / Revision Hash'}
             </div>
           </div>
 
@@ -175,6 +188,13 @@ function BuildFooterMeta({
                 {build.version}
               </dd>
             </div>
+
+            {showDistinctGitRef && (
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-crt-muted shrink-0">Git Ref</dt>
+                <dd className="text-right text-crt-text truncate">{build.gitRef}</dd>
+              </div>
+            )}
 
             <div className="flex items-center justify-between gap-3">
               <dt className="text-crt-muted shrink-0">Revision</dt>
