@@ -1715,6 +1715,8 @@ export function getCatalogTotalsAndSystems(): {
     downloadedItems: number;
     skippedItems: number;
     failedItems: number;
+    queuedItems: number;
+    installedItems: number;
     totalBytesMirrored: number;
     totalRuns: number;
   };
@@ -1727,6 +1729,8 @@ export function getCatalogTotalsAndSystems(): {
       SUM(CASE WHEN status = 'downloaded' THEN 1 ELSE 0 END) as downloaded_items,
       SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_items,
       SUM(CASE WHEN status IN ('failed', 'partial') THEN 1 ELSE 0 END) as failed_items,
+      SUM(CASE WHEN status IN ('queued', 'downloading') THEN 1 ELSE 0 END) as queued_items,
+      SUM(CASE WHEN installed_at IS NOT NULL THEN 1 ELSE 0 END) as installed_items,
       COALESCE(SUM(CASE WHEN status IN ('downloaded', 'skipped', 'partial') THEN file_size_bytes ELSE 0 END), 0) as total_bytes
     FROM catalog_releases
   `).get() as Record<string, unknown>;
@@ -1793,6 +1797,8 @@ export function getCatalogTotalsAndSystems(): {
       downloadedItems: Number(totalsRow.downloaded_items || 0),
       skippedItems: Number(totalsRow.skipped_items || 0),
       failedItems: Number(totalsRow.failed_items || 0),
+      queuedItems: Number(totalsRow.queued_items || 0),
+      installedItems: Number(totalsRow.installed_items || 0),
       totalBytesMirrored: Number(totalsRow.total_bytes || 0),
       totalRuns: Number(runsRow.count || 0),
     },

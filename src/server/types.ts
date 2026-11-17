@@ -253,6 +253,7 @@ export interface StorageStats {
   writable: boolean;
   totalFilesOnDisk: number;
   totalBytesOnDisk: number;
+  sqliteBytes: number;
   diskFreeBytes: number | null;
   diskTotalBytes: number | null;
 }
@@ -298,6 +299,8 @@ export interface AuthSessionStatus {
 
 export interface ServiceStatusSnapshot {
   podId: string;
+  uptimeSeconds: number;
+  schemaVersion: number;
   build: {
     version: string;
     gitSha: string;
@@ -319,6 +322,8 @@ export interface ServiceStatusSnapshot {
     downloadedItems: number;
     skippedItems: number;
     failedItems: number;
+    queuedItems: number;
+    installedItems: number;
     totalBytesMirrored: number;
     totalRuns: number;
   };

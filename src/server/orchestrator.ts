@@ -620,6 +620,18 @@ export class ScraperOrchestrator extends EventEmitter {
       walk(downloadDir);
     }
 
+    let sqliteBytes = 0;
+    for (const dbFile of ['scraper.db', 'scraper.db-wal', 'scraper.db-shm']) {
+      try {
+        const st = fs.statSync(path.join(dataDir, dbFile));
+        if (st.isFile()) {
+          sqliteBytes += st.size;
+        }
+      } catch {
+        // Ignore absent WAL/SHM files
+      }
+    }
+
     let diskFreeBytes: number | null = null;
     let diskTotalBytes: number | null = null;
     try {
@@ -637,6 +649,7 @@ export class ScraperOrchestrator extends EventEmitter {
         writable,
         totalFilesOnDisk,
         totalBytesOnDisk,
+        sqliteBytes,
         diskFreeBytes,
         diskTotalBytes,
       },
@@ -1118,6 +1131,8 @@ export class ScraperOrchestrator extends EventEmitter {
 
     return {
       podId: POD_ID,
+      uptimeSeconds: Math.max(0, Math.floor(process.uptime())),
+      schemaVersion: getSchemaMigrationReport().currentVersion,
       build: resolveRuntimeBuildInfo(),
       activeRun: this.activeRun,
       activeTransfer: this.activeTransfer,
