@@ -740,90 +740,103 @@ export function OverviewPanel({
           </div>
         </div>
 
-        {/* Inline Incremental Cutoff Timestamp Editor (Single-Elevation Hairline Divider) */}
-        {editingCutoff && !status.activeRun && (
-          <div className="mt-4 pt-4 border-t border-crt-border space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-              <span className="text-crt-muted">
-                Incremental Sync (live or dry-run) inspects releases created or updated after this cutoff. Full Sync (live or dry-run) inspects every release in scope.
-              </span>
-              <span className="font-mono text-crt-muted tabular-nums">
-                UTC: {resolvedCutoffPreviewIso ?? '—'}
-              </span>
-            </div>
+        {/* Inline Incremental Cutoff Timestamp Editor (Smooth Accordion Disclosure) */}
+        <div
+          aria-hidden={!(editingCutoff && !status.activeRun)}
+          inert={!(editingCutoff && !status.activeRun) || undefined}
+          data-open={editingCutoff && !status.activeRun ? 'true' : 'false'}
+          className={`crt-accordion-grid transition-opacity duration-250 motion-reduce:transition-none ${
+            editingCutoff && !status.activeRun
+              ? 'opacity-100'
+              : 'opacity-0 pointer-events-none'
+          }`}
+        >
+          <div className="crt-accordion-inner">
+            <div className="pt-4">
+              <div className="pt-4 border-t border-crt-border space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="text-crt-muted">
+                    Incremental Sync (live or dry-run) inspects releases created or updated after this cutoff. Full Sync (live or dry-run) inspects every release in scope.
+                  </span>
+                  <span className="font-mono text-crt-muted tabular-nums">
+                    UTC: {resolvedCutoffPreviewIso ?? '—'}
+                  </span>
+                </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  type="datetime-local"
-                  aria-label="Incremental cutoff date and time"
-                  value={cutoffLocalInput}
-                  disabled={cutoffSaving}
-                  onChange={(e) => {
-                    setCutoffLocalInput(e.target.value);
-                    setCutoffError(null);
-                  }}
-                  className="px-3 py-1.5 text-xs font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-50"
-                />
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="datetime-local"
+                      aria-label="Incremental cutoff date and time"
+                      value={cutoffLocalInput}
+                      disabled={cutoffSaving}
+                      onChange={(e) => {
+                        setCutoffLocalInput(e.target.value);
+                        setCutoffError(null);
+                      }}
+                      className="px-3 py-1.5 text-xs font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-50"
+                    />
 
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {[
-                    { label: '24h Ago', hours: 24 },
-                    { label: '7d Ago', hours: 24 * 7 },
-                    { label: '30d Ago', hours: 24 * 30 },
-                    { label: 'Now', hours: 0 },
-                  ].map((preset) => (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {[
+                        { label: '24h Ago', hours: 24 },
+                        { label: '7d Ago', hours: 24 * 7 },
+                        { label: '30d Ago', hours: 24 * 30 },
+                        { label: 'Now', hours: 0 },
+                      ].map((preset) => (
+                        <button
+                          key={preset.label}
+                          type="button"
+                          disabled={cutoffSaving}
+                          onClick={() => applyCutoffPresetHoursAgo(preset.hours)}
+                          className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+
+                      <button
+                        type="button"
+                        disabled={cutoffSaving || !activeWatermark}
+                        onClick={() => void handleResetCutoffDefault()}
+                        title="Clear stored watermark so Incremental Sync uses the rolling 24-hour default lookback"
+                        className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-amber hover:text-crt-amber text-crt-muted rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Reset Default
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0 ml-auto">
                     <button
-                      key={preset.label}
                       type="button"
                       disabled={cutoffSaving}
-                      onClick={() => applyCutoffPresetHoursAgo(preset.hours)}
-                      className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+                      onClick={() => {
+                        setEditingCutoff(false);
+                        setCutoffError(null);
+                      }}
+                      className="px-3 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0"
                     >
-                      {preset.label}
+                      Cancel
                     </button>
-                  ))}
-
-                  <button
-                    type="button"
-                    disabled={cutoffSaving || !activeWatermark}
-                    onClick={() => void handleResetCutoffDefault()}
-                    title="Clear stored watermark so Incremental Sync uses the rolling 24-hour default lookback"
-                    className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-amber hover:text-crt-amber text-crt-muted rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    Reset Default
-                  </button>
+                    <button
+                      type="button"
+                      disabled={cutoffSaving || !resolvedCutoffPreviewIso}
+                      onClick={() => void handleSaveCutoff()}
+                      className="crt-cta-beam px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+                    >
+                      {cutoffSaving ? 'Saving...' : 'Save Cutoff'}
+                    </button>
+                  </div>
                 </div>
-              </div>
 
-              <div className="flex items-center gap-2 shrink-0 ml-auto">
-                <button
-                  type="button"
-                  disabled={cutoffSaving}
-                  onClick={() => {
-                    setEditingCutoff(false);
-                    setCutoffError(null);
-                  }}
-                  className="px-3 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={cutoffSaving || !resolvedCutoffPreviewIso}
-                  onClick={() => void handleSaveCutoff()}
-                  className="crt-cta-beam px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
-                >
-                  {cutoffSaving ? 'Saving...' : 'Save Cutoff'}
-                </button>
+                {cutoffError && (
+                  <p className="text-xs font-mono text-crt-crimson">{cutoffError}</p>
+                )}
               </div>
             </div>
-
-            {cutoffError && (
-              <p className="text-xs font-mono text-crt-crimson">{cutoffError}</p>
-            )}
           </div>
-        )}
+        </div>
       </section>
 
       {/* 4-Column KPI Strip + Inline Collapsible Failed Queue */}
