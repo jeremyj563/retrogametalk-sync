@@ -969,7 +969,7 @@ export function GameDetailDrawer({
                               disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
                               title={
                                 !canSync
-                                  ? 'Verify login in Operations before retrying'
+                                  ? 'Verify login in System Settings before retrying'
                                   : 'Dry-run: verify fresh download link for this file without downloading'
                               }
                               onClick={() => void handleRetry(file.id, true)}
@@ -981,7 +981,7 @@ export function GameDetailDrawer({
                             <button
                               type="button"
                               disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
-                              title={!canSync ? 'Verify login in Operations before retrying' : undefined}
+                              title={!canSync ? 'Verify login in System Settings before retrying' : undefined}
                               onClick={() => void handleRetry(file.id, false)}
                               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
                             >
@@ -1259,7 +1259,7 @@ export function GameDetailDrawer({
                   disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
                   title={
                     !canSync
-                      ? 'Verify login in Operations before retrying'
+                      ? 'Verify login in System Settings before retrying'
                       : 'Simulate retry by verifying fresh download link resolution without downloading archives'
                   }
                   onClick={() => void handleRetry(undefined, true)}
@@ -1271,7 +1271,7 @@ export function GameDetailDrawer({
                 <button
                   type="button"
                   disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
-                  title={!canSync ? 'Verify login in Operations before retrying' : undefined}
+                  title={!canSync ? 'Verify login in System Settings before retrying' : undefined}
                   onClick={() => void handleRetry(undefined, false)}
                   className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
                 >

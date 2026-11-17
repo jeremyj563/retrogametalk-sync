@@ -221,11 +221,11 @@ export function SdCardExportModal({
                 <button
                   type="button"
                   onClick={onEditFolderMappings}
-                  title="Open Storage Device Folder Mappings in Operations"
+                  title="Open Storage Device Folder Mappings in Device Export"
                   className="inline-flex items-center gap-1.5 text-xs font-mono text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <FolderTree className="h-3.5 w-3.5 shrink-0" />
-                  <span>Edit in Operations</span>
+                  <span>Edit in Device Export</span>
                 </button>
               </div>
             </div>

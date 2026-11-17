@@ -8,18 +8,15 @@ import { BrandMark } from './components/BrandMark';
 import { BulkInstallDock } from './components/BulkInstallDock';
 import { CatalogPanel } from './components/CatalogPanel';
 import { CrtDisplayControl } from './components/CrtDisplayControl';
+import { DeviceExportPanel } from './components/DeviceExportPanel';
 import { LivingNavIcon } from './components/LivingNavIcon';
 import { MirroredSystemsSidebar } from './components/MirroredSystemsSidebar';
-import {
-  OperationsPanel,
-  type OperationsDirtyState,
-  type OperationsPanelHandle,
-} from './components/OperationsPanel';
 import { OverviewPanel } from './components/OverviewPanel';
-import { SchedulePanel } from './components/SchedulePanel';
 import { SdCardExportModal } from './components/SdCardExportModal';
 import { ServiceTelemetrySidebar } from './components/ServiceTelemetrySidebar';
 import { SyncCommandButton } from './components/SyncCommandButton';
+import { SyncRulesPanel } from './components/SyncRulesPanel';
+import { SystemSettingsPanel } from './components/SystemSettingsPanel';
 import { useBulkStorageInstaller } from './hooks/useBulkStorageInstaller';
 import {
   computeCrtCssVariables,
@@ -31,10 +28,12 @@ import { buildGitBranchUrl, buildGitCommitUrl } from './shared/gitUrl';
 import type {
   ActivityLogRecord,
   ActiveTransferState,
+  ConfigDirtyState,
+  ConfigFocusRequest,
+  ConfigPanelHandle,
+  ConfigSectionTarget,
   LogLevel,
   NavSection,
-  OperationsFocusRequest,
-  OperationsSectionTarget,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
   SyncRunRecord,
@@ -47,14 +46,14 @@ const SYNC_DRY_RUN_STORAGE_KEY = 'rgt_sync_dry_run_v1';
 
 interface AppHistoryState {
   section: NavSection;
-  target: OperationsSectionTarget | null;
+  target: ConfigSectionTarget | null;
   scrollY: number;
   index: number;
 }
 
 interface PendingNavIntent {
   section: NavSection;
-  target: OperationsSectionTarget | null;
+  target: ConfigSectionTarget | null;
   historyDelta: number;
 }
 
@@ -106,25 +105,51 @@ function BuildFooterMeta({
   );
 }
 
-const OPERATIONS_TARGET_HASH_SLUG: Record<OperationsSectionTarget, string> = {
-  auth: 'auth',
+function isConfigSection(section: NavSection): boolean {
+  return section === 'sync-rules' || section === 'device-export' || section === 'settings';
+}
+
+function resolveSectionForTarget(target: ConfigSectionTarget): NavSection {
+  switch (target) {
+    case 'schedule':
+    case 'systems':
+    case 'releaseTypes':
+      return 'sync-rules';
+    case 'romNaming':
+    case 'storageMappings':
+      return 'device-export';
+    case 'auth':
+    case 'pacing':
+      return 'settings';
+  }
+}
+
+const CONFIG_TARGET_HASH_SLUG: Record<ConfigSectionTarget, string> = {
+  schedule: 'schedule',
   systems: 'systems',
   releaseTypes: 'release-types',
+  romNaming: 'rom-naming',
   storageMappings: 'storage-mappings',
+  auth: 'auth',
+  pacing: 'pacing',
 };
 
-const HASH_SLUG_TO_OPERATIONS_TARGET: Record<string, OperationsSectionTarget> = {
-  auth: 'auth',
+const HASH_SLUG_TO_CONFIG_TARGET: Record<string, ConfigSectionTarget> = {
+  schedule: 'schedule',
   systems: 'systems',
   'release-types': 'releaseTypes',
   releasetypes: 'releaseTypes',
+  'rom-naming': 'romNaming',
+  romnaming: 'romNaming',
   'storage-mappings': 'storageMappings',
   storagemappings: 'storageMappings',
+  auth: 'auth',
+  pacing: 'pacing',
 };
 
 function parseLocationHash(rawHash: string): {
   section: NavSection;
-  target: OperationsSectionTarget | null;
+  target: ConfigSectionTarget | null;
 } {
   const cleaned = rawHash.replace(/^#\/?/, '').trim().toLowerCase();
   if (!cleaned) {
@@ -137,22 +162,47 @@ function parseLocationHash(rawHash: string): {
   if (head === 'catalog') {
     return { section: 'catalog', target: null };
   }
+  if (head === 'sync-rules' || head === 'syncrules') {
+    const candidate = sub ? (HASH_SLUG_TO_CONFIG_TARGET[sub] ?? null) : null;
+    const validTarget =
+      candidate && resolveSectionForTarget(candidate) === 'sync-rules' ? candidate : null;
+    return { section: 'sync-rules', target: validTarget };
+  }
+  if (head === 'device-export' || head === 'deviceexport' || head === 'export') {
+    const candidate = sub ? (HASH_SLUG_TO_CONFIG_TARGET[sub] ?? null) : null;
+    const validTarget =
+      candidate && resolveSectionForTarget(candidate) === 'device-export' ? candidate : null;
+    return { section: 'device-export', target: validTarget };
+  }
+  if (head === 'settings' || head === 'system-settings') {
+    const candidate = sub ? (HASH_SLUG_TO_CONFIG_TARGET[sub] ?? null) : null;
+    const validTarget =
+      candidate && resolveSectionForTarget(candidate) === 'settings' ? candidate : null;
+    return { section: 'settings', target: validTarget };
+  }
+  // Legacy bookmark & history redirects
   if (head === 'schedule') {
-    return { section: 'schedule', target: null };
+    return { section: 'sync-rules', target: 'schedule' };
   }
   if (head === 'operations') {
-    const target = sub ? (HASH_SLUG_TO_OPERATIONS_TARGET[sub] ?? null) : null;
-    return { section: 'operations', target };
+    const legacyTarget = sub ? (HASH_SLUG_TO_CONFIG_TARGET[sub] ?? null) : null;
+    if (legacyTarget) {
+      return {
+        section: resolveSectionForTarget(legacyTarget),
+        target: legacyTarget,
+      };
+    }
+    return { section: 'settings', target: null };
   }
   return { section: 'monitor', target: null };
 }
 
 function formatLocationHash(
   section: NavSection,
-  target: OperationsSectionTarget | null = null,
+  target: ConfigSectionTarget | null = null,
 ): string {
-  if (section === 'operations' && target) {
-    return `#operations/${OPERATIONS_TARGET_HASH_SLUG[target]}`;
+  if (target && resolveSectionForTarget(target) === section) {
+    return `#${section}/${CONFIG_TARGET_HASH_SLUG[target]}`;
   }
   return `#${section}`;
 }
@@ -163,8 +213,9 @@ function isAppHistoryState(raw: unknown): raw is AppHistoryState {
   return (
     (candidate.section === 'monitor' ||
       candidate.section === 'catalog' ||
-      candidate.section === 'schedule' ||
-      candidate.section === 'operations') &&
+      candidate.section === 'sync-rules' ||
+      candidate.section === 'device-export' ||
+      candidate.section === 'settings') &&
     typeof candidate.index === 'number'
   );
 }
@@ -190,7 +241,7 @@ function loadInitialDryRunEnabled(): boolean {
 export default function App() {
   const initialRouteRef = useRef<{
     section: NavSection;
-    target: OperationsSectionTarget | null;
+    target: ConfigSectionTarget | null;
   } | null>(null);
   if (!initialRouteRef.current) {
     initialRouteRef.current = parseLocationHash(
@@ -199,14 +250,14 @@ export default function App() {
   }
 
   const [section, setSection] = useState<NavSection>(() => initialRouteRef.current!.section);
-  const [operationsFocus, setOperationsFocus] = useState<OperationsFocusRequest | null>(() =>
+  const [configFocus, setConfigFocus] = useState<ConfigFocusRequest | null>(() =>
     initialRouteRef.current!.target
       ? { target: initialRouteRef.current!.target, nonce: 1 }
       : null,
   );
-  const operationsFocusNonceRef = useRef(initialRouteRef.current.target ? 1 : 0);
-  const operationsPanelRef = useRef<OperationsPanelHandle | null>(null);
-  const [operationsDirty, setOperationsDirty] = useState<OperationsDirtyState>({
+  const configFocusNonceRef = useRef(initialRouteRef.current.target ? 1 : 0);
+  const configPanelRef = useRef<ConfigPanelHandle | null>(null);
+  const [configDirty, setConfigDirty] = useState<ConfigDirtyState>({
     isDirty: false,
     changedSections: [],
   });
@@ -215,7 +266,7 @@ export default function App() {
   const [navGuardError, setNavGuardError] = useState<string | null>(null);
 
   const sectionRef = useRef<NavSection>(initialRouteRef.current.section);
-  const operationsDirtyRef = useRef(false);
+  const configDirtyRef = useRef(false);
   const currentHistoryStateRef = useRef<AppHistoryState>({
     section: initialRouteRef.current.section,
     target: initialRouteRef.current.target,
@@ -227,7 +278,7 @@ export default function App() {
   const pendingScrollRestoreRef = useRef<{ section: NavSection; scrollY: number } | null>(null);
 
   sectionRef.current = section;
-  operationsDirtyRef.current = operationsDirty.isDirty;
+  configDirtyRef.current = configDirty.isDirty;
 
   const [status, setStatus] = useState<ServiceStatusSnapshot | null>(null);
   const [config, setConfig] = useState<ScraperConfigPublic | null>(null);
@@ -583,8 +634,9 @@ export default function App() {
   const navItems: { id: NavSection; label: string }[] = [
     { id: 'monitor', label: 'Sync' },
     { id: 'catalog', label: 'Catalog' },
-    { id: 'schedule', label: 'Schedule' },
-    { id: 'operations', label: 'Operations' },
+    { id: 'sync-rules', label: 'Sync Rules' },
+    { id: 'device-export', label: 'Device Export' },
+    { id: 'settings', label: 'System Settings' },
   ];
 
   const syncAllowed = Boolean(status?.auth.hasCompletedLogin);
@@ -626,7 +678,10 @@ export default function App() {
   }, [crtSettings]);
 
   const commitNavigation = useCallback(
-    (nextSection: NavSection, target: OperationsSectionTarget | null = null) => {
+    (nextSection: NavSection, target: ConfigSectionTarget | null = null) => {
+      const normalizedTarget =
+        target && resolveSectionForTarget(target) === nextSection ? target : null;
+
       if (typeof window !== 'undefined') {
         const currentEntry: AppHistoryState = {
           ...currentHistoryStateRef.current,
@@ -638,7 +693,7 @@ export default function App() {
         historyIndexRef.current = nextIndex;
         const nextEntry: AppHistoryState = {
           section: nextSection,
-          target: nextSection === 'operations' ? target : null,
+          target: normalizedTarget,
           scrollY: 0,
           index: nextIndex,
         };
@@ -650,15 +705,15 @@ export default function App() {
         );
       }
 
-      if (nextSection === 'operations' && target) {
+      if (normalizedTarget) {
         pendingScrollRestoreRef.current = null;
-        operationsFocusNonceRef.current += 1;
-        setOperationsFocus({
-          target,
-          nonce: operationsFocusNonceRef.current,
+        configFocusNonceRef.current += 1;
+        setConfigFocus({
+          target: normalizedTarget,
+          nonce: configFocusNonceRef.current,
         });
       } else {
-        setOperationsFocus(null);
+        setConfigFocus(null);
         pendingScrollRestoreRef.current = { section: nextSection, scrollY: 0 };
       }
       setSection(nextSection);
@@ -667,9 +722,9 @@ export default function App() {
   );
 
   const requestSectionChange = useCallback(
-    (nextSection: NavSection, target: OperationsSectionTarget | null = null) => {
+    (nextSection: NavSection, target: ConfigSectionTarget | null = null) => {
       if (nextSection === section && !target) return;
-      if (section === 'operations' && nextSection !== 'operations' && operationsDirty.isDirty) {
+      if (isConfigSection(section) && nextSection !== section && configDirty.isDirty) {
         setNavGuardError(null);
         setPendingNavIntent({
           section: nextSection,
@@ -680,7 +735,16 @@ export default function App() {
       }
       commitNavigation(nextSection, target);
     },
-    [section, operationsDirty.isDirty, commitNavigation],
+    [section, configDirty.isDirty, commitNavigation],
+  );
+
+  const navigateToConfigTarget = useCallback(
+    (target?: ConfigSectionTarget) => {
+      const resolvedTarget = target ?? 'auth';
+      const targetSection = resolveSectionForTarget(resolvedTarget);
+      requestSectionChange(targetSection, resolvedTarget);
+    },
+    [requestSectionChange],
   );
 
   useEffect(() => {
@@ -746,9 +810,9 @@ export default function App() {
       }
 
       if (
-        sectionRef.current === 'operations' &&
-        nextState.section !== 'operations' &&
-        operationsDirtyRef.current
+        isConfigSection(sectionRef.current) &&
+        nextState.section !== sectionRef.current &&
+        configDirtyRef.current
       ) {
         const currentIndex = currentHistoryStateRef.current.index;
         const revertDelta = hasIndexedState
@@ -780,15 +844,19 @@ export default function App() {
 
       currentHistoryStateRef.current = nextState;
 
-      if (nextState.section === 'operations' && nextState.target && nextState.scrollY === 0) {
+      if (
+        nextState.target &&
+        resolveSectionForTarget(nextState.target) === nextState.section &&
+        nextState.scrollY === 0
+      ) {
         pendingScrollRestoreRef.current = null;
-        operationsFocusNonceRef.current += 1;
-        setOperationsFocus({
+        configFocusNonceRef.current += 1;
+        setConfigFocus({
           target: nextState.target,
-          nonce: operationsFocusNonceRef.current,
+          nonce: configFocusNonceRef.current,
         });
       } else {
-        setOperationsFocus(null);
+        setConfigFocus(null);
         pendingScrollRestoreRef.current = {
           section: nextState.section,
           scrollY: nextState.scrollY,
@@ -845,17 +913,20 @@ export default function App() {
 
   const handleGuardSaveAndLeave = async () => {
     if (!pendingNavIntent) return;
+    const currentLabel = navItems.find((n) => n.id === section)?.label ?? 'this page';
     setNavGuardSaving(true);
     setNavGuardError(null);
-    const saved = await operationsPanelRef.current?.save();
+    const saved = await configPanelRef.current?.save();
     setNavGuardSaving(false);
     if (!saved) {
-      setNavGuardError('Fix the validation or save error shown in Operations before leaving.');
+      setNavGuardError(
+        `Fix the validation or save error shown in ${currentLabel} before leaving.`,
+      );
       return;
     }
     const intent = pendingNavIntent;
     setPendingNavIntent(null);
-    operationsDirtyRef.current = false;
+    configDirtyRef.current = false;
     if (intent.historyDelta !== 0) {
       window.history.go(intent.historyDelta);
     } else {
@@ -866,10 +937,10 @@ export default function App() {
   const handleGuardDiscardAndLeave = () => {
     if (!pendingNavIntent || navGuardSaving) return;
     const intent = pendingNavIntent;
-    operationsPanelRef.current?.discard();
+    configPanelRef.current?.discard();
     setPendingNavIntent(null);
     setNavGuardError(null);
-    operationsDirtyRef.current = false;
+    configDirtyRef.current = false;
     if (intent.historyDelta !== 0) {
       window.history.go(intent.historyDelta);
     } else {
@@ -950,7 +1021,7 @@ export default function App() {
                   disabled={Boolean(status?.activeRun) || !syncAllowed}
                   title={
                     !syncAllowed
-                      ? 'Verify login in Operations before running a sync'
+                      ? 'Verify login in System Settings before running a sync'
                       : scope === 'incremental'
                         ? 'Inspect releases created or updated since the Incremental Cutoff'
                         : 'Inspect every release across target consoles with no date cutoff'
@@ -978,7 +1049,7 @@ export default function App() {
             disabled={Boolean(status?.activeRun) || !syncAllowed}
             title={
               !syncAllowed
-                ? 'Verify login in Operations before running a sync'
+                ? 'Verify login in System Settings before running a sync'
                 : dryRunEnabled
                   ? `Dry Run ON: ${selectedScope === 'full' ? 'Full Sync' : 'Incremental Sync'} will simulate discovery without downloading files or modifying catalog records`
                   : `Toggle Dry Run ON to preview what ${selectedScope === 'full' ? 'Full Sync' : 'Incremental Sync'} would download without writing to disk`
@@ -1051,7 +1122,7 @@ export default function App() {
                 disabled={actionPending || !status || !syncAllowed}
                 title={
                   !syncAllowed
-                    ? 'Login required: test and verify credentials in Operations before syncing'
+                    ? 'Login required: test and verify credentials in System Settings before syncing'
                     : dryRunEnabled
                       ? `Simulate ${selectedScope === 'full' ? 'Full Sync' : 'Incremental Sync'} (0 bytes written to disk)`
                       : selectedScope === 'full'
@@ -1136,10 +1207,12 @@ export default function App() {
         {/* Left Rail Sidebar (240px on Desktop) */}
         <aside className="crt-sidebar-rail relative lg:z-20 lg:w-60 shrink-0 border-b lg:border-b-0 lg:border-r border-crt-border bg-crt-surface/70 p-4 flex flex-col justify-between gap-6">
           <div className="space-y-6">
-            {/* Mobile Section Switcher */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-1 gap-1.5">
+            {/* Mobile & Desktop Section Switcher */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-1 gap-1.5">
               {navItems.map((item) => {
                 const active = section === item.id;
+                const showDirtyBadge =
+                  active && isConfigSection(item.id) && configDirty.isDirty;
                 return (
                   <button
                     key={item.id}
@@ -1156,9 +1229,9 @@ export default function App() {
                       <LivingNavIcon section={item.id} />
                       <span>{item.label}</span>
                     </span>
-                    {item.id === 'operations' && operationsDirty.isDirty && (
+                    {showDirtyBadge && (
                       <span
-                        title={`Unsaved changes: ${operationsDirty.changedSections.join(', ')}`}
+                        title={`Unsaved changes: ${configDirty.changedSections.join(', ')}`}
                         className="text-[10px] font-mono text-crt-amber shrink-0"
                       >
                         Unsaved
@@ -1238,9 +1311,7 @@ export default function App() {
                   onSaveConfig={handleSaveConfig}
                   onClearLogs={handleClearLogs}
                   onClearRuns={handleClearRuns}
-                  onNavigateToOperations={(target?: OperationsSectionTarget) => {
-                    requestSectionChange('operations', target ?? null);
-                  }}
+                  onNavigateToOperations={navigateToConfigTarget}
                   onRetryItem={handleRetryItem}
                   onRetryAllFailed={handleRetryAllFailed}
                   onRefreshStatus={loadInitialData}
@@ -1257,20 +1328,34 @@ export default function App() {
                   onRefreshStatus={loadInitialData}
                 />
               )}
-              {section === 'schedule' && (
-                <SchedulePanel
+              {section === 'sync-rules' && (
+                <SyncRulesPanel
+                  ref={configPanelRef}
                   config={config}
                   status={status}
+                  focusRequest={configFocus}
+                  onDirtyChange={setConfigDirty}
+                  onSaveConfig={handleSaveConfig}
+                  onNavigateToAuth={() => requestSectionChange('settings', 'auth')}
+                />
+              )}
+              {section === 'device-export' && (
+                <DeviceExportPanel
+                  ref={configPanelRef}
+                  config={config}
+                  status={status}
+                  focusRequest={configFocus}
+                  onDirtyChange={setConfigDirty}
                   onSaveConfig={handleSaveConfig}
                 />
               )}
-              {section === 'operations' && (
-                <OperationsPanel
-                  ref={operationsPanelRef}
+              {section === 'settings' && (
+                <SystemSettingsPanel
+                  ref={configPanelRef}
                   config={config}
                   status={status}
-                  focusRequest={operationsFocus}
-                  onDirtyChange={setOperationsDirty}
+                  focusRequest={configFocus}
+                  onDirtyChange={setConfigDirty}
                   onSaveConfig={handleSaveConfig}
                   onRefreshConfig={loadInitialData}
                 />
@@ -1294,12 +1379,12 @@ export default function App() {
           config={config}
           onEditFolderMappings={() => {
             bulkInstaller.closeModal();
-            requestSectionChange('operations', 'storageMappings');
+            requestSectionChange('device-export', 'storageMappings');
           }}
         />
       )}
 
-      {/* Unsaved Operations Changes Guard Modal */}
+      {/* Unsaved Configuration Changes Guard Modal */}
       {pendingNavIntent && (
         <div
           role="dialog"
@@ -1324,12 +1409,12 @@ export default function App() {
                   id="unsaved-ops-title"
                   className="font-display text-base font-semibold text-crt-text"
                 >
-                  Unsaved Operations Changes
+                  Unsaved Configuration Changes
                 </h2>
                 <p className="text-xs text-crt-muted leading-relaxed">
-                  You have unsaved configuration edits in{' '}
+                  You have unsaved edits in{' '}
                   <span className="font-mono text-crt-text">
-                    {operationsDirty.changedSections.join(', ')}
+                    {configDirty.changedSections.join(', ')}
                   </span>
                   . Save before switching to{' '}
                   <span className="text-crt-text font-medium">

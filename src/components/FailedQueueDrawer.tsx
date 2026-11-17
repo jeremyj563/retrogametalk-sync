@@ -455,7 +455,7 @@ export function FailedQueueDrawer({
               }
               title={
                 !status.auth.hasCompletedLogin
-                  ? 'Verify login in Operations before retrying failed downloads'
+                  ? 'Verify login in System Settings before retrying failed downloads'
                   : status.activeRun
                     ? 'Wait for or stop the active sync run first'
                     : retryDryRun
@@ -791,7 +791,7 @@ export function FailedQueueDrawer({
                             }
                             title={
                               !status.auth.hasCompletedLogin
-                                ? 'Verify login in Operations before retrying'
+                                ? 'Verify login in System Settings before retrying'
                                 : retryDryRun
                                   ? 'Dry-run: verify fresh download link resolution without downloading files'
                                   : 'Re-fetch download link and retry failed/missing files'
