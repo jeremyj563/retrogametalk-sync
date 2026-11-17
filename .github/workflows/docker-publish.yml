@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - "v*"
+      - "[0-9]*.*.*"
   pull_request:
     branches:
       - main
@@ -41,7 +41,7 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Validate v1.x.y SemVer & mint tag + GitHub Release
+      - name: Validate 1.x.y SemVer & mint tag + GitHub Release
         id: mint
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,7 +61,7 @@ jobs:
           PATCH="${BASH_REMATCH[3]}"
 
           if [ "$MAJOR" -ne 1 ] && [ "${ALLOW_MAJOR_INPUT:-false}" != "true" ] && [ "${ALLOW_MAJOR_VAR:-false}" != "true" ]; then
-            echo "::error::Version v${PKG_VERSION} violates the v1.x.y SemVer constraint (MAJOR=${MAJOR}). Explicit approval is required to unlock MAJOR >= 2."
+            echo "::error::Version ${PKG_VERSION} violates the 1.x.y SemVer constraint (MAJOR=${MAJOR}). Explicit approval is required to unlock MAJOR >= 2."
             exit 1
           fi
 
@@ -71,7 +71,7 @@ jobs:
             exit 1
           fi
 
-          TAG="v${PKG_VERSION}"
+          TAG="${PKG_VERSION}"
 
           if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
             echo "Tag ${TAG} already exists; skipping duplicate tag/release creation."
@@ -171,7 +171,6 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=tag
-            type=raw,value=${{ steps.version.outputs.git_tag }},enable=${{ steps.version.outputs.git_tag != '' }}
             type=raw,value=${{ steps.version.outputs.semver_full }},enable=${{ steps.version.outputs.semver_full != '' }}
             type=raw,value=${{ steps.version.outputs.semver_minor }},enable=${{ steps.version.outputs.semver_minor != '' }}
             type=sha,prefix=sha-

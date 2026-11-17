@@ -1,12 +1,12 @@
 # Release & Semantic Versioning Process
 
-**RetroGameTalk Sync** follows [Semantic Versioning 2.0.0](https://semver.org/) (`vMAJOR.MINOR.PATCH`), constrained to the **`v1.x.y`** series unless an explicit major release (`v2.0.0+`) is authorized by the maintainer.
+**RetroGameTalk Sync** follows [Semantic Versioning 2.0.0](https://semver.org/) (`MAJOR.MINOR.PATCH`), constrained to the **`1.x.y`** series unless an explicit major release (`2.0.0+`) is authorized by the maintainer. All git tags, GitHub Releases, container image tags, and runtime version strings omit any leading `v` prefix (e.g., `1.0.0`, not `v1.0.0`) for frictionless compatibility with Helm, Kubernetes, and artifact registries.
 
 ---
 
-## 1. Version Increment Policy (`v1.x.y` Constraint)
+## 1. Version Increment Policy (`1.x.y` Constraint)
 
-Starting from **`v1.0.0`**, every commit-ready change batch bumps either **PATCH** or **MINOR** while keeping **MAJOR locked at `1`**:
+Starting from **`1.0.0`**, every commit-ready change batch bumps either **PATCH** or **MINOR** while keeping **MAJOR locked at `1`**:
 
 | Increment | Format | When to Use |
 | :--- | :--- | :--- |
@@ -29,9 +29,9 @@ Before committing changes to `main`, keep these two version declarations synchro
 
 ### Runtime Version Visibility
 At runtime, the application resolves its active version in the following order:
-1. Explicit `APP_VERSION` environment variable / Docker build arg (set to `vX.Y.Z` during CI builds).
+1. Explicit `APP_VERSION` environment variable / Docker build arg (set to `X.Y.Z` during CI builds).
 2. Local `.git` tag pointing at `HEAD` (or current branch name).
-3. `package.json` `"version"` formatted as `vX.Y.Z` when running outside Git (e.g., local dev sandboxes).
+3. `package.json` `"version"` (`X.Y.Z`) when running outside Git (e.g., local dev sandboxes).
 
 ---
 
@@ -43,28 +43,28 @@ Because AI Studio commits externally to GitHub without a local git CLI inside th
 
 1. **Job 1 — `release` (`contents: write`)**
    - Reads `version` from `package.json` and verifies strict `X.Y.Z` SemVer formatting.
-   - Verifies **`MAJOR == 1`** (unless explicitly overridden for an authorized `v2.0.0+` release) and confirms `Chart.yaml` `appVersion` matches `package.json`.
-   - Checks whether tag `vX.Y.Z` already exists in the repository:
-     - **New version**: Creates an annotated git tag (`vX.Y.Z`), pushes `refs/tags/vX.Y.Z`, and creates a corresponding **GitHub Release** (`gh release create vX.Y.Z --generate-notes`) using GitHub's auto-generated release notes from commits/PRs since the previous tag.
+   - Verifies **`MAJOR == 1`** (unless explicitly overridden for an authorized `2.0.0+` release) and confirms `Chart.yaml` `appVersion` matches `package.json`.
+   - Checks whether tag `X.Y.Z` already exists in the repository:
+     - **New version**: Creates an annotated git tag (`X.Y.Z`), pushes `refs/tags/X.Y.Z`, and creates a corresponding **GitHub Release** (`gh release create X.Y.Z --generate-notes`) using GitHub's auto-generated release notes from commits/PRs since the previous tag.
      - **Already-tagged version**: Logs a notice and skips duplicate tag/release creation safely so rolling `main` builds still succeed.
 2. **Job 2 — `build-and-push` (`needs: [release]`, `packages: write`)**
    - Chained directly behind `release` so newly minted tags immediately trigger the container build without needing a custom Personal Access Token (GitHub Actions suppresses downstream `on: push: tags:` triggers from `GITHUB_TOKEN` pushes).
-   - Builds the Docker image with `APP_VERSION=vX.Y.Z`, `GIT_SHA`, and `GIT_URL`, and pushes to `ghcr.io/<owner>/retrogametalk-sync` with the following tags:
-     - `vX.Y.Z` and `X.Y.Z` *(when a release tag is minted or pushed)*
-     - `X.Y` *(floating minor tag when a release tag is minted or pushed)*
+   - Builds the Docker image with `APP_VERSION=X.Y.Z`, `GIT_SHA`, and `GIT_URL`, and pushes to `ghcr.io/<owner>/retrogametalk-sync` with the following tags:
+     - `X.Y.Z` *(exact SemVer release tag when minted or pushed)*
+     - `X.Y` *(floating minor tag when minted or pushed)*
      - `latest` *(on `main`)*
      - `main` *(on `main`)*
      - `sha-<short-commit>`
 
 ### Pull Requests & Manual Tag Pushes
 - **Pull Requests to `main`**: Skip the `release` job and run `build-and-push` with `push: false` as a build verification check.
-- **Manual `v*` Tag Push**: Skips the `release` job and runs `build-and-push` directly against the pushed tag (`vX.Y.Z`, `X.Y.Z`, `X.Y`, `sha-<short>`).
+- **Manual `[0-9]*.*.*` Tag Push**: Skips the `release` job and runs `build-and-push` directly against the pushed SemVer tag (`X.Y.Z`, `X.Y`, `sha-<short>`).
 
 ---
 
-## 4. Authorizing a Future Major (`v2.0.0+`) Release
+## 4. Authorizing a Future Major (`2.0.0+`) Release
 
-When the maintainer explicitly approves moving to `v2.0.0` (or later):
+When the maintainer explicitly approves moving to `2.0.0` (or later):
 1. Update `package.json` `"version"` and `Chart.yaml` `appVersion` to `"2.0.0"`.
 2. Either:
    - Run **Actions → Release and Publish Container Image → Run workflow** with **`allow_major_bump: true`**, **or**
@@ -78,5 +78,5 @@ When the maintainer explicitly approves moving to `v2.0.0` (or later):
 - **Re-running a failed container build after a tag was already minted**: Re-run the failed job in GitHub Actions, or push a patch bump (`1.X.(Y+1)`).
 - **Retrying a missed GitHub Release for an existing tag**: Delete or edit the release in GitHub UI, or run locally:
   ```bash
-  gh release create v1.X.Y --generate-notes --title "v1.X.Y"
+  gh release create 1.X.Y --generate-notes --title "1.X.Y"
   ```
