@@ -123,6 +123,7 @@ export interface BulkInstallMetrics {
 
 interface UseBulkStorageInstallerOptions {
   config: ScraperConfigPublic | null;
+  debugLogging?: boolean;
   onItemsInstalled?: (updatedItems: RepositoryItemRecord[], deviceLabel: string) => void;
 }
 
@@ -300,7 +301,11 @@ function buildRowsFromInspectedItem(
   return builtRows;
 }
 
-export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkStorageInstallerOptions) {
+export function useBulkStorageInstaller({
+  config,
+  debugLogging = false,
+  onItemsInstalled,
+}: UseBulkStorageInstallerOptions) {
   const [sdRootHandle, setSdRootHandle] = useState<SdDirectoryHandle | null>(null);
   const [mountError, setMountError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -310,6 +315,8 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
 
   const configRef = useRef(config);
   configRef.current = config;
+  const debugLoggingRef = useRef(debugLogging);
+  debugLoggingRef.current = debugLogging;
   const sdRootHandleRef = useRef(sdRootHandle);
   sdRootHandleRef.current = sdRootHandle;
   const onItemsInstalledRef = useRef(onItemsInstalled);
@@ -320,6 +327,21 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
   const jobSeqRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
 
+  const emitSdDebug = useCallback(
+    (message: string, detail?: string, alsoPostToServer = false) => {
+      if (!debugLoggingRef.current) return;
+      console.debug('[RGT:SD-INSTALL]', message, detail ?? '');
+      if (alsoPostToServer) {
+        void fetch('/api/logs/debug', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scope: 'SD-INSTALL', message, detail: detail ?? null }),
+        }).catch(() => undefined);
+      }
+    },
+    [],
+  );
+
   const isBusy =
     job?.phase === 'inspecting' || job?.phase === 'running' || job?.phase === 'canceling';
 
@@ -328,16 +350,19 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
     const support = isFileSystemAccessSupported();
     if (!support.supported) {
       setMountError(support.reason || 'Folder picker not supported in this browser.');
+      emitSdDebug('SD folder picker unsupported', support.reason, true);
       return null;
     }
     try {
       const handle = await pickSdCardRootDirectory();
       sdRootHandleRef.current = handle;
       setSdRootHandle(handle);
+      emitSdDebug(`Mounted storage root "${handle.name}"`);
       return handle;
     } catch (err) {
       if (isAbortError(err)) return null;
       const msg = err instanceof Error ? err.message : String(err);
+      emitSdDebug('Failed mounting storage root', msg, true);
       setMountError(
         /cross origin|sub frame|user activation/i.test(msg)
           ? 'Browser blocked folder picker inside this embedded frame. Open the app directly in its own tab or use Prepared ROM browser downloads.'
@@ -345,7 +370,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
       );
       return null;
     }
-  }, []);
+  }, [emitSdDebug]);
 
   const syncInstalledIdsToServer = useCallback(
     async (ids: number[], deviceLabel: string) => {
@@ -414,12 +439,14 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
       setFolderScans((prev) => ({ ...prev, ...nextScans }));
       return nextScans;
     } catch (err) {
-      setMountError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      emitSdDebug('Failed scanning target folders on mounted device', msg, true);
+      setMountError(msg);
       return {};
     } finally {
       setScanningCard(false);
     }
-  }, []);
+  }, [emitSdDebug]);
 
   // Re-scan target folders if the user updates Storage Folder Mappings in Operations while a device is mounted
   useEffect(() => {
@@ -480,16 +507,23 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
 
         let systemDirHandle = dirCache.get(targetFolderRel) || null;
         if (!systemDirHandle) {
-          systemDirHandle = await resolveOrCreateSubdirectory(rootHandle, targetFolderRel, true);
+          systemDirHandle = await resolveOrCreateSubdirectory(
+            rootHandle,
+            targetFolderRel,
+            true,
+            (msg, detail) => emitSdDebug(msg, detail, true),
+          );
           if (systemDirHandle) {
             dirCache.set(targetFolderRel, systemDirHandle);
           }
         }
 
         if (!systemDirHandle) {
+          const detail = `Could not create folder /${targetFolderRel}`;
+          emitSdDebug(`Folder creation failed for "${row.title}"`, `itemId=${row.itemId}, folder=/${targetFolderRel}`, true);
           return {
             nextState: 'error',
-            detail: `Could not create folder /${targetFolderRel}`,
+            detail,
             bytesWritten: rowBytes,
             installedSuccess: false,
           };
@@ -524,6 +558,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
               rowBytes += await streamHttpPayloadToSdFile(url, discDir, cleanLeaf, {
                 signal,
                 hadExistingFile: cardStatus.exactMatch,
+                onDebug: (msg, detail) => emitSdDebug(msg, detail),
               });
             }
             registerWrittenEntryInScan(
@@ -539,6 +574,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
             rowBytes += await streamHttpPayloadToSdFile(url, systemDirHandle, finalName, {
               signal,
               hadExistingFile: cardStatus.exactMatch,
+              onDebug: (msg, detail) => emitSdDebug(msg, detail),
             });
             registerWrittenEntryInScan(
               scan,
@@ -554,15 +590,30 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
             try {
               await systemDirHandle.removeEntry(cardStatus.olderEntryName, { recursive: true });
               upgradedOldName = cardStatus.olderEntryName;
-            } catch {
-              // Non-fatal if older file could not be deleted
+            } catch (removeErr) {
+              emitSdDebug(
+                `Could not remove superseded file "${cardStatus.olderEntryName}" in /${targetFolderRel}`,
+                removeErr instanceof Error ? removeErr.message : String(removeErr),
+                true,
+              );
             }
           }
         } catch (err) {
           if (isAbortError(err)) {
             throw err;
           }
-          rowFailed = err instanceof Error ? err.message : String(err);
+          const errDetail =
+            err instanceof DOMException
+              ? `${err.name}: ${err.message}`
+              : err instanceof Error
+                ? err.message
+                : String(err);
+          rowFailed = errDetail;
+          emitSdDebug(
+            `Write failed for "${row.title}" -> /${targetFolderRel}/${finalName}`,
+            `itemId=${row.itemId}, fileId=${row.fileId}, target=${targetId}, error=${errDetail}`,
+            true,
+          );
         }
       }
 
@@ -602,7 +653,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
         installedSuccess: true,
       };
     },
-    [],
+    [emitSdDebug],
   );
 
   /**
@@ -725,7 +776,9 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
               res,
             );
             if (!parsed.ok || !parsed.data?.results) {
-              throw new Error(parsed.errorMessage || `Archive inspection failed (HTTP ${res.status})`);
+              const inspectErr = parsed.errorMessage || `Archive inspection failed (HTTP ${res.status})`;
+              emitSdDebug('Express inspect-batch failed', `chunk=${chunkIds.join(',')}, ${inspectErr}`, true);
+              throw new Error(inspectErr);
             }
 
             const expandedChunkRows: ExportQueueRow[] = [];
@@ -843,6 +896,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
             });
           } else {
             const errMsg = err instanceof Error ? err.message : String(err);
+            emitSdDebug('Express SD install pipeline failed', errMsg, true);
             setJob((prev) =>
               prev && prev.jobId === jobId
                 ? {
@@ -864,7 +918,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
 
       return true;
     },
-    [isBusy, promptMountSdCard, syncInstalledIdsToServer, writeSingleRowToDevice],
+    [emitSdDebug, isBusy, promptMountSdCard, syncInstalledIdsToServer, writeSingleRowToDevice],
   );
 
   /**
@@ -955,7 +1009,9 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
             res,
           );
           if (!parsed.ok || !parsed.data?.results) {
-            throw new Error(parsed.errorMessage || `Inspection failed (HTTP ${res.status})`);
+            const inspectErr = parsed.errorMessage || `Inspection failed (HTTP ${res.status})`;
+            emitSdDebug('Review inspect-batch failed', `chunk=${chunkIds.join(',')}, ${inspectErr}`, true);
+            throw new Error(inspectErr);
           }
 
           const expandedChunkRows: ExportQueueRow[] = [];
@@ -1177,6 +1233,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
           });
         } else {
           const msg = err instanceof Error ? err.message : String(err);
+          emitSdDebug('Review SD install pipeline failed', msg, true);
           setJob((prev) =>
             prev && prev.jobId === jobId
               ? {
@@ -1196,6 +1253,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
       }
     })();
   }, [
+    emitSdDebug,
     folderScans,
     isBusy,
     promptMountSdCard,

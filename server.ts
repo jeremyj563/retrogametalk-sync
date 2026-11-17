@@ -13,7 +13,12 @@ import {
   queryRepositoryItems,
   setCatalogItemsInstalled,
 } from './src/server/db.ts';
-import { streamCleanDiscZipToResponse, streamExtractedEntryToResponse } from './src/server/archiveService.ts';
+import {
+  buildContentDispositionAttachment,
+  streamCleanDiscZipToResponse,
+  streamExtractedEntryToResponse,
+} from './src/server/archiveService.ts';
+import { formatErrorDetails, isDebugLoggingEnabled, logServer } from './src/server/logger.ts';
 import { ScraperOrchestrator } from './src/server/orchestrator.ts';
 import { sanitizeFat32Filename } from './src/shared/romNaming.ts';
 import type { ConfigUpdateInput, RunMode } from './src/server/types.ts';
@@ -247,10 +252,20 @@ async function bootstrap() {
     }
     const rom = orchestrator.resolveItemRomFile(itemId, fileId);
     if (!rom) {
+      logServer('HTTP', 'debug', `Download failed: archive missing on disk`, `itemId=${itemId}, fileId=${fileId ?? 'default'}`);
       res.status(404).json({ error: 'Mirrored ROM archive not found on disk' });
       return;
     }
-    res.download(rom.absPath, rom.filename);
+    const disposition = buildContentDispositionAttachment(rom.filename);
+    res.setHeader('Content-Disposition', disposition.headerValue);
+    res.sendFile(rom.absPath, (err) => {
+      if (err) {
+        logServer('HTTP', 'debug', `Error streaming raw archive "${rom.filename}" (itemId=${itemId})`, formatErrorDetails(err));
+        if (!res.headersSent) {
+          res.status(500).json({ error: err.message });
+        }
+      }
+    });
   });
 
   app.get('/api/items/:id/inspect', async (req, res) => {
@@ -268,11 +283,13 @@ async function bootstrap() {
     try {
       const inspection = await orchestrator.inspectItemArchive(itemId, fileId);
       if (!inspection) {
+        logServer('HTTP', 'debug', `Inspect failed: archive missing on disk`, `itemId=${itemId}, fileId=${fileId ?? 'default'}`);
         res.status(404).json({ error: 'Mirrored archive not found on disk' });
         return;
       }
       res.json({ inspection });
     } catch (err) {
+      logServer('HTTP', 'debug', `Inspect error for itemId=${itemId}`, formatErrorDetails(err));
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
@@ -335,6 +352,7 @@ async function bootstrap() {
           if (insp) inspections.push(insp);
         } catch (err) {
           itemErr = err instanceof Error ? err.message : String(err);
+          logServer('HTTP', 'debug', `Batch inspect error for itemId=${item.id} fileId=${file.id} ("${file.filename}")`, formatErrorDetails(err));
         }
       }
       results.push({
@@ -400,6 +418,7 @@ async function bootstrap() {
         await streamExtractedEntryToResponse(ctx.absPath, target.primaryEntry, cleanName, res, target.sizeBytes);
       }
     } catch (err) {
+      logServer('HTTP', 'debug', `Prepared ROM download error for itemId=${itemId} fileId=${fileId ?? 'default'}`, formatErrorDetails(err));
       if (!res.headersSent) {
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
       }
@@ -424,12 +443,19 @@ async function bootstrap() {
     try {
       const ctx = orchestrator.resolveItemFileContext(itemId, fileId);
       if (!ctx) {
+        logServer('HTTP', 'debug', `Extract-entry failed: archive missing on disk`, `itemId=${itemId}, fileId=${fileId ?? 'default'}, entry="${entry}"`);
         res.status(404).json({ error: 'Mirrored ROM archive not found on disk' });
         return;
       }
       const outName = customName || path.posix.basename(entry);
       await streamExtractedEntryToResponse(ctx.absPath, entry, outName, res);
     } catch (err) {
+      logServer(
+        'HTTP',
+        'debug',
+        `Extract-entry error for itemId=${itemId} fileId=${fileId ?? 'default'} entry="${entry}" outName="${customName || path.posix.basename(entry)}"`,
+        formatErrorDetails(err),
+      );
       if (!res.headersSent) {
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
       }
@@ -575,6 +601,22 @@ async function bootstrap() {
     const level = typeof req.query.level === 'string' ? req.query.level : 'all';
     const limit = Number(req.query.limit || 150);
     res.json({ logs: listActivityLogs(level, limit) });
+  });
+
+  app.post('/api/logs/debug', (req, res) => {
+    if (!isDebugLoggingEnabled()) {
+      res.status(204).end();
+      return;
+    }
+    const scope = typeof req.body?.scope === 'string' && req.body.scope.trim() ? req.body.scope.trim().slice(0, 32) : 'CLIENT';
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim().slice(0, 400) : '';
+    const detail = typeof req.body?.detail === 'string' && req.body.detail.trim() ? req.body.detail.trim().slice(0, 800) : null;
+    if (!message) {
+      res.status(400).json({ error: 'Missing debug log message' });
+      return;
+    }
+    orchestrator.recordClientDebugLog(scope, message, detail);
+    res.status(204).end();
   });
 
   app.delete('/api/logs', (req, res) => {

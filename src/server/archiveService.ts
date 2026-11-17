@@ -9,6 +9,7 @@ import {
   sanitizeFat32Filename,
   type RomNamingConfig,
 } from '../shared/romNaming.ts';
+import { formatErrorDetails, logServer } from './logger.ts';
 import type {
   ArchiveFormat,
   ArchiveInspectResult,
@@ -61,6 +62,7 @@ export async function resolve7zBinary(): Promise<string | null> {
       const found = execFileSync('which', [cmd], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
       if (found) {
         cached7zPath = found;
+        logServer('ARCHIVE', 'debug', `Resolved 7-Zip binary "${cmd}" -> ${found}`);
         return cached7zPath;
       }
     } catch {
@@ -78,13 +80,15 @@ export async function resolve7zBinary(): Promise<string | null> {
         // Ignore chmod failure on read-only mounts
       }
       cached7zPath = candidate;
+      logServer('ARCHIVE', 'debug', `Resolved bundled 7zip-bin binary -> ${candidate}`);
       return cached7zPath;
     }
-  } catch {
-    // 7zip-bin unavailable
+  } catch (err) {
+    logServer('ARCHIVE', 'debug', 'Failed loading bundled 7zip-bin fallback', formatErrorDetails(err));
   }
 
   cached7zPath = null;
+  logServer('ARCHIVE', 'debug', 'No 7-Zip binary resolved; falling back to unzip for .zip archives');
   return null;
 }
 
@@ -176,8 +180,16 @@ export async function listArchiveEntries(archivePath: string): Promise<{ format:
   if (bin7z) {
     const res = await runProcessCapture(bin7z, ['l', '-slt', '-sccUTF-8', archivePath]);
     if (res.code === 0) {
-      return { format, entries: parse7zSltOutput(res.stdout) };
+      const entries = parse7zSltOutput(res.stdout);
+      logServer('ARCHIVE', 'debug', `Listed archive via ${path.basename(bin7z)}`, `${path.basename(archivePath)} (${format}, ${entries.length} entries)`);
+      return { format, entries };
     }
+    logServer(
+      'ARCHIVE',
+      'debug',
+      `7-Zip list returned exit code ${res.code} for ${path.basename(archivePath)}`,
+      res.stderr.trim() || 'no stderr',
+    );
     if (format !== 'zip') {
       throw new Error(`Unable to list ${format.toUpperCase()} archive: ${res.stderr.trim() || `exit code ${res.code}`}`);
     }
@@ -189,6 +201,12 @@ export async function listArchiveEntries(archivePath: string): Promise<{ format:
       runProcessCapture('unzip', ['-l', archivePath]),
     );
     if (res.code !== 0) {
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `unzip list failed (exit=${res.code}) for ${path.basename(archivePath)}`,
+        res.stderr.trim() || 'no stderr',
+      );
       throw new Error(`Unable to inspect ZIP archive: ${res.stderr.trim() || `exit code ${res.code}`}`);
     }
     const entries: RawArchiveEntry[] = [];
@@ -203,6 +221,7 @@ export async function listArchiveEntries(archivePath: string): Promise<{ format:
         }
       }
     }
+    logServer('ARCHIVE', 'debug', `Listed ZIP archive via unzip fallback`, `${path.basename(archivePath)} (${entries.length} entries)`);
     return { format: 'zip', entries };
   }
 
@@ -456,6 +475,71 @@ function deriveTargetRoleBadge(item: RepositoryItemRecord, file: ReleaseFileReco
   return null;
 }
 
+/**
+ * Builds an HTTP-compliant RFC 6266 / RFC 5987 Content-Disposition attachment header.
+ * Node.js rejects header field values containing non-ISO-8859-1 or control characters
+ * (e.g., ™, –, ’, CJK characters), throwing ERR_INVALID_CHAR inside legacy `filename="..."`.
+ * This guarantees `filename="..."` stays strictly printable ASCII while preserving the full
+ * UTF-8 name inside `filename*=UTF-8''...`.
+ */
+export function buildContentDispositionAttachment(filename: string): {
+  headerValue: string;
+  asciiFallback: string;
+  utf8Filename: string;
+  adjusted: boolean;
+} {
+  // Replace lone UTF-16 surrogates & strip ASCII control characters / path separators
+  const wellFormed = filename.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    '_',
+  );
+  const cleanUtf8 =
+    wellFormed
+      .replace(/[\u0000-\u001F\u007F/\\]/g, '_')
+      .trim() || 'rom-download';
+
+  const extMatch = cleanUtf8.match(/(\.[A-Za-z0-9]{1,8})$/);
+  const ext = extMatch ? extMatch[1] : '';
+
+  const transliterated = cleanUtf8
+    .replace(/\u2122/g, 'TM')
+    .replace(/\u00A9/g, '(C)')
+    .replace(/\u00AE/g, '(R)')
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '_')
+    .replace(/\u2026/g, '...')
+    .replace(/\u00D7/g, 'x')
+    .replace(/\u00B0/g, 'deg')
+    .replace(/\u00A0/g, ' ')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  let asciiFallback = transliterated
+    .replace(/["\\;/\r\n\t]/g, '_')
+    .replace(/[^\x20-\x7E]/g, '_')
+    .replace(/_{2,}/g, '_')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  if (!asciiFallback || asciiFallback.replace(/[_\s.]/g, '') === '') {
+    asciiFallback = `rom-download${ext}`;
+  }
+
+  // RFC 5987 attr-char encoding (also percent-encodes !'()*)
+  const encodedUtf8 = encodeURIComponent(cleanUtf8).replace(
+    /['()*!]/g,
+    (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+
+  return {
+    headerValue: `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedUtf8}`,
+    asciiFallback,
+    utf8Filename: cleanUtf8,
+    adjusted: asciiFallback !== cleanUtf8,
+  };
+}
+
 async function openEntryReadableStream(archivePath: string, entryPath: string): Promise<NodeJS.ReadableStream> {
   if (!isSafeArchiveEntryPath(entryPath)) {
     throw new Error('Invalid archive entry path');
@@ -463,11 +547,13 @@ async function openEntryReadableStream(archivePath: string, entryPath: string): 
 
   const format = detectArchiveFormat(archivePath);
   if (format === 'raw') {
+    logServer('ARCHIVE', 'debug', `Opening raw file read stream: ${path.basename(archivePath)}`);
     return fs.createReadStream(archivePath);
   }
 
   const bin7z = await resolve7zBinary();
   if (bin7z) {
+    logServer('ARCHIVE', 'debug', `Spawning ${path.basename(bin7z)} extraction`, `archive="${path.basename(archivePath)}", entry="${entryPath}"`);
     const child = spawn(bin7z, ['e', '-so', archivePath, entryPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -475,17 +561,45 @@ async function openEntryReadableStream(archivePath: string, entryPath: string): 
     child.stderr.on('data', (d: Buffer) => {
       errBuf += d.toString('utf8');
     });
+    child.on('error', (err) => {
+      logServer('ARCHIVE', 'debug', `7-Zip spawn error for "${entryPath}"`, formatErrorDetails(err));
+      if (!child.stdout.destroyed) {
+        child.stdout.destroy(err);
+      }
+    });
     child.on('close', (code) => {
-      if (code !== 0 && !child.stdout.destroyed) {
-        child.stdout.destroy(new Error(errBuf.trim() || `7-Zip extraction exited with code ${code}`));
+      if (code !== 0) {
+        logServer('ARCHIVE', 'debug', `7-Zip extraction failed (exit=${code}) for "${entryPath}"`, errBuf.trim() || 'no stderr');
+        if (!child.stdout.destroyed) {
+          child.stdout.destroy(new Error(errBuf.trim() || `7-Zip extraction exited with code ${code}`));
+        }
       }
     });
     return child.stdout;
   }
 
   if (format === 'zip') {
+    logServer('ARCHIVE', 'debug', `Spawning unzip extraction`, `archive="${path.basename(archivePath)}", entry="${entryPath}"`);
     const child = spawn('unzip', ['-p', archivePath, entryPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let errBuf = '';
+    child.stderr.on('data', (d: Buffer) => {
+      errBuf += d.toString('utf8');
+    });
+    child.on('error', (err) => {
+      logServer('ARCHIVE', 'debug', `unzip spawn error for "${entryPath}"`, formatErrorDetails(err));
+      if (!child.stdout.destroyed) {
+        child.stdout.destroy(err);
+      }
+    });
+    child.on('close', (code) => {
+      if (code !== 0) {
+        logServer('ARCHIVE', 'debug', `unzip extraction failed (exit=${code}) for "${entryPath}"`, errBuf.trim() || 'no stderr');
+        if (!child.stdout.destroyed) {
+          child.stdout.destroy(new Error(errBuf.trim() || `unzip extraction exited with code ${code}`));
+        }
+      }
     });
     return child.stdout;
   }
@@ -500,29 +614,52 @@ export async function streamExtractedEntryToResponse(
   res: Response,
   expectedSizeBytes?: number,
 ): Promise<void> {
-  const safeName = downloadFilename.replace(/["\r\n]/g, '_');
+  const disposition = buildContentDispositionAttachment(downloadFilename);
+  if (disposition.adjusted) {
+    logServer(
+      'ARCHIVE',
+      'debug',
+      `Normalized non-ASCII Content-Disposition fallback`,
+      `utf8="${disposition.utf8Filename}", ascii="${disposition.asciiFallback}"`,
+    );
+  }
   const stream = await openEntryReadableStream(archivePath, entryPath);
 
   res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader(
-    'Content-Disposition',
-    `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(downloadFilename)}`,
-  );
+  res.setHeader('Content-Disposition', disposition.headerValue);
   if (expectedSizeBytes && expectedSizeBytes > 0) {
     res.setHeader('Content-Length', String(expectedSizeBytes));
   }
 
   await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (err?: unknown) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve();
+    };
+
     stream.on('error', (err) => {
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `Extraction stream error for "${entryPath}" (${disposition.asciiFallback})`,
+        formatErrorDetails(err),
+      );
       if (!res.headersSent) {
         res.status(500).json({ error: err.message });
       } else {
         res.destroy(err);
       }
-      reject(err);
+      finish(err);
     });
-    res.on('close', () => resolve());
-    res.on('finish', () => resolve());
+    res.on('error', (err) => {
+      logServer('ARCHIVE', 'debug', `HTTP response stream error for "${disposition.asciiFallback}"`, formatErrorDetails(err));
+      finish(err);
+    });
+    res.on('close', () => finish());
+    res.on('finish', () => finish());
     stream.pipe(res);
   });
 }
@@ -533,14 +670,42 @@ export async function streamCleanDiscZipToResponse(
   zipDownloadName: string,
   res: Response,
 ): Promise<void> {
-  const safeZipName = zipDownloadName.endsWith('.zip') ? zipDownloadName : `${zipDownloadName}.zip`;
-  const zipFile = new yazl.ZipFile();
+  const rawZipName = zipDownloadName.endsWith('.zip') ? zipDownloadName : `${zipDownloadName}.zip`;
+  const disposition = buildContentDispositionAttachment(rawZipName);
+  if (disposition.adjusted) {
+    logServer(
+      'ARCHIVE',
+      'debug',
+      `Normalized non-ASCII disc ZIP Content-Disposition fallback`,
+      `utf8="${disposition.utf8Filename}", ascii="${disposition.asciiFallback}"`,
+    );
+  }
 
+  const zipFile = new yazl.ZipFile();
   res.setHeader('Content-Type', 'application/zip');
-  res.setHeader(
-    'Content-Disposition',
-    `attachment; filename="${safeZipName.replace(/["\r\n]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(safeZipName)}`,
-  );
+  res.setHeader('Content-Disposition', disposition.headerValue);
+
+  const pipePromise = new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const done = (err?: unknown) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve();
+    };
+    zipFile.outputStream.on('error', (err) => {
+      logServer('ARCHIVE', 'debug', `ZIP output stream error for "${disposition.asciiFallback}"`, formatErrorDetails(err));
+      if (!res.headersSent) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      } else {
+        res.destroy(err instanceof Error ? err : new Error(String(err)));
+      }
+      done(err);
+    });
+    res.on('error', (err) => done(err));
+    res.on('close', () => done());
+    res.on('finish', () => done());
+  });
 
   zipFile.outputStream.pipe(res);
 
@@ -552,4 +717,5 @@ export async function streamCleanDiscZipToResponse(
   }
 
   zipFile.end();
+  await pipePromise;
 }

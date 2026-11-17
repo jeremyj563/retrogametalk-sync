@@ -16,5 +16,6 @@ services:
       RGT_USERNAME: "${RGT_USERNAME:-}"
       RGT_PASSWORD: "${RGT_PASSWORD:-}"
       SCRAPER_SYSTEM_FILTER: "${SCRAPER_SYSTEM_FILTER:-}"
+      SCRAPER_DEBUG: "${SCRAPER_DEBUG:-false}"
     volumes:
       - ./mirror-data:/run/repo

@@ -97,6 +97,9 @@ scraper:
   systemFilter: ""
   # Optional HTTP User-Agent string (empty uses UI/SQLite default)
   userAgent: ""
+  # Enable verbose DEBUG-level diagnostic logging (maps to SCRAPER_DEBUG env var;
+  # emits detailed scrape, HTTP/WP REST, disk download, archive, and SD-install telemetry)
+  debug: false
   # Adaptive AIMD rate-limit overrides (leave empty strings to manage dynamically via UI/SQLite)
   rateLimit:
     baseDelayMs: ""

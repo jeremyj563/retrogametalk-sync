@@ -102,6 +102,13 @@ const LOG_FILTER_OPTIONS: readonly LogFilterOption[] = [
     emptyLabel: 'errors',
     activeClass: 'bg-crt-elevated text-crt-crimson',
   },
+  {
+    value: 'debug',
+    label: 'Debug',
+    clearLabel: 'Debug',
+    emptyLabel: 'debug events',
+    activeClass: 'bg-crt-elevated text-crt-text',
+  },
 ];
 
 const PROGRESS_WIDTH_CLASSES: readonly string[] = [
@@ -1143,9 +1150,16 @@ export function OverviewPanel({
             className="h-64 overflow-y-auto p-3 font-mono text-xs space-y-1.5"
           >
             {filteredLogs.length === 0 ? (
-              <p className="text-crt-muted py-6 text-center">
-                No {activeFilterOption.emptyLabel} recorded yet.
-              </p>
+              <div className="text-crt-muted py-6 text-center space-y-1">
+                <p>No {activeFilterOption.emptyLabel} recorded yet.</p>
+                {logFilter === 'debug' && !status.debugLogging && (
+                  <p className="text-[11px] text-crt-muted/80">
+                    DEBUG logging is currently disabled. Set{' '}
+                    <code className="text-crt-text">SCRAPER_DEBUG=true</code> or Helm{' '}
+                    <code className="text-crt-text">scraper.debug: true</code> and restart to stream debug telemetry.
+                  </p>
+                )}
+              </div>
             ) : (
               filteredLogs.map((entry) => (
                 <div key={entry.id} className="flex items-start gap-3 leading-relaxed">
@@ -1160,7 +1174,9 @@ export function OverviewPanel({
                           ? 'text-crt-amber'
                           : entry.level === 'error'
                             ? 'text-crt-crimson'
-                            : 'text-crt-muted'
+                            : entry.level === 'debug'
+                              ? 'text-crt-muted/75'
+                              : 'text-crt-muted'
                     }`}
                   >
                     [{entry.level}]
