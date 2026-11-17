@@ -104,6 +104,31 @@ const LOG_FILTER_OPTIONS: readonly LogFilterOption[] = [
   },
 ];
 
+const PROGRESS_WIDTH_CLASSES: readonly string[] = [
+  'w-[0%]', 'w-[1%]', 'w-[2%]', 'w-[3%]', 'w-[4%]', 'w-[5%]', 'w-[6%]', 'w-[7%]', 'w-[8%]', 'w-[9%]',
+  'w-[10%]', 'w-[11%]', 'w-[12%]', 'w-[13%]', 'w-[14%]', 'w-[15%]', 'w-[16%]', 'w-[17%]', 'w-[18%]', 'w-[19%]',
+  'w-[20%]', 'w-[21%]', 'w-[22%]', 'w-[23%]', 'w-[24%]', 'w-[25%]', 'w-[26%]', 'w-[27%]', 'w-[28%]', 'w-[29%]',
+  'w-[30%]', 'w-[31%]', 'w-[32%]', 'w-[33%]', 'w-[34%]', 'w-[35%]', 'w-[36%]', 'w-[37%]', 'w-[38%]', 'w-[39%]',
+  'w-[40%]', 'w-[41%]', 'w-[42%]', 'w-[43%]', 'w-[44%]', 'w-[45%]', 'w-[46%]', 'w-[47%]', 'w-[48%]', 'w-[49%]',
+  'w-[50%]', 'w-[51%]', 'w-[52%]', 'w-[53%]', 'w-[54%]', 'w-[55%]', 'w-[56%]', 'w-[57%]', 'w-[58%]', 'w-[59%]',
+  'w-[60%]', 'w-[61%]', 'w-[62%]', 'w-[63%]', 'w-[64%]', 'w-[65%]', 'w-[66%]', 'w-[67%]', 'w-[68%]', 'w-[69%]',
+  'w-[70%]', 'w-[71%]', 'w-[72%]', 'w-[73%]', 'w-[74%]', 'w-[75%]', 'w-[76%]', 'w-[77%]', 'w-[78%]', 'w-[79%]',
+  'w-[80%]', 'w-[81%]', 'w-[82%]', 'w-[83%]', 'w-[84%]', 'w-[85%]', 'w-[86%]', 'w-[87%]', 'w-[88%]', 'w-[89%]',
+  'w-[90%]', 'w-[91%]', 'w-[92%]', 'w-[93%]', 'w-[94%]', 'w-[95%]', 'w-[96%]', 'w-[97%]', 'w-[98%]', 'w-[99%]',
+  'w-[100%]',
+];
+
+interface CompletedTransferHold {
+  runId: number | null;
+  fileKey: string;
+  systemName: string;
+  filename: string;
+  fileIndex: number | null;
+  totalFiles: number | null;
+  bytes: number;
+  downloadedCount: number;
+}
+
 function toLocalDateTimeInputValue(date: Date): string {
   if (Number.isNaN(date.getTime())) return '';
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -214,7 +239,122 @@ export function OverviewPanel({
     return Math.min(100, Math.round((t.bytesReceived / t.totalBytes) * 100));
   }, [status.activeTransfer]);
 
-  const activeWatermark = status.lastWatermarkAt ?? config.lastWatermarkAt;
+  const isDryRunActive = Boolean(
+    status.activeRun && (status.activeRun.dryRun || status.activeRun.mode === 'dry_run'),
+  );
+  const isLiveSyncRun = Boolean(status.activeRun && !isDryRunActive);
+  const hasTransferDemand = isLiveSyncRun || Boolean(status.activeTransfer);
+
+  const [lastCompletedTransfer, setLastCompletedTransfer] = useState<CompletedTransferHold | null>(
+    null,
+  );
+  const [postRunHold, setPostRunHold] = useState(false);
+  const [unknownSizeGraceElapsed, setUnknownSizeGraceElapsed] = useState(false);
+  const prevTransferDemandRef = useRef(hasTransferDemand);
+  const hadTransferInCurrentRunRef = useRef(Boolean(status.activeTransfer));
+
+  // Clear stale last-file snapshot when a brand-new sync run ID starts
+  useEffect(() => {
+    const currentRunId = status.activeRun?.id ?? null;
+    if (
+      currentRunId !== null &&
+      !status.activeTransfer &&
+      lastCompletedTransfer &&
+      lastCompletedTransfer.runId !== null &&
+      lastCompletedTransfer.runId !== currentRunId
+    ) {
+      hadTransferInCurrentRunRef.current = false;
+      setLastCompletedTransfer(null);
+    }
+  }, [status.activeRun?.id, status.activeTransfer, lastCompletedTransfer]);
+
+  // Continuously capture the active file snapshot so inter-file rate-limit pauses hold steady
+  useEffect(() => {
+    const t = status.activeTransfer;
+    if (!t) return;
+    hadTransferInCurrentRunRef.current = true;
+    const fileKey = `${t.itemId ?? 'item'}:${t.fileId ?? t.filename}`;
+    const bytes = Math.max(t.bytesReceived, t.totalBytes ?? 0);
+    setLastCompletedTransfer((prev) => {
+      const nextRunId = status.activeRun?.id ?? prev?.runId ?? null;
+      const nextDownloadedCount = status.activeRun?.downloadedCount ?? prev?.downloadedCount ?? 0;
+      if (
+        prev &&
+        prev.runId === nextRunId &&
+        prev.fileKey === fileKey &&
+        prev.bytes === bytes &&
+        prev.downloadedCount === nextDownloadedCount
+      ) {
+        return prev;
+      }
+      return {
+        runId: nextRunId,
+        fileKey,
+        systemName: t.systemName,
+        filename: t.filename,
+        fileIndex: t.fileIndex ?? null,
+        totalFiles: t.totalFiles ?? null,
+        bytes,
+        downloadedCount: nextDownloadedCount,
+      };
+    });
+  }, [status.activeTransfer, status.activeRun?.id, status.activeRun?.downloadedCount]);
+
+  // Keep transfer bay open across the entire sync run and settle gently once the run ends
+  useEffect(() => {
+    const wasActive = prevTransferDemandRef.current;
+    prevTransferDemandRef.current = hasTransferDemand;
+
+    if (hasTransferDemand) {
+      setPostRunHold(false);
+      return;
+    }
+
+    if (!wasActive) {
+      return;
+    }
+
+    setPostRunHold(true);
+    const settleMs = hadTransferInCurrentRunRef.current ? 900 : 320;
+    const timer = window.setTimeout(() => {
+      hadTransferInCurrentRunRef.current = false;
+      setPostRunHold(false);
+    }, settleMs);
+
+    return () => window.clearTimeout(timer);
+  }, [hasTransferDemand]);
+
+  const activeTransferFileKey = status.activeTransfer
+    ? `${status.activeTransfer.itemId ?? 'item'}:${status.activeTransfer.fileId ?? status.activeTransfer.filename}`
+    : null;
+  const activeTransferHasTotal = Boolean(
+    status.activeTransfer?.totalBytes && status.activeTransfer.totalBytes > 0,
+  );
+
+  // Avoid flashing an indeterminate sweep bar during the brief 30–200ms pre-header handshake on small files
+  useEffect(() => {
+    if (!activeTransferFileKey || activeTransferHasTotal) {
+      setUnknownSizeGraceElapsed(false);
+      return;
+    }
+    setUnknownSizeGraceElapsed(false);
+    const timer = window.setTimeout(() => {
+      setUnknownSizeGraceElapsed(true);
+    }, 380);
+    return () => window.clearTimeout(timer);
+  }, [activeTransferFileKey, activeTransferHasTotal]);
+
+  const isTransferBayOpen = hasTransferDemand || postRunHold;
+  const heldTransferForActiveRun =
+    lastCompletedTransfer &&
+    (status.activeRun === null ||
+      lastCompletedTransfer.runId === null ||
+      lastCompletedTransfer.runId === status.activeRun.id)
+      ? lastCompletedTransfer
+      : null;
+
+  const activeWatermakVal = status.lastWatermarkAt ?? config.lastWatermarkAt;
+  const activeWatermark = activeWatermakVal;
 
   const activeReleaseTypesSummary = useMemo(() => {
     const normalized = normalizeAllowedReleaseTypes(config.allowedReleaseTypes);
@@ -333,99 +473,206 @@ export function OverviewPanel({
       ) : null}
 
       {/* Active Runner Phase Status Panel */}
-      <section className="relative crt-panel-living crt-panel-hero border border-crt-border bg-crt-surface rounded-md p-5 space-y-4">
+      <section className="relative crt-panel-living crt-panel-hero border border-crt-border bg-crt-surface rounded-md p-5">
         <div aria-hidden="true" className="crt-edge-beam">
           <span />
         </div>
-        {/* Zone 1: Full-Width Phase Header */}
+        {/* Zone 1: Full-Width Phase Header (Locked Single-Line Geometry) */}
         <div className="space-y-1.5 min-w-0">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+          <div className="flex items-center justify-between gap-3 text-xs font-mono min-w-0">
             <span
-              className={`inline-flex items-center gap-1.5 font-medium ${
+              className={`inline-flex items-center gap-1.5 font-medium whitespace-nowrap shrink-0 ${
                 status.activeRun
-                  ? `${status.activeRun.dryRun || status.activeRun.mode === 'dry_run' ? 'text-crt-amber' : 'text-crt-phosphor'} crt-phase-sync-active`
+                  ? `${isDryRunActive ? 'text-crt-amber' : 'text-crt-phosphor'} crt-phase-sync-active`
                   : 'text-crt-muted'
               }`}
             >
               <LivingNavIcon section="monitor" className="h-3.5 w-3.5 shrink-0" />
               <span>
                 {status.activeRun
-                  ? `${status.activeRun.dryRun || status.activeRun.mode === 'dry_run' ? 'Dry Run Active' : 'Sync Active'} · Run #${status.activeRun.id}`
+                  ? `${isDryRunActive ? 'Dry Run Active' : 'Sync Active'} · Run #${status.activeRun.id}`
                   : 'Standby'}
               </span>
             </span>
 
             {status.activeRun ? (
-              <span className="text-crt-muted tabular-nums">
+              <span className="text-crt-muted tabular-nums truncate">
                 {formatRunDuration(status.activeRun.startedAt, null)} elapsed
                 {status.activeRun.downloadedCount > 0
                   ? ` · ${status.activeRun.downloadedCount} downloaded`
                   : ''}
               </span>
             ) : cutoffSavedNotice && !editingCutoff ? (
-              <span className="text-crt-phosphor">{cutoffSavedNotice}</span>
+              <span className="text-crt-phosphor whitespace-nowrap shrink-0">{cutoffSavedNotice}</span>
             ) : null}
           </div>
 
-          <h1 className="font-display text-lg sm:text-xl font-semibold tracking-tight text-crt-text leading-snug break-words">
+          <h1
+            title={status.currentPhase}
+            className="font-display text-lg sm:text-xl font-semibold tracking-tight text-crt-text leading-snug truncate"
+          >
             {status.currentPhase}
           </h1>
         </div>
 
-        {/* Zone 2: Dedicated Full-Width Active File Transfer Strip */}
-        {status.activeTransfer && (
-          <div className="pt-3.5 border-t border-crt-border space-y-2">
-            <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
-              <div className="flex items-center gap-2 text-crt-text min-w-0">
-                <Download className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
-                <span className="truncate">
-                  {status.activeTransfer.systemName} / {status.activeTransfer.filename}
-                </span>
-                {status.activeTransfer.totalFiles &&
-                  status.activeTransfer.totalFiles > 1 &&
-                  status.activeTransfer.fileIndex && (
-                    <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums">
-                      · File {status.activeTransfer.fileIndex}/{status.activeTransfer.totalFiles}
-                    </span>
-                  )}
-              </div>
-              <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
-                <span>
-                  {formatBytes(status.activeTransfer.bytesReceived)}
-                  {status.activeTransfer.totalBytes
-                    ? ` / ${formatBytes(status.activeTransfer.totalBytes)}`
-                    : ''}
-                </span>
-                {status.activeTransfer.bytesPerSec > 0 && (
-                  <span>{formatBytes(status.activeTransfer.bytesPerSec)}/s</span>
+        {/* Zone 2: Run-Docked Active Transfer Telemetry Bay (Zero Inter-File Layout Shift) */}
+        <div
+          aria-hidden={!isTransferBayOpen}
+          inert={!isTransferBayOpen || undefined}
+          data-open={isTransferBayOpen ? 'true' : 'false'}
+          className={`crt-accordion-grid transition-opacity duration-200 motion-reduce:transition-none ${
+            isTransferBayOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}
+        >
+          <div className="crt-accordion-inner">
+            <div className="pt-4">
+              <div className="pt-3.5 border-t border-crt-border space-y-2">
+                {status.activeTransfer ? (
+                  <>
+                    <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0">
+                      <div className="flex items-center gap-2 text-crt-text min-w-0">
+                        <Download className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
+                        <span className="truncate">
+                          {status.activeTransfer.systemName} / {status.activeTransfer.filename}
+                        </span>
+                        {status.activeTransfer.totalFiles &&
+                          status.activeTransfer.totalFiles > 1 &&
+                          status.activeTransfer.fileIndex && (
+                            <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums hidden sm:inline">
+                              · File {status.activeTransfer.fileIndex}/{status.activeTransfer.totalFiles}
+                            </span>
+                          )}
+                      </div>
+                      <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+                        <span>
+                          {status.activeTransfer.bytesReceived > 0 || status.activeTransfer.totalBytes
+                            ? `${formatBytes(status.activeTransfer.bytesReceived)}${
+                                status.activeTransfer.totalBytes
+                                  ? ` / ${formatBytes(status.activeTransfer.totalBytes)}`
+                                  : ''
+                              }`
+                            : 'Connecting…'}
+                        </span>
+                        {status.activeTransfer.bytesPerSec > 0 && (
+                          <span className="hidden sm:inline">
+                            {formatBytes(status.activeTransfer.bytesPerSec)}/s
+                          </span>
+                        )}
+                        {transferPct !== null && (
+                          <span className="text-crt-phosphor font-semibold inline-block min-w-[3.5ch] text-right">
+                            {transferPct}%
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div
+                      role="progressbar"
+                      aria-label={`Active download progress for ${status.activeTransfer.filename}`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={transferPct ?? undefined}
+                      className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+                    >
+                      {transferPct !== null ? (
+                        <div
+                          key={activeTransferFileKey ?? 'active'}
+                          className={`h-full bg-crt-phosphor crt-progress-beam transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none ${
+                            PROGRESS_WIDTH_CLASSES[Math.max(3, Math.min(100, transferPct))]
+                          }`}
+                        />
+                      ) : unknownSizeGraceElapsed ? (
+                        <div className="h-full bg-crt-phosphor crt-progress-indeterminate" />
+                      ) : (
+                        <div
+                          key={activeTransferFileKey ?? 'handshake'}
+                          className={`h-full bg-crt-phosphor/75 crt-progress-beam transition-opacity duration-150 motion-reduce:transition-none ${PROGRESS_WIDTH_CLASSES[4]}`}
+                        />
+                      )}
+                    </div>
+                  </>
+                ) : heldTransferForActiveRun ? (
+                  <>
+                    <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0">
+                      <div className="flex items-center gap-2 text-crt-text/90 min-w-0">
+                        <CheckCircle2 className="h-3.5 w-3.5 text-crt-phosphor/80 shrink-0" />
+                        <span className="truncate">
+                          {heldTransferForActiveRun.systemName} / {heldTransferForActiveRun.filename}
+                        </span>
+                        <span className="text-crt-muted whitespace-nowrap shrink-0 hidden sm:inline">
+                          · {isLiveSyncRun ? 'Saved — queuing next…' : 'Sync transfer complete'}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+                        {heldTransferForActiveRun.bytes > 0 && (
+                          <span>{formatBytes(heldTransferForActiveRun.bytes)}</span>
+                        )}
+                        <span className="text-crt-phosphor/80 font-semibold inline-block min-w-[3.5ch] text-right">
+                          100%
+                        </span>
+                      </div>
+                    </div>
+
+                    <div
+                      role="progressbar"
+                      aria-label={`Completed download for ${heldTransferForActiveRun.filename}`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={100}
+                      className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+                    >
+                      <div
+                        key={heldTransferForActiveRun.fileKey}
+                        className={`h-full bg-crt-phosphor transition-opacity duration-200 motion-reduce:transition-none ${
+                          isLiveSyncRun ? 'opacity-45' : 'opacity-75'
+                        } ${PROGRESS_WIDTH_CLASSES[100]}`}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0">
+                      <div className="flex items-center gap-2 text-crt-muted min-w-0">
+                        <Activity className="h-3.5 w-3.5 text-crt-phosphor/80 shrink-0" />
+                        <span className="truncate">
+                          {isLiveSyncRun
+                            ? 'Scanning repository pages — awaiting next downloadable archive…'
+                            : 'Sync scan complete'}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+                        {status.activeRun ? (
+                          <span>
+                            {status.activeRun.newFound} matched · {status.activeRun.skippedCount} on disk
+                          </span>
+                        ) : (
+                          <span>Done</span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div
+                      role="progressbar"
+                      aria-label="Scanning repository for downloadable files"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+                    >
+                      {isLiveSyncRun ? (
+                        <div className="h-full bg-crt-phosphor/65 crt-progress-indeterminate" />
+                      ) : (
+                        <div className={`h-full bg-crt-phosphor/50 ${PROGRESS_WIDTH_CLASSES[100]}`} />
+                      )}
+                    </div>
+                  </>
                 )}
-                {transferPct !== null && (
-                  <span className="text-crt-phosphor font-semibold">{transferPct}%</span>
-                )}
               </div>
-            </div>
-            <div
-              role="progressbar"
-              aria-label={`Active download progress for ${status.activeTransfer.filename}`}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={transferPct ?? undefined}
-              className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
-            >
-              {transferPct !== null ? (
-                <div
-                  className="h-full bg-crt-phosphor crt-progress-beam transition-all duration-200"
-                  style={{ width: `${transferPct}%` }}
-                />
-              ) : (
-                <div className="h-full bg-crt-phosphor crt-progress-indeterminate" />
-              )}
             </div>
           </div>
-        )}
+        </div>
 
         {/* Zone 3: 4-Column Operational Summary Strip */}
-        <div className="pt-3.5 border-t border-crt-border grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-x-6">
+        <div className="mt-4 pt-3.5 border-t border-crt-border grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-x-6">
           <div className="space-y-1 min-w-0">
             <div className="text-[11px] text-crt-muted">Next Schedule</div>
             <div className="text-xs font-mono text-crt-text tabular-nums truncate">
@@ -495,7 +742,7 @@ export function OverviewPanel({
 
         {/* Inline Incremental Cutoff Timestamp Editor (Single-Elevation Hairline Divider) */}
         {editingCutoff && !status.activeRun && (
-          <div className="pt-4 border-t border-crt-border space-y-3">
+          <div className="mt-4 pt-4 border-t border-crt-border space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <span className="text-crt-muted">
                 Incremental Sync (live or dry-run) inspects releases created or updated after this cutoff. Full Sync (live or dry-run) inspects every release in scope.
