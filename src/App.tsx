@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   Check,
   FlaskConical,
-  HardDrive,
   Play,
   Square,
 } from 'lucide-react';
@@ -12,6 +11,7 @@ import { BulkInstallDock } from './components/BulkInstallDock';
 import { CatalogPanel } from './components/CatalogPanel';
 import { CrtDisplayControl } from './components/CrtDisplayControl';
 import { LivingNavIcon } from './components/LivingNavIcon';
+import { MirroredSystemsSidebar } from './components/MirroredSystemsSidebar';
 import {
   OperationsPanel,
   type OperationsDirtyState,
@@ -1131,7 +1131,7 @@ export default function App() {
       {/* Main Workspace: Sidebar + Content Viewport */}
       <div className="flex-1 flex flex-col lg:flex-row">
         {/* Left Rail Sidebar (240px on Desktop) */}
-        <aside className="lg:w-60 shrink-0 border-b lg:border-b-0 lg:border-r border-crt-border bg-crt-surface/70 p-4 flex flex-col justify-between gap-6">
+        <aside className="relative lg:z-20 lg:w-60 shrink-0 border-b lg:border-b-0 lg:border-r border-crt-border bg-crt-surface/70 p-4 flex flex-col justify-between gap-6">
           <div className="space-y-6">
             {/* Mobile Section Switcher */}
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-1 gap-1.5">
@@ -1224,23 +1224,11 @@ export default function App() {
 
             {/* Discovered Systems Breakdown */}
             {status && status.systems.length > 0 && (
-              <div className="hidden lg:block border-t border-crt-border pt-4 space-y-2">
-                <div className="flex items-center gap-2 text-xs font-medium text-crt-muted">
-                  <HardDrive className="h-3.5 w-3.5 crt-drive-activity" />
-                  <span>Mirrored Systems</span>
-                </div>
-                <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
-                  {status.systems.map((sys) => (
-                    <div
-                      key={sys.systemName}
-                      className="flex items-center justify-between text-xs font-mono py-0.5"
-                    >
-                      <span className="text-crt-text truncate">{sys.systemName}</span>
-                      <span className="text-crt-muted tabular-nums shrink-0">{sys.totalItems}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <MirroredSystemsSidebar
+                systems={status.systems}
+                totalBytesOnDisk={status.storage.totalBytesOnDisk}
+                storageFolderConfig={config?.storageFolderConfig}
+              />
             )}
           </div>
 

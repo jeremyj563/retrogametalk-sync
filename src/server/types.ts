@@ -272,7 +272,11 @@ export interface SystemBreakdown {
   downloadedItems: number;
   skippedItems: number;
   failedItems: number;
+  queuedItems: number;
+  installedItems: number;
+  mirroredFiles: number;
   totalBytes: number;
+  lastActivityAt: string | null;
 }
 
 export interface ReleaseTypeBreakdown {

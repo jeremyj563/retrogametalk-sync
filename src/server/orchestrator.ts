@@ -546,7 +546,10 @@ export class ScraperOrchestrator extends EventEmitter {
     return result;
   }
 
-  getStorageStats(downloadDir: string): StorageStats {
+  private collectStorageAndSystemDiskStats(downloadDir: string): {
+    storage: StorageStats;
+    systemDiskUsage: Map<string, { filesOnDisk: number; bytesOnDisk: number }>;
+  } {
     const dataDir = getDataDir();
     let writable = false;
     try {
@@ -561,8 +564,9 @@ export class ScraperOrchestrator extends EventEmitter {
 
     let totalFilesOnDisk = 0;
     let totalBytesOnDisk = 0;
+    const systemDiskUsage = new Map<string, { filesOnDisk: number; bytesOnDisk: number }>();
 
-    const walk = (dir: string, depth = 0) => {
+    const walk = (dir: string, depth = 0, topLevelSystem: string | null = null) => {
       if (depth > 6) return;
       let entries: fs.Dirent[];
       try {
@@ -586,12 +590,25 @@ export class ScraperOrchestrator extends EventEmitter {
         }
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
-          walk(full, depth + 1);
+          const nextSystem = depth === 0 ? entry.name.toLowerCase() : topLevelSystem;
+          walk(full, depth + 1, nextSystem);
         } else if (entry.isFile()) {
           try {
             const st = fs.statSync(full);
             totalFilesOnDisk += 1;
             totalBytesOnDisk += st.size;
+            if (topLevelSystem) {
+              const bucket = systemDiskUsage.get(topLevelSystem);
+              if (bucket) {
+                bucket.filesOnDisk += 1;
+                bucket.bytesOnDisk += st.size;
+              } else {
+                systemDiskUsage.set(topLevelSystem, {
+                  filesOnDisk: 1,
+                  bytesOnDisk: st.size,
+                });
+              }
+            }
           } catch {
             // Skip unreadable entry
           }
@@ -614,14 +631,21 @@ export class ScraperOrchestrator extends EventEmitter {
     }
 
     return {
-      downloadDir,
-      dataDir,
-      writable,
-      totalFilesOnDisk,
-      totalBytesOnDisk,
-      diskFreeBytes,
-      diskTotalBytes,
+      storage: {
+        downloadDir,
+        dataDir,
+        writable,
+        totalFilesOnDisk,
+        totalBytesOnDisk,
+        diskFreeBytes,
+        diskTotalBytes,
+      },
+      systemDiskUsage,
     };
+  }
+
+  getStorageStats(downloadDir: string): StorageStats {
+    return this.collectStorageAndSystemDiskStats(downloadDir).storage;
   }
 
   listFsTree(relativeSubpath = ''): { currentPath: string; nodes: FsTreeNode[] } {
@@ -1078,8 +1102,19 @@ export class ScraperOrchestrator extends EventEmitter {
 
   getStatusSnapshot(): ServiceStatusSnapshot {
     const cfg = getInternalConfig();
-    const { totals, systems, releaseTypes } = getCatalogTotalsAndSystems();
+    const { totals, systems: dbSystems, releaseTypes } = getCatalogTotalsAndSystems();
+    const { storage, systemDiskUsage } = this.collectStorageAndSystemDiskStats(cfg.downloadDir);
     const nextRun = this.cronJob?.nextRun();
+
+    const systems = dbSystems.map((sys) => {
+      const disk = systemDiskUsage.get(sys.systemName.toLowerCase());
+      if (!disk) return sys;
+      return {
+        ...sys,
+        totalBytes: disk.bytesOnDisk > 0 ? disk.bytesOnDisk : sys.totalBytes,
+        mirroredFiles: disk.filesOnDisk > 0 ? disk.filesOnDisk : sys.mirroredFiles,
+      };
+    });
 
     return {
       podId: POD_ID,
@@ -1094,7 +1129,7 @@ export class ScraperOrchestrator extends EventEmitter {
       lastWatermarkAt: cfg.lastWatermarkAt,
       rateLimiter: this.rateLimiter.getTelemetry(),
       auth: this.client.getAuthStatus(cfg, getLastAuthenticatedAt()),
-      storage: this.getStorageStats(cfg.downloadDir),
+      storage,
       totals,
       systems,
       releaseTypes,
