@@ -569,38 +569,52 @@ export default function App() {
       try {
         const transfer = JSON.parse((ev as MessageEvent).data) as ActiveTransferState | null;
         if (!transfer) {
-          setStatus((prev) => (prev && prev.activeTransfer ? { ...prev, activeTransfer: null } : prev));
+          setStatus((prev) =>
+            prev && (prev.activeTransfer || (prev.activeTransfers && prev.activeTransfers.length > 0))
+              ? { ...prev, activeTransfer: null, activeTransfers: [] }
+              : prev,
+          );
           return;
         }
+        const { parallelTransfers, ...primaryTransfer } = transfer;
+        const nextActiveTransfers =
+          Array.isArray(parallelTransfers) && parallelTransfers.length > 0
+            ? parallelTransfers
+            : [primaryTransfer];
         const now = Date.now();
         const isDone =
-          transfer.totalBytes !== null &&
-          transfer.totalBytes > 0 &&
-          transfer.bytesReceived >= transfer.totalBytes;
+          primaryTransfer.totalBytes !== null &&
+          primaryTransfer.totalBytes > 0 &&
+          primaryTransfer.bytesReceived >= primaryTransfer.totalBytes;
         const shouldSample =
-          transfer.bytesPerSec > 0 && (now - lastLiveTransferSampleMs >= 450 || isDone);
+          primaryTransfer.bytesPerSec > 0 && (now - lastLiveTransferSampleMs >= 450 || isDone);
         if (shouldSample) {
           lastLiveTransferSampleMs = now;
         }
         setStatus((prev) => {
           if (!prev) return prev;
           if (!shouldSample) {
-            return { ...prev, activeTransfer: transfer };
+            return {
+              ...prev,
+              activeTransfer: primaryTransfer,
+              activeTransfers: nextActiveTransfers,
+            };
           }
           const nextHistory = [
             ...(prev.transferHistory || []),
             {
               timestamp: new Date(now).toISOString(),
-              bytesPerSec: Math.round(transfer.bytesPerSec),
-              bytesReceived: transfer.bytesReceived,
-              totalBytes: transfer.totalBytes,
-              filename: transfer.filename,
-              systemName: transfer.systemName,
+              bytesPerSec: Math.round(primaryTransfer.bytesPerSec),
+              bytesReceived: primaryTransfer.bytesReceived,
+              totalBytes: primaryTransfer.totalBytes,
+              filename: primaryTransfer.filename,
+              systemName: primaryTransfer.systemName,
             },
           ].slice(-90);
           return {
             ...prev,
-            activeTransfer: transfer,
+            activeTransfer: primaryTransfer,
+            activeTransfers: nextActiveTransfers,
             transferHistory: nextHistory,
           };
         });

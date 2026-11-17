@@ -1318,8 +1318,21 @@ export class ScraperOrchestrator extends EventEmitter {
     this.emit('transfer', null);
   }
 
+  private getOrderedActiveTransfers(): ActiveTransferState[] {
+    const ordered: ActiveTransferState[] = [];
+    const activeWorkers = this.activeTransfers.size;
+    for (const key of this.activeTransferOrder) {
+      const entry = this.activeTransfers.get(key);
+      if (entry) {
+        ordered.push({ ...entry, activeWorkers });
+      }
+    }
+    return ordered;
+  }
+
   private syncActiveTransferSnapshot(forceSample = false): void {
-    if (this.activeTransfers.size === 0) {
+    const orderedTransfers = this.getOrderedActiveTransfers();
+    if (orderedTransfers.length === 0) {
       this.activeTransfer = null;
       this.emit('transfer', null);
       return;
@@ -1330,9 +1343,7 @@ export class ScraperOrchestrator extends EventEmitter {
     let totalChunks = 0;
     let anyResumed = false;
 
-    for (const key of this.activeTransferOrder) {
-      const entry = this.activeTransfers.get(key);
-      if (!entry) continue;
+    for (const entry of orderedTransfers) {
       totalSpeed += Math.max(0, entry.bytesPerSec || 0);
       totalChunks += Math.max(1, entry.activeChunks ?? 1);
       if (entry.resumed) anyResumed = true;
@@ -1351,7 +1362,7 @@ export class ScraperOrchestrator extends EventEmitter {
       return;
     }
 
-    const activeWorkers = this.activeTransfers.size;
+    const activeWorkers = orderedTransfers.length;
     this.activeTransfer = {
       ...primary,
       bytesPerSec: totalSpeed,
@@ -1359,7 +1370,10 @@ export class ScraperOrchestrator extends EventEmitter {
       activeWorkers,
       resumed: anyResumed || Boolean(primary.resumed),
     };
-    this.emit('transfer', this.activeTransfer);
+    this.emit('transfer', {
+      ...this.activeTransfer,
+      parallelTransfers: orderedTransfers,
+    });
 
     const now = Date.now();
     const isFinished =
@@ -1430,6 +1444,7 @@ export class ScraperOrchestrator extends EventEmitter {
       build: resolveRuntimeBuildInfo(),
       activeRun: this.activeRun,
       activeTransfer: this.activeTransfer,
+      activeTransfers: this.getOrderedActiveTransfers(),
       transferHistory: [...this.transferHistory],
       currentPhase: this.currentPhase,
       nextScheduledRunAt: cfg.scheduleEnabled && nextRun ? nextRun.toISOString() : null,
@@ -3149,6 +3164,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
     const workerKey = `${releaseId}:${initial.file.id}`;
     const transferEntry: ActiveTransferState = {
+      workerKey,
       itemId: releaseId,
       fileId: initial.file.id,
       fileIndex: fileSequence?.index ?? null,
@@ -3170,15 +3186,25 @@ export class ScraperOrchestrator extends EventEmitter {
       this.activeTransfers.delete(workerKey);
       this.activeTransferOrder = this.activeTransferOrder.filter((k) => k !== workerKey);
       this.syncActiveTransferSnapshot(true);
+      const remaining = this.getOrderedActiveTransfers();
+      if (remaining.length > 0 && this.activeTransfer) {
+        const primary = this.activeTransfer;
+        this.currentPhase =
+          remaining.length > 1
+            ? `Downloading ${remaining.length} files in parallel (primary: ${primary.systemName} / ${primary.filename})`
+            : `Downloading ${primary.systemName} / ${primary.filename}`;
+        this.emitStatus();
+      }
     };
 
     this.activeTransfers.set(workerKey, transferEntry);
     this.activeTransferOrder.push(workerKey);
+    this.syncActiveTransferSnapshot(false);
+    const primary = this.activeTransfer ?? transferEntry;
     this.currentPhase =
       this.activeTransfers.size > 1
-        ? `Downloading ${this.activeTransfers.size} files in parallel (primary: ${release.systemName} / ${release.filename})`
-        : `Downloading ${release.systemName} / ${release.filename}`;
-    this.syncActiveTransferSnapshot(false);
+        ? `Downloading ${this.activeTransfers.size} files in parallel (primary: ${primary.systemName} / ${primary.filename})`
+        : `Downloading ${primary.systemName} / ${primary.filename}`;
     this.emitCatalogUpdated('file_downloading', releaseId);
     this.emitStatus();
 

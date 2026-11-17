@@ -239,6 +239,7 @@ export interface RateLimiterTelemetry {
 }
 
 export interface ActiveTransferState {
+  workerKey?: string;
   itemId: number | null;
   fileId?: number | null;
   fileIndex?: number | null;
@@ -254,6 +255,7 @@ export interface ActiveTransferState {
   activeChunks?: number | null;
   activeWorkers?: number | null;
   resumed?: boolean;
+  parallelTransfers?: ActiveTransferState[];
 }
 
 export interface TransferSpeedSample {
@@ -299,6 +301,7 @@ export interface ServiceStatusSnapshot {
   };
   activeRun: SyncRunRecord | null;
   activeTransfer: ActiveTransferState | null;
+  activeTransfers?: ActiveTransferState[];
   transferHistory: TransferSpeedSample[];
   currentPhase: string;
   nextScheduledRunAt: string | null;
