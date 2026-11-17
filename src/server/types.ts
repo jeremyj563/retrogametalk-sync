@@ -297,6 +297,7 @@ export interface ServiceStatusSnapshot {
   build: {
     version: string;
     gitSha: string;
+    gitUrl: string | null;
   };
   activeRun: SyncRunRecord | null;
   activeTransfer: ActiveTransferState | null;

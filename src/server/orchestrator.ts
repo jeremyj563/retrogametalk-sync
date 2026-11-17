@@ -43,6 +43,7 @@ import {
   formatAllowedReleaseTypesSummary,
   normalizeAllowedReleaseTypes,
 } from '../shared/releaseTypeFilter.ts';
+import { normalizeGitRepoUrl } from '../shared/gitUrl.ts';
 import { filterValidSystemSlugs } from '../shared/systemCatalog.ts';
 import {
   type DiscoveredRelease,
@@ -118,20 +119,29 @@ function getLocalGitFallback(): { version: string; gitSha: string } {
   return cachedLocalGitFallback;
 }
 
-function resolveRuntimeBuildInfo(): { version: string; gitSha: string } {
+function resolveRuntimeBuildInfo(): { version: string; gitSha: string; gitUrl: string | null } {
   const envVersion = (process.env.APP_VERSION || '').trim();
   const envSha = (process.env.GIT_SHA || '').trim();
+  const gitUrl = normalizeGitRepoUrl(process.env.GIT_URL);
   const fallback =
-    !envVersion || !envSha || envSha === 'unknown' ? getLocalGitFallback() : null;
+    !envVersion || envVersion === 'dev' || !envSha || envSha === 'unknown'
+      ? getLocalGitFallback()
+      : null;
 
   return {
-    version: envVersion || fallback?.version || 'dev',
+    version:
+      envVersion && envVersion !== 'dev'
+        ? envVersion
+        : fallback?.version && fallback.version !== 'dev'
+          ? fallback.version
+          : envVersion || fallback?.version || 'dev',
     gitSha:
       envSha && envSha !== 'unknown'
         ? envSha
         : fallback?.gitSha && fallback.gitSha !== 'unknown'
           ? fallback.gitSha
           : envSha || 'unknown',
+    gitUrl,
   };
 }
 
