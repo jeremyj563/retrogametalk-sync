@@ -181,6 +181,19 @@ function getPackageVersionFallback(): string | null {
   return null;
 }
 
+function getDistBuildTimestampFallback(): string | null {
+  try {
+    const distIndex = path.resolve(process.cwd(), 'dist', 'index.html');
+    const stat = fs.statSync(distIndex);
+    if (stat.isFile() && Number.isFinite(stat.mtimeMs) && stat.mtimeMs > 0) {
+      return stat.mtime.toISOString();
+    }
+  } catch {
+    // No dist build artifact available
+  }
+  return null;
+}
+
 function resolveRuntimeBuildInfo(): {
   version: string;
   gitSha: string;
@@ -236,7 +249,7 @@ function resolveRuntimeBuildInfo(): {
           : envSha || 'unknown',
     gitUrl,
     gitRef: resolvedGitRef,
-    builtAt: envBuiltAt ?? fallback?.builtAt ?? null,
+    builtAt: envBuiltAt ?? fallback?.builtAt ?? getDistBuildTimestampFallback(),
   };
 }
 

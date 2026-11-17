@@ -73,6 +73,34 @@ const SEMVER_TAG_PATTERN = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const PR_REF_PATTERN = /^(?:refs\/)?(?:pull|merge-requests)\/(\d+)(?:\/.*)?$/i;
 
 /**
+ * Returns true when the provided gitRef (or fallback version) identifies a SemVer tag
+ * rather than a branch, pull request, or non-semver tag.
+ */
+export function isSemverTagRef(
+  gitRef: string | null | undefined,
+  fallbackVersion?: string | null | undefined,
+): boolean {
+  const raw =
+    (typeof gitRef === 'string' && gitRef.trim()) ||
+    (typeof fallbackVersion === 'string' && fallbackVersion.trim()) ||
+    '';
+  if (!raw || raw === 'unknown' || raw === 'local' || raw === 'dev' || raw === 'HEAD') {
+    return false;
+  }
+  if (raw.startsWith('refs/tags/')) {
+    return SEMVER_TAG_PATTERN.test(raw.slice('refs/tags/'.length).trim());
+  }
+  if (
+    raw.startsWith('refs/heads/') ||
+    raw.startsWith('refs/remotes/') ||
+    PR_REF_PATTERN.test(raw)
+  ) {
+    return false;
+  }
+  return SEMVER_TAG_PATTERN.test(raw);
+}
+
+/**
  * Classifies a GIT_REF (e.g. "refs/tags/1.0.2", "refs/heads/main", "refs/pull/42/merge",
  * "1.0.2", or "feature/xyz") and resolves the appropriate upstream web URL on top of GIT_URL.
  */
