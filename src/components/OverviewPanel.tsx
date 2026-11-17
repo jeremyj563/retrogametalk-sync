@@ -441,7 +441,7 @@ export function OverviewPanel({
           <div className="flex items-center gap-3 text-sm text-crt-text">
             <AlertTriangle className="h-4 w-4 text-crt-amber shrink-0" />
             <span>
-              Repository credentials are not configured yet. Add and verify your retrogametalk.com login in Operations to enable syncing.
+              Repository credentials are not configured yet. Add and verify your retrogametalk.com login in System Settings to enable syncing.
             </span>
           </div>
           <button
@@ -459,7 +459,7 @@ export function OverviewPanel({
             <span className="break-words">
               {status.auth.lastCheckedAt && status.auth.lastMessage
                 ? `Sync locked — login has not succeeded yet (${status.auth.lastMessage})`
-                : 'Sync locked — run "Test Login & Discover Consoles" in Operations to verify your account before syncing.'}
+                : 'Sync locked — run "Test Login & Discover Consoles" in System Settings to verify your account before syncing.'}
             </span>
           </div>
           <button
@@ -467,7 +467,7 @@ export function OverviewPanel({
             onClick={() => onNavigateToOperations('auth')}
             className="crt-cta-beam px-3.5 py-1.5 text-xs font-medium text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            Open Operations
+            Open System Settings
           </button>
         </div>
       ) : null}
@@ -674,7 +674,16 @@ export function OverviewPanel({
         {/* Zone 3: 4-Column Operational Summary Strip */}
         <div className="mt-4 pt-3.5 border-t border-crt-border grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-x-6">
           <div className="space-y-1 min-w-0">
-            <div className="text-[11px] text-crt-muted">Next Schedule</div>
+            <div className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="text-crt-muted">Next Schedule</span>
+              <button
+                type="button"
+                onClick={() => onNavigateToOperations('schedule')}
+                className="font-mono text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Edit
+              </button>
+            </div>
             <div className="text-xs font-mono text-crt-text tabular-nums truncate">
               {formatCountdown(status.nextScheduledRunAt)}
             </div>

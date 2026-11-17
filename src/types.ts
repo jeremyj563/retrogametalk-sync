@@ -5,12 +5,39 @@ export type {
   SystemTypeFolderOverride,
   SystemTypeSubfolderMode,
 } from './shared/storageFolderMappings';
-export type NavSection = 'monitor' | 'catalog' | 'schedule' | 'operations';
-export type OperationsSectionTarget = 'auth' | 'systems' | 'releaseTypes' | 'storageMappings';
+export type NavSection =
+  | 'monitor'
+  | 'catalog'
+  | 'sync-rules'
+  | 'device-export'
+  | 'settings';
 
-export interface OperationsFocusRequest {
-  target: OperationsSectionTarget;
+export type ConfigSectionTarget =
+  | 'schedule'
+  | 'systems'
+  | 'releaseTypes'
+  | 'romNaming'
+  | 'storageMappings'
+  | 'auth'
+  | 'pacing';
+
+export type OperationsSectionTarget = ConfigSectionTarget;
+
+export interface ConfigFocusRequest {
+  target: ConfigSectionTarget;
   nonce: number;
+}
+
+export type OperationsFocusRequest = ConfigFocusRequest;
+
+export interface ConfigDirtyState {
+  isDirty: boolean;
+  changedSections: string[];
+}
+
+export interface ConfigPanelHandle {
+  save: () => Promise<boolean>;
+  discard: () => void;
 }
 export type SyncScope = 'incremental' | 'full';
 export type RunMode = SyncScope | 'dry_run';

@@ -2197,7 +2197,7 @@ export function CatalogPanel({
                               <button
                                 type="button"
                                 disabled={effectiveRetryingId === item.id || Boolean(status.activeRun) || !status.auth.hasCompletedLogin}
-                                title={!status.auth.hasCompletedLogin ? 'Verify login in Operations before retrying' : undefined}
+                                title={!status.auth.hasCompletedLogin ? 'Verify login in System Settings before retrying' : undefined}
                                 onClick={() => void handleRetry(item.id)}
                                 className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-border hover:border-crt-phosphor text-crt-text rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                               >

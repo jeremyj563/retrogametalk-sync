@@ -10,8 +10,9 @@ interface LivingNavIconProps {
  * Custom 16x16 hardware-CRT kinetic icons for primary navigation:
  * - Sync (monitor): Traveling oscilloscope ECG phosphor pulse sweeping left-to-right
  * - Catalog (catalog): Vertically scrolling 2-level directory tree inside a masked window
- * - Schedule (schedule): Precision chronometer with sweeping minute hand & cardinal ticks
- * - Operations (operations): Machined 8-tooth servo cog assembly with breathing optical core
+ * - Sync Rules (sync-rules): Precision chronometer & filter dial with sweeping hand
+ * - Device Export (device-export): Handheld SD / ROM cartridge slot with pulsing transfer pins & arrow
+ * - System Settings (settings): Machined 8-tooth servo cog assembly with breathing optical core
  */
 export function LivingNavIcon({ section, className = 'h-4 w-4 shrink-0' }: LivingNavIconProps) {
   const uid = useId();
@@ -145,7 +146,7 @@ export function LivingNavIcon({ section, className = 'h-4 w-4 shrink-0' }: Livin
     );
   }
 
-  if (section === 'schedule') {
+  if (section === 'sync-rules') {
     return (
       <svg
         viewBox="0 0 16 16"
@@ -191,7 +192,42 @@ export function LivingNavIcon({ section, className = 'h-4 w-4 shrink-0' }: Livin
     );
   }
 
-  // Operations: 8-tooth precision servo gear + optical core
+  if (section === 'device-export') {
+    return (
+      <svg
+        viewBox="0 0 16 16"
+        fill="none"
+        aria-hidden="true"
+        className={`${className} crt-living-icon crt-living-icon-export`}
+      >
+        {/* Notched SD / Handheld Flash Cartridge silhouette */}
+        <path
+          d="M 3.1 1.75 H 10.35 L 13.15 4.55 V 13.25 C 13.15 13.8 12.7 14.25 12.15 14.25 H 3.85 C 3.3 14.25 2.85 13.8 2.85 13.25 V 2.0 C 2.85 1.86 2.96 1.75 3.1 1.75 Z"
+          stroke="currentColor"
+          strokeWidth="1.35"
+          strokeLinejoin="round"
+        />
+        {/* Cartridge gold contact pins */}
+        <g className="crt-svg-sd-pins">
+          <line x1="5.15" y1="3.45" x2="5.15" y2="5.45" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+          <line x1="7.25" y1="3.45" x2="7.25" y2="5.45" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+          <line x1="9.35" y1="3.45" x2="9.35" y2="5.45" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        </g>
+        {/* Transfer / write chevron */}
+        <g className="crt-svg-sd-arrow">
+          <path
+            d="M 8 7.55 V 11.75 M 6.15 9.95 L 8 11.85 L 9.85 9.95"
+            stroke="currentColor"
+            strokeWidth="1.35"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </g>
+      </svg>
+    );
+  }
+
+  // System Settings: 8-tooth precision servo gear + optical core
   return (
     <svg
       viewBox="0 0 16 16"
