@@ -410,6 +410,11 @@ export class ScraperOrchestrator extends EventEmitter {
     });
   }
 
+  notifyInstalledStateChanged(): void {
+    this.emitCatalogUpdated('installed_updated');
+    this.emitStatus();
+  }
+
   private formatRelativePhasePath(targetUrl: string, baseUrl: string): string {
     try {
       const target = new URL(targetUrl);

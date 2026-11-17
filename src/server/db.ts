@@ -1376,15 +1376,23 @@ function listStatusFacetCounts(): Record<string, number> {
   };
 }
 
-function listInstalledFacetCounts(): { installed: number; notInstalled: number } {
+function listInstalledFacetCounts(params: CatalogQueryFilterParams): {
+  installed: number;
+  notInstalled: number;
+} {
+  const { where, args } = buildCatalogWhereAndOrder({
+    ...params,
+    installed: undefined,
+  });
+
   const row = getDb()
     .prepare(
       `SELECT
         SUM(CASE WHEN installed_at IS NOT NULL THEN 1 ELSE 0 END) AS installed_cnt,
         SUM(CASE WHEN installed_at IS NULL THEN 1 ELSE 0 END) AS not_installed_cnt
-      FROM catalog_releases`,
+      FROM catalog_releases ${where}`,
     )
-    .get() as { installed_cnt: number | null; not_installed_cnt: number | null } | undefined;
+    .get(...args) as { installed_cnt: number | null; not_installed_cnt: number | null } | undefined;
 
   return {
     installed: Number(row?.installed_cnt || 0),
@@ -1597,7 +1605,7 @@ export function queryRepositoryItems(
   const languagesFacet = listDistinctJsonFacetWithCounts('languages_json');
   const sourcesFacet = listDistinctJsonFacetWithCounts('sources_json');
   const statusCounts = listStatusFacetCounts();
-  const installedCounts = listInstalledFacetCounts();
+  const installedCounts = listInstalledFacetCounts(params);
 
   const counts: CatalogFacetCounts = {
     tags: tagsFacet.counts,
