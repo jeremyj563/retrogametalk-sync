@@ -149,8 +149,13 @@ jobs:
 
           if [ -n "$GIT_TAG" ]; then
             APP_VERSION="$GIT_TAG"
-          else
+            GIT_REF="refs/tags/${GIT_TAG}"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
             APP_VERSION="${{ github.head_ref || github.ref_name }}"
+            GIT_REF="${{ github.ref }}"
+          else
+            APP_VERSION="${{ github.ref_name }}"
+            GIT_REF="${{ github.ref }}"
           fi
 
           if [ -n "$MINTED_RELEASE_DATE" ]; then
@@ -163,6 +168,7 @@ jobs:
           echo "semver_full=${SEMVER_FULL}" >> "$GITHUB_OUTPUT"
           echo "semver_minor=${SEMVER_MINOR}" >> "$GITHUB_OUTPUT"
           echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "git_ref=${GIT_REF}" >> "$GITHUB_OUTPUT"
           echo "built_at=${BUILT_AT}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
@@ -202,6 +208,7 @@ jobs:
             GIT_SHA=${{ github.sha }}
             APP_VERSION=${{ steps.version.outputs.app_version }}
             GIT_URL=${{ github.server_url }}/${{ github.repository }}
+            GIT_REF=${{ steps.version.outputs.git_ref }}
             BUILT_AT=${{ steps.version.outputs.built_at }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

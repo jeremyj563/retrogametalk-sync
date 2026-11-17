@@ -77,7 +77,12 @@ import type {
 
 const POD_ID = process.env.HOSTNAME || os.hostname() || 'rgt-sync-pod';
 
-let cachedLocalGitFallback: { version: string; gitSha: string; builtAt: string | null } | null = null;
+let cachedLocalGitFallback: {
+  version: string;
+  gitSha: string;
+  gitRef: string | null;
+  builtAt: string | null;
+} | null = null;
 
 function normalizeBuildTimestamp(raw: string | null | undefined): string | null {
   const trimmed = typeof raw === 'string' ? raw.trim() : '';
@@ -87,10 +92,16 @@ function normalizeBuildTimestamp(raw: string | null | undefined): string | null 
   return new Date(parsed).toISOString();
 }
 
-function getLocalGitFallback(): { version: string; gitSha: string; builtAt: string | null } {
+function getLocalGitFallback(): {
+  version: string;
+  gitSha: string;
+  gitRef: string | null;
+  builtAt: string | null;
+} {
   if (cachedLocalGitFallback) return cachedLocalGitFallback;
   let version = 'dev';
   let gitSha = 'unknown';
+  let gitRef: string | null = null;
   let builtAt: string | null = null;
   try {
     const tag = execFileSync('git', ['tag', '--points-at', 'HEAD'], {
@@ -102,13 +113,26 @@ function getLocalGitFallback(): { version: string; gitSha: string; builtAt: stri
       .find(Boolean);
     if (tag) {
       version = tag;
+      gitRef = `refs/tags/${tag}`;
     } else {
-      const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
-      if (branch && branch !== 'HEAD') {
-        version = branch;
+      try {
+        const symbolicRef = execFileSync('git', ['symbolic-ref', '-q', 'HEAD'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
+        if (symbolicRef) {
+          gitRef = symbolicRef;
+          version = symbolicRef.replace(/^refs\/heads\//, '');
+        }
+      } catch {
+        const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
+        if (branch && branch !== 'HEAD') {
+          version = branch;
+          gitRef = `refs/heads/${branch}`;
+        }
       }
     }
   } catch {
@@ -134,7 +158,7 @@ function getLocalGitFallback(): { version: string; gitSha: string; builtAt: stri
   } catch {
     // No local git repository available
   }
-  cachedLocalGitFallback = { version, gitSha, builtAt };
+  cachedLocalGitFallback = { version, gitSha, gitRef, builtAt };
   return cachedLocalGitFallback;
 }
 
@@ -161,10 +185,12 @@ function resolveRuntimeBuildInfo(): {
   version: string;
   gitSha: string;
   gitUrl: string | null;
+  gitRef: string | null;
   builtAt: string | null;
 } {
   const envVersion = (process.env.APP_VERSION || '').trim();
   const envSha = (process.env.GIT_SHA || '').trim();
+  const envGitRef = (process.env.GIT_REF || '').trim();
   const gitUrl = normalizeGitRepoUrl(process.env.GIT_URL);
   const envBuiltAt = normalizeBuildTimestamp(
     process.env.BUILT_AT ||
@@ -173,7 +199,12 @@ function resolveRuntimeBuildInfo(): {
       process.env.BUILD_DATE,
   );
   const fallback =
-    !envVersion || envVersion === 'dev' || !envSha || envSha === 'unknown' || !envBuiltAt
+    !envVersion ||
+    envVersion === 'dev' ||
+    !envSha ||
+    envSha === 'unknown' ||
+    !envGitRef ||
+    !envBuiltAt
       ? getLocalGitFallback()
       : null;
   const pkgVersion =
@@ -181,13 +212,22 @@ function resolveRuntimeBuildInfo(): {
       ? getPackageVersionFallback()
       : null;
 
+  const resolvedVersion =
+    envVersion && envVersion !== 'dev'
+      ? envVersion
+      : fallback?.version && fallback.version !== 'dev'
+        ? fallback.version
+        : pkgVersion || envVersion || fallback?.version || 'dev';
+
+  const resolvedGitRef =
+    envGitRef ||
+    fallback?.gitRef ||
+    (resolvedVersion && resolvedVersion !== 'dev' && resolvedVersion !== 'unknown'
+      ? resolvedVersion
+      : null);
+
   return {
-    version:
-      envVersion && envVersion !== 'dev'
-        ? envVersion
-        : fallback?.version && fallback.version !== 'dev'
-          ? fallback.version
-          : pkgVersion || envVersion || fallback?.version || 'dev',
+    version: resolvedVersion,
     gitSha:
       envSha && envSha !== 'unknown'
         ? envSha
@@ -195,6 +235,7 @@ function resolveRuntimeBuildInfo(): {
           ? fallback.gitSha
           : envSha || 'unknown',
     gitUrl,
+    gitRef: resolvedGitRef,
     builtAt: envBuiltAt ?? fallback?.builtAt ?? null,
   };
 }

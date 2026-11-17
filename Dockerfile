@@ -14,6 +14,7 @@ WORKDIR /app
 ARG GIT_SHA=unknown
 ARG APP_VERSION=dev
 ARG GIT_URL=""
+ARG GIT_REF=""
 ARG BUILT_AT=""
 LABEL org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.version="${APP_VERSION}" \
@@ -22,6 +23,7 @@ LABEL org.opencontainers.image.revision="${GIT_SHA}" \
 ENV GIT_SHA=${GIT_SHA}
 ENV APP_VERSION=${APP_VERSION}
 ENV GIT_URL=${GIT_URL}
+ENV GIT_REF=${GIT_REF}
 ENV BUILT_AT=${BUILT_AT}
 
 ENV NODE_ENV=production
