@@ -18,11 +18,12 @@ Starting from **`1.0.0`**, every commit-ready change batch bumps either **PATCH*
 
 ## 2. Synchronized Version Files
 
-Before committing changes to `main`, keep these three version declarations synchronized to the exact same `X.Y.Z` SemVer string:
+Before committing changes to `main`, keep these three version declarations synchronized to the exact same `X.Y.Z` SemVer string and add a concise release summary entry:
 
 1. **`package.json`** → `"version": "X.Y.Z"` *(Canonical application SemVer read by CI and local runtime fallback)*
 2. **`k8s/charts/retrogametalk-sync/Chart.yaml`** → `version: X.Y.Z` *(Helm chart packaging version)*
 3. **`k8s/charts/retrogametalk-sync/Chart.yaml`** → `appVersion: "X.Y.Z"` *(Application version deployed by the chart)*
+4. **`CHANGELOG.md`** → `## [X.Y.Z] - YYYY-MM-DD` *(Concise bulleted summary used as the GitHub Release notes body)*
 
 > **Why Chart `version` and `appVersion` Stay in Lockstep**:
 > Because every commit on `main` mints a `X.Y.Z` release tag, keeping `Chart.yaml`'s `version` and `appVersion` identical ensures deploying or GitOps-tracking the chart from any Git SemVer tag always yields matching chart metadata and container image versions.
@@ -45,7 +46,7 @@ Because AI Studio commits externally to GitHub without a local git CLI inside th
    - Reads `version` from `package.json` and verifies strict `X.Y.Z` SemVer formatting.
    - Verifies **`MAJOR == 1`** (unless explicitly overridden for an authorized `2.0.0+` release) and confirms `Chart.yaml` `version` and `appVersion` both match `package.json`.
    - Checks whether tag `X.Y.Z` already exists in the repository:
-     - **New version**: Creates an annotated git tag (`X.Y.Z`), pushes `refs/tags/X.Y.Z`, and creates a corresponding **GitHub Release** (`gh release create X.Y.Z --generate-notes`) using GitHub's auto-generated release notes from commits/PRs since the previous tag.
+     - **New version**: Creates an annotated git tag (`X.Y.Z`), pushes `refs/tags/X.Y.Z`, and creates a corresponding **GitHub Release** (`gh release create X.Y.Z --notes-file ...`) populated from the matching `## [X.Y.Z]` section in `CHANGELOG.md` (automatically falling back to commit subjects since the previous tag if missing), along with the `ghcr.io` image reference and full compare link.
      - **Already-tagged version**: Logs a notice and skips duplicate tag/release creation safely so rolling `main` builds still succeed.
 2. **Job 2 — `build-and-push` (`needs: [release]`, `packages: write`)**
    - Chained directly behind `release` so newly minted tags immediately trigger the container build without needing a custom Personal Access Token (GitHub Actions suppresses downstream `on: push: tags:` triggers from `GITHUB_TOKEN` pushes).
