@@ -518,13 +518,13 @@ async function bootstrap() {
       typeof req.body?.deviceLabel === 'string' && req.body.deviceLabel.trim()
         ? req.body.deviceLabel.trim()
         : null;
-    res.json(
-      setCatalogItemsInstalled({
-        ids: rawIds,
-        installed,
-        deviceLabel,
-      }),
-    );
+    const result = setCatalogItemsInstalled({
+      ids: rawIds,
+      installed,
+      deviceLabel,
+    });
+    orchestrator.notifyInstalledStateChanged();
+    res.json(result);
   });
 
   app.delete('/api/items', (req, res) => {

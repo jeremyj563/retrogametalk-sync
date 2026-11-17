@@ -1552,8 +1552,8 @@ export function CatalogPanel({
                   }
                   title={
                     installedFilter === 'only'
-                      ? 'Click to clear Installed filter and show all games'
-                      : 'Show only games installed to a storage device'
+                      ? 'Click to clear Installed filter and show all matching games'
+                      : 'Show only matching games installed to a storage device'
                   }
                   className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     installedFilter === 'only'
@@ -1568,8 +1568,12 @@ export function CatalogPanel({
                   />
                   <span>Installed</span>
                   {facets.counts?.installed && (
-                    <span className="font-mono text-[11px] tabular-nums text-crt-muted">
-                      ({facets.counts.installed.installed})
+                    <span
+                      className={`font-mono text-[11px] tabular-nums ${
+                        installedFilter === 'only' ? 'text-crt-phosphor/90' : 'text-crt-muted'
+                      }`}
+                    >
+                      ({facets.counts.installed.installed.toLocaleString()})
                     </span>
                   )}
                 </button>
@@ -1581,8 +1585,8 @@ export function CatalogPanel({
                   }
                   title={
                     installedFilter === 'exclude'
-                      ? 'Click to clear Not Installed filter and show all games'
-                      : 'Show only games not yet installed to a storage device'
+                      ? 'Click to clear Not Installed filter and show all matching games'
+                      : 'Show only matching games not yet installed to a storage device'
                   }
                   className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     installedFilter === 'exclude'
@@ -1592,8 +1596,12 @@ export function CatalogPanel({
                 >
                   <span>Not Installed</span>
                   {facets.counts?.installed && (
-                    <span className="font-mono text-[11px] tabular-nums text-crt-muted">
-                      ({facets.counts.installed.notInstalled})
+                    <span
+                      className={`font-mono text-[11px] tabular-nums ${
+                        installedFilter === 'exclude' ? 'text-crt-amber/90' : 'text-crt-muted'
+                      }`}
+                    >
+                      ({facets.counts.installed.notInstalled.toLocaleString()})
                     </span>
                   )}
                 </button>
