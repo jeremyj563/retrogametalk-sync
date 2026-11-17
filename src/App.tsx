@@ -24,7 +24,11 @@ import {
   loadInitialCrtDisplaySettings,
   saveCrtDisplaySettings,
 } from './shared/crtDisplay';
-import { buildGitCommitUrl, resolveGitRefDestination } from './shared/gitUrl';
+import {
+  buildGitCommitUrl,
+  isSemverTagRef,
+  resolveGitRefDestination,
+} from './shared/gitUrl';
 import type {
   ActivityLogRecord,
   ActiveTransferState,
@@ -73,8 +77,7 @@ function BuildFooterMeta({
   const hasRealSha = Boolean(build.gitSha && build.gitSha !== 'unknown');
   const shortSha = hasRealSha ? build.gitSha.slice(0, 7) : 'local';
   const displaySha = hasRealSha ? build.gitSha.slice(0, 12) : 'local (untracked)';
-  const isSemverRelease =
-    refDest?.kind === 'release' || /^\d+\.\d+\.\d+(?:[-+].+)?$/.test(build.version.trim());
+  const isSemverRelease = isSemverTagRef(build.gitRef, build.version);
   const showDistinctGitRef = Boolean(build.gitRef && build.gitRef !== build.version);
   const builtInfo = formatLocalDateTimeWithAge(build.builtAt);
   const activeLinkHint =
