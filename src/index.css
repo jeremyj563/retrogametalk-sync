@@ -182,11 +182,20 @@
 
   /* Selective Gauss phosphor bloom & RGB convergence fringe (keeps body & table rows crisp) */
   .crt-fx-active .text-crt-phosphor:not(.text-crt-bg),
-  .crt-fx-active .font-display:not(.text-crt-bg):not(.crt-sync-trigger):not(.text-crt-muted):not(.text-crt-amber),
+  .crt-fx-active .font-display:not(.text-crt-bg):not(.crt-sync-trigger):not(.crt-banner-wordmark):not(.text-crt-muted):not(.text-crt-amber),
   .crt-fx-active .crt-kpi-value {
     text-shadow:
       0 0 var(--crt-glow-radius-sm, 0px) rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-glow-alpha-sm, 0)),
       0 0 var(--crt-glow-radius-lg, 0px) rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-glow-alpha-lg, 0)),
+      calc(var(--crt-aberration-offset, 0px) * -1) 0 0 rgba(255, 55, 85, var(--crt-aberration-alpha, 0)),
+      var(--crt-aberration-offset, 0px) 0 0 rgba(45, 225, 255, var(--crt-aberration-alpha, 0));
+  }
+
+  .crt-fx-active .crt-banner-title-word {
+    text-shadow:
+      0 1px 0 rgba(0, 0, 0, 0.88),
+      0 0 var(--crt-glow-radius-sm, 3px) rgba(var(--crt-banner-accent-rgb), var(--crt-glow-alpha-sm, 0.28)),
+      0 0 var(--crt-glow-radius-lg, 10px) rgba(var(--crt-banner-accent-rgb), var(--crt-glow-alpha-lg, 0.16)),
       calc(var(--crt-aberration-offset, 0px) * -1) 0 0 rgba(255, 55, 85, var(--crt-aberration-alpha, 0)),
       var(--crt-aberration-offset, 0px) 0 0 rgba(45, 225, 255, var(--crt-aberration-alpha, 0));
   }
@@ -1699,7 +1708,7 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
 }
 
 /* --------------------------------------------------------------------------
-   Native CSS Animated CRT Header Banner (BrandMark)
+   Native CSS Animated CRT Header Banner (BrandMark — +50% Hardware Lockup)
    -------------------------------------------------------------------------- */
 .crt-brand-banner {
   --crt-banner-accent: var(--color-crt-phosphor);
@@ -1715,50 +1724,175 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   transition: filter 200ms ease, transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+.crt-banner-screen-grid {
+  opacity: 0.18;
+  transition: opacity 200ms ease;
+}
+
 .crt-banner-scanline {
-  opacity: 0.22;
+  opacity: 0.24;
 }
 
 .crt-banner-pin-runner {
-  opacity: 0.85;
-}
-
-.crt-banner-led {
   opacity: 0.9;
 }
 
+.crt-banner-pin-tail {
+  opacity: 0;
+}
+
+.crt-banner-led {
+  opacity: 0.92;
+}
+
+/* Upper Calibration Horizon Ruler */
+.crt-banner-horizon {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 2.5px;
+  overflow: hidden;
+  background-image: repeating-linear-gradient(
+    90deg,
+    rgba(var(--crt-banner-accent-rgb), 0.38) 0px,
+    rgba(var(--crt-banner-accent-rgb), 0.38) 2px,
+    transparent 2px,
+    transparent 9px
+  );
+  box-shadow: inset 0 -1px 0 rgba(var(--crt-banner-accent-rgb), 0.16);
+}
+
+.crt-banner-horizon-beam {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 28%;
+  opacity: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    270deg,
+    transparent 0%,
+    rgba(var(--crt-banner-accent-rgb), 0.95) 55%,
+    rgba(255, 255, 255, 0.92) 90%,
+    transparent 100%
+  );
+  will-change: transform, opacity;
+}
+
+/* Sculpted RETROGAMETALK Wordmark with Clipped Phosphor Glint */
+.crt-banner-title-word {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+  color: var(--color-crt-text);
+  text-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.88),
+    0 0 10px rgba(var(--crt-banner-accent-rgb), 0.16);
+}
+
+.crt-banner-title-word::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 34%;
+  opacity: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    108deg,
+    transparent 0%,
+    rgba(var(--crt-banner-accent-rgb), 0.28) 44%,
+    rgba(255, 255, 255, 0.46) 52%,
+    transparent 100%
+  );
+  transform: translateX(-150%);
+  will-change: transform, opacity;
+}
+
+/* Backlit VFD / CRT Hardware Module around SYNC */
 .crt-banner-sync-word {
-  color: var(--crt-banner-accent);
-  transition: color 180ms ease, text-shadow 200ms ease, filter 200ms ease;
+  display: inline-block;
+  padding: 2px 6px 1.5px;
+  border-radius: 4px;
+  color: color-mix(in srgb, var(--crt-banner-accent) 88%, #ffffff);
+  border: 1px solid rgba(var(--crt-banner-accent-rgb), 0.54);
+  background: linear-gradient(
+    180deg,
+    rgba(var(--crt-banner-accent-rgb), 0.22) 0%,
+    rgba(var(--crt-banner-accent-rgb), 0.06) 100%
+  );
+  box-shadow:
+    0 0 12px -4px rgba(var(--crt-banner-accent-rgb), 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  transition:
+    color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 200ms ease,
+    text-shadow 200ms ease,
+    filter 200ms ease;
 }
 
 .crt-fx-active .crt-banner-sync-word {
-  text-shadow: 0 0 8px rgba(var(--crt-banner-accent-rgb), 0.38);
+  text-shadow: 0 0 9px rgba(var(--crt-banner-accent-rgb), 0.52);
 }
 
+/* Segmented VFD / CRT Dual-Beam Telemetry Bus */
 .crt-banner-track {
   position: relative;
   display: block;
   width: 100%;
-  height: 3.5px;
-  border-radius: 9999px;
-  background-color: var(--color-crt-elevated);
+  height: 6px;
+  border-radius: 2px;
+  border: 1px solid rgba(var(--crt-banner-accent-rgb), 0.34);
+  background-color: var(--color-crt-bg);
   overflow: hidden;
-  transition: box-shadow 200ms ease;
+  transition: box-shadow 200ms ease, border-color 200ms ease;
+}
+
+/* Physical VFD cell divider mask */
+.crt-banner-track-segments {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    90deg,
+    transparent 0px,
+    transparent 6px,
+    var(--color-crt-bg) 6px,
+    var(--color-crt-bg) 8px
+  );
 }
 
 /* Static resting posture (used when Living UI Motion is Off or reduced-motion is active) */
 .crt-banner-track-beam {
+  position: relative;
+  z-index: 1;
   display: block;
   width: 100%;
   height: 100%;
-  border-radius: 9999px;
-  opacity: 0.48;
+  opacity: 0.56;
   background: linear-gradient(
     90deg,
-    rgba(var(--crt-banner-accent-rgb), 0.18) 0%,
+    rgba(var(--crt-banner-accent-rgb), 0.2) 0%,
     var(--crt-banner-accent) 100%
   );
+}
+
+.crt-banner-track-return {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 2;
+  width: 30%;
+  height: 100%;
+  opacity: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    270deg,
+    transparent 0%,
+    rgba(var(--crt-banner-accent-rgb), 0.72) 55%,
+    rgba(255, 255, 255, 0.9) 92%,
+    transparent 100%
+  );
+  will-change: transform, opacity;
 }
 
 @keyframes crt-banner-chevron-flow {
@@ -1777,24 +1911,25 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
     opacity: 0.24;
   }
   50% {
-    transform: translateY(24.5px);
-    opacity: 0.48;
+    transform: translateY(25px);
+    opacity: 0.54;
   }
 }
 
+/* Exact 7-pin PCB step across x = 12.5 + n*4.8 (7 * 4.8 = 33.6) */
 @keyframes crt-banner-pin-step {
   0% {
     transform: translateX(0);
   }
   100% {
-    transform: translateX(35px);
+    transform: translateX(33.6px);
   }
 }
 
 @keyframes crt-banner-led-pulse {
   0%,
   100% {
-    opacity: 0.45;
+    opacity: 0.42;
   }
   50% {
     opacity: 1;
@@ -1810,6 +1945,52 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   }
 }
 
+@keyframes crt-banner-track-reverse {
+  0% {
+    transform: translateX(360%);
+    opacity: 0;
+  }
+  12% {
+    opacity: 0.95;
+  }
+  88% {
+    opacity: 0.95;
+  }
+  100% {
+    transform: translateX(-125%);
+    opacity: 0;
+  }
+}
+
+@keyframes crt-banner-word-glint {
+  0% {
+    transform: translateX(-150%);
+    opacity: 0;
+  }
+  8% {
+    opacity: 1;
+  }
+  34% {
+    transform: translateX(330%);
+    opacity: 1;
+  }
+  38%,
+  100% {
+    transform: translateX(330%);
+    opacity: 0;
+  }
+}
+
+@keyframes crt-banner-grid-breathe {
+  0%,
+  100% {
+    opacity: 0.14;
+  }
+  50% {
+    opacity: 0.34;
+  }
+}
+
 /* Animated Banner Rules across Low, Medium, High, and Ultra */
 [data-crt-motion="low"],
 [data-crt-motion="medium"],
@@ -1817,78 +1998,119 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
 [data-crt-motion="ultra"] {
   .crt-banner-cartridge {
     filter: drop-shadow(
-      0 0 var(--crt-motion-glow-sm, 2px)
-        rgba(var(--crt-banner-accent-rgb), var(--crt-motion-tail-alpha, 0.3))
+      0 0 var(--crt-motion-glow-sm, 3px)
+        rgba(var(--crt-banner-accent-rgb), var(--crt-motion-tail-alpha, 0.32))
     );
   }
 
   .crt-banner-chevrons {
-    animation: crt-banner-chevron-flow calc(1.9s * var(--crt-motion-speed, 1)) linear infinite;
+    animation: crt-banner-chevron-flow calc(1.85s * var(--crt-motion-speed, 1)) linear infinite;
   }
 
   .crt-banner-scanline {
-    opacity: 0.38;
-    animation: crt-banner-scanline-sweep calc(3.4s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+    opacity: 0.4;
+    animation: crt-banner-scanline-sweep calc(3.2s * var(--crt-motion-speed, 1)) ease-in-out infinite;
   }
 
   .crt-banner-pin-runner {
     opacity: 1;
-    animation: crt-banner-pin-step calc(3.1s * var(--crt-motion-speed, 1)) steps(5, end) infinite;
+    animation: crt-banner-pin-step calc(2.8s * var(--crt-motion-speed, 1)) steps(7, end) infinite;
   }
 
   .crt-banner-led {
-    animation: crt-banner-led-pulse calc(2.6s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+    animation: crt-banner-led-pulse calc(2.5s * var(--crt-motion-speed, 1)) ease-in-out infinite;
   }
 
   .crt-banner-track {
-    box-shadow: 0 0 var(--crt-motion-glow-sm, 2px)
-      rgba(var(--crt-banner-accent-rgb), calc(var(--crt-motion-tail-alpha, 0.25) * 0.65));
+    box-shadow: 0 0 var(--crt-motion-glow-sm, 3px)
+      rgba(var(--crt-banner-accent-rgb), calc(var(--crt-motion-tail-alpha, 0.28) * 0.7));
   }
 
   .crt-banner-track-beam {
-    width: 36%;
+    width: 38%;
     opacity: 1;
     background: linear-gradient(
       90deg,
       transparent 0%,
-      rgba(var(--crt-banner-accent-rgb), 0.24) 22%,
+      rgba(var(--crt-banner-accent-rgb), 0.28) 20%,
       var(--crt-banner-accent) 76%,
-      rgba(255, 255, 255, 0.88) 100%
+      rgba(255, 255, 255, 0.92) 100%
     );
     will-change: transform;
-    animation: crt-banner-track-sweep calc(3.1s * var(--crt-motion-speed, 1)) cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    animation: crt-banner-track-sweep calc(2.9s * var(--crt-motion-speed, 1)) cubic-bezier(0.4, 0, 0.2, 1) infinite;
   }
 
   /* Header Brand Anchor Hover / Focus Wake-Up */
   .crt-brand-link:hover .crt-banner-cartridge,
   .crt-brand-link:focus-visible .crt-banner-cartridge {
+    transform: translateY(-0.5px);
     filter: drop-shadow(
-      0 0 var(--crt-motion-glow-lg, 5px)
-        rgba(var(--crt-banner-accent-rgb), var(--crt-motion-glow-alpha, 0.45))
+      0 0 var(--crt-motion-glow-lg, 6px)
+        rgba(var(--crt-banner-accent-rgb), var(--crt-motion-glow-alpha, 0.5))
     );
   }
 
   .crt-brand-link:hover .crt-banner-chevrons,
   .crt-brand-link:focus-visible .crt-banner-chevrons {
-    animation-duration: 1.05s;
+    animation-duration: 0.95s;
   }
 
   .crt-brand-link:hover .crt-banner-track-beam,
   .crt-brand-link:focus-visible .crt-banner-track-beam {
-    animation-duration: 1.65s;
+    animation-duration: 1.5s;
+  }
+
+  .crt-brand-link:hover .crt-banner-title-word::after,
+  .crt-brand-link:focus-visible .crt-banner-title-word::after {
+    opacity: 1;
+    animation: crt-banner-word-glint 1.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;
   }
 }
 
-/* Medium, High & Ultra Tier Wordmark Breathe + Richer Cadence */
+/* Medium, High & Ultra Tier: Wordmark Glint, Dual-Pin Trail & CRT Grid Shimmer */
 [data-crt-motion="medium"],
 [data-crt-motion="high"],
 [data-crt-motion="ultra"] {
+  .crt-banner-screen-grid {
+    animation: crt-banner-grid-breathe calc(3.6s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+  }
+
+  .crt-banner-pin-tail {
+    opacity: 0.44;
+    animation: crt-banner-pin-step calc(2.8s * var(--crt-motion-speed, 1)) steps(7, end)
+      calc(-0.4s * var(--crt-motion-speed, 1)) infinite;
+  }
+
+  .crt-banner-title-word::after {
+    opacity: 1;
+    animation: crt-banner-word-glint calc(6.2s * var(--crt-motion-speed, 1)) cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  }
+
   .crt-banner-sync-word {
-    animation: crt-phosphor-breathe calc(3.2s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+    animation: crt-phosphor-breathe calc(3.1s * var(--crt-motion-speed, 1)) ease-in-out infinite;
   }
 
   .crt-banner-track-beam {
-    animation-duration: calc(2.45s * var(--crt-motion-speed, 1));
+    animation-duration: calc(2.35s * var(--crt-motion-speed, 1));
+  }
+}
+
+/* High & Ultra Tier: Upper Horizon Spark & Dual Counter-Sweeping VFD Bus */
+[data-crt-motion="high"],
+[data-crt-motion="ultra"] {
+  .crt-banner-horizon-beam {
+    animation: crt-banner-track-reverse 4.8s cubic-bezier(0.4, 0, 0.2, 1) -1.2s infinite;
+  }
+
+  .crt-banner-track-return {
+    animation: crt-banner-track-reverse 3.8s cubic-bezier(0.4, 0, 0.2, 1) -1.9s infinite;
+  }
+
+  .crt-banner-sync-word {
+    border-color: rgba(var(--crt-banner-accent-rgb), 0.72);
+    box-shadow:
+      0 0 16px -3px rgba(var(--crt-banner-accent-rgb), 0.48),
+      inset 0 1px 0 rgba(255, 255, 255, 0.18);
   }
 }
 
@@ -1898,25 +2120,30 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
 [data-crt-motion="high"][data-sync-running="true"],
 [data-crt-motion="ultra"][data-sync-running="true"] {
   .crt-banner-chevrons {
-    animation-duration: 0.9s;
+    animation-duration: 0.85s;
   }
 
   .crt-banner-pin-runner {
-    animation-duration: 1.35s;
+    animation-duration: 1.26s;
+  }
+
+  .crt-banner-pin-tail {
+    animation-duration: 1.26s;
+    animation-delay: -0.18s;
   }
 
   .crt-banner-led {
-    animation-duration: 1.1s;
+    animation-duration: 0.95s;
   }
 
   .crt-banner-track-beam {
-    animation-duration: 1.35s;
+    animation-duration: 1.25s;
   }
 
   .crt-banner-cartridge {
     filter: drop-shadow(
-      0 0 var(--crt-motion-glow-lg, 6px)
-        rgba(var(--crt-banner-accent-rgb), var(--crt-motion-glow-alpha, 0.5))
+      0 0 var(--crt-motion-glow-lg, 7px)
+        rgba(var(--crt-banner-accent-rgb), var(--crt-motion-glow-alpha, 0.55))
     );
   }
 }
@@ -2232,6 +2459,26 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   }
 }
 
+@keyframes crt-banner-ultra-convergence {
+  0%,
+  100% {
+    text-shadow:
+      0 1px 0 rgba(0, 0, 0, 0.88),
+      0 0 var(--crt-glow-radius-sm, 3px) rgba(var(--crt-banner-accent-rgb), var(--crt-glow-alpha-sm, 0.5)),
+      0 0 var(--crt-glow-radius-lg, 14px) rgba(var(--crt-banner-accent-rgb), var(--crt-glow-alpha-lg, 0.3)),
+      calc(var(--crt-aberration-offset, 0.7px) * -1) 0 0 rgba(255, 55, 85, var(--crt-aberration-alpha, 0.32)),
+      var(--crt-aberration-offset, 0.7px) 0 0 rgba(45, 225, 255, var(--crt-aberration-alpha, 0.32));
+  }
+  50% {
+    text-shadow:
+      0 1px 0 rgba(0, 0, 0, 0.88),
+      0 0 calc(var(--crt-glow-radius-sm, 3px) * 1.35) rgba(var(--crt-banner-accent-rgb), 0.78),
+      0 0 calc(var(--crt-glow-radius-lg, 14px) * 1.25) rgba(var(--crt-banner-accent-rgb), 0.46),
+      calc(var(--crt-aberration-offset, 0.7px) * -1.75) 0 0 rgba(255, 55, 85, 0.56),
+      calc(var(--crt-aberration-offset, 0.7px) * 1.75) 0 0 rgba(45, 225, 255, 0.56);
+  }
+}
+
 [data-crt-motion="ultra"] {
   /* 1. Full-Screen Overclocked Cathode-Ray Tube Atmosphere (when CRT FX master toggle is ON) */
   &.crt-fx-active .crt-layer-degauss {
@@ -2261,9 +2508,13 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   }
 
   /* Live Analog RGB Beam Convergence Pulse on Display Type & Hero Metrics */
-  &.crt-fx-active .font-display:not(.text-crt-bg):not(.crt-sync-trigger):not(.text-crt-muted):not(.text-crt-amber),
+  &.crt-fx-active .font-display:not(.text-crt-bg):not(.crt-sync-trigger):not(.crt-banner-wordmark):not(.text-crt-muted):not(.text-crt-amber),
   &.crt-fx-active .crt-kpi-value {
     animation: crt-ultra-rgb-convergence 3.8s ease-in-out infinite;
+  }
+
+  &.crt-fx-active .crt-banner-title-word {
+    animation: crt-banner-ultra-convergence 3.8s ease-in-out infinite;
   }
 
   /* 2. Sticky Header Dual Laser Border & Overclocked Cartridge Banner */
@@ -2283,44 +2534,75 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
 
   .crt-banner-cartridge {
     filter:
-      drop-shadow(0 0 3px rgba(var(--crt-banner-accent-rgb), 0.68))
-      drop-shadow(0 0 12px rgba(var(--crt-banner-accent-rgb), 0.42));
+      drop-shadow(0 0 3px rgba(var(--crt-banner-accent-rgb), 0.72))
+      drop-shadow(0 0 13px rgba(var(--crt-banner-accent-rgb), 0.44));
+  }
+
+  .crt-banner-shell {
+    stroke: rgba(var(--crt-banner-accent-rgb), 0.62);
   }
 
   .crt-banner-chevrons {
-    animation-duration: 0.78s;
+    animation-duration: 0.74s;
   }
 
   .crt-banner-pin-runner {
-    animation-duration: 1.18s;
+    animation-duration: 1.12s;
+  }
+
+  .crt-banner-pin-tail {
+    opacity: 0.58;
+    animation-duration: 1.12s;
+    animation-delay: -0.16s;
   }
 
   .crt-banner-scanline {
-    opacity: 0.58;
-    animation-duration: 1.55s;
+    opacity: 0.6;
+    animation-duration: 1.45s;
   }
 
   .crt-banner-led {
-    animation-duration: 1.08s;
+    animation-duration: 1.02s;
+  }
+
+  .crt-banner-horizon {
+    box-shadow: 0 0 8px rgba(var(--crt-banner-accent-rgb), 0.35);
+  }
+
+  .crt-banner-horizon-beam {
+    animation-duration: 2.7s;
+  }
+
+  .crt-banner-title-word::after {
+    animation-duration: 2.9s;
   }
 
   .crt-banner-sync-word {
+    border-color: rgba(var(--crt-banner-accent-rgb), 0.88);
+    box-shadow:
+      0 0 18px -2px rgba(var(--crt-banner-accent-rgb), 0.62),
+      inset 0 1px 0 rgba(255, 255, 255, 0.22);
     text-shadow:
-      0 0 6px rgba(var(--crt-banner-accent-rgb), 0.72),
-      0 0 18px rgba(var(--crt-banner-accent-rgb), 0.46),
-      -1px 0 0 rgba(255, 55, 85, 0.36),
-      1px 0 0 rgba(45, 225, 255, 0.36);
+      0 0 6px rgba(var(--crt-banner-accent-rgb), 0.75),
+      0 0 18px rgba(var(--crt-banner-accent-rgb), 0.48),
+      -1px 0 0 rgba(255, 55, 85, 0.38),
+      1px 0 0 rgba(45, 225, 255, 0.38);
   }
 
   .crt-banner-track {
+    border-color: rgba(var(--crt-banner-accent-rgb), 0.65);
     box-shadow:
-      0 0 9px rgba(var(--crt-banner-accent-rgb), 0.58),
+      0 0 10px rgba(var(--crt-banner-accent-rgb), 0.58),
       inset 0 0 4px rgba(var(--crt-banner-accent-rgb), 0.28);
   }
 
   .crt-banner-track-beam {
-    width: 46%;
-    animation-duration: 1.25s;
+    width: 48%;
+    animation-duration: 1.2s;
+  }
+
+  .crt-banner-track-return {
+    animation-duration: 2.1s;
   }
 
   /* 3. Desktop Sidebar Dual Vertical Data-Bus Carrier Lasers, Nav & Tuner Overdrive */
@@ -2616,15 +2898,28 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   }
 
   .crt-banner-chevrons {
-    animation-duration: 0.5s;
+    animation-duration: 0.48s;
   }
 
   .crt-banner-pin-runner {
-    animation-duration: 0.75s;
+    animation-duration: 0.7s;
+  }
+
+  .crt-banner-pin-tail {
+    animation-duration: 0.7s;
+    animation-delay: -0.1s;
+  }
+
+  .crt-banner-horizon-beam {
+    animation-duration: 1.6s;
   }
 
   .crt-banner-track-beam {
-    animation-duration: 0.85s;
+    animation-duration: 0.82s;
+  }
+
+  .crt-banner-track-return {
+    animation-duration: 1.35s;
   }
 
   .crt-telemetry-raster:not(.crt-telemetry-raster-secondary) {
@@ -2803,6 +3098,10 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   .crt-progress-beam::after,
   .crt-telemetry-raster,
   .crt-console-scan,
+  .crt-banner-horizon-beam,
+  .crt-banner-title-word::after,
+  .crt-banner-track-return,
+  .crt-banner-pin-tail,
   .crt-card-holo {
     opacity: 0 !important;
     animation: none !important;
@@ -2831,6 +3130,7 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   .crt-chart-endpoint-pulse,
   .crt-dryrun-flask-active,
   .crt-stop-active-pulse,
+  .crt-banner-screen-grid,
   .crt-banner-chevrons,
   .crt-banner-scanline,
   .crt-banner-pin-runner,
@@ -2844,12 +3144,12 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   }
   .crt-banner-track-beam {
     width: 100% !important;
-    opacity: 0.48 !important;
+    opacity: 0.56 !important;
     animation: none !important;
     transform: none !important;
     background: linear-gradient(
       90deg,
-      rgba(var(--crt-banner-accent-rgb), 0.18) 0%,
+      rgba(var(--crt-banner-accent-rgb), 0.2) 0%,
       var(--crt-banner-accent) 100%
     ) !important;
   }

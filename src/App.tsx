@@ -908,7 +908,7 @@ export default function App() {
       {showDegauss && <div aria-hidden="true" className="crt-layer-degauss" />}
       {/* Sticky Top Header & Full Sync Confirmation Container */}
       <div className="sticky top-0 z-30">
-        <header className="relative bg-crt-bg/95 backdrop-blur border-b border-crt-border px-4 lg:px-6 py-3.5 flex flex-wrap md:flex-nowrap items-center justify-between gap-4">
+        <header className="relative bg-crt-bg/95 backdrop-blur border-b border-crt-border px-4 lg:px-6 py-3 flex flex-wrap lg:flex-nowrap items-center justify-between gap-4">
           <div aria-hidden="true" className="crt-header-beam">
             <span />
           </div>
@@ -920,7 +920,7 @@ export default function App() {
             requestSectionChange('monitor');
           }}
           aria-label="RetroGameTalk Sync"
-          className="crt-brand-link inline-flex items-center shrink-0 min-h-8 rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-crt-phosphor"
+          className="crt-brand-link inline-flex items-center shrink-0 min-h-10 sm:min-h-[52px] rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-crt-phosphor"
         >
           <BrandMark
             isSyncRunning={Boolean(status?.activeRun)}
