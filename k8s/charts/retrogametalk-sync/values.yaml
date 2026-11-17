@@ -84,6 +84,10 @@ scraper:
   baseUrl: https://retrogametalk.com/repo
   # RetroGameTalk XenForo login URL
   loginUrl: https://retrogametalk.com/login/login
+  # Optional base Git repository URL used to link branch/tag and commit SHA in the UI footer.
+  # Leave empty ("") to inherit the container image's built-in GIT_URL, set a URL (e.g.
+  # "https://github.com/jeremyj563/retrogametalk-sync") to override it, or set "none" to disable links.
+  gitUrl: ""
   # Enable or pause automatic cron scheduling ("true" or "false"; empty uses UI/SQLite setting)
   scheduleEnabled: ""
   # 5-field cron schedule for incremental sync runs (empty uses UI/SQLite default "0 */6 * * *")
