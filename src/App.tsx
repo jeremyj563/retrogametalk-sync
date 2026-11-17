@@ -27,6 +27,7 @@ import {
   loadInitialCrtDisplaySettings,
   saveCrtDisplaySettings,
 } from './shared/crtDisplay';
+import { buildGitBranchUrl, buildGitCommitUrl } from './shared/gitUrl';
 import type {
   ActivityLogRecord,
   ActiveTransferState,
@@ -56,6 +57,54 @@ interface PendingNavIntent {
   section: NavSection;
   target: OperationsSectionTarget | null;
   historyDelta: number;
+}
+
+function BuildFooterMeta({
+  build,
+  className,
+}: {
+  build: ServiceStatusSnapshot['build'];
+  className: string;
+}) {
+  const branchUrl = buildGitBranchUrl(build.gitUrl, build.version);
+  const commitUrl = buildGitCommitUrl(build.gitUrl, build.gitSha);
+  const shortSha =
+    build.gitSha && build.gitSha !== 'unknown' ? build.gitSha.slice(0, 7) : 'local';
+
+  return (
+    <div
+      className={className}
+      title={`Version: ${build.version} · Revision: ${build.gitSha}`}
+    >
+      {branchUrl ? (
+        <a
+          href={branchUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Open branch/ref ${build.version} (${branchUrl})`}
+          className="truncate hover:text-crt-phosphor hover:underline underline-offset-2 focus-visible:outline-none focus-visible:text-crt-phosphor focus-visible:underline transition-colors"
+        >
+          {build.version}
+        </a>
+      ) : (
+        <span className="truncate">{build.version}</span>
+      )}
+
+      {commitUrl ? (
+        <a
+          href={commitUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Open commit ${build.gitSha} (${commitUrl})`}
+          className="tabular-nums shrink-0 hover:text-crt-phosphor hover:underline underline-offset-2 focus-visible:outline-none focus-visible:text-crt-phosphor focus-visible:underline transition-colors"
+        >
+          {shortSha}
+        </a>
+      ) : (
+        <span className="tabular-nums shrink-0">{shortSha}</span>
+      )}
+    </div>
+  );
 }
 
 const OPERATIONS_TARGET_HASH_SLUG: Record<OperationsSectionTarget, string> = {
@@ -1200,17 +1249,10 @@ export default function App() {
             <CrtDisplayControl settings={crtSettings} onChange={setCrtSettings} />
 
             {status?.build && (
-              <div
+              <BuildFooterMeta
+                build={status.build}
                 className="flex items-center justify-between gap-2 px-1 text-[11px] font-mono text-crt-muted/60 hover:text-crt-muted transition-colors"
-                title={`Version: ${status.build.version} · Revision: ${status.build.gitSha}`}
-              >
-                <span className="truncate">{status.build.version}</span>
-                <span className="tabular-nums shrink-0">
-                  {status.build.gitSha && status.build.gitSha !== 'unknown'
-                    ? status.build.gitSha.slice(0, 7)
-                    : 'local'}
-                </span>
-              </div>
+              />
             )}
           </div>
         </aside>
@@ -1289,17 +1331,10 @@ export default function App() {
               )}
 
               {status.build && (
-                <div
-                  className="lg:hidden mt-8 pt-3 border-t border-crt-border/50 flex items-center justify-between text-[11px] font-mono text-crt-muted/60"
-                  title={`Version: ${status.build.version} · Revision: ${status.build.gitSha}`}
-                >
-                  <span className="truncate">{status.build.version}</span>
-                  <span className="tabular-nums shrink-0">
-                    {status.build.gitSha && status.build.gitSha !== 'unknown'
-                      ? status.build.gitSha.slice(0, 7)
-                      : 'local'}
-                  </span>
-                </div>
+                <BuildFooterMeta
+                  build={status.build}
+                  className="lg:hidden mt-8 pt-3 border-t border-crt-border/50 flex items-center justify-between gap-2 text-[11px] font-mono text-crt-muted/60"
+                />
               )}
             </>
           )}
