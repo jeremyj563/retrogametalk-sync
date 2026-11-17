@@ -253,12 +253,59 @@ function resolveRuntimeBuildInfo(): {
   };
 }
 
+function isEphemeralPartFile(name: string): boolean {
+  return (
+    name.endsWith('.part') ||
+    name.endsWith('.part.meta.json') ||
+    name.endsWith('.part.meta.json.tmp')
+  );
+}
+
+async function runWithConcurrency<T>(
+  items: readonly T[],
+  concurrency: number,
+  signal: AbortSignal,
+  worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+  const workerCount = Math.max(1, Math.min(items.length, Math.floor(concurrency || 1)));
+  if (workerCount === 1) {
+    for (let i = 0; i < items.length; i += 1) {
+      if (signal.aborted) break;
+      await worker(items[i]!, i);
+    }
+    return;
+  }
+
+  let nextIdx = 0;
+  let fatalErr: unknown = null;
+  const runWorker = async () => {
+    while (!signal.aborted && fatalErr === null) {
+      const idx = nextIdx;
+      nextIdx += 1;
+      if (idx >= items.length) break;
+      try {
+        await worker(items[idx]!, idx);
+      } catch (err) {
+        if (fatalErr === null) {
+          fatalErr = err;
+        }
+        throw err;
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+}
+
 export class ScraperOrchestrator extends EventEmitter {
   private rateLimiter: AdaptiveRateLimiter;
   private client: RetroGameTalkClient;
   private cronJob: Cron | null = null;
   private activeRun: SyncRunRecord | null = null;
   private activeTransfer: ActiveTransferState | null = null;
+  private activeTransfers = new Map<string, ActiveTransferState>();
+  private activeTransferOrder: string[] = [];
   private transferHistory: TransferSpeedSample[] = [];
   private lastTransferSampleMs = 0;
   private currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
@@ -398,7 +445,7 @@ export class ScraperOrchestrator extends EventEmitter {
           if (fs.existsSync(shotsDir) && fs.statSync(shotsDir).isDirectory()) {
             const shotFiles = fs
               .readdirSync(shotsDir)
-              .filter((f) => !f.startsWith('.') && !f.endsWith('.part'))
+              .filter((f) => !f.startsWith('.') && !isEphemeralPartFile(f))
               .sort();
             for (const sf of shotFiles) {
               const absShot = path.join(shotsDir, sf);
@@ -414,7 +461,7 @@ export class ScraperOrchestrator extends EventEmitter {
               (de) =>
                 de.isFile() &&
                 !de.name.startsWith('.') &&
-                !de.name.endsWith('.part') &&
+                !isEphemeralPartFile(de.name) &&
                 de.name !== 'metadata.json' &&
                 de.name !== 'scraper.db' &&
                 de.name !== 'scraper.db-wal' &&
@@ -718,7 +765,7 @@ export class ScraperOrchestrator extends EventEmitter {
       for (const entry of entries) {
         if (
           entry.name.startsWith('.') ||
-          entry.name.endsWith('.part') ||
+          isEphemeralPartFile(entry.name) ||
           entry.name === 'scraper.db' ||
           entry.name === 'scraper.db-wal' ||
           entry.name === 'scraper.db-shm' ||
@@ -821,7 +868,7 @@ export class ScraperOrchestrator extends EventEmitter {
     for (const entry of entries) {
       if (
         entry.name.startsWith('.') ||
-        entry.name.endsWith('.part') ||
+        isEphemeralPartFile(entry.name) ||
         entry.name === 'scraper.db' ||
         entry.name === 'scraper.db-wal' ||
         entry.name === 'scraper.db-shm' ||
@@ -878,12 +925,19 @@ export class ScraperOrchestrator extends EventEmitter {
       for (const file of item.files) {
         if (!file.localPath) continue;
         const target = path.resolve(file.localPath);
-        if (target.startsWith(root + path.sep) && fs.existsSync(target)) {
-          try {
-            fs.rmSync(target, { recursive: true, force: true });
-            filesRemoved += 1;
-          } catch (rmErr) {
-            this.log('debug', `Non-fatal error deleting catalog file ${target}`, formatErrorDetails(rmErr));
+        if (target.startsWith(root + path.sep)) {
+          if (fs.existsSync(target)) {
+            try {
+              fs.rmSync(target, { recursive: true, force: true });
+              filesRemoved += 1;
+            } catch (rmErr) {
+              this.log('debug', `Non-fatal error deleting catalog file ${target}`, formatErrorDetails(rmErr));
+            }
+          }
+          for (const sidecar of [`${target}.part`, `${target}.part.meta.json`, `${target}.part.meta.json.tmp`]) {
+            if (fs.existsSync(sidecar)) {
+              fs.rmSync(sidecar, { force: true });
+            }
           }
         }
       }
@@ -966,7 +1020,7 @@ export class ScraperOrchestrator extends EventEmitter {
     if (fs.existsSync(shotsDir)) {
       const files = fs
         .readdirSync(shotsDir)
-        .filter((f) => !f.startsWith('.') && !f.endsWith('.part'))
+        .filter((f) => !f.startsWith('.') && !isEphemeralPartFile(f))
         .sort();
       if (index >= 0 && index < files.length) {
         const candidate = path.join(shotsDir, files[index]);
@@ -1257,34 +1311,99 @@ export class ScraperOrchestrator extends EventEmitter {
     return cleared;
   }
 
-  private handleTransferProgress(progress: {
-    bytesReceived: number;
-    totalBytes: number | null;
-    bytesPerSec: number;
-  }): void {
-    if (!this.activeTransfer) return;
-    this.activeTransfer.bytesReceived = progress.bytesReceived;
-    this.activeTransfer.totalBytes = progress.totalBytes;
-    this.activeTransfer.bytesPerSec = progress.bytesPerSec;
+  private clearAllActiveTransfers(): void {
+    this.activeTransfers.clear();
+    this.activeTransferOrder = [];
+    this.activeTransfer = null;
+    this.emit('transfer', null);
+  }
+
+  private syncActiveTransferSnapshot(forceSample = false): void {
+    if (this.activeTransfers.size === 0) {
+      this.activeTransfer = null;
+      this.emit('transfer', null);
+      return;
+    }
+
+    let primary: ActiveTransferState | null = null;
+    let totalSpeed = 0;
+    let totalChunks = 0;
+    let anyResumed = false;
+
+    for (const key of this.activeTransferOrder) {
+      const entry = this.activeTransfers.get(key);
+      if (!entry) continue;
+      totalSpeed += Math.max(0, entry.bytesPerSec || 0);
+      totalChunks += Math.max(1, entry.activeChunks ?? 1);
+      if (entry.resumed) anyResumed = true;
+      if (
+        !primary ||
+        ((entry.totalBytes ?? 0) > (primary.totalBytes ?? 0)) ||
+        (primary.totalBytes === null && entry.bytesReceived > primary.bytesReceived)
+      ) {
+        primary = entry;
+      }
+    }
+
+    if (!primary) {
+      this.activeTransfer = null;
+      this.emit('transfer', null);
+      return;
+    }
+
+    const activeWorkers = this.activeTransfers.size;
+    this.activeTransfer = {
+      ...primary,
+      bytesPerSec: totalSpeed,
+      activeChunks: totalChunks,
+      activeWorkers,
+      resumed: anyResumed || Boolean(primary.resumed),
+    };
     this.emit('transfer', this.activeTransfer);
 
     const now = Date.now();
     const isFinished =
-      progress.totalBytes !== null && progress.totalBytes > 0 && progress.bytesReceived >= progress.totalBytes;
-    if (progress.bytesPerSec > 0 && (now - this.lastTransferSampleMs >= 450 || isFinished)) {
+      primary.totalBytes !== null &&
+      primary.totalBytes > 0 &&
+      primary.bytesReceived >= primary.totalBytes;
+    if (totalSpeed > 0 && (now - this.lastTransferSampleMs >= 450 || (forceSample && isFinished))) {
       this.lastTransferSampleMs = now;
       this.transferHistory.push({
         timestamp: new Date(now).toISOString(),
-        bytesPerSec: Math.round(progress.bytesPerSec),
-        bytesReceived: progress.bytesReceived,
-        totalBytes: progress.totalBytes,
-        filename: this.activeTransfer.filename,
-        systemName: this.activeTransfer.systemName,
+        bytesPerSec: Math.round(totalSpeed),
+        bytesReceived: primary.bytesReceived,
+        totalBytes: primary.totalBytes,
+        filename: primary.filename,
+        systemName: primary.systemName,
       });
       if (this.transferHistory.length > 90) {
         this.transferHistory.shift();
       }
     }
+  }
+
+  private handleTransferProgress(
+    workerKey: string,
+    progress: {
+      bytesReceived: number;
+      totalBytes: number | null;
+      bytesPerSec: number;
+      activeChunks?: number;
+      resumed?: boolean;
+    },
+  ): void {
+    const existing = this.activeTransfers.get(workerKey);
+    if (!existing) return;
+    existing.bytesReceived = progress.bytesReceived;
+    existing.totalBytes = progress.totalBytes;
+    existing.bytesPerSec = progress.bytesPerSec;
+    if (progress.activeChunks !== undefined) {
+      existing.activeChunks = progress.activeChunks;
+    }
+    if (progress.resumed !== undefined) {
+      existing.resumed = progress.resumed;
+    }
+    this.syncActiveTransferSnapshot(true);
   }
 
   getStatusSnapshot(): ServiceStatusSnapshot {
@@ -1486,8 +1605,8 @@ export class ScraperOrchestrator extends EventEmitter {
       if (freshDownloads.length === 0) {
         throw new Error(`No downloadable archive files found on release page ${pageUrl}`);
       }
-      for (const release of freshDownloads) {
-        if (signal.aborted) break;
+      await runWithConcurrency(freshDownloads, cfg.maxConcurrency, signal, async (release) => {
+        if (signal.aborted) return;
         if (isDryRun) {
           const mirrored = resolveMirroredPaths(cfg.baseUrl, release.pageUrl || pageUrl, cfg.downloadDir, release.filename);
           const remotePath = release.remotePath || mirrored.remotePath;
@@ -1503,7 +1622,7 @@ export class ScraperOrchestrator extends EventEmitter {
               release.downloadUrl,
             );
           }
-          continue;
+          return;
         }
         const outcome = await this.downloadReleaseFile(
           item.id,
@@ -1518,7 +1637,7 @@ export class ScraperOrchestrator extends EventEmitter {
         if (outcome.skipped) skipped += 1;
         if (outcome.failed) failed += 1;
         bytes += outcome.bytes;
-      }
+      });
       return { downloaded, skipped, failed, bytes, wouldRecover };
     }
 
@@ -1553,9 +1672,8 @@ export class ScraperOrchestrator extends EventEmitter {
       return undefined;
     };
 
-    for (let fileIdx = 0; fileIdx < filesToRetry.length; fileIdx += 1) {
-      const targetFile = filesToRetry[fileIdx]!;
-      if (signal.aborted) break;
+    await runWithConcurrency(filesToRetry, cfg.maxConcurrency, signal, async (targetFile, fileIdx) => {
+      if (signal.aborted) return;
       const matched = matchFreshDownload(targetFile);
 
       // If no fresh download link was extracted and stored downloadUrl is just the page URL itself, fail explicitly
@@ -1578,7 +1696,7 @@ export class ScraperOrchestrator extends EventEmitter {
             pageUrl,
           );
           failed += 1;
-          continue;
+          return;
         }
         upsertReleaseFile({
           releaseId: item.id,
@@ -1597,7 +1715,7 @@ export class ScraperOrchestrator extends EventEmitter {
         runLogger('error', `Could not resolve fresh download link for ${targetFile.filename}`, pageUrl);
         this.emitCatalogUpdated('file_failed', item.id);
         failed += 1;
-        continue;
+        return;
       }
 
       const release: DiscoveredRelease = matched || {
@@ -1624,7 +1742,7 @@ export class ScraperOrchestrator extends EventEmitter {
             release.downloadUrl,
           );
         }
-        continue;
+        return;
       }
 
       const latestRetryItem = getRepositoryItemById(item.id) || item;
@@ -1648,7 +1766,7 @@ export class ScraperOrchestrator extends EventEmitter {
       if (outcome.skipped) skipped += 1;
       if (outcome.failed) failed += 1;
       bytes += outcome.bytes;
-    }
+    });
 
     return { downloaded, skipped, failed, bytes, wouldRecover };
   }
@@ -1814,7 +1932,7 @@ export class ScraperOrchestrator extends EventEmitter {
           runLogger('error', `${isDryRun ? 'Retry dry run' : 'Retry run'} #${run.id} failed: ${msg}`);
         }
       } finally {
-        this.activeTransfer = null;
+        this.clearAllActiveTransfers();
         this.activeRun = null;
         this.abortController = null;
         this.currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
@@ -1898,9 +2016,10 @@ export class ScraperOrchestrator extends EventEmitter {
           this.client.setPersistedLastAuthenticatedAt(ts);
         }
 
-        for (let idx = 0; idx < targets.length; idx += 1) {
-          if (signal.aborted) break;
-          const item = getRepositoryItemById(targets[idx].id) || targets[idx];
+        let retryCompletedTargets = 0;
+        await runWithConcurrency(targets, cfg.maxConcurrency, signal, async (target, idx) => {
+          if (signal.aborted) return;
+          const item = getRepositoryItemById(target.id) || target;
           let filesToRetry = item.files.filter(
             (f) =>
               f.status === 'failed' ||
@@ -1914,10 +2033,11 @@ export class ScraperOrchestrator extends EventEmitter {
           }
           const hasPageUrl = item.remoteUrl.split('#')[0].startsWith('http');
           if (filesToRetry.length === 0 && !hasPageUrl) {
-            continue;
+            return;
           }
 
-          this.currentPhase = `${phasePrefix} (${idx + 1}/${targets.length}): ${item.systemName} / ${item.title}`;
+          retryCompletedTargets += 1;
+          this.currentPhase = `${phasePrefix} (${Math.min(retryCompletedTargets, targets.length)}/${targets.length}): ${item.systemName} / ${item.title}`;
           this.emitStatus();
 
           try {
@@ -1941,7 +2061,7 @@ export class ScraperOrchestrator extends EventEmitter {
             failed += outcome.failed;
             bytes += outcome.bytes;
           } catch (itemErr) {
-            if (signal.aborted) break;
+            if (signal.aborted) return;
             const errMsg = itemErr instanceof Error ? itemErr.message : String(itemErr);
             if (/Cloudflare|Authentication|Re-authentication/i.test(errMsg)) {
               throw itemErr;
@@ -1990,7 +2110,8 @@ export class ScraperOrchestrator extends EventEmitter {
             avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
           });
           this.emitStatus();
-        }
+          void idx;
+        });
 
         if (!signal.aborted && failed > 0 && downloaded === 0 && wouldRecover === 0 && skipped === 0) {
           throw new Error(`${isDryRun ? 'Dry-run batch retry' : 'Batch retry'} failed for all ${failed} file(s)`);
@@ -2034,7 +2155,7 @@ export class ScraperOrchestrator extends EventEmitter {
           this.lockRenewTimer = null;
         }
         releaseDistributedLock(lockKey, POD_ID);
-        this.activeTransfer = null;
+        this.clearAllActiveTransfers();
         this.activeRun = null;
         this.abortController = null;
         this.currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
@@ -2344,9 +2465,8 @@ export class ScraperOrchestrator extends EventEmitter {
           ...eligibleReleases.map((r) => r.remoteUrl),
         ]).size;
 
-        for (let fileIdx = 0; fileIdx < eligibleReleases.length; fileIdx += 1) {
-          const rel = eligibleReleases[fileIdx]!;
-          if (signal.aborted) break;
+        await runWithConcurrency(eligibleReleases, cfg.maxConcurrency, signal, async (rel, fileIdx) => {
+          if (signal.aborted) return;
           processedFileUrls.add(rel.remoteUrl);
           newFound += 1;
 
@@ -2367,7 +2487,7 @@ export class ScraperOrchestrator extends EventEmitter {
           if (outcome.failed) failedCount += 1;
           bytesDownloaded += outcome.bytes;
           persistCounters();
-        }
+        });
       };
 
       const inspectAndProcessReleasePage = async (
@@ -2649,6 +2769,7 @@ export class ScraperOrchestrator extends EventEmitter {
           }
 
           let foundNewerReleaseOnPage = false;
+          const releaseCandidates: string[] = [];
           for (const relPageUrl of extracted.releasePages) {
             if (signal.aborted) break;
             if (cutoffMs !== null) {
@@ -2660,7 +2781,11 @@ export class ScraperOrchestrator extends EventEmitter {
                 }
               }
             }
+            releaseCandidates.push(relPageUrl);
+          }
 
+          await runWithConcurrency(releaseCandidates, cfg.maxConcurrency, signal, async (relPageUrl) => {
+            if (signal.aborted) return;
             const inspectPrefix = isDryRun
               ? `Dry Run (${dryRunScopeTag}) inspecting`
               : isDeltaMode
@@ -2673,7 +2798,7 @@ export class ScraperOrchestrator extends EventEmitter {
             if (res.newerThanCutoff) {
               foundNewerReleaseOnPage = true;
             }
-          }
+          });
 
           const shouldFollowPagination =
             cutoffMs === null ||
@@ -2967,8 +3092,7 @@ export class ScraperOrchestrator extends EventEmitter {
         this.lockRenewTimer = null;
       }
       releaseDistributedLock(lockKey, POD_ID);
-      this.activeTransfer = null;
-      this.emit('transfer', null);
+      this.clearAllActiveTransfers();
       this.activeRun = null;
       this.abortController = null;
       this.currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
@@ -3023,8 +3147,8 @@ export class ScraperOrchestrator extends EventEmitter {
     ).length;
     const totalInItem = Math.max(fileSequence?.total ?? 0, initial.release.files.length, 1);
 
-    this.currentPhase = `Downloading ${release.systemName} / ${release.filename}`;
-    this.activeTransfer = {
+    const workerKey = `${releaseId}:${initial.file.id}`;
+    const transferEntry: ActiveTransferState = {
       itemId: releaseId,
       fileId: initial.file.id,
       fileIndex: fileSequence?.index ?? null,
@@ -3037,8 +3161,24 @@ export class ScraperOrchestrator extends EventEmitter {
       bytesReceived: 0,
       totalBytes: null,
       bytesPerSec: 0,
+      activeChunks: 1,
+      activeWorkers: this.activeTransfers.size + 1,
+      resumed: false,
     };
-    this.emit('transfer', this.activeTransfer);
+
+    const unregisterWorker = () => {
+      this.activeTransfers.delete(workerKey);
+      this.activeTransferOrder = this.activeTransferOrder.filter((k) => k !== workerKey);
+      this.syncActiveTransferSnapshot(true);
+    };
+
+    this.activeTransfers.set(workerKey, transferEntry);
+    this.activeTransferOrder.push(workerKey);
+    this.currentPhase =
+      this.activeTransfers.size > 1
+        ? `Downloading ${this.activeTransfers.size} files in parallel (primary: ${release.systemName} / ${release.filename})`
+        : `Downloading ${release.systemName} / ${release.filename}`;
+    this.syncActiveTransferSnapshot(false);
     this.emitCatalogUpdated('file_downloading', releaseId);
     this.emitStatus();
 
@@ -3051,7 +3191,7 @@ export class ScraperOrchestrator extends EventEmitter {
           cfg,
           signal,
           (progress) => {
-            this.handleTransferProgress(progress);
+            this.handleTransferProgress(workerKey, progress);
           },
           runLogger,
         );
@@ -3129,14 +3269,13 @@ export class ScraperOrchestrator extends EventEmitter {
           cfg,
           signal,
           (progress) => {
-            this.handleTransferProgress(progress);
+            this.handleTransferProgress(workerKey, progress);
           },
           runLogger,
         );
       }
 
-      this.activeTransfer = null;
-      this.emit('transfer', null);
+      unregisterWorker();
 
       if (res.outcome === 'skipped') {
         let existingMtimeIso: string | null = null;
@@ -3187,8 +3326,7 @@ export class ScraperOrchestrator extends EventEmitter {
       this.emitCatalogUpdated('file_downloaded', releaseId);
       return { downloaded: true, skipped: false, failed: false, bytes: res.bytes };
     } catch (err) {
-      this.activeTransfer = null;
-      this.emit('transfer', null);
+      unregisterWorker();
       const errMsg = err instanceof Error ? err.message : String(err);
       upsertReleaseFile({
         releaseId,

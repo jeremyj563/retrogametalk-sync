@@ -324,6 +324,14 @@ export function getInternalConfig(): ScraperConfigInternal {
   let backoffMultiplier = Number(row.backoff_multiplier);
   let maxRetries = Number(row.max_retries);
   let maxConcurrency = Number(row.max_concurrency);
+  const rawRowChunkConc = Number(row.download_chunk_concurrency ?? 3);
+  let downloadChunkConcurrency = Number.isFinite(rawRowChunkConc)
+    ? Math.max(1, Math.min(4, Math.round(rawRowChunkConc)))
+    : 3;
+  const rawRowChunkMinMb = Number(row.download_chunk_min_size_mb ?? 8);
+  let downloadChunkMinSizeMb = Number.isFinite(rawRowChunkMinMb)
+    ? Math.max(4, Math.min(64, Math.round(rawRowChunkMinMb)))
+    : 8;
   let requestTimeoutMs = Number(row.request_timeout_ms);
   let userAgent = String(row.user_agent);
 
@@ -354,6 +362,20 @@ export function getInternalConfig(): ScraperConfigInternal {
   if (process.env.SCRAPER_MAX_CONCURRENCY) {
     maxConcurrency = Number(process.env.SCRAPER_MAX_CONCURRENCY);
     envOverrides.push('SCRAPER_MAX_CONCURRENCY');
+  }
+  if (process.env.SCRAPER_DOWNLOAD_CHUNK_CONCURRENCY) {
+    const parsedChunkConc = Number(process.env.SCRAPER_DOWNLOAD_CHUNK_CONCURRENCY);
+    if (Number.isFinite(parsedChunkConc)) {
+      downloadChunkConcurrency = Math.max(1, Math.min(4, Math.round(parsedChunkConc)));
+    }
+    envOverrides.push('SCRAPER_DOWNLOAD_CHUNK_CONCURRENCY');
+  }
+  if (process.env.SCRAPER_DOWNLOAD_CHUNK_MIN_SIZE_MB) {
+    const parsedMinMb = Number(process.env.SCRAPER_DOWNLOAD_CHUNK_MIN_SIZE_MB);
+    if (Number.isFinite(parsedMinMb)) {
+      downloadChunkMinSizeMb = Math.max(4, Math.min(64, Math.round(parsedMinMb)));
+    }
+    envOverrides.push('SCRAPER_DOWNLOAD_CHUNK_MIN_SIZE_MB');
   }
   if (process.env.SCRAPER_REQUEST_TIMEOUT_MS) {
     requestTimeoutMs = Number(process.env.SCRAPER_REQUEST_TIMEOUT_MS);
@@ -411,6 +433,8 @@ export function getInternalConfig(): ScraperConfigInternal {
     backoffMultiplier,
     maxRetries,
     maxConcurrency,
+    downloadChunkConcurrency,
+    downloadChunkMinSizeMb,
     requestTimeoutMs,
     userAgent,
     systemFilter,
@@ -578,6 +602,8 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       backoff_multiplier = ?,
       max_retries = ?,
       max_concurrency = ?,
+      download_chunk_concurrency = ?,
+      download_chunk_min_size_mb = ?,
       request_timeout_ms = ?,
       user_agent = ?,
       system_filter = ?,
@@ -604,6 +630,14 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     Math.max(1.2, Math.min(5.0, Number(input.backoffMultiplier ?? current.backoff_multiplier))),
     Math.max(0, Math.min(15, Number(input.maxRetries ?? current.max_retries))),
     Math.max(1, Math.min(4, Number(input.maxConcurrency ?? current.max_concurrency))),
+    (() => {
+      const n = Number(input.downloadChunkConcurrency ?? current.download_chunk_concurrency ?? 3);
+      return Number.isFinite(n) ? Math.max(1, Math.min(4, Math.round(n))) : 3;
+    })(),
+    (() => {
+      const n = Number(input.downloadChunkMinSizeMb ?? current.download_chunk_min_size_mb ?? 8);
+      return Number.isFinite(n) ? Math.max(4, Math.min(64, Math.round(n))) : 8;
+    })(),
     Math.max(5000, Math.min(180000, Number(input.requestTimeoutMs ?? current.request_timeout_ms))),
     (input.userAgent ?? String(current.user_agent)).trim(),
     sanitizeSystemFilterString((input.systemFilter ?? String(current.system_filter)).trim()),

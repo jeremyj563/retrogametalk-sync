@@ -9,6 +9,23 @@ import { type Browser, type HttpMethod, Impit, type ImpitResponse } from 'impit'
 import { CookieJar } from 'tough-cookie';
 import { getCookieJarPath } from './db.ts';
 import { formatErrorDetails, isDebugLoggingEnabled, logServer } from './logger.ts';
+import {
+  type ByteRange,
+  findMissingByteRanges,
+  getPartialMetaPath,
+  isValidatorCompatibleForResume,
+  loadPartialTransferMeta,
+  mergeByteRanges,
+  parseContentRange,
+  pickIfRangeValidator,
+  removePartialTransferFiles,
+  RollingThroughputMeter,
+  savePartialTransferMeta,
+  splitMissingRangesIntoSlices,
+  streamResponseToFileOffset,
+  sumByteRanges,
+  type PartialTransferMeta,
+} from './rangeDownload.ts';
 import type { AdaptiveRateLimiter } from './rateLimiter.ts';
 import { classifyFileRole, decodeHtmlEntities, deriveReleaseTags } from './releaseTags.ts';
 import {
@@ -309,6 +326,43 @@ export interface DownloadProgress {
   bytesReceived: number;
   totalBytes: number | null;
   bytesPerSec: number;
+  activeChunks?: number;
+  resumed?: boolean;
+}
+
+class RangeThrottleError extends Error {
+  readonly status: number;
+  readonly cooldownMs: number;
+  readonly retryAfterSec?: number;
+  readonly hostname: string;
+
+  constructor(status: number, cooldownMs: number, retryAfterSec: number | undefined, hostname: string) {
+    super(`HTTP ${status} rate limit from ${hostname}`);
+    this.name = 'RangeThrottleError';
+    this.status = status;
+    this.cooldownMs = cooldownMs;
+    this.retryAfterSec = retryAfterSec;
+    this.hostname = hostname;
+  }
+}
+
+function createLinkedAbortController(parentSignal: AbortSignal): {
+  controller: AbortController;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  const onParentAbort = () => {
+    controller.abort(parentSignal.reason ?? new DOMException('Aborted', 'AbortError'));
+  };
+  if (parentSignal.aborted) {
+    onParentAbort();
+    return { controller, dispose: () => undefined };
+  }
+  parentSignal.addEventListener('abort', onParentAbort, { once: true });
+  return {
+    controller,
+    dispose: () => parentSignal.removeEventListener('abort', onParentAbort),
+  };
 }
 
 export type LoggerFn = (level: LogLevel, message: string, detail?: string | null) => void;
@@ -985,7 +1039,10 @@ export class RetroGameTalkClient {
         currentUrl = nextUrl;
         maxRedirects -= 1;
         if (res.status === 301 || res.status === 302 || res.status === 303) {
-          init = { method: 'GET' };
+          const nextHeaders = new Headers(init.headers || {});
+          nextHeaders.delete('content-type');
+          nextHeaders.delete('content-length');
+          init = { method: 'GET', headers: nextHeaders };
         }
         this.rateLimiter.recordSuccess(latency);
         continue;
@@ -2799,6 +2856,127 @@ export class RetroGameTalkClient {
     return { html, finalUrl, status: response.status };
   }
 
+  private async fetchRangeSlice(
+    targetUrl: string,
+    refererUrl: string,
+    slice: ByteRange,
+    ifRangeValidator: string | null,
+    config: ScraperConfigInternal,
+    signal: AbortSignal,
+    timeoutMs: number,
+    log?: LoggerFn,
+  ): Promise<{ response: ImpitResponse; finalUrl: string; latencyMs: number }> {
+    // Respect any active global 429/503 cooldown before issuing sibling range traffic
+    await this.rateLimiter.waitForCooldown(signal);
+
+    const started = performance.now();
+    let cookieHeader = await this.jar.getCookieString(targetUrl);
+    try {
+      if (!cookieHeader && isSameRootDomain(new URL(targetUrl).hostname, new URL(config.baseUrl).hostname)) {
+        cookieHeader = await this.jar.getCookieString(config.baseUrl);
+      }
+    } catch {
+      // Ignore malformed URL during fallback cookie lookup
+    }
+
+    const headers = new Headers();
+    headers.set('Range', `bytes=${slice[0]}-${slice[1]}`);
+    if (ifRangeValidator) {
+      headers.set('If-Range', ifRangeValidator);
+    }
+    if (refererUrl) {
+      headers.set('Referer', refererUrl);
+      try {
+        const refOrigin = new URL(refererUrl).origin;
+        const curOrigin = new URL(targetUrl).origin;
+        headers.set('Sec-Fetch-Site', refOrigin === curOrigin ? 'same-origin' : 'cross-site');
+      } catch {
+        // Keep default Sec-Fetch-Site
+      }
+    }
+    const trimmedUa = (config.userAgent || '').trim();
+    if (trimmedUa && !DEFAULT_BROWSER_USER_AGENTS.has(trimmedUa)) {
+      headers.set('User-Agent', trimmedUa);
+    }
+    if (cookieHeader) {
+      headers.set('Cookie', cookieHeader);
+    }
+
+    let res: ImpitResponse;
+    try {
+      res = await this.httpClient.fetch(targetUrl, {
+        method: 'GET',
+        headers,
+        redirect: 'manual',
+        timeout: timeoutMs,
+        signal,
+      });
+    } catch (err) {
+      const latency = performance.now() - started;
+      if (!signal.aborted) {
+        this.rateLimiter.recordError(latency);
+      }
+      throw err;
+    }
+
+    const latency = performance.now() - started;
+    const setCookies = typeof res.headers.getSetCookie === 'function'
+      ? res.headers.getSetCookie()
+      : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : []);
+    let storedCookies = 0;
+    for (const rawCookie of setCookies) {
+      const cookieName = rawCookie.split('=', 1)[0]?.trim() || '';
+      if (isIgnoredTrackingCookie(cookieName)) continue;
+      try {
+        await this.jar.setCookie(rawCookie, targetUrl);
+        storedCookies += 1;
+      } catch {
+        // Ignore malformed Set-Cookie on range chunk
+      }
+    }
+    if (storedCookies > 0) {
+      this.saveCookieJar();
+    }
+
+    if (res.status === 429 || res.status === 503) {
+      await res.body?.cancel().catch(() => undefined);
+      const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
+      const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency);
+      const hostname = (() => {
+        try {
+          return new URL(targetUrl).hostname;
+        } catch {
+          return 'mirror';
+        }
+      })();
+      throw new RangeThrottleError(res.status, cooldownMs, retryAfterSec, hostname);
+    }
+
+    if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+      const redirectLocation = new URL(res.headers.get('location')!, targetUrl).toString();
+      await res.body?.cancel().catch(() => undefined);
+      return this.fetchWithRedirects(
+        redirectLocation,
+        config,
+        {
+          method: 'GET',
+          headers: {
+            Referer: refererUrl || config.baseUrl,
+            Range: `bytes=${slice[0]}-${slice[1]}`,
+            ...(ifRangeValidator ? { 'If-Range': ifRangeValidator } : {}),
+          },
+        },
+        signal,
+        log,
+        6,
+        timeoutMs,
+      );
+    }
+
+    this.rateLimiter.recordSuccess(latency);
+    return { response: res, finalUrl: targetUrl, latencyMs: latency };
+  }
+
   async downloadFileAtomic(
     release: DiscoveredRelease,
     config: ScraperConfigInternal,
@@ -2830,7 +3008,10 @@ export class RetroGameTalkClient {
 
     // Decouple binary archive transfer timeout from short API/page requestTimeoutMs
     const streamTimeoutMs = Math.min(600_000, Math.max(config.requestTimeoutMs * 6, 180_000));
-    const maxStreamAttempts = Math.min(3, Math.max(1, (config.maxRetries ?? 2) + 1));
+    const maxStreamAttempts = Math.min(4, Math.max(1, (config.maxRetries ?? 2) + 1));
+    const configuredChunkConcurrency = Math.max(1, Math.min(4, Math.round(config.downloadChunkConcurrency ?? 3)));
+    const chunkThresholdBytes = Math.max(4, Math.min(64, Math.round(config.downloadChunkMinSizeMb ?? 8))) * 1024 * 1024;
+    let disableResumeForFreshRestart = false;
 
     for (let streamAttempt = 1; streamAttempt <= maxStreamAttempts; streamAttempt += 1) {
       if (signal.aborted) {
@@ -2838,26 +3019,83 @@ export class RetroGameTalkClient {
       }
 
       let partPath: string | null = null;
+      let keepPartialOnError = false;
+
       try {
+        const expectedPartPath = `${expectedLocalPath}.part`;
+        const preExistingMeta = disableResumeForFreshRestart
+          ? null
+          : loadPartialTransferMeta(expectedPartPath);
+        disableResumeForFreshRestart = false;
+
+        let initialRangeHeader: string | null = null;
+        let initialIfRangeHeader: string | null = null;
+
+        if (preExistingMeta && preExistingMeta.totalBytes && preExistingMeta.totalBytes > 0) {
+          const missing = findMissingByteRanges(preExistingMeta.totalBytes, preExistingMeta.completedRanges);
+          if (missing.length === 0) {
+            const partStat = fs.statSync(expectedPartPath);
+            if (partStat.size === preExistingMeta.totalBytes) {
+              await fs.promises.rename(expectedPartPath, expectedLocalPath);
+              await removePartialTransferFiles(expectedPartPath, { keepPartial: true });
+              return {
+                outcome: 'downloaded',
+                localPath: expectedLocalPath,
+                remotePath: release.remotePath,
+                filename: path.basename(expectedLocalPath),
+                bytes: partStat.size,
+              };
+            }
+          } else {
+            const firstMissing = missing[0]!;
+            const probeEnd =
+              configuredChunkConcurrency > 1
+                ? Math.min(firstMissing[1], firstMissing[0] + chunkThresholdBytes - 1)
+                : firstMissing[1];
+            initialRangeHeader = `bytes=${firstMissing[0]}-${probeEnd}`;
+            initialIfRangeHeader = pickIfRangeValidator(preExistingMeta);
+          }
+        } else if (configuredChunkConcurrency > 1) {
+          initialRangeHeader = `bytes=0-${chunkThresholdBytes - 1}`;
+        }
+
         log?.(
           'debug',
           `[Download] Starting transfer attempt ${streamAttempt}/${maxStreamAttempts} for "${release.filename}"`,
-          `url=${release.downloadUrl}, timeoutMs=${streamTimeoutMs}`,
+          `url=${release.downloadUrl}, chunks=${configuredChunkConcurrency}, thresholdMb=${Math.round(chunkThresholdBytes / (1024 * 1024))}, initialRange=${initialRangeHeader ?? 'none'}`,
         );
+
+        const requestHeaders: Record<string, string> = {
+          Referer: release.pageUrl || config.baseUrl,
+        };
+        if (initialRangeHeader) {
+          requestHeaders.Range = initialRangeHeader;
+          if (initialIfRangeHeader) {
+            requestHeaders['If-Range'] = initialIfRangeHeader;
+          }
+        }
+
         const { response, finalUrl } = await this.fetchWithRedirects(
           release.downloadUrl,
           config,
           {
             method: 'GET',
-            headers: {
-              Referer: release.pageUrl || config.baseUrl,
-            },
+            headers: requestHeaders,
           },
           signal,
           log,
           8,
           streamTimeoutMs,
         );
+
+        // Stale resume range (e.g. remote file shrunk): discard .part and restart cleanly
+        if (response.status === 416 && initialRangeHeader) {
+          await response.body?.cancel().catch(() => undefined);
+          await removePartialTransferFiles(expectedPartPath);
+          disableResumeForFreshRestart = true;
+          log?.('warn', `Resume offset rejected (HTTP 416) for ${release.filename}; restarting cleanly from byte 0`);
+          continue;
+        }
 
         if (!response.ok) {
           const bodySnippet = await response.text().catch(() => '');
@@ -2932,6 +3170,7 @@ export class RetroGameTalkClient {
           const stat = fs.statSync(finalLocalPath);
           if (stat.size > 0) {
             await response.body?.cancel().catch(() => undefined);
+            await removePartialTransferFiles(`${finalLocalPath}.part`);
             log?.('debug', `[Download] Deduplicated existing archive after Content-Disposition: ${finalRemotePath}`, `${stat.size} bytes`);
             return {
               outcome: 'skipped',
@@ -2943,7 +3182,7 @@ export class RetroGameTalkClient {
           }
         }
 
-        // 4. Atomic streaming write to .part -> rename
+        // 4. Prepare .part path & inspect Range / resume capabilities
         const targetDir = path.dirname(finalLocalPath);
         try {
           fs.mkdirSync(targetDir, { recursive: true });
@@ -2951,122 +3190,495 @@ export class RetroGameTalkClient {
           log?.('debug', `[Download] Failed creating target directory "${targetDir}"`, formatErrorDetails(mkdirErr));
           throw mkdirErr;
         }
-        partPath = `${finalLocalPath}.part`;
-        const totalBytesHeader = response.headers.get('content-length');
-        const totalBytes = totalBytesHeader ? Number(totalBytesHeader) : null;
+        const activePartPath = `${finalLocalPath}.part`;
+        partPath = activePartPath;
 
-        log?.(
-          'debug',
-          `[Download] Writing stream to disk "${partPath}"`,
-          `final="${finalLocalPath}", contentLength=${totalBytes ?? 'unknown'}, contentType="${contentType || 'unset'}", disposition="${rawDisposition || 'none'}"`,
-        );
+        const etag = response.headers.get('etag');
+        const lastModified = response.headers.get('last-modified');
+        const acceptRanges = (response.headers.get('accept-ranges') || '').toLowerCase();
+        const contentRange = response.status === 206
+          ? parseContentRange(response.headers.get('content-range'))
+          : null;
+
+        // If Content-Disposition resolved to a different filename, load that path's sidecar if present
+        const savedMeta = loadPartialTransferMeta(activePartPath);
+        let isResuming = false;
+        if (response.status === 206 && contentRange && savedMeta) {
+          const validatorOk = isValidatorCompatibleForResume(savedMeta, {
+            etag,
+            lastModified,
+            totalBytes: contentRange.total,
+          });
+          const expectedResumeMissing = savedMeta.totalBytes
+            ? findMissingByteRanges(savedMeta.totalBytes, savedMeta.completedRanges)
+            : [];
+          const matchesMissingStart = expectedResumeMissing.some(
+            ([ms]) => ms === contentRange.start,
+          );
+          if (validatorOk && matchesMissingStart) {
+            isResuming = true;
+          } else {
+            // Upstream asset changed or wrong offset: discard stale .part and restart cleanly
+            await response.body?.cancel().catch(() => undefined);
+            await removePartialTransferFiles(activePartPath);
+            disableResumeForFreshRestart = true;
+            log?.('info', `Remote archive validator changed for ${finalFilename}; restarting transfer cleanly`);
+            continue;
+          }
+        }
 
         if (!response.body) {
           throw new Error(`Empty response stream for ${release.downloadUrl}`);
         }
 
-        let bytesReceived = 0;
+        const meter = new RollingThroughputMeter();
         const startedAt = Date.now();
-        let lastEmitAt = 0;
 
-        const writeStream = fs.createWriteStream(partPath);
-        const nodeReadable = Readable.fromWeb(response.body as unknown as import('node:stream/web').ReadableStream);
+        // Determine single-stream vs Range-capable multi-chunk mode
+        if (response.status === 206 && contentRange && contentRange.total !== null && contentRange.total > 0) {
+          const totalBytes = contentRange.total;
+          const priorCompletedRanges: ByteRange[] = isResuming && savedMeta ? savedMeta.completedRanges : [];
+          let committedRanges: ByteRange[] = mergeByteRanges(priorCompletedRanges);
+          const inFlightWritten = new Map<number, [number, number]>();
+          let activeWorkersCount = 1;
+          let effectiveChunks = configuredChunkConcurrency;
+          let lastEmitAt = 0;
+          let lastMetaFlushBytes = 0;
 
-        await new Promise<void>((resolve, reject) => {
-          const onAbort = () => {
-            nodeReadable.destroy();
-            writeStream.destroy();
-            reject(new DOMException('Aborted', 'AbortError'));
+          const metaState: PartialTransferMeta = {
+            version: 1,
+            finalUrl,
+            etag: etag ?? savedMeta?.etag ?? null,
+            lastModified: lastModified ?? savedMeta?.lastModified ?? null,
+            totalBytes,
+            completedRanges: committedRanges,
+            updatedAt: new Date().toISOString(),
           };
-          signal.addEventListener('abort', onAbort, { once: true });
 
-          nodeReadable.on('data', (chunk: Buffer) => {
-            bytesReceived += chunk.length;
-            const now = Date.now();
-            if (now - lastEmitAt >= 200) {
-              lastEmitAt = now;
-              const elapsedSec = Math.max(0.1, (now - startedAt) / 1000);
-              onProgress({
-                bytesReceived,
-                totalBytes,
-                bytesPerSec: Math.round(bytesReceived / elapsedSec),
-              });
+          const computeReceivedBytes = (): number => {
+            const combined: ByteRange[] = [...committedRanges];
+            for (const pair of inFlightWritten.values()) {
+              combined.push(pair);
             }
-          });
+            return Math.min(totalBytes, sumByteRanges(combined));
+          };
 
-          nodeReadable.on('error', (err) => {
-            signal.removeEventListener('abort', onAbort);
-            log?.('debug', `[Download] Upstream readable stream error writing "${partPath}" after ${bytesReceived} bytes`, formatErrorDetails(err));
-            writeStream.destroy();
-            reject(err);
-          });
+          const emitProgressThrottled = (force = false) => {
+            const now = Date.now();
+            if (!force && now - lastEmitAt < 180) return;
+            lastEmitAt = now;
+            onProgress({
+              bytesReceived: computeReceivedBytes(),
+              totalBytes,
+              bytesPerSec: meter.getBytesPerSec(),
+              activeChunks: activeWorkersCount,
+              resumed: isResuming,
+            });
+          };
 
-          writeStream.on('error', (err) => {
-            signal.removeEventListener('abort', onAbort);
-            log?.('debug', `[Download] Disk WriteStream error writing "${partPath}" after ${bytesReceived} bytes`, formatErrorDetails(err));
-            nodeReadable.destroy();
-            reject(err);
-          });
+          let fileHandle: fs.promises.FileHandle;
+          if (isResuming && fs.existsSync(activePartPath)) {
+            fileHandle = await fs.promises.open(activePartPath, 'r+');
+            const st = await fileHandle.stat();
+            if (st.size !== totalBytes) {
+              await fileHandle.truncate(totalBytes);
+            }
+          } else {
+            await removePartialTransferFiles(activePartPath);
+            fileHandle = await fs.promises.open(activePartPath, 'w+');
+            await fileHandle.truncate(totalBytes);
+          }
 
-          writeStream.on('finish', () => {
-            signal.removeEventListener('abort', onAbort);
-            resolve();
-          });
+          let metaFlushChain: Promise<void> = Promise.resolve();
+          const flushMeta = (sync = false) => {
+            const snapshotRanges: ByteRange[] = [...committedRanges];
+            for (const pair of inFlightWritten.values()) {
+              snapshotRanges.push(pair);
+            }
+            committedRanges = mergeByteRanges(snapshotRanges);
+            metaState.completedRanges = committedRanges;
+            metaFlushChain = metaFlushChain.then(async () => {
+              if (sync) {
+                await fileHandle.sync().catch(() => undefined);
+              }
+              await savePartialTransferMeta(activePartPath, metaState);
+            });
+            return metaFlushChain;
+          };
 
-          nodeReadable.pipe(writeStream);
-        });
+          if (!isResuming) {
+            await savePartialTransferMeta(activePartPath, metaState);
+          }
+          keepPartialOnError = true;
 
-        if (totalBytes !== null && Number.isFinite(totalBytes) && totalBytes > 0 && bytesReceived !== totalBytes) {
-          log?.(
-            'debug',
-            `[Download] Byte count differs from Content-Length for "${finalFilename}"`,
-            `received=${bytesReceived}, contentLength=${totalBytes}`,
-          );
+          const commitSliceProgress = (workerId: number, sliceStart: number, writtenInSlice: number, delta: number) => {
+            if (writtenInSlice > 0) {
+              inFlightWritten.set(workerId, [sliceStart, sliceStart + writtenInSlice - 1]);
+            }
+            meter.recordBytes(delta);
+            lastMetaFlushBytes += delta;
+            if (lastMetaFlushBytes >= 2 * 1024 * 1024) {
+              lastMetaFlushBytes = 0;
+              void flushMeta(false);
+            }
+            emitProgressThrottled(false);
+          };
+
+          const finalizeSlice = (workerId: number, sliceStart: number, writtenInSlice: number) => {
+            inFlightWritten.delete(workerId);
+            if (writtenInSlice > 0) {
+              committedRanges = mergeByteRanges([
+                ...committedRanges,
+                [sliceStart, sliceStart + writtenInSlice - 1],
+              ]);
+            }
+          };
+
+          try {
+            let firstResponseConsumed = false;
+            let currentWaveThrottleRetries = 0;
+            const maxWaveThrottleRetries = Math.max(2, config.maxRetries + 1);
+
+            while (true) {
+              const allMissing = findMissingByteRanges(totalBytes, committedRanges);
+              if (allMissing.length === 0) {
+                break;
+              }
+
+              const { controller: waveController, dispose: disposeWave } = createLinkedAbortController(signal);
+              let waveThrottleError: RangeThrottleError | null = null;
+              let firstWaveError: unknown = null;
+
+              const initialSlice: ByteRange | null = !firstResponseConsumed
+                ? [contentRange.start, contentRange.end]
+                : null;
+
+              // Exclude the initial in-flight 206 probe slice from sibling work queue
+              const remainingRangesForQueue = initialSlice
+                ? findMissingByteRanges(totalBytes, mergeByteRanges([...committedRanges, initialSlice]))
+                : allMissing;
+
+              const canFanOut =
+                effectiveChunks > 1 &&
+                (initialSlice === null || totalBytes >= chunkThresholdBytes) &&
+                remainingRangesForQueue.length > 0;
+
+              const workerTargetCount = canFanOut
+                ? Math.min(effectiveChunks, Math.max(1, remainingRangesForQueue.length + (initialSlice ? 1 : 0)))
+                : 1;
+
+              const sliceQueue = remainingRangesForQueue.length > 0
+                ? splitMissingRangesIntoSlices(
+                    remainingRangesForQueue,
+                    Math.max(2 * 1024 * 1024, Math.floor(chunkThresholdBytes / 2)),
+                    workerTargetCount,
+                  )
+                : [];
+
+              activeWorkersCount = canFanOut
+                ? Math.min(effectiveChunks, sliceQueue.length + (initialSlice ? 1 : 0))
+                : 1;
+
+              if (isResuming || activeWorkersCount > 1) {
+                log?.(
+                  'debug',
+                  `[Download] Transfer "${finalFilename}" wave active`,
+                  `totalBytes=${totalBytes}, resumedBytes=${sumByteRanges(committedRanges)}, workers=${activeWorkersCount}, queuedSlices=${sliceQueue.length}`,
+                );
+              }
+              emitProgressThrottled(true);
+
+              const runRangeSlice = async (
+                workerId: number,
+                slice: ByteRange,
+                preloadedBody?: ReadableStream<Uint8Array>,
+              ) => {
+                const expectedLen = slice[1] - slice[0] + 1;
+                let sliceWritten = 0;
+
+                if (preloadedBody) {
+                  try {
+                    sliceWritten = await streamResponseToFileOffset(
+                      preloadedBody,
+                      fileHandle,
+                      slice[0],
+                      expectedLen,
+                      waveController.signal,
+                      (delta, totalWritten) => {
+                        commitSliceProgress(workerId, slice[0], totalWritten, delta);
+                      },
+                    );
+                    finalizeSlice(workerId, slice[0], sliceWritten);
+                    if (sliceWritten < expectedLen) {
+                      throw new Error(`Unexpected EOF in range ${slice[0]}-${slice[1]} (${sliceWritten}/${expectedLen} bytes)`);
+                    }
+                  } catch (err) {
+                    finalizeSlice(workerId, slice[0], sliceWritten);
+                    throw err;
+                  }
+                  return;
+                }
+
+                const ifRangeVal = pickIfRangeValidator(metaState);
+                const { response: sliceRes } = await this.fetchRangeSlice(
+                  finalUrl,
+                  release.pageUrl || config.baseUrl,
+                  slice,
+                  ifRangeVal,
+                  config,
+                  waveController.signal,
+                  streamTimeoutMs,
+                  log,
+                );
+
+                if (sliceRes.status === 200) {
+                  await sliceRes.body?.cancel().catch(() => undefined);
+                  throw new Error(`Range request downgraded to HTTP 200 (If-Range mismatch or unsupported)`);
+                }
+                if (!sliceRes.ok || !sliceRes.body) {
+                  await sliceRes.body?.cancel().catch(() => undefined);
+                  throw new Error(`HTTP ${sliceRes.status} on byte range ${slice[0]}-${slice[1]}`);
+                }
+
+                const sliceCr = parseContentRange(sliceRes.headers.get('content-range'));
+                if (!sliceCr || sliceCr.start !== slice[0] || (sliceCr.total !== null && sliceCr.total !== totalBytes)) {
+                  await sliceRes.body.cancel().catch(() => undefined);
+                  throw new Error(`Mismatched Content-Range for slice ${slice[0]}-${slice[1]}`);
+                }
+
+                const effectiveExpectedLen = Math.min(expectedLen, sliceCr.end - sliceCr.start + 1);
+                try {
+                  sliceWritten = await streamResponseToFileOffset(
+                    sliceRes.body,
+                    fileHandle,
+                    slice[0],
+                    effectiveExpectedLen,
+                    waveController.signal,
+                    (delta, totalWritten) => {
+                      commitSliceProgress(workerId, slice[0], totalWritten, delta);
+                    },
+                  );
+                  finalizeSlice(workerId, slice[0], sliceWritten);
+                  if (sliceWritten < effectiveExpectedLen) {
+                    throw new Error(`Unexpected EOF in range ${slice[0]}-${slice[1]} (${sliceWritten}/${effectiveExpectedLen} bytes)`);
+                  }
+                } catch (err) {
+                  finalizeSlice(workerId, slice[0], sliceWritten);
+                  throw err;
+                }
+              };
+
+              const spawnWorker = async (workerId: number, useInitialBody: boolean) => {
+                try {
+                  if (useInitialBody && initialSlice && !firstResponseConsumed) {
+                    firstResponseConsumed = true;
+                    await runRangeSlice(workerId, initialSlice, response.body!);
+                  }
+                  while (!waveController.signal.aborted) {
+                    const nextSlice = sliceQueue.shift();
+                    if (!nextSlice) break;
+                    await runRangeSlice(workerId, nextSlice);
+                  }
+                } catch (err) {
+                  if (err instanceof RangeThrottleError) {
+                    if (!waveThrottleError) {
+                      waveThrottleError = err;
+                      waveController.abort(err);
+                    }
+                    return;
+                  }
+                  if (!waveController.signal.aborted && !firstWaveError) {
+                    firstWaveError = err;
+                    waveController.abort(err);
+                  }
+                }
+              };
+
+              const workers: Promise<void>[] = [];
+              for (let w = 0; w < activeWorkersCount; w += 1) {
+                workers.push(spawnWorker(w, w === 0 && initialSlice !== null && !firstResponseConsumed));
+              }
+              await Promise.all(workers);
+              disposeWave();
+
+              // Flush all partial progress before deciding next step
+              await flushMeta(false);
+
+              if (signal.aborted) {
+                throw new DOMException('Aborted', 'AbortError');
+              }
+
+              if (waveThrottleError) {
+                const throttleErr = waveThrottleError as RangeThrottleError;
+                currentWaveThrottleRetries += 1;
+                effectiveChunks = Math.max(1, Math.floor(effectiveChunks / 2));
+                log?.(
+                  'throttle',
+                  `HTTP ${throttleErr.status} rate limit on chunk transfer for ${finalFilename}; pausing all chunks (${Math.round(throttleErr.cooldownMs / 1000)}s, next wave ${effectiveChunks}x)`,
+                  `Wave throttle ${currentWaveThrottleRetries}/${maxWaveThrottleRetries}${throttleErr.retryAfterSec ? ` · Retry-After: ${throttleErr.retryAfterSec}s` : ''}`,
+                );
+                if (currentWaveThrottleRetries > maxWaveThrottleRetries) {
+                  throw throttleErr;
+                }
+                await this.rateLimiter.waitForCooldown(signal);
+                continue;
+              }
+
+              if (firstWaveError) {
+                throw firstWaveError;
+              }
+            }
+
+            await fileHandle.sync().catch(() => undefined);
+            await fileHandle.close();
+
+            await fs.promises.rename(activePartPath, finalLocalPath);
+            await fs.promises.unlink(getPartialMetaPath(activePartPath)).catch(() => undefined);
+            partPath = null;
+            keepPartialOnError = false;
+
+            onProgress({
+              bytesReceived: totalBytes,
+              totalBytes,
+              bytesPerSec: meter.getBytesPerSec(),
+              activeChunks: effectiveChunks,
+              resumed: isResuming,
+            });
+
+            log?.(
+              'debug',
+              `[Download] Completed Range transfer "${finalLocalPath}" (${totalBytes} bytes in ${Date.now() - startedAt}ms, chunks=${effectiveChunks}, resumed=${isResuming})`,
+            );
+
+            return {
+              outcome: 'downloaded',
+              localPath: finalLocalPath,
+              remotePath: finalRemotePath,
+              filename: finalFilename,
+              bytes: totalBytes,
+            };
+          } catch (rangeErr) {
+            await flushMeta(false).catch(() => undefined);
+            await fileHandle.close().catch(() => undefined);
+            // If server downgraded a slice to 200 OK (upstream changed), wipe .part & retry cleanly
+            if (rangeErr instanceof Error && /downgraded to HTTP 200/i.test(rangeErr.message)) {
+              keepPartialOnError = false;
+              disableResumeForFreshRestart = true;
+            }
+            throw rangeErr;
+          }
         }
 
-        try {
-          await fs.promises.rename(partPath, finalLocalPath);
-        } catch (renameErr) {
-          log?.(
-            'debug',
-            `[Download] Atomic rename failed: "${partPath}" -> "${finalLocalPath}"`,
-            formatErrorDetails(renameErr),
-          );
-          throw renameErr;
-        }
-        partPath = null;
-        onProgress({
-          bytesReceived,
-          totalBytes: totalBytes ?? bytesReceived,
-          bytesPerSec: Math.round(bytesReceived / Math.max(0.1, (Date.now() - startedAt) / 1000)),
-        });
+        // Single-stream fallback (200 OK, unknown total length, or Range unsupported)
+        const totalBytesHeader = response.headers.get('content-length');
+        const parsedLen = totalBytesHeader ? Number(totalBytesHeader) : NaN;
+        const totalBytes = Number.isFinite(parsedLen) && parsedLen > 0 ? parsedLen : null;
+        const canResumeLater = acceptRanges.includes('bytes') && totalBytes !== null;
 
+        await removePartialTransferFiles(activePartPath);
+        const fileHandle = await fs.promises.open(activePartPath, 'w+');
+        keepPartialOnError = canResumeLater;
+
+        let bytesReceived = 0;
+        let lastEmitAt = 0;
         log?.(
           'debug',
-          `[Download] Completed atomic write "${finalLocalPath}" (${bytesReceived} bytes in ${Date.now() - startedAt}ms)`,
+          `[Download] Writing single stream to disk "${activePartPath}"`,
+          `final="${finalLocalPath}", contentLength=${totalBytes ?? 'unknown'}, acceptRanges="${acceptRanges || 'none'}", contentType="${contentType || 'unset'}"`,
         );
 
-        return {
-          outcome: 'downloaded',
-          localPath: finalLocalPath,
-          remotePath: finalRemotePath,
-          filename: finalFilename,
-          bytes: bytesReceived,
-        };
+        try {
+          bytesReceived = await streamResponseToFileOffset(
+            response.body,
+            fileHandle,
+            0,
+            null,
+            signal,
+            (delta, totalWritten) => {
+              bytesReceived = totalWritten;
+              meter.recordBytes(delta);
+              const now = Date.now();
+              if (now - lastEmitAt >= 180) {
+                lastEmitAt = now;
+                onProgress({
+                  bytesReceived,
+                  totalBytes,
+                  bytesPerSec: meter.getBytesPerSec(),
+                  activeChunks: 1,
+                  resumed: false,
+                });
+              }
+            },
+          );
+
+          await fileHandle.sync().catch(() => undefined);
+          await fileHandle.close();
+
+          if (totalBytes !== null && bytesReceived > 0 && bytesReceived < totalBytes) {
+            throw new Error(`Unexpected EOF for "${finalFilename}" after ${bytesReceived}/${totalBytes} bytes`);
+          }
+
+          await fs.promises.rename(activePartPath, finalLocalPath);
+          await fs.promises.unlink(getPartialMetaPath(activePartPath)).catch(() => undefined);
+          partPath = null;
+          keepPartialOnError = false;
+
+          onProgress({
+            bytesReceived,
+            totalBytes: totalBytes ?? bytesReceived,
+            bytesPerSec: meter.getBytesPerSec(),
+            activeChunks: 1,
+            resumed: false,
+          });
+
+          log?.(
+            'debug',
+            `[Download] Completed atomic write "${finalLocalPath}" (${bytesReceived} bytes in ${Date.now() - startedAt}ms)`,
+          );
+
+          return {
+            outcome: 'downloaded',
+            localPath: finalLocalPath,
+            remotePath: finalRemotePath,
+            filename: finalFilename,
+            bytes: bytesReceived,
+          };
+        } catch (streamErr) {
+          await fileHandle.close().catch(() => undefined);
+          if (canResumeLater && bytesReceived > 0 && totalBytes !== null) {
+            await savePartialTransferMeta(activePartPath, {
+              version: 1,
+              finalUrl,
+              etag,
+              lastModified,
+              totalBytes,
+              completedRanges: [[0, bytesReceived - 1]],
+              updatedAt: new Date().toISOString(),
+            }).catch(() => undefined);
+            keepPartialOnError = true;
+          } else {
+            keepPartialOnError = false;
+          }
+          throw streamErr;
+        }
       } catch (err) {
-        if (partPath) {
-          await fs.promises.unlink(partPath).catch((unlinkErr) => {
+        if (partPath && !keepPartialOnError) {
+          await removePartialTransferFiles(partPath).catch((unlinkErr) => {
             log?.('debug', `[Download] Failed cleaning up partial file "${partPath}"`, formatErrorDetails(unlinkErr));
           });
         }
         if (signal.aborted) {
           throw err;
         }
-        const canRetryStream = streamAttempt < maxStreamAttempts && this.isRetryableStreamError(err);
+        const canRetryStream =
+          streamAttempt < maxStreamAttempts &&
+          (this.isRetryableStreamError(err) ||
+            err instanceof RangeThrottleError ||
+            (err instanceof Error && /downgraded to HTTP 200/i.test(err.message)));
         log?.(
           'debug',
           `[Download] Stream attempt ${streamAttempt}/${maxStreamAttempts} caught error for "${release.filename}"`,
-          `retryable=${canRetryStream}, ${formatErrorDetails(err)}`,
+          `retryable=${canRetryStream}, keptPartial=${Boolean(partPath && keepPartialOnError)}, ${formatErrorDetails(err)}`,
         );
         if (!canRetryStream) {
           throw err;
@@ -3074,7 +3686,7 @@ export class RetroGameTalkClient {
         const errMsg = err instanceof Error ? err.message : String(err);
         log?.(
           'warn',
-          `Stream interrupted for ${release.filename}; retrying (${streamAttempt}/${maxStreamAttempts - 1})`,
+          `Stream interrupted for ${release.filename}; ${keepPartialOnError ? 'resuming' : 'retrying'} (${streamAttempt}/${maxStreamAttempts - 1})`,
           errMsg,
         );
         const retryWaitMs = Math.min(2000, Math.max(100, config.minDelayMs) * streamAttempt);
@@ -4245,34 +4857,62 @@ export class RetroGameTalkClient {
     );
     if (shotCount > 0) {
       const shotsDir = path.join(resolvedReleaseDir, 'screenshots');
-      for (let i = 0; i < shotCount; i += 1) {
-        if (signal?.aborted) break;
-        const cands = expandFullResImageCandidates(
-          metadata.screenshotCandidates?.[i]?.length
-            ? metadata.screenshotCandidates[i]
-            : [metadata.screenshotUrls[i]],
-          metadata.sourcePageUrl,
-        );
-        if (cands.length === 0) continue;
-        const indexName = String(i + 1).padStart(2, '0');
-        const shotSaved = await this.downloadAssetWithFallback(
-          cands,
-          path.join(shotsDir, indexName),
-          metadata.sourcePageUrl,
-          config,
-          { forceRefresh: shouldForceRefresh, signal, log },
-        );
-        if (shotSaved) {
-          if (!shotSaved.downloadedOrVerified) anyStaleFallback = true;
-          screenshotAbsPaths.push(shotSaved.filePath);
-          screenshotLocalRelPaths.push(
-            path.relative(resolvedReleaseDir, shotSaved.filePath).split(path.sep).join('/'),
+      const shotResults: ({
+        filePath: string | null;
+        relPath: string | null;
+        resolvedUrl: string;
+        staleFallback: boolean;
+      } | null)[] = new Array(shotCount).fill(null);
+
+      let nextShotIdx = 0;
+      const workerCount = Math.max(1, Math.min(shotCount, Math.min(config.maxConcurrency || 1, 3)));
+      const runShotWorker = async () => {
+        while (!signal?.aborted) {
+          const i = nextShotIdx;
+          nextShotIdx += 1;
+          if (i >= shotCount) break;
+          const cands = expandFullResImageCandidates(
+            metadata.screenshotCandidates?.[i]?.length
+              ? metadata.screenshotCandidates[i]
+              : [metadata.screenshotUrls[i]],
+            metadata.sourcePageUrl,
           );
-          resolvedScreenshotUrls.push(shotSaved.resolvedUrl || cands[0]);
-        } else {
-          anyStaleFallback = true;
-          resolvedScreenshotUrls.push(cands[0]);
+          if (cands.length === 0) continue;
+          const indexName = String(i + 1).padStart(2, '0');
+          const shotSaved = await this.downloadAssetWithFallback(
+            cands,
+            path.join(shotsDir, indexName),
+            metadata.sourcePageUrl,
+            config,
+            { forceRefresh: shouldForceRefresh, signal, log },
+          );
+          if (shotSaved) {
+            shotResults[i] = {
+              filePath: shotSaved.filePath,
+              relPath: path.relative(resolvedReleaseDir, shotSaved.filePath).split(path.sep).join('/'),
+              resolvedUrl: shotSaved.resolvedUrl || cands[0],
+              staleFallback: !shotSaved.downloadedOrVerified,
+            };
+          } else {
+            shotResults[i] = {
+              filePath: null,
+              relPath: null,
+              resolvedUrl: cands[0],
+              staleFallback: true,
+            };
+          }
         }
+      };
+
+      await Promise.all(Array.from({ length: workerCount }, () => runShotWorker()));
+      for (const res of shotResults) {
+        if (!res) continue;
+        if (res.staleFallback) anyStaleFallback = true;
+        if (res.filePath && res.relPath) {
+          screenshotAbsPaths.push(res.filePath);
+          screenshotLocalRelPaths.push(res.relPath);
+        }
+        resolvedScreenshotUrls.push(res.resolvedUrl);
       }
     }
 

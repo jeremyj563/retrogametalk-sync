@@ -114,6 +114,30 @@ export class AdaptiveRateLimiter {
     }
   }
 
+  getCooldownRemainingMs(): number {
+    if (!this.cooldownUntilMs) return 0;
+    const remaining = this.cooldownUntilMs - Date.now();
+    return remaining > 0 ? remaining : 0;
+  }
+
+  /**
+   * Shared cooldown barrier for sibling byte-range workers once an origin URL
+   * has already passed the main acquire() gate. Waits cleanly if any sibling or
+   * worker triggered an upstream 429/503 cooldown.
+   */
+  async waitForCooldown(signal?: AbortSignal): Promise<void> {
+    while (true) {
+      if (signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      const remaining = this.getCooldownRemainingMs();
+      if (remaining <= 0) {
+        return;
+      }
+      await sleepWithAbort(remaining, signal);
+    }
+  }
+
   recordSuccess(latencyMs: number): void {
     this.totalRequests += 1;
     this.totalLatencyMs += latencyMs;
