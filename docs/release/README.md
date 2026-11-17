@@ -18,14 +18,14 @@ Starting from **`1.0.0`**, every commit-ready change batch bumps either **PATCH*
 
 ## 2. Synchronized Version Files
 
-Before committing changes to `main`, keep these two version declarations synchronized to the exact same `X.Y.Z` SemVer string:
+Before committing changes to `main`, keep these three version declarations synchronized to the exact same `X.Y.Z` SemVer string:
 
 1. **`package.json`** → `"version": "X.Y.Z"` *(Canonical application SemVer read by CI and local runtime fallback)*
-2. **`k8s/charts/retrogametalk-sync/Chart.yaml`** → `appVersion: "X.Y.Z"`
+2. **`k8s/charts/retrogametalk-sync/Chart.yaml`** → `version: X.Y.Z` *(Helm chart packaging version)*
+3. **`k8s/charts/retrogametalk-sync/Chart.yaml`** → `appVersion: "X.Y.Z"` *(Application version deployed by the chart)*
 
-> **Helm Chart `version` vs. `appVersion`**:
-> - `appVersion` tracks the RetroGameTalk Sync application release (`1.0.0`, `1.0.1`, `1.1.0`, etc.) and must match `package.json`.
-> - `Chart.yaml`'s `version` (`0.1.0`) versions the Kubernetes Helm chart package itself and only needs bumping when chart templates, `values.yaml`, or chart dependencies change.
+> **Why Chart `version` and `appVersion` Stay in Lockstep**:
+> Because every commit on `main` mints a `X.Y.Z` release tag, keeping `Chart.yaml`'s `version` and `appVersion` identical ensures deploying or GitOps-tracking the chart from any Git SemVer tag always yields matching chart metadata and container image versions.
 
 ### Runtime Version Visibility
 At runtime, the application resolves its active version in the following order:
@@ -43,7 +43,7 @@ Because AI Studio commits externally to GitHub without a local git CLI inside th
 
 1. **Job 1 — `release` (`contents: write`)**
    - Reads `version` from `package.json` and verifies strict `X.Y.Z` SemVer formatting.
-   - Verifies **`MAJOR == 1`** (unless explicitly overridden for an authorized `2.0.0+` release) and confirms `Chart.yaml` `appVersion` matches `package.json`.
+   - Verifies **`MAJOR == 1`** (unless explicitly overridden for an authorized `2.0.0+` release) and confirms `Chart.yaml` `version` and `appVersion` both match `package.json`.
    - Checks whether tag `X.Y.Z` already exists in the repository:
      - **New version**: Creates an annotated git tag (`X.Y.Z`), pushes `refs/tags/X.Y.Z`, and creates a corresponding **GitHub Release** (`gh release create X.Y.Z --generate-notes`) using GitHub's auto-generated release notes from commits/PRs since the previous tag.
      - **Already-tagged version**: Logs a notice and skips duplicate tag/release creation safely so rolling `main` builds still succeed.
@@ -65,7 +65,7 @@ Because AI Studio commits externally to GitHub without a local git CLI inside th
 ## 4. Authorizing a Future Major (`2.0.0+`) Release
 
 When the maintainer explicitly approves moving to `2.0.0` (or later):
-1. Update `package.json` `"version"` and `Chart.yaml` `appVersion` to `"2.0.0"`.
+1. Update `package.json` `"version"`, `Chart.yaml` `version`, and `Chart.yaml` `appVersion` to `"2.0.0"`.
 2. Either:
    - Run **Actions → Release and Publish Container Image → Run workflow** with **`allow_major_bump: true`**, **or**
    - Temporarily set repository variable `ALLOW_MAJOR_VERSION_BUMP=true` in **Settings → Secrets and variables → Actions → Variables** before pushing to `main` (and unset or update the constraint afterwards).
@@ -74,7 +74,7 @@ When the maintainer explicitly approves moving to `2.0.0` (or later):
 
 ## 5. Recovery & Troubleshooting
 
-- **`Helm Chart appVersion does not match package.json version`**: Sync `k8s/charts/retrogametalk-sync/Chart.yaml` `appVersion` to match `package.json` `"version"` and push to `main`.
+- **`Helm Chart version or appVersion does not match package.json version`**: Sync both `version` and `appVersion` in `k8s/charts/retrogametalk-sync/Chart.yaml` to match `package.json` `"version"` and push to `main`.
 - **Re-running a failed container build after a tag was already minted**: Re-run the failed job in GitHub Actions, or push a patch bump (`1.X.(Y+1)`).
 - **Retrying a missed GitHub Release for an existing tag**: Delete or edit the release in GitHub UI, or run locally:
   ```bash

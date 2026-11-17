@@ -26,10 +26,11 @@ Whenever executing an approved implementation plan (or when asked to archive a r
 
 - **Strict `1.x.y` Major Version Lock**: Keep all releases within **`1.x.y`** (`MAJOR = 1`). **Never** bump to `2.0.0` (or any higher major version) unless the user explicitly gives the go-ahead.
 - **Bare SemVer Tags (No `v` Prefix)**: Git tags, GitHub Releases, container tags, and runtime version strings use bare `X.Y.Z` (e.g., `1.0.0`, **never** `v1.0.0`) so tags stay directly compatible with Helm, Kubernetes, and artifact registries without stripping prefixes.
-- **Synchronized Version Files**: On every commit-ready change batch, bump both of the following to the same `X.Y.Z` SemVer string:
+- **Synchronized Version Files**: On every commit-ready change batch, bump all three of the following to the same `X.Y.Z` SemVer string:
   - `package.json` → `"version": "X.Y.Z"`
+  - `k8s/charts/retrogametalk-sync/Chart.yaml` → `version: X.Y.Z`
   - `k8s/charts/retrogametalk-sync/Chart.yaml` → `appVersion: "X.Y.Z"`
-  *(Bump `Chart.yaml`'s chart packaging `version` independently only when Kubernetes chart templates, values, or dependencies themselves change.)*
+  *(Keeping Helm chart `version` and `appVersion` in lockstep guarantees Git-tag chart deployments always install the matching chart and container release.)*
 - **Patch vs. Minor Increment Rules** *(agent judgment call)*:
   - **Patch (`1.X.(Y+1)`)**: Bug fixes, regression patches, typo/copy corrections, log level tweaks, styling/CSS polish, CI adjustments, dependency updates, or documentation-only changes.
   - **Minor (`1.(X+1).0`)**: New user-facing features, new UI panels or workflows, new API endpoints, SQLite schema migrations, new deployment/Helm capabilities, or substantive architectural additions (backward-compatible within `v1`).
