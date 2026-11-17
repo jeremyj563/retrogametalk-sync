@@ -129,7 +129,7 @@ function getPackageVersionFallback(): string | null {
     const raw = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version?: unknown };
     const ver = typeof raw.version === 'string' ? raw.version.trim() : '';
     if (/^\d+\.\d+\.\d+(?:[-+].+)?$/.test(ver) && ver !== '0.0.0') {
-      cachedPackageVersionFallback = `v${ver}`;
+      cachedPackageVersionFallback = ver;
       return cachedPackageVersionFallback;
     }
   } catch {
