@@ -21,3 +21,14 @@ Whenever executing an approved implementation plan (or when asked to archive a r
    ```
 3. Update the index table in `/docs/plans/README.md`.
 4. Note that during AI Studio's Planning Phase (before `Proceed`), workspace modifications are restricted to the temporary `implementation_plan.md` artifact, so `/docs/plans/` entries are written during execution (`Proceed`) or upon explicit post-review archive request.
+
+## Ready-to-Copy Commit Messages
+
+Whenever a turn creates, modifies, or deletes any workspace files, always include a ready-to-copy **Conventional Commit** message inside a fenced `text` code block at the end of the response (as a workaround when AI Studio's GitHub modal does not auto-populate the commit message):
+
+```text
+<type>(<optional-scope>): <concise imperative summary>
+
+- <concise bullet summarizing key change>
+```
+
