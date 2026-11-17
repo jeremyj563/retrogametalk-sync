@@ -15,7 +15,7 @@
   --color-crt-phosphor: #38e56b;
   --color-crt-phosphor-dim: #1d7a3a;
   --color-crt-amber: #f59e0b;
-  --color-crt-crimson: #ef4444;
+  --color-crt-crimson: #f06449;
 }
 
 @layer base {
@@ -40,6 +40,7 @@
     --color-crt-phosphor: #ffb000;
     --color-crt-phosphor-dim: #996600;
     --color-crt-amber: #fb923c;
+    --color-crt-crimson: #f46a42;
   }
 
   [data-crt-palette="cyan"] {
@@ -52,6 +53,7 @@
     --color-crt-muted: #849fb0;
     --color-crt-phosphor: #38d9f5;
     --color-crt-phosphor-dim: #147a8c;
+    --color-crt-crimson: #f06256;
   }
 
   /* Dynamic CRT phosphor radial ambient glow (scales with Gauss Glow & active palette) */
@@ -180,11 +182,19 @@
 
   /* Selective Gauss phosphor bloom & RGB convergence fringe (keeps body & table rows crisp) */
   .crt-fx-active .text-crt-phosphor:not(.text-crt-bg),
-  .crt-fx-active .font-display:not(.text-crt-bg),
+  .crt-fx-active .font-display:not(.text-crt-bg):not(.crt-sync-trigger):not(.text-crt-muted):not(.text-crt-amber),
   .crt-fx-active .crt-kpi-value {
     text-shadow:
       0 0 var(--crt-glow-radius-sm, 0px) rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-glow-alpha-sm, 0)),
       0 0 var(--crt-glow-radius-lg, 0px) rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-glow-alpha-lg, 0)),
+      calc(var(--crt-aberration-offset, 0px) * -1) 0 0 rgba(255, 55, 85, var(--crt-aberration-alpha, 0)),
+      var(--crt-aberration-offset, 0px) 0 0 rgba(45, 225, 255, var(--crt-aberration-alpha, 0));
+  }
+
+  .crt-fx-active .crt-sync-trigger {
+    text-shadow:
+      0 0 var(--crt-glow-radius-sm, 4px) rgba(var(--crt-trigger-rgb), var(--crt-glow-alpha-sm, 0.36)),
+      0 0 var(--crt-glow-radius-lg, 10px) rgba(var(--crt-trigger-rgb), var(--crt-glow-alpha-lg, 0.2)),
       calc(var(--crt-aberration-offset, 0px) * -1) 0 0 rgba(255, 55, 85, var(--crt-aberration-alpha, 0)),
       var(--crt-aberration-offset, 0px) 0 0 rgba(45, 225, 255, var(--crt-aberration-alpha, 0));
   }
@@ -791,6 +801,336 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
     transparent 100%
   );
   transform: translateX(-150%) skewX(-20deg);
+}
+
+/* ==========================================================================
+   Centerpiece Top-Bar Backlit CRT Broadcast Trigger (.crt-sync-trigger)
+   Smoked-acrylic housing, beveled tactile keycap, corner registration ticks,
+   custom vector glyphs, and mode-tuned phosphor/VFD halogen chambers
+   ========================================================================== */
+.crt-sync-trigger {
+  --crt-trigger-rgb: var(--crt-phosphor-rgb, 56, 229, 107);
+  --crt-trigger-text: color-mix(in srgb, var(--color-crt-phosphor) 88%, #ffffff);
+  --crt-trigger-surface-top: var(--color-crt-elevated);
+  --crt-trigger-surface-bottom: var(--color-crt-bg);
+  --crt-trigger-chamber-top: 0.24;
+  --crt-trigger-chamber-mid: 0.08;
+  --crt-trigger-border-alpha: 0.62;
+  --crt-trigger-outer-glow: 0.28;
+  --crt-trigger-inner-glow: 0.22;
+
+  overflow: hidden;
+  color: var(--crt-trigger-text);
+  border: 1px solid rgba(var(--crt-trigger-rgb), var(--crt-trigger-border-alpha));
+  background-color: var(--crt-trigger-surface-bottom);
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.22) 0px,
+      rgba(0, 0, 0, 0.22) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    radial-gradient(
+      ellipse 95% 110% at 50% 0%,
+      rgba(var(--crt-trigger-rgb), var(--crt-trigger-chamber-top)) 0%,
+      rgba(var(--crt-trigger-rgb), var(--crt-trigger-chamber-mid)) 58%,
+      transparent 100%
+    ),
+    linear-gradient(
+      180deg,
+      var(--crt-trigger-surface-top) 0%,
+      var(--crt-trigger-surface-bottom) 100%
+    );
+  box-shadow:
+    0 0 14px -4px rgba(var(--crt-trigger-rgb), var(--crt-trigger-outer-glow)),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.12),
+    inset 0 -2px 0 0 rgba(0, 0, 0, 0.58),
+    inset 0 0 14px -5px rgba(var(--crt-trigger-rgb), var(--crt-trigger-inner-glow));
+  text-shadow: 0 0 8px rgba(var(--crt-trigger-rgb), 0.38);
+  transition:
+    transform 120ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 160ms ease,
+    box-shadow 180ms ease,
+    color 160ms ease,
+    filter 160ms ease;
+}
+
+/* Mode 2: Full Sync — High-Output Overdrive Phosphor Chamber */
+.crt-sync-trigger[data-trigger-mode="full"] {
+  --crt-trigger-text: color-mix(in srgb, var(--color-crt-phosphor) 76%, #ffffff);
+  --crt-trigger-chamber-top: 0.34;
+  --crt-trigger-chamber-mid: 0.13;
+  --crt-trigger-border-alpha: 0.78;
+  --crt-trigger-outer-glow: 0.4;
+  --crt-trigger-inner-glow: 0.3;
+}
+
+/* Armed posture while Uncapped Full Sync confirmation strip is open */
+.crt-sync-trigger[data-trigger-armed="true"] {
+  --crt-trigger-chamber-top: 0.42;
+  --crt-trigger-border-alpha: 0.94;
+  --crt-trigger-outer-glow: 0.56;
+  box-shadow:
+    0 0 0 1px rgba(var(--crt-trigger-rgb), 0.28),
+    0 0 20px -3px rgba(var(--crt-trigger-rgb), 0.52),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.18),
+    inset 0 -2px 0 0 rgba(0, 0, 0, 0.55),
+    inset 0 0 16px -4px rgba(var(--crt-trigger-rgb), 0.36);
+}
+
+/* Mode 3: Dry Run — Smoked VFD Golden-Amber Simulation Chamber */
+.crt-sync-trigger[data-trigger-mode="dry_run"] {
+  --crt-trigger-rgb: 245, 168, 36;
+  --crt-trigger-text: #ffd166;
+  --crt-trigger-surface-top: #1d1509;
+  --crt-trigger-surface-bottom: #0c0904;
+  --crt-trigger-chamber-top: 0.28;
+  --crt-trigger-chamber-mid: 0.1;
+  --crt-trigger-border-alpha: 0.72;
+  --crt-trigger-outer-glow: 0.34;
+  --crt-trigger-inner-glow: 0.24;
+}
+
+/* Mode 4: Active Run (Stop ...) — Smoked Broadcast Tally / VFD Halogen Vermilion-Coral */
+.crt-sync-trigger[data-trigger-mode="stop"] {
+  --crt-trigger-rgb: 255, 106, 62;
+  --crt-trigger-text: #ff9c7d;
+  --crt-trigger-surface-top: #23100b;
+  --crt-trigger-surface-bottom: #100705;
+  --crt-trigger-chamber-top: 0.32;
+  --crt-trigger-chamber-mid: 0.12;
+  --crt-trigger-border-alpha: 0.76;
+  --crt-trigger-outer-glow: 0.42;
+  --crt-trigger-inner-glow: 0.28;
+}
+
+/* Mode 5: Stopping... — Warm Amber-Ochre Transport Brake Wind-Down */
+.crt-sync-trigger[data-trigger-mode="stopping"] {
+  --crt-trigger-rgb: 245, 158, 11;
+  --crt-trigger-text: #fcd34d;
+  --crt-trigger-surface-top: #1d1408;
+  --crt-trigger-surface-bottom: #0d0904;
+  --crt-trigger-chamber-top: 0.22;
+  --crt-trigger-chamber-mid: 0.08;
+  --crt-trigger-border-alpha: 0.55;
+  --crt-trigger-outer-glow: 0.22;
+}
+
+.crt-sync-trigger:not(:disabled):hover,
+.crt-sync-trigger:not(:disabled):focus-visible {
+  --crt-trigger-border-alpha: 0.92;
+  --crt-trigger-outer-glow: 0.5;
+  --crt-trigger-inner-glow: 0.34;
+  color: color-mix(in srgb, var(--crt-trigger-text) 78%, #ffffff);
+  filter: brightness(1.07);
+}
+
+.crt-sync-trigger:not(:disabled):focus-visible {
+  outline: 1.5px solid rgba(var(--crt-trigger-rgb), 0.85);
+  outline-offset: 2px;
+}
+
+.crt-sync-trigger:not(:disabled):active {
+  transform: translateY(1px);
+  box-shadow:
+    0 0 10px -4px rgba(var(--crt-trigger-rgb), var(--crt-trigger-outer-glow)),
+    inset 0 1px 2px rgba(0, 0, 0, 0.55),
+    inset 0 0 12px -4px rgba(var(--crt-trigger-rgb), var(--crt-trigger-inner-glow));
+}
+
+/* Smoked-glass diagonal cathode sheen overlay */
+.crt-sync-trigger::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 44%;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 3;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(var(--crt-trigger-rgb), 0.22) 38%,
+    rgba(255, 255, 255, 0.28) 55%,
+    transparent 100%
+  );
+  transform: translateX(-160%) skewX(-20deg);
+  will-change: transform, opacity;
+}
+
+/* Precision corner hardware registration micro-brackets */
+.crt-sync-trigger-corners {
+  position: absolute;
+  inset: 2.5px;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0.58;
+  transition: opacity 160ms ease;
+  background:
+    linear-gradient(90deg, rgba(var(--crt-trigger-rgb), 0.95) 0 100%) top left / 5px 1px no-repeat,
+    linear-gradient(180deg, rgba(var(--crt-trigger-rgb), 0.95) 0 100%) top left / 1px 5px no-repeat,
+    linear-gradient(90deg, rgba(var(--crt-trigger-rgb), 0.95) 0 100%) bottom right / 5px 1px no-repeat,
+    linear-gradient(180deg, rgba(var(--crt-trigger-rgb), 0.95) 0 100%) bottom right / 1px 5px no-repeat;
+}
+
+.crt-sync-trigger:not(:disabled):hover .crt-sync-trigger-corners {
+  opacity: 0.95;
+}
+
+/* Top & bottom bezel electron carrier rails inside the button */
+.crt-sync-trigger-rail-top,
+.crt-sync-trigger-rail-bottom {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 1.5px;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.crt-sync-trigger-rail-top {
+  top: 0;
+}
+
+.crt-sync-trigger-rail-bottom {
+  bottom: 0;
+}
+
+.crt-sync-trigger-rail-top > span,
+.crt-sync-trigger-rail-bottom > span {
+  display: block;
+  width: 34%;
+  height: 100%;
+  opacity: 0;
+  will-change: transform, opacity;
+}
+
+.crt-sync-trigger-rail-top > span {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(var(--crt-trigger-rgb), 0.95) 60%,
+    rgba(255, 255, 255, 0.9) 92%,
+    transparent 100%
+  );
+}
+
+.crt-sync-trigger-rail-bottom > span {
+  background: linear-gradient(
+    270deg,
+    transparent 0%,
+    rgba(var(--crt-trigger-rgb), 0.95) 60%,
+    rgba(255, 255, 255, 0.9) 92%,
+    transparent 100%
+  );
+}
+
+.crt-trigger-glyph {
+  position: relative;
+  z-index: 10;
+  filter: drop-shadow(0 0 3px rgba(var(--crt-trigger-rgb), 0.55));
+  transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), filter 180ms ease;
+}
+
+.crt-trigger-stop-orbit,
+.crt-trigger-stopping-ring {
+  transform-origin: 8px 8px;
+}
+
+@keyframes crt-trigger-rail-forward {
+  0% {
+    transform: translateX(-115%);
+    opacity: 0;
+  }
+  14% {
+    opacity: 1;
+  }
+  86% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(315%);
+    opacity: 0;
+  }
+}
+
+@keyframes crt-trigger-rail-reverse {
+  0% {
+    transform: translateX(315%);
+    opacity: 0;
+  }
+  14% {
+    opacity: 0.95;
+  }
+  86% {
+    opacity: 0.95;
+  }
+  100% {
+    transform: translateX(-115%);
+    opacity: 0;
+  }
+}
+
+@keyframes crt-trigger-bubble-float {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.55;
+  }
+  50% {
+    transform: translateY(-1.8px);
+    opacity: 1;
+  }
+}
+
+@keyframes crt-trigger-chevron-nudge {
+  0%,
+  100% {
+    transform: translateX(0);
+    opacity: 0.72;
+  }
+  50% {
+    transform: translateX(1.1px);
+    opacity: 1;
+  }
+}
+
+@keyframes crt-trigger-tally-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 14px -3px rgba(var(--crt-trigger-rgb), 0.36),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.13),
+      inset 0 -2px 0 0 rgba(0, 0, 0, 0.58),
+      inset 0 0 14px -4px rgba(var(--crt-trigger-rgb), 0.24);
+  }
+  50% {
+    box-shadow:
+      0 0 24px -2px rgba(var(--crt-trigger-rgb), 0.62),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.2),
+      inset 0 -2px 0 0 rgba(0, 0, 0, 0.58),
+      inset 0 0 20px -3px rgba(var(--crt-trigger-rgb), 0.42);
+  }
+}
+
+@keyframes crt-trigger-chamber-breathe {
+  0%,
+  100% {
+    box-shadow:
+      0 0 14px -4px rgba(var(--crt-trigger-rgb), var(--crt-trigger-outer-glow)),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.12),
+      inset 0 -2px 0 0 rgba(0, 0, 0, 0.58),
+      inset 0 0 14px -5px rgba(var(--crt-trigger-rgb), var(--crt-trigger-inner-glow));
+  }
+  50% {
+    box-shadow:
+      0 0 20px -3px rgba(var(--crt-trigger-rgb), calc(var(--crt-trigger-outer-glow) + 0.16)),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.16),
+      inset 0 -2px 0 0 rgba(0, 0, 0, 0.58),
+      inset 0 0 18px -4px rgba(var(--crt-trigger-rgb), calc(var(--crt-trigger-inner-glow) + 0.12));
+  }
 }
 
 /* Determinate Transfer Progress Beam & Leading Phosphor Tip */
@@ -1921,7 +2261,7 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   }
 
   /* Live Analog RGB Beam Convergence Pulse on Display Type & Hero Metrics */
-  &.crt-fx-active .font-display:not(.text-crt-bg),
+  &.crt-fx-active .font-display:not(.text-crt-bg):not(.crt-sync-trigger):not(.text-crt-muted):not(.text-crt-amber),
   &.crt-fx-active .crt-kpi-value {
     animation: crt-ultra-rgb-convergence 3.8s ease-in-out infinite;
   }
@@ -2296,6 +2636,148 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   }
 }
 
+/* ==========================================================================
+   SyncCommandButton (.crt-sync-trigger) Living UI Motion Progression
+   ========================================================================== */
+[data-crt-motion="low"],
+[data-crt-motion="medium"],
+[data-crt-motion="high"],
+[data-crt-motion="ultra"] {
+  /* Hover / Focus Smoked-Glass Cathode Sheen & Vector Wake-Up */
+  .crt-sync-trigger:not(:disabled):hover::after,
+  .crt-sync-trigger:not(:disabled):focus-visible::after {
+    opacity: 1;
+    animation: crt-cta-sheen-sweep 680ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .crt-sync-trigger:not(:disabled):hover .crt-trigger-engage-core,
+  .crt-sync-trigger:not(:disabled):focus-visible .crt-trigger-engage-core {
+    transform: translateX(0.8px);
+  }
+
+  .crt-sync-trigger:not(:disabled):hover .crt-trigger-lead-chevron,
+  .crt-sync-trigger:not(:disabled):focus-visible .crt-trigger-lead-chevron {
+    animation: crt-trigger-chevron-nudge 0.85s ease-in-out infinite;
+  }
+
+  .crt-sync-trigger:not(:disabled):hover .crt-trigger-sim-bubble,
+  .crt-sync-trigger:not(:disabled):focus-visible .crt-trigger-sim-bubble {
+    animation: crt-trigger-bubble-float 1.15s ease-in-out infinite;
+  }
+
+  .crt-sync-trigger:not(:disabled):hover .crt-trigger-sim-bubble-alt,
+  .crt-sync-trigger:not(:disabled):focus-visible .crt-trigger-sim-bubble-alt {
+    animation-delay: -0.55s;
+  }
+
+  /* Active Sync Run ("Stop ...") Live Broadcast Tally & Transport Orbit */
+  .crt-sync-trigger[data-trigger-mode="stop"]:not(:disabled) {
+    animation: crt-trigger-tally-pulse calc(2.3s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+  }
+
+  .crt-sync-trigger[data-trigger-mode="stop"] .crt-trigger-stop-orbit {
+    animation: crt-clock-sweep calc(2.2s * var(--crt-motion-speed, 1)) linear infinite;
+  }
+
+  .crt-sync-trigger[data-trigger-mode="stop"] .crt-sync-trigger-rail-bottom > span {
+    animation: crt-trigger-rail-reverse calc(1.95s * var(--crt-motion-speed, 1)) cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
+  .crt-sync-trigger[data-trigger-mode="stopping"] .crt-trigger-stopping-ring {
+    animation: crt-clock-sweep 4.6s linear reverse infinite;
+  }
+}
+
+[data-crt-motion="medium"],
+[data-crt-motion="high"],
+[data-crt-motion="ultra"] {
+  /* Ambient chamber breathing & top electron trace on enabled Sync trigger */
+  .crt-sync-trigger:not(:disabled):not([data-trigger-mode="stop"]) {
+    animation: crt-trigger-chamber-breathe calc(4.2s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+  }
+
+  .crt-sync-trigger:not(:disabled) .crt-sync-trigger-rail-top > span {
+    animation: crt-trigger-rail-forward calc(4.4s * var(--crt-motion-speed, 1)) cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
+  .crt-sync-trigger[data-trigger-mode="stop"] .crt-sync-trigger-rail-top > span {
+    animation-duration: calc(2.1s * var(--crt-motion-speed, 1));
+  }
+
+  /* Ambient simulation vapor shimmer in Dry Run mode */
+  .crt-sync-trigger[data-trigger-mode="dry_run"]:not(:disabled) .crt-trigger-sim-bubble {
+    animation: crt-trigger-bubble-float calc(2.1s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+  }
+
+  .crt-sync-trigger[data-trigger-mode="dry_run"]:not(:disabled) .crt-trigger-sim-bubble-alt {
+    animation-delay: -1.05s;
+  }
+}
+
+[data-crt-motion="high"],
+[data-crt-motion="ultra"] {
+  /* Periodic smoked-glass cathode sheen + dual counter-sweeping top/bottom bezel rails */
+  .crt-sync-trigger:not(:disabled)::after {
+    opacity: 1;
+    animation: crt-cta-periodic-sheen 4.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  }
+
+  .crt-sync-trigger:not(:disabled):hover::after,
+  .crt-sync-trigger:not(:disabled):focus-visible::after {
+    animation: crt-cta-sheen-sweep 620ms cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  }
+
+  .crt-sync-trigger:not(:disabled) .crt-sync-trigger-rail-bottom > span {
+    animation: crt-trigger-rail-reverse calc(5.2s * var(--crt-motion-speed, 1)) cubic-bezier(0.4, 0, 0.2, 1) -1.9s infinite;
+  }
+
+  .crt-sync-trigger:not(:disabled) .crt-trigger-lead-chevron {
+    animation: crt-trigger-chevron-nudge calc(1.8s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+  }
+}
+
+[data-crt-motion="ultra"] {
+  /* Overclocked Centerpiece Presence: Turbo Dual Rails, Corner Lock & RGB Micro-Convergence */
+  .crt-sync-trigger:not(:disabled) .crt-sync-trigger-corners {
+    opacity: 0.96;
+  }
+
+  .crt-sync-trigger:not(:disabled)::after {
+    animation-duration: 2.6s;
+  }
+
+  .crt-sync-trigger:not(:disabled) .crt-sync-trigger-rail-top > span {
+    width: 40%;
+    animation-duration: 2.2s;
+  }
+
+  .crt-sync-trigger:not(:disabled) .crt-sync-trigger-rail-bottom > span {
+    width: 40%;
+    animation-duration: 2.85s;
+  }
+
+  .crt-sync-trigger[data-trigger-mode="stop"]:not(:disabled) .crt-sync-trigger-rail-top > span {
+    animation-duration: 1.2s;
+  }
+
+  .crt-sync-trigger[data-trigger-mode="stop"]:not(:disabled) .crt-sync-trigger-rail-bottom > span {
+    animation-duration: 1.55s;
+  }
+
+  .crt-sync-trigger:not(:disabled) .crt-trigger-glyph {
+    filter:
+      drop-shadow(0 0 3px rgba(var(--crt-trigger-rgb), 0.85))
+      drop-shadow(0 0 8px rgba(var(--crt-trigger-rgb), 0.45));
+  }
+
+  &.crt-fx-active .crt-sync-trigger:not(:disabled) .crt-sync-trigger-label {
+    text-shadow:
+      0 0 7px rgba(var(--crt-trigger-rgb), 0.65),
+      -0.8px 0 0 rgba(255, 55, 85, 0.34),
+      0.8px 0 0 rgba(45, 225, 255, 0.34);
+  }
+}
+
 /* Accessibility: strictly honor OS reduced-motion preference */
 @media (prefers-reduced-motion: reduce) {
   .crt-svg-sync-base {
@@ -2315,6 +2797,9 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   .crt-drawer-bezel-beam > span,
   .crt-nav-btn::after,
   .crt-cta-beam::after,
+  .crt-sync-trigger::after,
+  .crt-sync-trigger-rail-top > span,
+  .crt-sync-trigger-rail-bottom > span,
   .crt-progress-beam::after,
   .crt-telemetry-raster,
   .crt-console-scan,
@@ -2329,6 +2814,11 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   .crt-drawer-panel,
   [role="tooltip"],
   .crt-ultra-pill-active,
+  .crt-sync-trigger,
+  .crt-trigger-stop-orbit,
+  .crt-trigger-stopping-ring,
+  .crt-trigger-lead-chevron,
+  .crt-trigger-sim-bubble,
   .font-display,
   .crt-svg-tree-scroll,
   .crt-svg-clock-hand,

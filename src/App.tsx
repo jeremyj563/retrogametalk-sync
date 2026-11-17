@@ -3,8 +3,6 @@ import {
   AlertTriangle,
   Check,
   FlaskConical,
-  Play,
-  Square,
 } from 'lucide-react';
 import { BrandMark } from './components/BrandMark';
 import { BulkInstallDock } from './components/BulkInstallDock';
@@ -21,6 +19,7 @@ import { OverviewPanel } from './components/OverviewPanel';
 import { SchedulePanel } from './components/SchedulePanel';
 import { SdCardExportModal } from './components/SdCardExportModal';
 import { ServiceTelemetrySidebar } from './components/ServiceTelemetrySidebar';
+import { SyncCommandButton } from './components/SyncCommandButton';
 import { useBulkStorageInstaller } from './hooks/useBulkStorageInstaller';
 import {
   computeCrtCssVariables,
@@ -939,7 +938,7 @@ export default function App() {
           <div
             role="group"
             aria-label="Sync scope"
-            className="flex items-center gap-0.5 p-0.5 bg-crt-bg border border-crt-border rounded-md shrink-0"
+            className="flex items-center gap-0.5 p-0.5 bg-crt-bg border border-crt-border rounded-[5px] shrink-0"
           >
             {(['incremental', 'full'] as const).map((scope) => {
               const label = scope === 'incremental' ? 'Incremental' : 'Full';
@@ -960,7 +959,7 @@ export default function App() {
                     setSelectedScope(scope);
                     if (scope !== 'full') setConfirmingFullSync(false);
                   }}
-                  className={`px-3 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
+                  className={`px-3 py-1 font-display text-xs font-medium tracking-[0.02em] rounded-[4px] transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     active
                       ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
                       : 'text-crt-muted hover:text-crt-text border border-transparent'
@@ -991,9 +990,9 @@ export default function App() {
                 return next;
               });
             }}
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 ${
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 font-display text-xs font-medium tracking-[0.02em] rounded-[5px] border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               dryRunEnabled
-                ? 'border-crt-amber/80 bg-crt-amber/12 text-crt-amber'
+                ? 'border-crt-amber/75 bg-crt-amber/12 text-crt-amber'
                 : 'border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
             } disabled:opacity-45 disabled:cursor-not-allowed`}
           >
@@ -1013,40 +1012,51 @@ export default function App() {
             <span>Dry Run</span>
           </button>
 
-          <div className="w-[196px] flex justify-end shrink-0">
+          <div className="w-[208px] flex justify-end shrink-0">
             {status?.activeRun ? (
-              <button
-                type="button"
+              <SyncCommandButton
+                mode={stopRequested ? 'stopping' : 'stop'}
                 disabled={actionPending || stopRequested}
-                onClick={() => void handleStopRun()}
-                className={`crt-cta-beam w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 disabled:cursor-not-allowed ${
+                title={
                   stopRequested
-                    ? 'bg-crt-amber opacity-85'
-                    : 'bg-crt-crimson hover:brightness-110 crt-stop-active-pulse disabled:opacity-50'
-                }`}
-              >
-                <Square className="h-3.5 w-3.5 fill-current shrink-0" />
-                {stopRequested
-                  ? 'Stopping...'
-                  : status.activeRun.dryRun || status.activeRun.mode === 'dry_run'
-                    ? 'Stop Dry Run'
-                    : status.activeRun.triggerType === 'retry'
-                      ? 'Stop Retry'
-                      : status.activeRun.mode === 'full'
-                        ? 'Stop Full Sync'
-                        : 'Stop Incremental'}
-              </button>
+                    ? 'Waiting for active transfer or scrape step to halt cleanly'
+                    : 'Gracefully halt the active run after the current step completes'
+                }
+                onClick={() => void handleStopRun()}
+                label={
+                  stopRequested
+                    ? 'Stopping...'
+                    : status.activeRun.dryRun || status.activeRun.mode === 'dry_run'
+                      ? 'Stop Dry Run'
+                      : status.activeRun.triggerType === 'retry'
+                        ? 'Stop Retry'
+                        : status.activeRun.mode === 'full'
+                          ? 'Stop Full Sync'
+                          : 'Stop Incremental'
+                }
+              />
             ) : (
-              <button
-                type="button"
-                aria-expanded={selectedScope === 'full' && !dryRunEnabled ? showFullSyncConfirm : undefined}
+              <SyncCommandButton
+                mode={
+                  dryRunEnabled
+                    ? 'dry_run'
+                    : selectedScope === 'full'
+                      ? 'full'
+                      : 'incremental'
+                }
+                armed={selectedScope === 'full' && !dryRunEnabled && showFullSyncConfirm}
+                aria-expanded={
+                  selectedScope === 'full' && !dryRunEnabled ? showFullSyncConfirm : undefined
+                }
                 disabled={actionPending || !status || !syncAllowed}
                 title={
                   !syncAllowed
                     ? 'Login required: test and verify credentials in Operations before syncing'
                     : dryRunEnabled
                       ? `Simulate ${selectedScope === 'full' ? 'Full Sync' : 'Incremental Sync'} (0 bytes written to disk)`
-                      : undefined
+                      : selectedScope === 'full'
+                        ? 'Crawl and mirror every release across target consoles with no date cutoff'
+                        : 'Mirror releases added or updated since the Incremental Cutoff'
                 }
                 onClick={() => {
                   if (selectedScope === 'full' && !dryRunEnabled) {
@@ -1055,25 +1065,16 @@ export default function App() {
                     void handleStartRun(selectedScope, dryRunEnabled);
                   }
                 }}
-                className={`crt-cta-beam w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed ${
+                label={
                   dryRunEnabled
-                    ? 'bg-crt-amber hover:brightness-110'
-                    : 'bg-crt-phosphor hover:brightness-110'
-                }`}
-              >
-                {dryRunEnabled ? (
-                  <FlaskConical className="h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <Play className="h-3.5 w-3.5 fill-current shrink-0" />
-                )}
-                {dryRunEnabled
-                  ? selectedScope === 'full'
-                    ? 'Dry Run Full'
-                    : 'Dry Run Incremental'
-                  : selectedScope === 'full'
-                    ? 'Full Sync'
-                    : 'Incremental Sync'}
-              </button>
+                    ? selectedScope === 'full'
+                      ? 'Dry Run Full'
+                      : 'Dry Run Incremental'
+                    : selectedScope === 'full'
+                      ? 'Full Sync'
+                      : 'Incremental Sync'
+                }
+              />
             )}
           </div>
         </div>
@@ -1098,7 +1099,7 @@ export default function App() {
               type="button"
               disabled={actionPending}
               onClick={() => setConfirmingFullSync(false)}
-              className="px-3 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="px-3 py-1.5 font-display text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded-[5px] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Cancel
             </button>
@@ -1109,21 +1110,19 @@ export default function App() {
                 setDryRunEnabled(true);
                 void handleStartRun('full', true);
               }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-amber/80 bg-crt-amber/12 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 font-display text-xs font-semibold border border-crt-amber/75 bg-crt-amber/12 text-crt-amber hover:bg-crt-amber/20 rounded-[5px] transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
               title="Simulate Full Sync across all target consoles without downloading archives or modifying catalog rows"
             >
               <FlaskConical className="h-3.5 w-3.5 shrink-0" />
               Dry Run Full First
             </button>
-            <button
-              type="button"
+            <SyncCommandButton
+              mode="full"
+              compact
               disabled={actionPending}
               onClick={() => void handleStartRun('full', false)}
-              className="crt-cta-beam inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
-            >
-              <Play className="h-3 w-3 fill-current shrink-0" />
-              Confirm Full Sync
-            </button>
+              label="Confirm Full Sync"
+            />
           </div>
         </div>
       )}
