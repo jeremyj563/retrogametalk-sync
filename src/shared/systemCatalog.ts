@@ -15,9 +15,78 @@ export interface SystemBrandGroupMeta {
 
 export interface SystemDisplayInfo {
   slug: string;
+  aliases: string[];
   displayName: string;
   brandId: SystemBrandId;
   brandLabel: string;
+}
+
+/**
+ * Alias groups where RetroGameTalk's public URL / disk directory slug differs from
+ * its WordPress Custom Post Type (`rest_base` / `?platform=`) or historical aliases.
+ * Index 0 of each group is ALWAYS the canonical slug (matching `/repo/<slug>/` & disk paths).
+ */
+export const CANONICAL_SYSTEM_ALIAS_GROUPS: readonly (readonly string[])[] = [
+  ['gameboy-roms', 'gb_roms', 'gb-roms'],
+  ['gameboy-color-roms', 'gbc_roms', 'gbc-roms'],
+  ['gamecube', 'gcn-iso', 'gcn_iso', 'gamecube-iso'],
+  ['psx2psp-eboots', 'psx2psp', 'psn-eboot'],
+];
+
+const ALIAS_TO_CANONICAL = new Map<string, string>();
+const GROUP_BY_CANONICAL = new Map<string, readonly string[]>();
+
+for (const group of CANONICAL_SYSTEM_ALIAS_GROUPS) {
+  const canonical = group[0]!.trim().toLowerCase();
+  GROUP_BY_CANONICAL.set(canonical, group);
+  for (const member of group) {
+    ALIAS_TO_CANONICAL.set(member.trim().toLowerCase(), canonical);
+  }
+}
+
+/**
+ * Normalizes known RGT alias slugs (e.g. `gb_roms`, `gbc_roms`, `gcn-iso`, `psx2psp`)
+ * to their canonical public URL / directory slug (`gameboy-roms`, `gameboy-color-roms`,
+ * `gamecube`, `psx2psp-eboots`). Non-aliased slugs are returned trimmed cleanly.
+ */
+export function canonicalizeSystemSlug(rawSlug: string): string {
+  const trimmed = String(rawSlug || '').trim();
+  if (!trimmed) return '';
+  const lower = trimmed.toLowerCase();
+  return ALIAS_TO_CANONICAL.get(lower) ?? trimmed;
+}
+
+/**
+ * Returns the secondary aliases (e.g. WP CPT slugs) associated with a system slug,
+ * excluding the canonical slug itself.
+ */
+export function getSystemAliases(rawSlug: string): string[] {
+  const canonical = canonicalizeSystemSlug(rawSlug).toLowerCase();
+  const group = GROUP_BY_CANONICAL.get(canonical);
+  if (!group) return [];
+  return group.filter((member) => member.toLowerCase() !== canonical);
+}
+
+/**
+ * Expands a list of system slugs to include all known alias slugs in their canonical groups.
+ */
+export function expandSystemAliases(slugs: Iterable<string>): string[] {
+  const expanded = new Set<string>();
+  for (const raw of slugs) {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) continue;
+    const lower = trimmed.toLowerCase();
+    const canonical = canonicalizeSystemSlug(lower).toLowerCase();
+    expanded.add(lower);
+    expanded.add(canonical);
+    const group = GROUP_BY_CANONICAL.get(canonical);
+    if (group) {
+      for (const member of group) {
+        expanded.add(member.toLowerCase());
+      }
+    }
+  }
+  return Array.from(expanded);
 }
 
 export const SYSTEM_BRAND_GROUPS: readonly SystemBrandGroupMeta[] = [
@@ -118,10 +187,11 @@ export function filterValidSystemSlugs(slugs: Iterable<string>): string[] {
   for (const raw of slugs) {
     const trimmed = String(raw || '').trim();
     if (!trimmed) continue;
-    const lower = trimmed.toLowerCase();
+    const canonical = canonicalizeSystemSlug(trimmed);
+    const lower = canonical.toLowerCase();
     if (isNonSystemSlug(lower)) continue;
     if (!deduped.has(lower)) {
-      deduped.set(lower, trimmed);
+      deduped.set(lower, canonical);
     }
   }
   return Array.from(deduped.values()).sort((a, b) => a.localeCompare(b));
@@ -442,8 +512,10 @@ function formatFallbackDisplayName(slug: string): string {
 }
 
 export function resolveSystemDisplayInfo(slug: string): SystemDisplayInfo {
-  const clean = slug.trim();
+  const canonical = canonicalizeSystemSlug(slug);
+  const clean = canonical || slug.trim();
   const lower = clean.toLowerCase();
+  const aliases = getSystemAliases(clean);
   const hyphenVariant = lower.replace(/_/g, '-');
   const underscoreVariant = lower.replace(/-/g, '_');
 
@@ -455,6 +527,7 @@ export function resolveSystemDisplayInfo(slug: string): SystemDisplayInfo {
   if (known) {
     return {
       slug: clean,
+      aliases,
       displayName: known.displayName,
       brandId: known.brandId,
       brandLabel: BRAND_LABEL_BY_ID.get(known.brandId) || 'System & Other',
@@ -464,6 +537,7 @@ export function resolveSystemDisplayInfo(slug: string): SystemDisplayInfo {
   const brandId = inferBrandId(lower);
   return {
     slug: clean,
+    aliases,
     displayName: formatFallbackDisplayName(clean),
     brandId,
     brandLabel: BRAND_LABEL_BY_ID.get(brandId) || 'System & Other',

@@ -142,6 +142,7 @@ export function StorageFolderMappingsSection({
         info.displayName.toLowerCase().includes(q) ||
         info.slug.toLowerCase().includes(q) ||
         info.brandLabel.toLowerCase().includes(q) ||
+        info.aliases.some((alias) => alias.toLowerCase().includes(q)) ||
         baseFolder.includes(q)
       );
     });

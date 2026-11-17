@@ -3,7 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { normalizeStorageFolderConfig } from '../shared/storageFolderMappings.ts';
-import { filterValidSystemSlugs, sanitizeSystemFilterString } from '../shared/systemCatalog.ts';
+import {
+  CANONICAL_SYSTEM_ALIAS_GROUPS,
+  filterValidSystemSlugs,
+  sanitizeSystemFilterString,
+} from '../shared/systemCatalog.ts';
 import type { AppliedMigrationRecord, DatabaseMigrationReport } from './types.ts';
 
 export interface MigrationContext {
@@ -554,6 +558,72 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
 
       db.prepare(`UPDATE scraper_config SET storage_folder_config_json = ? WHERE id = 1`).run(
         JSON.stringify(normalized),
+      );
+    },
+  },
+  {
+    version: 15,
+    name: 'canonicalize_rgt_system_slugs',
+    description:
+      'Normalize RetroGameTalk WP CPT / alias slugs (gb_roms, gbc_roms, gcn-iso, psx2psp, etc.) to canonical public URL slugs across catalog and config',
+    up: (db) => {
+      // 1. Consolidate catalog_releases.system_name onto each group's canonical slug (index 0)
+      for (const group of CANONICAL_SYSTEM_ALIAS_GROUPS) {
+        const canonical = group[0]!.trim().toLowerCase();
+        const aliases = group
+          .slice(1)
+          .map((s) => s.trim().toLowerCase())
+          .filter((s) => s && s !== canonical);
+        if (aliases.length === 0) continue;
+        const placeholders = aliases.map(() => '?').join(', ');
+        db.prepare(
+          `UPDATE catalog_releases SET system_name = ? WHERE LOWER(system_name) IN (${placeholders})`,
+        ).run(canonical, ...aliases);
+      }
+
+      // 2. Deduplicate & canonicalize scraper_config discovered systems, system filter, and folder mappings
+      const row = db
+        .prepare(
+          'SELECT discovered_systems_json, system_filter, storage_folder_config_json FROM scraper_config WHERE id = 1',
+        )
+        .get() as
+        | {
+            discovered_systems_json?: string;
+            system_filter?: string;
+            storage_folder_config_json?: string;
+          }
+        | undefined;
+      if (!row) return;
+
+      let parsedSystems: string[] = [];
+      try {
+        const raw = JSON.parse(String(row.discovered_systems_json || '[]'));
+        if (Array.isArray(raw)) {
+          parsedSystems = raw.map(String);
+        }
+      } catch {
+        parsedSystems = [];
+      }
+
+      let parsedStorageConfig: unknown = {};
+      try {
+        parsedStorageConfig = JSON.parse(String(row.storage_folder_config_json || '{}'));
+      } catch {
+        parsedStorageConfig = {};
+      }
+
+      const cleanedSystems = filterValidSystemSlugs(parsedSystems);
+      const cleanedFilter = sanitizeSystemFilterString(String(row.system_filter || ''));
+      const cleanedStorageConfig = normalizeStorageFolderConfig(parsedStorageConfig);
+
+      db.prepare(
+        `UPDATE scraper_config
+         SET discovered_systems_json = ?, system_filter = ?, storage_folder_config_json = ?
+         WHERE id = 1`,
+      ).run(
+        JSON.stringify(cleanedSystems),
+        cleanedFilter,
+        JSON.stringify(cleanedStorageConfig),
       );
     },
   },

@@ -3,7 +3,11 @@ import {
   classifyReleaseTagsToTypeKeys,
   isTranslationTypeKey,
 } from './releaseTypeFilter.ts';
-import { isNonSystemSlug, resolveSystemDisplayInfo } from './systemCatalog.ts';
+import {
+  canonicalizeSystemSlug,
+  isNonSystemSlug,
+  resolveSystemDisplayInfo,
+} from './systemCatalog.ts';
 
 export type StorageRomCategoryKey =
   | 'retail'
@@ -364,17 +368,17 @@ export const CANONICAL_KNOWN_SYSTEM_SLUGS: readonly string[] = [
   // Nintendo
   'nes-roms',
   'fds-roms',
-  'snes-roms',
+  'snes-rom',
   'satellaview',
   'n64-roms',
   '64dd',
-  'gamecube-iso',
+  'gamecube',
   'wii-iso',
   'wiiware',
   'wii-u',
   'switch-roms',
-  'gb-roms',
-  'gbc-roms',
+  'gameboy-roms',
+  'gameboy-color-roms',
   'gba-roms',
   'virtual-boy',
   'nds-roms',
@@ -528,15 +532,24 @@ export function normalizeStorageFolderConfig(raw: unknown): StorageFolderMapping
 
   if (obj.systemFolders && typeof obj.systemFolders === 'object' && !Array.isArray(obj.systemFolders)) {
     const rawSystems = obj.systemFolders as Record<string, unknown>;
-    const sortedKeys = Object.keys(rawSystems).sort((a, b) => a.localeCompare(b));
+    // Process canonical keys before alias keys so an explicit canonical entry is never overwritten by a stale alias
+    const sortedKeys = Object.keys(rawSystems).sort((a, b) => {
+      const aNorm = a.trim().toLowerCase();
+      const bNorm = b.trim().toLowerCase();
+      const aIsCanonical = canonicalizeSystemSlug(aNorm).toLowerCase() === aNorm ? 0 : 1;
+      const bIsCanonical = canonicalizeSystemSlug(bNorm).toLowerCase() === bNorm ? 0 : 1;
+      if (aIsCanonical !== bIsCanonical) return aIsCanonical - bIsCanonical;
+      return a.localeCompare(b);
+    });
     for (const rawSlug of sortedKeys) {
-      const slug = rawSlug.trim().toLowerCase();
-      if (!slug || isNonSystemSlug(slug)) continue;
+      const canonical = canonicalizeSystemSlug(rawSlug).toLowerCase();
+      if (!canonical || isNonSystemSlug(canonical)) continue;
+      if (base.systemFolders[canonical] !== undefined) continue;
       const val = typeof rawSystems[rawSlug] === 'string' ? sanitizeRelativeStoragePath(rawSystems[rawSlug]) : '';
       if (!val) continue;
       // Only persist non-default overrides so config stays minimal and clean
-      if (val !== resolveDefaultSystemFolder(slug)) {
-        base.systemFolders[slug] = val;
+      if (val !== resolveDefaultSystemFolder(canonical)) {
+        base.systemFolders[canonical] = val;
       }
     }
   }
@@ -547,10 +560,17 @@ export function normalizeStorageFolderConfig(raw: unknown): StorageFolderMapping
     !Array.isArray(obj.systemTypeOverrides)
   ) {
     const rawOverrides = obj.systemTypeOverrides as Record<string, unknown>;
-    const sortedSlugs = Object.keys(rawOverrides).sort((a, b) => a.localeCompare(b));
+    const sortedSlugs = Object.keys(rawOverrides).sort((a, b) => {
+      const aNorm = a.trim().toLowerCase();
+      const bNorm = b.trim().toLowerCase();
+      const aIsCanonical = canonicalizeSystemSlug(aNorm).toLowerCase() === aNorm ? 0 : 1;
+      const bIsCanonical = canonicalizeSystemSlug(bNorm).toLowerCase() === bNorm ? 0 : 1;
+      if (aIsCanonical !== bIsCanonical) return aIsCanonical - bIsCanonical;
+      return a.localeCompare(b);
+    });
     for (const rawSlug of sortedSlugs) {
-      const slug = rawSlug.trim().toLowerCase();
-      if (!slug || isNonSystemSlug(slug)) continue;
+      const canonical = canonicalizeSystemSlug(rawSlug).toLowerCase();
+      if (!canonical || isNonSystemSlug(canonical)) continue;
       const entry = rawOverrides[rawSlug];
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
 
@@ -559,10 +579,17 @@ export function normalizeStorageFolderConfig(raw: unknown): StorageFolderMapping
       const mode: SystemTypeSubfolderMode =
         rawMode === 'enabled' || rawMode === 'disabled' ? rawMode : 'inherit';
 
-      const cleanSubfolders: Partial<Record<StorageRomCategoryKey, string>> = {};
+      const existing = base.systemTypeOverrides[canonical];
+      const mergedMode: SystemTypeSubfolderMode =
+        existing?.mode && existing.mode !== 'inherit' ? existing.mode : mode;
+
+      const cleanSubfolders: Partial<Record<StorageRomCategoryKey, string>> = {
+        ...(existing?.subfolders ?? {}),
+      };
       if (rec.subfolders && typeof rec.subfolders === 'object' && !Array.isArray(rec.subfolders)) {
         const subObj = rec.subfolders as Record<string, unknown>;
         for (const key of STORAGE_ROM_CATEGORY_KEYS) {
+          if (cleanSubfolders[key] !== undefined) continue;
           if (typeof subObj[key] === 'string') {
             const cleaned = sanitizeRelativeStoragePath(subObj[key]);
             // Keep explicit per-system override whenever it differs from global setting for that category
@@ -574,9 +601,9 @@ export function normalizeStorageFolderConfig(raw: unknown): StorageFolderMapping
       }
 
       const hasSubfolders = Object.keys(cleanSubfolders).length > 0;
-      if (mode !== 'inherit' || hasSubfolders) {
-        base.systemTypeOverrides[slug] = {
-          ...(mode !== 'inherit' ? { mode } : {}),
+      if (mergedMode !== 'inherit' || hasSubfolders) {
+        base.systemTypeOverrides[canonical] = {
+          ...(mergedMode !== 'inherit' ? { mode: mergedMode } : {}),
           ...(hasSubfolders ? { subfolders: cleanSubfolders } : {}),
         };
       }

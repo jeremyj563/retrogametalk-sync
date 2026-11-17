@@ -44,7 +44,7 @@ import {
   normalizeAllowedReleaseTypes,
 } from '../shared/releaseTypeFilter.ts';
 import { normalizeGitRepoUrl } from '../shared/gitUrl.ts';
-import { filterValidSystemSlugs } from '../shared/systemCatalog.ts';
+import { canonicalizeSystemSlug, filterValidSystemSlugs } from '../shared/systemCatalog.ts';
 import {
   type DiscoveredRelease,
   type LoggerFn,
@@ -322,12 +322,13 @@ export class ScraperOrchestrator extends EventEmitter {
             continue;
           }
 
+          const canonicalSys = canonicalizeSystemSlug(systemName) || systemName;
           const remotePath = `${systemName}/${releaseSlug}`;
           const remoteUrl =
             meta?.sourcePageUrl && /^https?:\/\//i.test(meta.sourcePageUrl)
               ? meta.sourcePageUrl.split('#')[0]
               : new URL(
-                  `${encodeURIComponent(systemName)}/${encodeURIComponent(releaseSlug)}/`,
+                  `${encodeURIComponent(canonicalSys)}/${encodeURIComponent(releaseSlug)}/`,
                   baseWithSlash,
                 ).toString();
 
@@ -335,7 +336,7 @@ export class ScraperOrchestrator extends EventEmitter {
             remoteUrl,
             remotePath,
             localPath: absReleaseDir,
-            systemName,
+            systemName: canonicalSys,
             title: meta?.title || releaseSlug,
             publishedAt: meta?.publishedAt ?? null,
             remoteUpdatedAt: meta?.remoteUpdatedAt ?? null,
@@ -347,8 +348,8 @@ export class ScraperOrchestrator extends EventEmitter {
           existingLocalPaths.add(absReleaseDir);
           releasesImported += 1;
 
-          if (systemName !== 'uncategorized' && systemName !== 'root') {
-            reconciledSystems.add(systemName);
+          if (canonicalSys !== 'uncategorized' && canonicalSys !== 'root') {
+            reconciledSystems.add(canonicalSys);
           }
 
           for (const filename of releaseFiles) {
@@ -2091,7 +2092,7 @@ export class ScraperOrchestrator extends EventEmitter {
         );
         const releaseLocalDir = path.dirname(mirroredProbe.localPath);
         const releaseRemoteDir = path.posix.dirname(mirroredProbe.remotePath);
-        const systemName = sampleRel.systemName || mirroredProbe.systemName;
+        const systemName = canonicalizeSystemSlug(sampleRel.systemName || mirroredProbe.systemName);
 
         recordObservedTimestamp(preloadedMeta?.publishedAt);
         recordObservedTimestamp(preloadedMeta?.remoteUpdatedAt);
@@ -2596,7 +2597,7 @@ export class ScraperOrchestrator extends EventEmitter {
       let preloadedRootPage: { url: string; html: string; finalUrl: string } | undefined;
 
       if (explicitFilters.length > 0) {
-        targetSystems = explicitFilters;
+        targetSystems = filterValidSystemSlugs(explicitFilters).map((s) => s.toLowerCase());
       } else {
         this.currentPhase = `Scanning repository index: ${this.formatRelativePhasePath(cfg.baseUrl, cfg.baseUrl)}`;
         this.emitStatus();
@@ -2641,12 +2642,26 @@ export class ScraperOrchestrator extends EventEmitter {
           visitedPages.add(preloadedRootPage.finalUrl);
         }
 
+        const scannedRestBases = new Set<string>();
         for (let sysIdx = 0; sysIdx < targetSystems.length; sysIdx += 1) {
           if (signal.aborted) break;
           const systemSlug = targetSystems[sysIdx];
           const scopeLabel = `${sysIdx + 1}/${targetSystems.length}`;
           const prevNewFound = newFound;
           const prevSkipped = skippedCount;
+
+          const resolvedRestBase = await this.client.resolveWpRestBaseForSystem(systemSlug, cfg, signal, runLogger);
+          if (resolvedRestBase) {
+            const restBaseKey = resolvedRestBase.toLowerCase();
+            if (scannedRestBases.has(restBaseKey)) {
+              runLogger(
+                'debug',
+                `[Crawl] Skipping duplicate target "${systemSlug}" (WP REST "${resolvedRestBase}" already scanned in this run)`,
+              );
+              continue;
+            }
+            scannedRestBases.add(restBaseKey);
+          }
 
           this.currentPhase = isDeltaMode
             ? `${isDryRun ? 'Dry Run (Incremental)' : 'Checking'} ${systemSlug} (${scopeLabel}) since ${effectiveCutoffIso!.slice(0, 16).replace('T', ' ')} UTC`
