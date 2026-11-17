@@ -1,4 +1,13 @@
-import { type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Activity,
   ChevronLeft,
@@ -26,6 +35,14 @@ export type TelemetrySlideId =
   | 'consoles'
   | 'types'
   | 'percentiles';
+
+type DeckSlideMotionState =
+  | 'active'
+  | 'pre-left'
+  | 'pre-right'
+  | 'exit-left'
+  | 'exit-right'
+  | 'idle';
 
 interface TelemetryDeckProps {
   status: ServiceStatusSnapshot;
@@ -175,7 +192,19 @@ const PLOT_H = VB_H - PAD_T - PAD_B;
 
 export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
   const [initialPrefs] = useState<TelemetryDeckPrefs>(() => loadDeckPrefs());
-  const [activeSlide, setActiveSlide] = useState<TelemetrySlideId>(initialPrefs.activeSlide);
+  const [deckMotion, setDeckMotion] = useState<{
+    active: TelemetrySlideId;
+    prev: TelemetrySlideId | null;
+    dir: 1 | -1;
+    phase: 'pre' | 'run';
+  }>({
+    active: initialPrefs.activeSlide,
+    prev: null,
+    dir: 1,
+    phase: 'run',
+  });
+  const activeSlide = deckMotion.active;
+
   const [autoCycle, setAutoCycle] = useState<boolean>(initialPrefs.autoCycle);
   const [bandwidthSource, setBandwidthSource] = useState<'auto' | 'stream' | 'runs'>('auto');
   const [isHovering, setIsHovering] = useState(false);
@@ -184,8 +213,113 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
     normX: number;
     normY: number;
   } | null>(null);
+  const [tooltipSide, setTooltipSide] = useState<'left' | 'right'>('right');
 
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const tablistRef = useRef<HTMLDivElement | null>(null);
+  const tabRefs = useRef<Partial<Record<TelemetrySlideId, HTMLButtonElement | null>>>({});
+  const [tabPillMetrics, setTabPillMetrics] = useState<{
+    x: number;
+    w: number;
+    ready: boolean;
+  }>({ x: 0, w: 0, ready: false });
+
+  const transitionToSlide = useCallback((nextId: TelemetrySlideId, explicitDir?: 1 | -1) => {
+    setDeckMotion((cur) => {
+      if (cur.active === nextId) return cur;
+      const curIdx = SLIDE_ORDER.indexOf(cur.active);
+      const nextIdx = SLIDE_ORDER.indexOf(nextId);
+      const dir: 1 | -1 = explicitDir ?? (nextIdx > curIdx ? 1 : -1);
+      return {
+        active: nextId,
+        prev: cur.active,
+        dir,
+        phase: 'pre',
+      };
+    });
+  }, []);
+
+  const stepSlide = useCallback((delta: 1 | -1) => {
+    setDeckMotion((cur) => {
+      const idx = SLIDE_ORDER.indexOf(cur.active);
+      const nextIdx = (idx + delta + SLIDE_ORDER.length) % SLIDE_ORDER.length;
+      const nextId = SLIDE_ORDER[nextIdx];
+      return {
+        active: nextId,
+        prev: cur.active,
+        dir: delta,
+        phase: 'pre',
+      };
+    });
+  }, []);
+
+  // Advance 1-frame pre-staging into smooth compositor glide
+  useEffect(() => {
+    if (deckMotion.phase !== 'pre') return;
+    let raf2 = 0;
+    const raf1 = window.requestAnimationFrame(() => {
+      raf2 = window.requestAnimationFrame(() => {
+        setDeckMotion((cur) => (cur.phase === 'pre' ? { ...cur, phase: 'run' } : cur));
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(raf1);
+      if (raf2) window.cancelAnimationFrame(raf2);
+    };
+  }, [deckMotion.active, deckMotion.phase]);
+
+  // Release outgoing slide reference after dissolve settles
+  useEffect(() => {
+    if (deckMotion.phase !== 'run' || deckMotion.prev === null) return;
+    const timer = window.setTimeout(() => {
+      setDeckMotion((cur) =>
+        cur.phase === 'run' && cur.prev !== null ? { ...cur, prev: null } : cur,
+      );
+    }, 520);
+    return () => window.clearTimeout(timer);
+  }, [deckMotion.active, deckMotion.phase, deckMotion.prev]);
+
+  // Measure active tab button for the gliding tab selector pill
+  useLayoutEffect(() => {
+    const updatePill = (enableTransitionAfter: boolean) => {
+      const btn = tabRefs.current[activeSlide];
+      const list = tablistRef.current;
+      if (!btn || !list) return;
+      const x = btn.offsetLeft;
+      const w = btn.offsetWidth;
+      setTabPillMetrics((cur) => ({
+        x,
+        w,
+        ready: cur.ready || enableTransitionAfter,
+      }));
+
+      // Keep active tab comfortably visible if narrow viewports overflow horizontally (never scrolls page Y)
+      if (list.scrollWidth > list.clientWidth) {
+        const minScroll = x - 12;
+        const maxScroll = x + w + 12 - list.clientWidth;
+        if (list.scrollLeft > minScroll) {
+          list.scrollTo({ left: Math.max(0, minScroll), behavior: 'smooth' });
+        } else if (list.scrollLeft < maxScroll) {
+          list.scrollTo({ left: maxScroll, behavior: 'smooth' });
+        }
+      }
+    };
+
+    updatePill(false);
+    const raf = window.requestAnimationFrame(() => {
+      setTabPillMetrics((cur) => (cur.ready ? cur : { ...cur, ready: true }));
+    });
+
+    const listEl = tablistRef.current;
+    if (!listEl || typeof ResizeObserver === 'undefined') {
+      return () => window.cancelAnimationFrame(raf);
+    }
+    const observer = new ResizeObserver(() => updatePill(true));
+    observer.observe(listEl);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      observer.disconnect();
+    };
+  }, [activeSlide]);
 
   useEffect(() => {
     try {
@@ -207,20 +341,25 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
   useEffect(() => {
     if (!autoCycle || isHovering) return;
     const timer = setInterval(() => {
-      setActiveSlide((prev) => {
-        const idx = SLIDE_ORDER.indexOf(prev);
-        return SLIDE_ORDER[(idx + 1) % SLIDE_ORDER.length];
-      });
+      stepSlide(1);
     }, 8000);
     return () => clearInterval(timer);
-  }, [autoCycle, isHovering]);
+  }, [autoCycle, isHovering, stepSlide]);
 
-  const stepSlide = (delta: number) => {
-    setActiveSlide((prev) => {
-      const idx = SLIDE_ORDER.indexOf(prev);
-      const nextIdx = (idx + delta + SLIDE_ORDER.length) % SLIDE_ORDER.length;
-      return SLIDE_ORDER[nextIdx];
-    });
+  const resolveSlideState = (id: TelemetrySlideId): DeckSlideMotionState => {
+    if (id === deckMotion.active) {
+      if (deckMotion.phase === 'pre') {
+        return deckMotion.dir === 1 ? 'pre-right' : 'pre-left';
+      }
+      return 'active';
+    }
+    if (id === deckMotion.prev) {
+      if (deckMotion.phase === 'pre') {
+        return 'active';
+      }
+      return deckMotion.dir === 1 ? 'exit-left' : 'exit-right';
+    }
+    return 'idle';
   };
 
   // --- Data derivations ---
@@ -342,8 +481,8 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
     pointCount: number,
     mode: 'line' | 'bar',
   ) => {
-    if (pointCount <= 0 || !svgRef.current) return;
-    const rect = svgRef.current.getBoundingClientRect();
+    if (pointCount <= 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
     const svgX = ((e.clientX - rect.left) / rect.width) * VB_W;
@@ -360,42 +499,40 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
       index = Math.round((clampedPlotX / PLOT_W) * (pointCount - 1));
     }
 
+    const normX = clampedPlotX / PLOT_W;
+    const normY = clampedPlotY / PLOT_H;
+
+    setTooltipSide((curSide) => {
+      if (hoverState === null) {
+        return normX > 0.55 ? 'left' : 'right';
+      }
+      if (normX > 0.62) return 'left';
+      if (normX < 0.38) return 'right';
+      return curSide;
+    });
+
     setHoverState({
       index,
-      normX: clampedPlotX / PLOT_W,
-      normY: clampedPlotY / PLOT_H,
+      normX,
+      normY,
     });
   };
 
-  // Header right badge text
-  const headerBadge = useMemo(() => {
-    switch (activeSlide) {
-      case 'pacing':
-      case 'percentiles':
-        return `${delaySeries.length} samples`;
-      case 'bandwidth':
-        return effectiveBandwidthMode === 'stream'
-          ? `${transferSeries.length} stream pts`
-          : `${runBandwidthPoints.length} runs`;
-      case 'outcomes':
-        return `${chronologicalRuns.length} runs`;
-      case 'consoles':
-        return `${rankedSystems.length} consoles`;
-      case 'types':
-        return `${releaseTypesData.rows.length} types`;
-    }
-  }, [
-    activeSlide,
-    delaySeries.length,
-    effectiveBandwidthMode,
-    transferSeries.length,
-    runBandwidthPoints.length,
-    chronologicalRuns.length,
-    rankedSystems.length,
-    releaseTypesData.rows.length,
-  ]);
+  const hasStreamBandwidth = transferSeries.length >= 2;
+  const hasRunBandwidth = runBandwidthPoints.some((p) => p.run.bytesDownloaded > 0);
 
-  const meta = SLIDE_META[activeSlide];
+  // Per-slide header right badge text
+  const headerBadgeBySlide: Record<TelemetrySlideId, string> = {
+    pacing: `${delaySeries.length} samples`,
+    percentiles: `${delaySeries.length} samples`,
+    bandwidth:
+      effectiveBandwidthMode === 'stream'
+        ? `${transferSeries.length} stream pts`
+        : `${runBandwidthPoints.length} runs`,
+    outcomes: `${chronologicalRuns.length} runs`,
+    consoles: `${rankedSystems.length} consoles`,
+    types: `${releaseTypesData.rows.length} types`,
+  };
 
   return (
     <div
@@ -420,57 +557,87 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
       </div>
       {/* Top Header + Navigation Deck Bar */}
       <div className="space-y-3 mb-3.5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="font-display text-base font-semibold text-crt-text truncate">
-              {meta.title}
-            </h2>
-            <p className="text-xs text-crt-muted truncate">{meta.subtitle}</p>
-          </div>
+        {/* Stacked Cross-Dissolving Slide Title, Subtitle & Sample Badge */}
+        <div className="crt-deck-meta-stage">
+          {SLIDE_ORDER.map((id) => {
+            const slideMeta = SLIDE_META[id];
+            const isActive = activeSlide === id;
+            return (
+              <div
+                key={id}
+                data-slide-state={resolveSlideState(id)}
+                aria-hidden={!isActive}
+                inert={!isActive || undefined}
+                className="crt-deck-meta-item flex items-start justify-between gap-3"
+              >
+                <div className="min-w-0">
+                  <h2 className="font-display text-base font-semibold text-crt-text truncate">
+                    {slideMeta.title}
+                  </h2>
+                  <p className="text-xs text-crt-muted truncate">{slideMeta.subtitle}</p>
+                </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            {activeSlide === 'bandwidth' &&
-              transferSeries.length >= 2 &&
-              runBandwidthPoints.some((p) => p.run.bytesDownloaded > 0) && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    setBandwidthSource((cur) =>
-                      (cur === 'auto' ? effectiveBandwidthMode : cur) === 'stream' ? 'runs' : 'stream',
-                    )
-                  }
-                  className="px-2 py-0.5 text-[11px] font-mono border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                  title="Switch between live stream samples and per-run average throughput"
-                >
-                  {effectiveBandwidthMode === 'stream' ? 'View: Live' : 'View: Runs'}
-                </button>
-              )}
-            <span className="font-mono text-xs text-crt-muted tabular-nums whitespace-nowrap">
-              {headerBadge}
-            </span>
-          </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {id === 'bandwidth' && hasStreamBandwidth && hasRunBandwidth && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setBandwidthSource((cur) =>
+                          (cur === 'auto' ? effectiveBandwidthMode : cur) === 'stream'
+                            ? 'runs'
+                            : 'stream',
+                        )
+                      }
+                      className="px-2 py-0.5 text-[11px] font-mono border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors duration-200 whitespace-nowrap shrink-0 cursor-pointer"
+                      title="Switch between live stream samples and per-run average throughput"
+                    >
+                      {effectiveBandwidthMode === 'stream' ? 'View: Live' : 'View: Runs'}
+                    </button>
+                  )}
+                  <span className="font-mono text-xs text-crt-muted tabular-nums whitespace-nowrap">
+                    {headerBadgeBySlide[id]}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
         </div>
 
-        {/* Slide Deck Switcher: 6 Tabs + Prev/Next Arrows + Auto-Cycle */}
+        {/* Slide Deck Switcher: 6 Gliding Tabs + Prev/Next Arrows + Auto-Cycle */}
         <div className="flex items-center justify-between gap-2">
           <div
+            ref={tablistRef}
             role="tablist"
             aria-label="Telemetry graph views"
-            className="flex items-center gap-0.5 p-0.5 bg-crt-bg border border-crt-border rounded overflow-x-auto min-w-0"
+            style={
+              {
+                '--deck-tab-x': `${tabPillMetrics.x}px`,
+                '--deck-tab-w': `${tabPillMetrics.w}px`,
+              } as CSSProperties
+            }
+            className="relative flex items-center gap-0.5 p-0.5 bg-crt-bg border border-crt-border rounded overflow-x-auto min-w-0"
           >
+            <span
+              aria-hidden="true"
+              data-ready={tabPillMetrics.ready ? 'true' : 'false'}
+              className={`crt-deck-tab-pill ${tabPillMetrics.w > 0 ? 'opacity-100' : 'opacity-0'}`}
+            />
             {SLIDE_ORDER.map((id) => {
               const selected = activeSlide === id;
               return (
                 <button
                   key={id}
+                  ref={(el) => {
+                    tabRefs.current[id] = el;
+                  }}
                   role="tab"
                   type="button"
                   aria-selected={selected}
-                  onClick={() => setActiveSlide(id)}
-                  className={`px-2 py-1 text-[11px] font-mono rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  onClick={() => transitionToSlide(id)}
+                  className={`crt-deck-tab relative z-10 px-2 py-1 text-[11px] font-mono rounded transition-colors duration-300 whitespace-nowrap shrink-0 cursor-pointer ${
                     selected
-                      ? 'bg-crt-elevated text-crt-phosphor font-medium border border-crt-border-strong'
-                      : 'text-crt-muted hover:text-crt-text border border-transparent'
+                      ? 'text-crt-phosphor font-medium'
+                      : 'text-crt-muted hover:text-crt-text'
                   }`}
                 >
                   {SLIDE_META[id].tabLabel}
@@ -485,7 +652,7 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
               onClick={() => stepSlide(-1)}
               aria-label="Previous telemetry graph"
               title="Previous graph"
-              className="p-1 border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors cursor-pointer shrink-0"
+              className="p-1 border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors duration-200 cursor-pointer shrink-0"
             >
               <ChevronLeft className="h-3.5 w-3.5" />
             </button>
@@ -494,7 +661,7 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
               onClick={() => stepSlide(1)}
               aria-label="Next telemetry graph"
               title="Next graph"
-              className="p-1 border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors cursor-pointer shrink-0"
+              className="p-1 border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors duration-200 cursor-pointer shrink-0"
             >
               <ChevronRight className="h-3.5 w-3.5" />
             </button>
@@ -507,7 +674,7 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                   ? 'Auto-cycling slides every 8s (pauses on hover)'
                   : 'Enable automatic 8s slide cycling'
               }
-              className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono rounded border transition-colors duration-300 whitespace-nowrap shrink-0 cursor-pointer ${
                 autoCycle
                   ? 'border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor'
                   : 'border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text'
@@ -520,53 +687,66 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
         </div>
       </div>
 
-      {/* Main Interactive Grafana Viewport (Fixed 212px Height to Prevent Layout Shift) */}
-      <div className="relative h-[212px] border border-crt-border bg-crt-bg rounded p-2.5 flex flex-col justify-center overflow-hidden select-none">
+      {/* Main Interactive Grafana Viewport (Fixed 212px Height, Smooth Cross-Gliding Stage) */}
+      <div className="relative h-[212px] border border-crt-border bg-crt-bg rounded p-2.5 overflow-hidden select-none">
         <div aria-hidden="true" className="crt-telemetry-raster" />
         <div aria-hidden="true" className="crt-telemetry-raster crt-telemetry-raster-secondary" />
-        {/* SLIDE 1: PACING */}
-        {activeSlide === 'pacing' &&
-          (delaySeries.length < 2 ? (
-            <div className="text-center space-y-1.5 py-6">
-              <Activity className="h-5 w-5 text-crt-muted mx-auto" />
-              <p className="text-xs text-crt-text font-medium">Awaiting HTTP pacing telemetry</p>
-              <p className="text-xs text-crt-muted max-w-xs mx-auto">
-                Start a Dry Run, Incremental Sync, or login check to plot live AIMD delay and latency curves.
-              </p>
-            </div>
-          ) : (
-            (() => {
-              const maxVal = Math.max(
-                status.rateLimiter.baseDelayMs * 1.4,
-                ...delaySeries.map((s) => Math.max(s.delayMs, s.latencyMs)),
-                100,
-              );
-              const xFor = (i: number) => PAD_L + (i / Math.max(1, delaySeries.length - 1)) * PLOT_W;
-              const yFor = (val: number) => PAD_T + PLOT_H - Math.min(1, Math.max(0, val / maxVal)) * PLOT_H;
 
-              const delayPts = delaySeries.map((pt, i) => `${xFor(i).toFixed(1)},${yFor(pt.delayMs).toFixed(1)}`);
-              const latPts = delaySeries.map((pt, i) => `${xFor(i).toFixed(1)},${yFor(pt.latencyMs).toFixed(1)}`);
-              const areaPath = `M ${PAD_L},${PAD_T + PLOT_H} L ${delayPts.join(' L ')} L ${xFor(delaySeries.length - 1).toFixed(1)},${PAD_T + PLOT_H} Z`;
+        <div className="crt-deck-stage w-full h-full">
+          {/* SLIDE 1: PACING */}
+          <div
+            data-slide-state={resolveSlideState('pacing')}
+            aria-hidden={activeSlide !== 'pacing'}
+            inert={activeSlide !== 'pacing' || undefined}
+            className="crt-deck-slide"
+          >
+            {delaySeries.length < 2 ? (
+              <div className="text-center space-y-1.5 py-6">
+                <Activity className="h-5 w-5 text-crt-muted mx-auto" />
+                <p className="text-xs text-crt-text font-medium">Awaiting HTTP pacing telemetry</p>
+                <p className="text-xs text-crt-muted max-w-xs mx-auto">
+                  Start a Dry Run, Incremental Sync, or login check to plot live AIMD delay and latency curves.
+                </p>
+              </div>
+            ) : (
+              (() => {
+                const maxVal = Math.max(
+                  status.rateLimiter.baseDelayMs * 1.4,
+                  ...delaySeries.map((s) => Math.max(s.delayMs, s.latencyMs)),
+                  100,
+                );
+                const xFor = (i: number) => PAD_L + (i / Math.max(1, delaySeries.length - 1)) * PLOT_W;
+                const yFor = (val: number) =>
+                  PAD_T + PLOT_H - Math.min(1, Math.max(0, val / maxVal)) * PLOT_H;
 
-              const hIdx =
-                hoverState !== null ? Math.min(delaySeries.length - 1, Math.max(0, hoverState.index)) : null;
-              const hSample = hIdx !== null ? delaySeries[hIdx] : null;
-              const hX = hIdx !== null ? xFor(hIdx) : 0;
-              const hCursorY = hoverState !== null ? PAD_T + hoverState.normY * PLOT_H : 0;
-              const cursorMs =
-                hoverState !== null ? Math.round((1 - hoverState.normY) * maxVal) : 0;
-              const flipLeft = hIdx !== null && hIdx / Math.max(1, delaySeries.length - 1) > 0.55;
+                const delayPts = delaySeries.map(
+                  (pt, i) => `${xFor(i).toFixed(1)},${yFor(pt.delayMs).toFixed(1)}`,
+                );
+                const latPts = delaySeries.map(
+                  (pt, i) => `${xFor(i).toFixed(1)},${yFor(pt.latencyMs).toFixed(1)}`,
+                );
+                const areaPath = `M ${PAD_L},${PAD_T + PLOT_H} L ${delayPts.join(' L ')} L ${xFor(delaySeries.length - 1).toFixed(1)},${PAD_T + PLOT_H} Z`;
 
-              return (
-                <div className="relative w-full h-full">
-                  <svg
-                    ref={svgRef}
-                    viewBox={`0 0 ${VB_W} ${VB_H}`}
-                    className="w-full h-full overflow-visible cursor-crosshair"
-                    aria-label="Adaptive rate limiter pacing chart"
-                    onPointerMove={(e) => handleSvgPointerMove(e, delaySeries.length, 'line')}
-                    onPointerLeave={() => setHoverState(null)}
-                  >
+                const activeHover = activeSlide === 'pacing' ? hoverState : null;
+                const hIdx =
+                  activeHover !== null
+                    ? Math.min(delaySeries.length - 1, Math.max(0, activeHover.index))
+                    : null;
+                const hSample = hIdx !== null ? delaySeries[hIdx] : null;
+                const hX = hIdx !== null ? xFor(hIdx) : 0;
+                const hCursorY = activeHover !== null ? PAD_T + activeHover.normY * PLOT_H : 0;
+                const cursorMs =
+                  activeHover !== null ? Math.round((1 - activeHover.normY) * maxVal) : 0;
+
+                return (
+                  <div className="relative w-full h-full">
+                    <svg
+                      viewBox={`0 0 ${VB_W} ${VB_H}`}
+                      className="w-full h-full overflow-visible cursor-crosshair"
+                      aria-label="Adaptive rate limiter pacing chart"
+                      onPointerMove={(e) => handleSvgPointerMove(e, delaySeries.length, 'line')}
+                      onPointerLeave={() => setHoverState(null)}
+                    >
                     <defs>
                       <linearGradient id="crtPacingArea" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="var(--color-crt-phosphor)" stopOpacity="0.22" />
@@ -727,9 +907,8 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                   {/* Floating Grafana Tooltip */}
                   {hSample && hIdx !== null && (
                     <div
-                      className={`pointer-events-none absolute top-2 z-20 w-48 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1 ${
-                        flipLeft ? 'left-12' : 'right-2'
-                      }`}
+                      data-side={tooltipSide}
+                      className="crt-chart-tooltip pointer-events-none absolute top-2 z-20 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1"
                     >
                       <div className="flex items-center justify-between text-crt-muted border-b border-crt-border pb-1">
                         <span>{formatTimeShort(hSample.timestamp)}</span>
@@ -765,39 +944,78 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                 </div>
               );
             })()
-          ))}
+          )}
+          </div>
 
-        {/* SLIDE 2: BANDWIDTH / SPEED */}
-        {activeSlide === 'bandwidth' &&
-          (effectiveBandwidthMode === 'stream' && transferSeries.length >= 2 ? (
-            (() => {
-              const maxBps = Math.max(
-                1024 * 512,
-                ...transferSeries.map((s) => s.bytesPerSec),
-              );
-              const xFor = (i: number) => PAD_L + (i / Math.max(1, transferSeries.length - 1)) * PLOT_W;
-              const yFor = (bps: number) => PAD_T + PLOT_H - Math.min(1, Math.max(0, bps / maxBps)) * PLOT_H;
-
-              const pts = transferSeries.map((pt, i) => `${xFor(i).toFixed(1)},${yFor(pt.bytesPerSec).toFixed(1)}`);
-              const areaPath = `M ${PAD_L},${PAD_T + PLOT_H} L ${pts.join(' L ')} L ${xFor(transferSeries.length - 1).toFixed(1)},${PAD_T + PLOT_H} Z`;
-
-              const hIdx =
-                hoverState !== null ? Math.min(transferSeries.length - 1, Math.max(0, hoverState.index)) : null;
-              const hPt = hIdx !== null ? transferSeries[hIdx] : null;
-              const hX = hIdx !== null ? xFor(hIdx) : 0;
-              const hCursorY = hoverState !== null ? PAD_T + hoverState.normY * PLOT_H : 0;
-              const flipLeft = hIdx !== null && hIdx / Math.max(1, transferSeries.length - 1) > 0.55;
-
-              return (
-                <div className="relative w-full h-full">
-                  <svg
-                    ref={svgRef}
-                    viewBox={`0 0 ${VB_W} ${VB_H}`}
-                    className="w-full h-full overflow-visible cursor-crosshair"
-                    aria-label="Live download speed chart"
-                    onPointerMove={(e) => handleSvgPointerMove(e, transferSeries.length, 'line')}
-                    onPointerLeave={() => setHoverState(null)}
+          {/* SLIDE 2: BANDWIDTH / SPEED */}
+          <div
+            data-slide-state={resolveSlideState('bandwidth')}
+            aria-hidden={activeSlide !== 'bandwidth'}
+            inert={activeSlide !== 'bandwidth' || undefined}
+            className="crt-deck-slide"
+          >
+            {!hasStreamBandwidth && !hasRunBandwidth ? (
+              <div className="text-center space-y-1.5 py-6">
+                <Download className="h-5 w-5 text-crt-muted mx-auto" />
+                <p className="text-xs text-crt-text font-medium">
+                  No active or recorded file transfers yet
+                </p>
+                <p className="text-xs text-crt-muted max-w-xs mx-auto">
+                  Run an Incremental Sync or Full Sync to stream real-time MB/s download curves here.
+                </p>
+              </div>
+            ) : (
+              <div className="crt-deck-stage w-full h-full">
+                {hasStreamBandwidth && (
+                  <div
+                    data-subview-active={
+                      effectiveBandwidthMode === 'stream' || !hasRunBandwidth ? 'true' : 'false'
+                    }
+                    aria-hidden={effectiveBandwidthMode !== 'stream' && hasRunBandwidth}
+                    inert={
+                      (effectiveBandwidthMode !== 'stream' && hasRunBandwidth) || undefined
+                    }
+                    className="crt-deck-subview"
                   >
+                    {(() => {
+                      const maxBps = Math.max(
+                        1024 * 512,
+                        ...transferSeries.map((s) => s.bytesPerSec),
+                      );
+                      const xFor = (i: number) =>
+                        PAD_L + (i / Math.max(1, transferSeries.length - 1)) * PLOT_W;
+                      const yFor = (bps: number) =>
+                        PAD_T + PLOT_H - Math.min(1, Math.max(0, bps / maxBps)) * PLOT_H;
+
+                      const pts = transferSeries.map(
+                        (pt, i) => `${xFor(i).toFixed(1)},${yFor(pt.bytesPerSec).toFixed(1)}`,
+                      );
+                      const areaPath = `M ${PAD_L},${PAD_T + PLOT_H} L ${pts.join(' L ')} L ${xFor(transferSeries.length - 1).toFixed(1)},${PAD_T + PLOT_H} Z`;
+
+                      const streamActive =
+                        activeSlide === 'bandwidth' &&
+                        (effectiveBandwidthMode === 'stream' || !hasRunBandwidth);
+                      const activeHover = streamActive ? hoverState : null;
+                      const hIdx =
+                        activeHover !== null
+                          ? Math.min(transferSeries.length - 1, Math.max(0, activeHover.index))
+                          : null;
+                      const hPt = hIdx !== null ? transferSeries[hIdx] : null;
+                      const hX = hIdx !== null ? xFor(hIdx) : 0;
+                      const hCursorY =
+                        activeHover !== null ? PAD_T + activeHover.normY * PLOT_H : 0;
+
+                      return (
+                        <div className="relative w-full h-full">
+                          <svg
+                            viewBox={`0 0 ${VB_W} ${VB_H}`}
+                            className="w-full h-full overflow-visible cursor-crosshair"
+                            aria-label="Live download speed chart"
+                            onPointerMove={(e) =>
+                              handleSvgPointerMove(e, transferSeries.length, 'line')
+                            }
+                            onPointerLeave={() => setHoverState(null)}
+                          >
                     <defs>
                       <linearGradient id="crtSpeedArea" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="var(--color-crt-phosphor)" stopOpacity="0.28" />
@@ -901,9 +1119,8 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
 
                   {hPt && (
                     <div
-                      className={`pointer-events-none absolute top-2 z-20 w-56 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1 ${
-                        flipLeft ? 'left-12' : 'right-2'
-                      }`}
+                      data-side={tooltipSide}
+                      className="crt-chart-tooltip crt-chart-tooltip-wide pointer-events-none absolute top-2 z-20 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1"
                     >
                       <div className="flex items-center justify-between text-crt-muted border-b border-crt-border pb-1">
                         <span>{formatTimeShort(hPt.timestamp)}</span>
@@ -924,33 +1141,50 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                     </div>
                   )}
                 </div>
-              );
-            })()
-          ) : runBandwidthPoints.some((p) => p.run.bytesDownloaded > 0) ? (
-            (() => {
-              const maxRunBps = Math.max(
-                1024 * 256,
-                ...runBandwidthPoints.map((p) => p.avgBytesPerSec),
-              );
-              const count = runBandwidthPoints.length;
-              const slotW = PLOT_W / Math.max(1, count);
-              const barW = Math.min(24, Math.max(6, slotW * 0.58));
+                    );
+                  })()}
+                  </div>
+                )}
 
-              const hIdx =
-                hoverState !== null ? Math.min(count - 1, Math.max(0, hoverState.index)) : null;
-              const hItem = hIdx !== null ? runBandwidthPoints[hIdx] : null;
-              const flipLeft = hIdx !== null && (hIdx + 0.5) / Math.max(1, count) > 0.55;
-
-              return (
-                <div className="relative w-full h-full">
-                  <svg
-                    ref={svgRef}
-                    viewBox={`0 0 ${VB_W} ${VB_H}`}
-                    className="w-full h-full overflow-visible cursor-crosshair"
-                    aria-label="Per-run download throughput chart"
-                    onPointerMove={(e) => handleSvgPointerMove(e, count, 'bar')}
-                    onPointerLeave={() => setHoverState(null)}
+                {hasRunBandwidth && (
+                  <div
+                    data-subview-active={
+                      effectiveBandwidthMode === 'runs' || !hasStreamBandwidth ? 'true' : 'false'
+                    }
+                    aria-hidden={effectiveBandwidthMode !== 'runs' && hasStreamBandwidth}
+                    inert={
+                      (effectiveBandwidthMode !== 'runs' && hasStreamBandwidth) || undefined
+                    }
+                    className="crt-deck-subview"
                   >
+                    {(() => {
+                      const maxRunBps = Math.max(
+                        1024 * 256,
+                        ...runBandwidthPoints.map((p) => p.avgBytesPerSec),
+                      );
+                      const count = runBandwidthPoints.length;
+                      const slotW = PLOT_W / Math.max(1, count);
+                      const barW = Math.min(24, Math.max(6, slotW * 0.58));
+
+                      const runsActive =
+                        activeSlide === 'bandwidth' &&
+                        (effectiveBandwidthMode === 'runs' || !hasStreamBandwidth);
+                      const activeHover = runsActive ? hoverState : null;
+                      const hIdx =
+                        activeHover !== null
+                          ? Math.min(count - 1, Math.max(0, activeHover.index))
+                          : null;
+                      const hItem = hIdx !== null ? runBandwidthPoints[hIdx] : null;
+
+                      return (
+                        <div className="relative w-full h-full">
+                          <svg
+                            viewBox={`0 0 ${VB_W} ${VB_H}`}
+                            className="w-full h-full overflow-visible cursor-crosshair"
+                            aria-label="Per-run download throughput chart"
+                            onPointerMove={(e) => handleSvgPointerMove(e, count, 'bar')}
+                            onPointerLeave={() => setHoverState(null)}
+                          >
                     {[0, 0.5, 1].map((frac) => {
                       const y = PAD_T + PLOT_H - frac * PLOT_H;
                       const mbps = ((frac * maxRunBps) / (1024 * 1024)).toFixed(1);
@@ -1026,9 +1260,8 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
 
                   {hItem && (
                     <div
-                      className={`pointer-events-none absolute top-2 z-20 w-52 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1 ${
-                        flipLeft ? 'left-12' : 'right-2'
-                      }`}
+                      data-side={tooltipSide}
+                      className="crt-chart-tooltip pointer-events-none absolute top-2 z-20 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1"
                     >
                       <div className="flex items-center justify-between text-crt-muted border-b border-crt-border pb-1">
                         <span className="text-crt-text font-medium">Run #{hItem.run.id}</span>
@@ -1053,62 +1286,64 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                     </div>
                   )}
                 </div>
-              );
-            })()
-          ) : (
-            <div className="text-center space-y-1.5 py-6">
-              <Download className="h-5 w-5 text-crt-muted mx-auto" />
-              <p className="text-xs text-crt-text font-medium">No active or recorded file transfers yet</p>
-              <p className="text-xs text-crt-muted max-w-xs mx-auto">
-                Run an Incremental Sync or Full Sync to stream real-time MB/s download curves here.
-              </p>
-            </div>
-          ))}
+                    );
+                  })()}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
-        {/* SLIDE 3: OUTCOMES (SYNC RUNS STACKED BARS + VOLUME) */}
-        {activeSlide === 'outcomes' &&
-          (chronologicalRuns.length === 0 ? (
-            <div className="text-center space-y-1.5 py-6">
-              <Clock className="h-5 w-5 text-crt-muted mx-auto" />
-              <p className="text-xs text-crt-text font-medium">No sync runs recorded yet</p>
-              <p className="text-xs text-crt-muted max-w-xs mx-auto">
-                Completed and running sync executions will plot downloaded, skipped, and failed item stacks here.
-              </p>
-            </div>
-          ) : (
-            (() => {
-              const count = chronologicalRuns.length;
-              const maxStack = Math.max(
-                1,
-                ...chronologicalRuns.map((r) =>
-                  Math.max(r.downloadedCount + r.skippedCount + r.failedCount, r.newFound || 0),
-                ),
-              );
-              const maxBytes = Math.max(1, ...chronologicalRuns.map((r) => r.bytesDownloaded));
-              const slotW = PLOT_W / count;
-              const barW = Math.min(24, Math.max(6, slotW * 0.58));
+          {/* SLIDE 3: OUTCOMES (SYNC RUNS STACKED BARS + VOLUME) */}
+          <div
+            data-slide-state={resolveSlideState('outcomes')}
+            aria-hidden={activeSlide !== 'outcomes'}
+            inert={activeSlide !== 'outcomes' || undefined}
+            className="crt-deck-slide"
+          >
+            {chronologicalRuns.length === 0 ? (
+              <div className="text-center space-y-1.5 py-6">
+                <Clock className="h-5 w-5 text-crt-muted mx-auto" />
+                <p className="text-xs text-crt-text font-medium">No sync runs recorded yet</p>
+                <p className="text-xs text-crt-muted max-w-xs mx-auto">
+                  Completed and running sync executions will plot downloaded, skipped, and failed item stacks here.
+                </p>
+              </div>
+            ) : (
+              (() => {
+                const count = chronologicalRuns.length;
+                const maxStack = Math.max(
+                  1,
+                  ...chronologicalRuns.map((r) =>
+                    Math.max(r.downloadedCount + r.skippedCount + r.failedCount, r.newFound || 0),
+                  ),
+                );
+                const maxBytes = Math.max(1, ...chronologicalRuns.map((r) => r.bytesDownloaded));
+                const slotW = PLOT_W / count;
+                const barW = Math.min(24, Math.max(6, slotW * 0.58));
 
-              const byteLinePts = chronologicalRuns.map((r, i) => {
-                const cx = PAD_L + (i + 0.5) * slotW;
-                const y = PAD_T + PLOT_H - (r.bytesDownloaded / maxBytes) * (PLOT_H * 0.88);
-                return `${cx.toFixed(1)},${y.toFixed(1)}`;
-              });
+                const byteLinePts = chronologicalRuns.map((r, i) => {
+                  const cx = PAD_L + (i + 0.5) * slotW;
+                  const y = PAD_T + PLOT_H - (r.bytesDownloaded / maxBytes) * (PLOT_H * 0.88);
+                  return `${cx.toFixed(1)},${y.toFixed(1)}`;
+                });
 
-              const hIdx =
-                hoverState !== null ? Math.min(count - 1, Math.max(0, hoverState.index)) : null;
-              const hRun = hIdx !== null ? chronologicalRuns[hIdx] : null;
-              const flipLeft = hIdx !== null && (hIdx + 0.5) / count > 0.55;
+                const activeHover = activeSlide === 'outcomes' ? hoverState : null;
+                const hIdx =
+                  activeHover !== null
+                    ? Math.min(count - 1, Math.max(0, activeHover.index))
+                    : null;
+                const hRun = hIdx !== null ? chronologicalRuns[hIdx] : null;
 
-              return (
-                <div className="relative w-full h-full">
-                  <svg
-                    ref={svgRef}
-                    viewBox={`0 0 ${VB_W} ${VB_H}`}
-                    className="w-full h-full overflow-visible cursor-crosshair"
-                    aria-label="Sync run outcomes stacked bar chart"
-                    onPointerMove={(e) => handleSvgPointerMove(e, count, 'bar')}
-                    onPointerLeave={() => setHoverState(null)}
-                  >
+                return (
+                  <div className="relative w-full h-full">
+                    <svg
+                      viewBox={`0 0 ${VB_W} ${VB_H}`}
+                      className="w-full h-full overflow-visible cursor-crosshair"
+                      aria-label="Sync run outcomes stacked bar chart"
+                      onPointerMove={(e) => handleSvgPointerMove(e, count, 'bar')}
+                      onPointerLeave={() => setHoverState(null)}
+                    >
                     {[0, 0.5, 1].map((frac) => {
                       const y = PAD_T + PLOT_H - frac * PLOT_H;
                       return (
@@ -1255,9 +1490,8 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                       );
                       return (
                         <div
-                          className={`pointer-events-none absolute top-2 z-20 w-56 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1 ${
-                            flipLeft ? 'left-12' : 'right-2'
-                          }`}
+                          data-side={tooltipSide}
+                          className="crt-chart-tooltip crt-chart-tooltip-wide pointer-events-none absolute top-2 z-20 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1"
                         >
                           <div className="flex items-center justify-between gap-2 text-crt-muted border-b border-crt-border pb-1">
                             <span className="text-crt-text font-semibold truncate">
@@ -1313,271 +1547,303 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                 </div>
               );
             })()
-          ))}
+          )}
+          </div>
 
-        {/* SLIDE 4: CONSOLES STORAGE FOOTPRINT */}
-        {activeSlide === 'consoles' &&
-          (rankedSystems.length === 0 ? (
-            <div className="text-center space-y-1.5 py-6">
-              <HardDrive className="h-5 w-5 text-crt-muted mx-auto" />
-              <p className="text-xs text-crt-text font-medium">No mirrored console storage yet</p>
-              <p className="text-xs text-crt-muted max-w-xs mx-auto">
-                Console storage breakdown populates automatically once releases are indexed and mirrored.
-              </p>
-            </div>
-          ) : (
-            (() => {
-              const totalBytesAll = Math.max(
-                1,
-                rankedSystems.reduce((acc, s) => acc + s.totalBytes, 0),
-              );
-              const maxSysBytes = Math.max(1, rankedSystems[0]?.totalBytes || 1);
-              const maxSysItems = Math.max(1, ...rankedSystems.map((s) => s.totalItems));
-              const useBytes = rankedSystems.some((s) => s.totalBytes > 0);
-              const hIdx = hoverState?.index ?? null;
-              const hSys = hIdx !== null ? rankedSystems[hIdx] : null;
+          {/* SLIDE 4: CONSOLES STORAGE FOOTPRINT */}
+          <div
+            data-slide-state={resolveSlideState('consoles')}
+            aria-hidden={activeSlide !== 'consoles'}
+            inert={activeSlide !== 'consoles' || undefined}
+            className="crt-deck-slide"
+          >
+            {rankedSystems.length === 0 ? (
+              <div className="text-center space-y-1.5 py-6">
+                <HardDrive className="h-5 w-5 text-crt-muted mx-auto" />
+                <p className="text-xs text-crt-text font-medium">No mirrored console storage yet</p>
+                <p className="text-xs text-crt-muted max-w-xs mx-auto">
+                  Console storage breakdown populates automatically once releases are indexed and mirrored.
+                </p>
+              </div>
+            ) : (
+              (() => {
+                const totalBytesAll = Math.max(
+                  1,
+                  rankedSystems.reduce((acc, s) => acc + s.totalBytes, 0),
+                );
+                const maxSysBytes = Math.max(1, rankedSystems[0]?.totalBytes || 1);
+                const maxSysItems = Math.max(1, ...rankedSystems.map((s) => s.totalItems));
+                const useBytes = rankedSystems.some((s) => s.totalBytes > 0);
+                const activeHover = activeSlide === 'consoles' ? hoverState : null;
+                const hIdx = activeHover?.index ?? null;
+                const hSys = hIdx !== null ? rankedSystems[hIdx] : null;
 
-              return (
-                <div className="relative w-full h-full flex flex-col">
-                  <div className="flex-1 overflow-y-auto pr-1 space-y-1.5">
-                    {rankedSystems.map((sys, idx) => {
-                      const pctWidth = useBytes
-                        ? (sys.totalBytes / maxSysBytes) * 100
-                        : (sys.totalItems / maxSysItems) * 100;
-                      const sharePct = useBytes
-                        ? ((sys.totalBytes / totalBytesAll) * 100).toFixed(1)
-                        : (
-                            (sys.totalItems / Math.max(1, status.totals.totalCatalogItems)) *
-                            100
-                          ).toFixed(1);
-                      const hovered = hIdx === idx;
-
-                      return (
-                        <div
-                          key={sys.systemName}
-                          onPointerEnter={() =>
-                            setHoverState({
-                              index: idx,
-                              normX: 0.5,
-                              normY: idx / Math.max(1, rankedSystems.length),
-                            })
-                          }
-                          className={`px-2 py-1 rounded transition-colors cursor-crosshair ${
-                            hovered ? 'bg-crt-elevated' : 'hover:bg-crt-elevated/60'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums mb-1">
-                            <span className="text-crt-text truncate font-medium">{sys.systemName}</span>
-                            <span className="text-crt-muted shrink-0">
-                              {useBytes ? formatBytes(sys.totalBytes) : `${sys.totalItems} items`} ·{' '}
-                              <span className="text-crt-phosphor">{sharePct}%</span>
-                            </span>
-                          </div>
-                          <div className="h-1.5 w-full bg-crt-surface rounded-xs overflow-hidden">
-                            <div
-                              className="h-full transition-all duration-150"
-                              style={{
-                                width: `${Math.max(2, pctWidth)}%`,
-                                backgroundColor: hovered
-                                  ? 'var(--color-crt-phosphor)'
-                                  : 'var(--color-crt-phosphor-dim)',
-                              }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {hSys && (
-                    <div className="pointer-events-none absolute bottom-2 right-2 z-20 w-56 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1">
-                      <div className="flex items-center justify-between border-b border-crt-border pb-1">
-                        <span className="text-crt-text font-semibold truncate">{hSys.systemName}</span>
-                        <span className="text-crt-phosphor shrink-0">
-                          {useBytes
-                            ? `${((hSys.totalBytes / totalBytesAll) * 100).toFixed(1)}%`
-                            : `${hSys.totalItems} rel`}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-crt-muted">Disk Size</span>
-                        <span className="text-crt-text">{formatBytes(hSys.totalBytes)}</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-crt-muted">Downloaded</span>
-                        <span className="text-crt-phosphor">
-                          {hSys.downloadedItems} / {hSys.totalItems}
-                        </span>
-                      </div>
-                      {hSys.failedItems > 0 && (
-                        <div className="flex items-center justify-between">
-                          <span className="text-crt-crimson">Failed / Partial</span>
-                          <span className="text-crt-crimson">{hSys.failedItems}</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })()
-          ))}
-
-        {/* SLIDE 5: DOWNLOADED RELEASE TYPES */}
-        {activeSlide === 'types' &&
-          (releaseTypesData.rows.length === 0 ? (
-            <div className="text-center space-y-1.5 py-6">
-              <Gamepad2 className="h-5 w-5 text-crt-muted mx-auto" />
-              <p className="text-xs text-crt-text font-medium">No categorized ROM types yet</p>
-              <p className="text-xs text-crt-muted max-w-xs mx-auto">
-                Downloaded translations, ROM hacks, ports, homebrew, and retail games will break down here.
-              </p>
-            </div>
-          ) : (
-            (() => {
-              const { rows, usingDownloadedOnly } = releaseTypesData;
-              const denomCount = usingDownloadedOnly
-                ? Math.max(1, status.totals.downloadedItems + status.totals.skippedItems)
-                : Math.max(1, status.totals.totalCatalogItems);
-              const maxCount = Math.max(
-                1,
-                ...rows.map((r) => (usingDownloadedOnly ? r.downloadedItems : r.totalItems)),
-              );
-              const hIdx = hoverState?.index ?? null;
-              const hType = hIdx !== null ? rows[hIdx] : null;
-
-              return (
-                <div className="relative w-full h-full flex flex-col">
-                  <div className="flex-1 overflow-y-auto pr-1 space-y-1.5">
-                    {rows.map((row, idx) => {
-                      const countVal = usingDownloadedOnly ? row.downloadedItems : row.totalItems;
-                      const barPct = (countVal / maxCount) * 100;
-                      const sharePct = Math.min(100, (countVal / denomCount) * 100).toFixed(1);
-                      const accent = classifyTypeAccent(row.typeName);
-                      const hovered = hIdx === idx;
-
-                      return (
-                        <div
-                          key={row.typeName}
-                          onPointerEnter={() =>
-                            setHoverState({
-                              index: idx,
-                              normX: 0.5,
-                              normY: idx / Math.max(1, rows.length),
-                            })
-                          }
-                          className={`px-2 py-1 rounded transition-colors cursor-crosshair ${
-                            hovered ? 'bg-crt-elevated' : 'hover:bg-crt-elevated/60'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums mb-1">
-                            <span className="inline-flex items-center gap-1.5 min-w-0 text-crt-text font-medium">
-                              <span
-                                className="w-2 h-2 rounded-xs shrink-0"
-                                style={{ backgroundColor: accent.dotColor }}
-                              />
-                              <span className="truncate">{row.typeName}</span>
-                            </span>
-                            <span className="text-crt-muted shrink-0">
-                              <span className="text-crt-text">{countVal.toLocaleString()}</span> ·{' '}
-                              <span className="text-crt-phosphor">{sharePct}%</span>
-                            </span>
-                          </div>
-                          <div className="h-1.5 w-full bg-crt-surface rounded-xs overflow-hidden">
-                            <div
-                              className="h-full transition-all duration-150"
-                              style={{
-                                width: `${Math.max(2, barPct)}%`,
-                                backgroundColor: accent.barStyle,
-                                opacity: hovered ? 1 : 0.85,
-                              }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {hType && (
-                    <div className="pointer-events-none absolute bottom-2 right-2 z-20 w-56 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1">
-                      <div className="flex items-center justify-between gap-2 border-b border-crt-border pb-1">
-                        <span className="text-crt-text font-semibold truncate">{hType.typeName}</span>
-                        <span className="text-crt-phosphor shrink-0">
-                          {Math.min(
-                            100,
-                            ((usingDownloadedOnly ? hType.downloadedItems : hType.totalItems) /
-                              denomCount) *
-                              100,
-                          ).toFixed(1)}
-                          %
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-crt-muted">Downloaded</span>
-                        <span className="text-crt-phosphor font-medium">
-                          {hType.downloadedItems.toLocaleString()}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-crt-muted">Indexed Total</span>
-                        <span className="text-crt-text">{hType.totalItems.toLocaleString()}</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-crt-muted">Disk Footprint</span>
-                        <span className="text-crt-text">{formatBytes(hType.totalBytes)}</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })()
-          ))}
-
-        {/* SLIDE 6: LATENCY PERCENTILES (ROLLING P50 / P95 / MAX) */}
-        {activeSlide === 'percentiles' &&
-          (rollingPercentiles.length < 2 ? (
-            <div className="text-center space-y-1.5 py-6">
-              <Layers className="h-5 w-5 text-crt-muted mx-auto" />
-              <p className="text-xs text-crt-text font-medium">Awaiting latency percentile samples</p>
-              <p className="text-xs text-crt-muted max-w-xs mx-auto">
-                Rolling p50 median, p95 tail, and peak response latency curves appear as HTTP requests complete.
-              </p>
-            </div>
-          ) : (
-            (() => {
-              const maxLat = Math.max(
-                100,
-                ...rollingPercentiles.map((p) => p.max),
-              );
-              const xFor = (i: number) =>
-                PAD_L + (i / Math.max(1, rollingPercentiles.length - 1)) * PLOT_W;
-              const yFor = (ms: number) =>
-                PAD_T + PLOT_H - Math.min(1, Math.max(0, ms / maxLat)) * PLOT_H;
-
-              const p50Pts = rollingPercentiles.map((p, i) => `${xFor(i).toFixed(1)},${yFor(p.p50).toFixed(1)}`);
-              const p95Pts = rollingPercentiles.map((p, i) => `${xFor(i).toFixed(1)},${yFor(p.p95).toFixed(1)}`);
-              const maxPts = rollingPercentiles.map((p, i) => `${xFor(i).toFixed(1)},${yFor(p.max).toFixed(1)}`);
-              const p50Area = `M ${PAD_L},${PAD_T + PLOT_H} L ${p50Pts.join(' L ')} L ${xFor(rollingPercentiles.length - 1).toFixed(1)},${PAD_T + PLOT_H} Z`;
-
-              const hIdx =
-                hoverState !== null
-                  ? Math.min(rollingPercentiles.length - 1, Math.max(0, hoverState.index))
-                  : null;
-              const hPt = hIdx !== null ? rollingPercentiles[hIdx] : null;
-              const hX = hIdx !== null ? xFor(hIdx) : 0;
-              const hCursorY = hoverState !== null ? PAD_T + hoverState.normY * PLOT_H : 0;
-              const flipLeft =
-                hIdx !== null && hIdx / Math.max(1, rollingPercentiles.length - 1) > 0.55;
-
-              return (
-                <div className="relative w-full h-full">
-                  <svg
-                    ref={svgRef}
-                    viewBox={`0 0 ${VB_W} ${VB_H}`}
-                    className="w-full h-full overflow-visible cursor-crosshair"
-                    aria-label="Upstream latency percentiles chart"
-                    onPointerMove={(e) => handleSvgPointerMove(e, rollingPercentiles.length, 'line')}
+                return (
+                  <div
+                    className="relative w-full h-full flex flex-col"
                     onPointerLeave={() => setHoverState(null)}
                   >
+                    <div className="flex-1 overflow-y-auto pr-1 space-y-1.5">
+                      {rankedSystems.map((sys, idx) => {
+                        const pctWidth = useBytes
+                          ? (sys.totalBytes / maxSysBytes) * 100
+                          : (sys.totalItems / maxSysItems) * 100;
+                        const sharePct = useBytes
+                          ? ((sys.totalBytes / totalBytesAll) * 100).toFixed(1)
+                          : (
+                              (sys.totalItems / Math.max(1, status.totals.totalCatalogItems)) *
+                              100
+                            ).toFixed(1);
+                        const hovered = hIdx === idx;
+
+                        return (
+                          <div
+                            key={sys.systemName}
+                            onPointerEnter={() =>
+                              setHoverState({
+                                index: idx,
+                                normX: 0.5,
+                                normY: idx / Math.max(1, rankedSystems.length),
+                              })
+                            }
+                            className={`px-2 py-1 rounded transition-colors duration-200 cursor-crosshair ${
+                              hovered ? 'bg-crt-elevated' : 'hover:bg-crt-elevated/60'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums mb-1">
+                              <span className="text-crt-text truncate font-medium">{sys.systemName}</span>
+                              <span className="text-crt-muted shrink-0">
+                                {useBytes ? formatBytes(sys.totalBytes) : `${sys.totalItems} items`} ·{' '}
+                                <span className="text-crt-phosphor">{sharePct}%</span>
+                              </span>
+                            </div>
+                            <div className="h-1.5 w-full bg-crt-surface rounded-xs overflow-hidden">
+                              <div
+                                className="h-full transition-all duration-300 ease-out"
+                                style={{
+                                  width: `${Math.max(2, pctWidth)}%`,
+                                  backgroundColor: hovered
+                                    ? 'var(--color-crt-phosphor)'
+                                    : 'var(--color-crt-phosphor-dim)',
+                                }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {hSys && (
+                      <div className="crt-chart-tooltip-static pointer-events-none absolute bottom-2 right-2 z-20 w-56 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1">
+                        <div className="flex items-center justify-between border-b border-crt-border pb-1">
+                          <span className="text-crt-text font-semibold truncate">{hSys.systemName}</span>
+                          <span className="text-crt-phosphor shrink-0">
+                            {useBytes
+                              ? `${((hSys.totalBytes / totalBytesAll) * 100).toFixed(1)}%`
+                              : `${hSys.totalItems} rel`}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-crt-muted">Disk Size</span>
+                          <span className="text-crt-text">{formatBytes(hSys.totalBytes)}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-crt-muted">Downloaded</span>
+                          <span className="text-crt-phosphor">
+                            {hSys.downloadedItems} / {hSys.totalItems}
+                          </span>
+                        </div>
+                        {hSys.failedItems > 0 && (
+                          <div className="flex items-center justify-between">
+                            <span className="text-crt-crimson">Failed / Partial</span>
+                            <span className="text-crt-crimson">{hSys.failedItems}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()
+            )}
+          </div>
+
+          {/* SLIDE 5: DOWNLOADED RELEASE TYPES */}
+          <div
+            data-slide-state={resolveSlideState('types')}
+            aria-hidden={activeSlide !== 'types'}
+            inert={activeSlide !== 'types' || undefined}
+            className="crt-deck-slide"
+          >
+            {releaseTypesData.rows.length === 0 ? (
+              <div className="text-center space-y-1.5 py-6">
+                <Gamepad2 className="h-5 w-5 text-crt-muted mx-auto" />
+                <p className="text-xs text-crt-text font-medium">No categorized ROM types yet</p>
+                <p className="text-xs text-crt-muted max-w-xs mx-auto">
+                  Downloaded translations, ROM hacks, ports, homebrew, and retail games will break down here.
+                </p>
+              </div>
+            ) : (
+              (() => {
+                const { rows, usingDownloadedOnly } = releaseTypesData;
+                const denomCount = usingDownloadedOnly
+                  ? Math.max(1, status.totals.downloadedItems + status.totals.skippedItems)
+                  : Math.max(1, status.totals.totalCatalogItems);
+                const maxCount = Math.max(
+                  1,
+                  ...rows.map((r) => (usingDownloadedOnly ? r.downloadedItems : r.totalItems)),
+                );
+                const activeHover = activeSlide === 'types' ? hoverState : null;
+                const hIdx = activeHover?.index ?? null;
+                const hType = hIdx !== null ? rows[hIdx] : null;
+
+                return (
+                  <div
+                    className="relative w-full h-full flex flex-col"
+                    onPointerLeave={() => setHoverState(null)}
+                  >
+                    <div className="flex-1 overflow-y-auto pr-1 space-y-1.5">
+                      {rows.map((row, idx) => {
+                        const countVal = usingDownloadedOnly ? row.downloadedItems : row.totalItems;
+                        const barPct = (countVal / maxCount) * 100;
+                        const sharePct = Math.min(100, (countVal / denomCount) * 100).toFixed(1);
+                        const accent = classifyTypeAccent(row.typeName);
+                        const hovered = hIdx === idx;
+
+                        return (
+                          <div
+                            key={row.typeName}
+                            onPointerEnter={() =>
+                              setHoverState({
+                                index: idx,
+                                normX: 0.5,
+                                normY: idx / Math.max(1, rows.length),
+                              })
+                            }
+                            className={`px-2 py-1 rounded transition-colors duration-200 cursor-crosshair ${
+                              hovered ? 'bg-crt-elevated' : 'hover:bg-crt-elevated/60'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums mb-1">
+                              <span className="inline-flex items-center gap-1.5 min-w-0 text-crt-text font-medium">
+                                <span
+                                  className="w-2 h-2 rounded-xs shrink-0"
+                                  style={{ backgroundColor: accent.dotColor }}
+                                />
+                                <span className="truncate">{row.typeName}</span>
+                              </span>
+                              <span className="text-crt-muted shrink-0">
+                                <span className="text-crt-text">{countVal.toLocaleString()}</span> ·{' '}
+                                <span className="text-crt-phosphor">{sharePct}%</span>
+                              </span>
+                            </div>
+                            <div className="h-1.5 w-full bg-crt-surface rounded-xs overflow-hidden">
+                              <div
+                                className="h-full transition-all duration-300 ease-out"
+                                style={{
+                                  width: `${Math.max(2, barPct)}%`,
+                                  backgroundColor: accent.barStyle,
+                                  opacity: hovered ? 1 : 0.85,
+                                }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {hType && (
+                      <div className="crt-chart-tooltip-static pointer-events-none absolute bottom-2 right-2 z-20 w-56 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1">
+                        <div className="flex items-center justify-between gap-2 border-b border-crt-border pb-1">
+                          <span className="text-crt-text font-semibold truncate">{hType.typeName}</span>
+                          <span className="text-crt-phosphor shrink-0">
+                            {Math.min(
+                              100,
+                              ((usingDownloadedOnly ? hType.downloadedItems : hType.totalItems) /
+                                denomCount) *
+                                100,
+                            ).toFixed(1)}
+                            %
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-crt-muted">Downloaded</span>
+                          <span className="text-crt-phosphor font-medium">
+                            {hType.downloadedItems.toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-crt-muted">Indexed Total</span>
+                          <span className="text-crt-text">{hType.totalItems.toLocaleString()}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-crt-muted">Disk Footprint</span>
+                          <span className="text-crt-text">{formatBytes(hType.totalBytes)}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()
+            )}
+          </div>
+
+          {/* SLIDE 6: LATENCY PERCENTILES (ROLLING P50 / P95 / MAX) */}
+          <div
+            data-slide-state={resolveSlideState('percentiles')}
+            aria-hidden={activeSlide !== 'percentiles'}
+            inert={activeSlide !== 'percentiles' || undefined}
+            className="crt-deck-slide"
+          >
+            {rollingPercentiles.length < 2 ? (
+              <div className="text-center space-y-1.5 py-6">
+                <Layers className="h-5 w-5 text-crt-muted mx-auto" />
+                <p className="text-xs text-crt-text font-medium">Awaiting latency percentile samples</p>
+                <p className="text-xs text-crt-muted max-w-xs mx-auto">
+                  Rolling p50 median, p95 tail, and peak response latency curves appear as HTTP requests complete.
+                </p>
+              </div>
+            ) : (
+              (() => {
+                const maxLat = Math.max(
+                  100,
+                  ...rollingPercentiles.map((p) => p.max),
+                );
+                const xFor = (i: number) =>
+                  PAD_L + (i / Math.max(1, rollingPercentiles.length - 1)) * PLOT_W;
+                const yFor = (ms: number) =>
+                  PAD_T + PLOT_H - Math.min(1, Math.max(0, ms / maxLat)) * PLOT_H;
+
+                const p50Pts = rollingPercentiles.map(
+                  (p, i) => `${xFor(i).toFixed(1)},${yFor(p.p50).toFixed(1)}`,
+                );
+                const p95Pts = rollingPercentiles.map(
+                  (p, i) => `${xFor(i).toFixed(1)},${yFor(p.p95).toFixed(1)}`,
+                );
+                const maxPts = rollingPercentiles.map(
+                  (p, i) => `${xFor(i).toFixed(1)},${yFor(p.max).toFixed(1)}`,
+                );
+                const p50Area = `M ${PAD_L},${PAD_T + PLOT_H} L ${p50Pts.join(' L ')} L ${xFor(rollingPercentiles.length - 1).toFixed(1)},${PAD_T + PLOT_H} Z`;
+
+                const activeHover = activeSlide === 'percentiles' ? hoverState : null;
+                const hIdx =
+                  activeHover !== null
+                    ? Math.min(rollingPercentiles.length - 1, Math.max(0, activeHover.index))
+                    : null;
+                const hPt = hIdx !== null ? rollingPercentiles[hIdx] : null;
+                const hX = hIdx !== null ? xFor(hIdx) : 0;
+                const hCursorY = activeHover !== null ? PAD_T + activeHover.normY * PLOT_H : 0;
+
+                return (
+                  <div className="relative w-full h-full">
+                    <svg
+                      viewBox={`0 0 ${VB_W} ${VB_H}`}
+                      className="w-full h-full overflow-visible cursor-crosshair"
+                      aria-label="Upstream latency percentiles chart"
+                      onPointerMove={(e) =>
+                        handleSvgPointerMove(e, rollingPercentiles.length, 'line')
+                      }
+                      onPointerLeave={() => setHoverState(null)}
+                    >
                     <defs>
                       <linearGradient id="crtP50Area" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="var(--color-crt-phosphor)" stopOpacity="0.18" />
@@ -1716,9 +1982,8 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
 
                   {hPt && (
                     <div
-                      className={`pointer-events-none absolute top-2 z-20 w-48 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1 ${
-                        flipLeft ? 'left-12' : 'right-2'
-                      }`}
+                      data-side={tooltipSide}
+                      className="crt-chart-tooltip pointer-events-none absolute top-2 z-20 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1"
                     >
                       <div className="flex items-center justify-between text-crt-muted border-b border-crt-border pb-1">
                         <span>{formatTimeShort(hPt.timestamp)}</span>
@@ -1741,48 +2006,56 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                 </div>
               );
             })()
-          ))}
+          )}
+          </div>
+        </div>
       </div>
 
-      {/* Grafana Tabular Summary Legend Footer */}
-      <div className="mt-3 pt-2.5 border-t border-crt-border/80 text-[11px] font-mono tabular-nums">
-        {activeSlide === 'pacing' && (
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="inline-flex items-center gap-1.5 text-crt-text">
-                <span
-                  className="w-2 h-2 rounded-xs shrink-0"
-                  style={{ backgroundColor: 'var(--color-crt-phosphor)' }}
-                />
-                AIMD Delay
-              </span>
-              <span className="text-crt-muted">
-                min <span className="text-crt-text">{pacingStats.delayMin}ms</span> · avg{' '}
-                <span className="text-crt-text">{pacingStats.delayAvg}ms</span> · max{' '}
-                <span className="text-crt-text">{pacingStats.delayMax}ms</span> · last{' '}
-                <span className="text-crt-phosphor">{pacingStats.delayLast}ms</span>
-              </span>
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="inline-flex items-center gap-1.5 text-crt-text">
-                <span
-                  className="w-2 h-2 rounded-xs shrink-0"
-                  style={{ backgroundColor: 'var(--color-crt-amber)' }}
-                />
-                HTTP Latency
-              </span>
-              <span className="text-crt-muted">
-                min <span className="text-crt-text">{pacingStats.latMin}ms</span> · avg{' '}
-                <span className="text-crt-text">{pacingStats.latAvg}ms</span> · max{' '}
-                <span className="text-crt-text">{pacingStats.latMax}ms</span> · last{' '}
-                <span className="text-crt-amber">{pacingStats.latLast}ms</span>
-              </span>
-            </div>
+      {/* Grafana Tabular Summary Legend Footer (Stacked Cross-Dissolve, Zero Height Shift) */}
+      <div className="mt-3 pt-2.5 border-t border-crt-border/80 text-[11px] font-mono tabular-nums crt-deck-meta-stage">
+        <div
+          data-slide-state={resolveSlideState('pacing')}
+          aria-hidden={activeSlide !== 'pacing'}
+          className="crt-deck-meta-item space-y-1"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-crt-text">
+              <span
+                className="w-2 h-2 rounded-xs shrink-0"
+                style={{ backgroundColor: 'var(--color-crt-phosphor)' }}
+              />
+              AIMD Delay
+            </span>
+            <span className="text-crt-muted">
+              min <span className="text-crt-text">{pacingStats.delayMin}ms</span> · avg{' '}
+              <span className="text-crt-text">{pacingStats.delayAvg}ms</span> · max{' '}
+              <span className="text-crt-text">{pacingStats.delayMax}ms</span> · last{' '}
+              <span className="text-crt-phosphor">{pacingStats.delayLast}ms</span>
+            </span>
           </div>
-        )}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-crt-text">
+              <span
+                className="w-2 h-2 rounded-xs shrink-0"
+                style={{ backgroundColor: 'var(--color-crt-amber)' }}
+              />
+              HTTP Latency
+            </span>
+            <span className="text-crt-muted">
+              min <span className="text-crt-text">{pacingStats.latMin}ms</span> · avg{' '}
+              <span className="text-crt-text">{pacingStats.latAvg}ms</span> · max{' '}
+              <span className="text-crt-text">{pacingStats.latMax}ms</span> · last{' '}
+              <span className="text-crt-amber">{pacingStats.latLast}ms</span>
+            </span>
+          </div>
+        </div>
 
-        {activeSlide === 'bandwidth' &&
-          (() => {
+        <div
+          data-slide-state={resolveSlideState('bandwidth')}
+          aria-hidden={activeSlide !== 'bandwidth'}
+          className="crt-deck-meta-item space-y-1"
+        >
+          {(() => {
             const bpsValues =
               effectiveBandwidthMode === 'stream' && transferSeries.length > 0
                 ? transferSeries.map((s) => s.bytesPerSec)
@@ -1797,7 +2070,7 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
               (bpsValues.length > 0 ? bpsValues[bpsValues.length - 1] : 0);
 
             return (
-              <div className="space-y-1">
+              <>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-crt-muted">
                     Peak <span className="text-crt-phosphor">{formatMbps(peak)}</span> · Avg{' '}
@@ -1814,18 +2087,23 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                     {formatBytes(status.totals.totalBytesMirrored)}
                   </span>
                 </div>
-              </div>
+              </>
             );
           })()}
+        </div>
 
-        {activeSlide === 'outcomes' &&
-          (() => {
+        <div
+          data-slide-state={resolveSlideState('outcomes')}
+          aria-hidden={activeSlide !== 'outcomes'}
+          className="crt-deck-meta-item space-y-1"
+        >
+          {(() => {
             const dlSum = chronologicalRuns.reduce((a, r) => a + r.downloadedCount, 0);
             const skSum = chronologicalRuns.reduce((a, r) => a + r.skippedCount, 0);
             const flSum = chronologicalRuns.reduce((a, r) => a + r.failedCount, 0);
             const bytesSum = chronologicalRuns.reduce((a, r) => a + r.bytesDownloaded, 0);
             return (
-              <div className="space-y-1">
+              <>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-crt-muted">
                     Saved <span className="text-crt-phosphor">{dlSum}</span> · Skipped{' '}
@@ -1840,16 +2118,21 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                   <span>Bars: Saved / Skipped / Failed</span>
                   <span>Line: Mirrored Bytes</span>
                 </div>
-              </div>
+              </>
             );
           })()}
+        </div>
 
-        {activeSlide === 'consoles' &&
-          (() => {
+        <div
+          data-slide-state={resolveSlideState('consoles')}
+          aria-hidden={activeSlide !== 'consoles'}
+          className="crt-deck-meta-item space-y-1"
+        >
+          {(() => {
             const top = rankedSystems[0];
             const totalB = Math.max(1, rankedSystems.reduce((a, s) => a + s.totalBytes, 0));
             return (
-              <div className="space-y-1">
+              <>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-crt-muted truncate">
                     Largest:{' '}
@@ -1865,12 +2148,17 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                   <span>Mirrored Consoles: {rankedSystems.length}</span>
                   <span>Hover any console bar for breakdown</span>
                 </div>
-              </div>
+              </>
             );
           })()}
+        </div>
 
-        {activeSlide === 'types' &&
-          (() => {
+        <div
+          data-slide-state={resolveSlideState('types')}
+          aria-hidden={activeSlide !== 'types'}
+          className="crt-deck-meta-item space-y-1"
+        >
+          {(() => {
             const { rows, usingDownloadedOnly } = releaseTypesData;
             const top = rows[0];
             const modCount = rows
@@ -1881,7 +2169,7 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
               : Math.max(1, status.totals.totalCatalogItems);
 
             return (
-              <div className="space-y-1">
+              <>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-crt-muted truncate">
                     Top:{' '}
@@ -1900,28 +2188,31 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
                   <span>Mods / Translations / Ports tags: {modCount.toLocaleString()}</span>
                   <span>{usingDownloadedOnly ? 'On-disk releases' : 'Dry-run preview'}</span>
                 </div>
-              </div>
+              </>
             );
           })()}
+        </div>
 
-        {activeSlide === 'percentiles' && (
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-crt-muted">
-                p50 <span className="text-crt-phosphor">{pacingStats.p50}ms</span> · p90{' '}
-                <span className="text-crt-text">{pacingStats.p90}ms</span> · p95{' '}
-                <span className="text-crt-amber">{pacingStats.p95}ms</span>
-              </span>
-              <span className="text-crt-muted">
-                max <span className="text-crt-crimson">{pacingStats.latMax}ms</span>
-              </span>
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-2 text-crt-muted">
-              <span>Rolling 12-request percentile window</span>
-              <span>Tracked: {status.rateLimiter.totalRequests} reqs</span>
-            </div>
+        <div
+          data-slide-state={resolveSlideState('percentiles')}
+          aria-hidden={activeSlide !== 'percentiles'}
+          className="crt-deck-meta-item space-y-1"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-crt-muted">
+              p50 <span className="text-crt-phosphor">{pacingStats.p50}ms</span> · p90{' '}
+              <span className="text-crt-text">{pacingStats.p90}ms</span> · p95{' '}
+              <span className="text-crt-amber">{pacingStats.p95}ms</span>
+            </span>
+            <span className="text-crt-muted">
+              max <span className="text-crt-crimson">{pacingStats.latMax}ms</span>
+            </span>
           </div>
-        )}
+          <div className="flex flex-wrap items-center justify-between gap-2 text-crt-muted">
+            <span>Rolling 12-request percentile window</span>
+            <span>Tracked: {status.rateLimiter.totalRequests} reqs</span>
+          </div>
+        </div>
       </div>
     </div>
   );
