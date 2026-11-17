@@ -120,6 +120,25 @@ function getLocalGitFallback(): { version: string; gitSha: string } {
   return cachedLocalGitFallback;
 }
 
+let cachedPackageVersionFallback: string | null | undefined;
+
+function getPackageVersionFallback(): string | null {
+  if (cachedPackageVersionFallback !== undefined) return cachedPackageVersionFallback;
+  try {
+    const pkgPath = path.resolve(process.cwd(), 'package.json');
+    const raw = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version?: unknown };
+    const ver = typeof raw.version === 'string' ? raw.version.trim() : '';
+    if (/^\d+\.\d+\.\d+(?:[-+].+)?$/.test(ver) && ver !== '0.0.0') {
+      cachedPackageVersionFallback = `v${ver}`;
+      return cachedPackageVersionFallback;
+    }
+  } catch {
+    // Ignore unreadable package.json
+  }
+  cachedPackageVersionFallback = null;
+  return null;
+}
+
 function resolveRuntimeBuildInfo(): { version: string; gitSha: string; gitUrl: string | null } {
   const envVersion = (process.env.APP_VERSION || '').trim();
   const envSha = (process.env.GIT_SHA || '').trim();
@@ -128,6 +147,10 @@ function resolveRuntimeBuildInfo(): { version: string; gitSha: string; gitUrl: s
     !envVersion || envVersion === 'dev' || !envSha || envSha === 'unknown'
       ? getLocalGitFallback()
       : null;
+  const pkgVersion =
+    !envVersion || envVersion === 'dev'
+      ? getPackageVersionFallback()
+      : null;
 
   return {
     version:
@@ -135,7 +158,7 @@ function resolveRuntimeBuildInfo(): { version: string; gitSha: string; gitUrl: s
         ? envVersion
         : fallback?.version && fallback.version !== 'dev'
           ? fallback.version
-          : envVersion || fallback?.version || 'dev',
+          : pkgVersion || envVersion || fallback?.version || 'dev',
     gitSha:
       envSha && envSha !== 'unknown'
         ? envSha
