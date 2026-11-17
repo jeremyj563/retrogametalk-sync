@@ -66,8 +66,14 @@ jobs:
             exit 1
           fi
 
+          CHART_VERSION="$(sed -nE 's/^version:[[:space:]]*["'\'']?([^"'\''[:space:]]+)["'\'']?/\1/p' k8s/charts/retrogametalk-sync/Chart.yaml | head -n 1)"
+          if [ -z "$CHART_VERSION" ] || [ "$CHART_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Helm Chart version ($CHART_VERSION) does not match package.json version ($PKG_VERSION)."
+            exit 1
+          fi
+
           CHART_APP_VERSION="$(sed -nE 's/^appVersion:[[:space:]]*["'\'']?([^"'\''[:space:]]+)["'\'']?/\1/p' k8s/charts/retrogametalk-sync/Chart.yaml | head -n 1)"
-          if [ -n "$CHART_APP_VERSION" ] && [ "$CHART_APP_VERSION" != "$PKG_VERSION" ]; then
+          if [ -z "$CHART_APP_VERSION" ] || [ "$CHART_APP_VERSION" != "$PKG_VERSION" ]; then
             echo "::error::Helm Chart appVersion ($CHART_APP_VERSION) does not match package.json version ($PKG_VERSION)."
             exit 1
           fi
