@@ -29,6 +29,8 @@ export interface ScraperConfigPublic {
   backoffMultiplier: number;
   maxRetries: number;
   maxConcurrency: number;
+  downloadChunkConcurrency: number;
+  downloadChunkMinSizeMb: number;
   requestTimeoutMs: number;
   userAgent: string;
   systemFilter: string;
@@ -59,6 +61,8 @@ export interface ConfigUpdateInput {
   backoffMultiplier?: number;
   maxRetries?: number;
   maxConcurrency?: number;
+  downloadChunkConcurrency?: number;
+  downloadChunkMinSizeMb?: number;
   requestTimeoutMs?: number;
   userAgent?: string;
   systemFilter?: string;
@@ -245,6 +249,9 @@ export interface ActiveTransferState {
   bytesReceived: number;
   totalBytes: number | null;
   bytesPerSec: number;
+  activeChunks?: number | null;
+  activeWorkers?: number | null;
+  resumed?: boolean;
 }
 
 export interface StorageStats {

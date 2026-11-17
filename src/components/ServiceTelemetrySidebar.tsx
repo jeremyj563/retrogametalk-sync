@@ -345,7 +345,11 @@ export function ServiceTelemetrySidebar({
                   <dt className="text-crt-muted">Active Transfer</dt>
                   <dd className="text-crt-text text-right truncate">
                     {status.activeTransfer
-                      ? `${formatBytes(status.activeTransfer.bytesPerSec)}/s`
+                      ? `${formatBytes(status.activeTransfer.bytesPerSec)}/s${
+                          status.activeTransfer.activeChunks && status.activeTransfer.activeChunks > 1
+                            ? ` · ${status.activeTransfer.activeChunks} chunks`
+                            : ''
+                        }`
                       : 'Idle'}
                   </dd>
                 </div>
@@ -444,6 +448,12 @@ export function ServiceTelemetrySidebar({
                   <span>Polite Jitter (±15%)</span>
                   <span aria-hidden="true"> · </span>
                   <span>{config?.maxConcurrency ?? 1}x Worker</span>
+                  <span aria-hidden="true"> · </span>
+                  <span>
+                    {(config?.downloadChunkConcurrency ?? 3) > 1
+                      ? `${config?.downloadChunkConcurrency ?? 3}x Chunks`
+                      : '1x Stream'}
+                  </span>
                 </div>
               </div>
 

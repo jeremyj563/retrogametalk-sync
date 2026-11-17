@@ -627,6 +627,23 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       );
     },
   },
+  {
+    version: 16,
+    name: 'download_chunk_acceleration_settings',
+    description: 'Add multi-chunk HTTP Range concurrency and minimum file size threshold columns to scraper_config',
+    up: (db) => {
+      if (!tableHasColumn(db, 'scraper_config', 'download_chunk_concurrency')) {
+        db.exec(
+          `ALTER TABLE scraper_config ADD COLUMN download_chunk_concurrency INTEGER NOT NULL DEFAULT 3;`,
+        );
+      }
+      if (!tableHasColumn(db, 'scraper_config', 'download_chunk_min_size_mb')) {
+        db.exec(
+          `ALTER TABLE scraper_config ADD COLUMN download_chunk_min_size_mb INTEGER NOT NULL DEFAULT 8;`,
+        );
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

@@ -74,6 +74,12 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
     const [backoffMultiplier, setBackoffMultiplier] = useState(config.backoffMultiplier);
     const [maxRetries, setMaxRetries] = useState(config.maxRetries);
     const [maxConcurrency, setMaxConcurrency] = useState(config.maxConcurrency);
+    const [downloadChunkConcurrency, setDownloadChunkConcurrency] = useState(
+      config.downloadChunkConcurrency,
+    );
+    const [downloadChunkMinSizeMb, setDownloadChunkMinSizeMb] = useState(
+      config.downloadChunkMinSizeMb,
+    );
     const [requestTimeoutMs, setRequestTimeoutMs] = useState(config.requestTimeoutMs);
     const [userAgent, setUserAgent] = useState(config.userAgent);
     const [showAdvancedPacing, setShowAdvancedPacing] = useState(false);
@@ -114,6 +120,12 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
     const maxRetriesLockedByEnv = config.envOverrides.includes('SCRAPER_MAX_RETRIES');
     const timeoutLockedByEnv = config.envOverrides.includes('SCRAPER_REQUEST_TIMEOUT_MS');
     const concurrencyLockedByEnv = config.envOverrides.includes('SCRAPER_MAX_CONCURRENCY');
+    const chunkConcurrencyLockedByEnv = config.envOverrides.includes(
+      'SCRAPER_DOWNLOAD_CHUNK_CONCURRENCY',
+    );
+    const chunkThresholdLockedByEnv = config.envOverrides.includes(
+      'SCRAPER_DOWNLOAD_CHUNK_MIN_SIZE_MB',
+    );
     const userAgentLockedByEnv = config.envOverrides.includes('SCRAPER_USER_AGENT');
 
     const allPacingNumericLockedByEnv =
@@ -133,6 +145,8 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
       maxRetriesLockedByEnv ||
       timeoutLockedByEnv ||
       concurrencyLockedByEnv ||
+      chunkConcurrencyLockedByEnv ||
+      chunkThresholdLockedByEnv ||
       userAgentLockedByEnv;
 
     const resetFormToConfig = useCallback((target: ScraperConfigPublic) => {
@@ -148,6 +162,8 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
       setBackoffMultiplier(target.backoffMultiplier);
       setMaxRetries(target.maxRetries);
       setMaxConcurrency(target.maxConcurrency);
+      setDownloadChunkConcurrency(target.downloadChunkConcurrency);
+      setDownloadChunkMinSizeMb(target.downloadChunkMinSizeMb);
       setRequestTimeoutMs(target.requestTimeoutMs);
       setUserAgent(target.userAgent);
     }, []);
@@ -247,6 +263,22 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
           ? { maxRetries: Math.max(0, Math.min(15, Math.round(maxRetries || 0))) }
           : {}),
         ...(!concurrencyLockedByEnv ? { maxConcurrency } : {}),
+        ...(!chunkConcurrencyLockedByEnv
+          ? {
+              downloadChunkConcurrency: Math.max(
+                1,
+                Math.min(4, Math.round(Number(downloadChunkConcurrency) || 3)),
+              ),
+            }
+          : {}),
+        ...(!chunkThresholdLockedByEnv
+          ? {
+              downloadChunkMinSizeMb: Math.max(
+                4,
+                Math.min(64, Math.round(Number(downloadChunkMinSizeMb) || 8)),
+              ),
+            }
+          : {}),
         ...(!timeoutLockedByEnv
           ? { requestTimeoutMs: Math.max(5000, Math.min(180000, Math.round(requestTimeoutMs || 30000))) }
           : {}),
@@ -264,6 +296,10 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
         maxRetries,
         concurrencyLockedByEnv,
         maxConcurrency,
+        chunkConcurrencyLockedByEnv,
+        downloadChunkConcurrency,
+        chunkThresholdLockedByEnv,
+        downloadChunkMinSizeMb,
         timeoutLockedByEnv,
         requestTimeoutMs,
         userAgentLockedByEnv,
@@ -290,6 +326,12 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
           Math.abs(Number(backoffMultiplier) - config.backoffMultiplier) >= 0.001) ||
         (!maxRetriesLockedByEnv && maxRetries !== config.maxRetries) ||
         (!concurrencyLockedByEnv && maxConcurrency !== config.maxConcurrency) ||
+        (!chunkConcurrencyLockedByEnv &&
+          Math.max(1, Math.min(4, Math.round(Number(downloadChunkConcurrency) || 3))) !==
+            config.downloadChunkConcurrency) ||
+        (!chunkThresholdLockedByEnv &&
+          Math.max(4, Math.min(64, Math.round(Number(downloadChunkMinSizeMb) || 8))) !==
+            config.downloadChunkMinSizeMb) ||
         (!timeoutLockedByEnv && requestTimeoutMs !== config.requestTimeoutMs) ||
         (!userAgentLockedByEnv && userAgent !== config.userAgent);
       if (pacingChanged) changedSections.push('Request Pacing');
@@ -322,6 +364,10 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
       maxRetries,
       concurrencyLockedByEnv,
       maxConcurrency,
+      chunkConcurrencyLockedByEnv,
+      downloadChunkConcurrency,
+      chunkThresholdLockedByEnv,
+      downloadChunkMinSizeMb,
       timeoutLockedByEnv,
       requestTimeoutMs,
       userAgentLockedByEnv,
@@ -736,6 +782,12 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
             <span aria-hidden="true">·</span>
             <span>{pacingSummary.workersSummary}</span>
             <span aria-hidden="true">·</span>
+            <span>
+              {downloadChunkConcurrency > 1
+                ? `${downloadChunkConcurrency}x Range chunks (≥${downloadChunkMinSizeMb} MiB) + resume`
+                : 'Single-stream downloads + resume'}
+            </span>
+            <span aria-hidden="true">·</span>
             <span>{pacingSummary.cooldownSummary}</span>
           </div>
 
@@ -921,7 +973,7 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between gap-2">
                         <label className="text-xs font-medium text-crt-text">
-                          Parallel Page Workers
+                          Parallel File &amp; Page Workers
                         </label>
                         {concurrencyLockedByEnv && (
                           <EnvLockIndicator envVar="SCRAPER_MAX_CONCURRENCY" />
@@ -937,6 +989,9 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
                         <option value={2}>2 (Moderate)</option>
                         <option value={3}>3 (Parallel · Higher load)</option>
                       </select>
+                      <p className="text-[11px] text-crt-muted">
+                        Concurrent release pages and archive downloads
+                      </p>
                     </div>
 
                     <div className="md:col-span-2 space-y-1.5">
@@ -955,6 +1010,65 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
                         onChange={(e) => setUserAgent(e.target.value)}
                         className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
                       />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5 pt-2 border-t border-crt-border/60">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <label
+                          htmlFor="download-chunk-concurrency"
+                          className="text-xs font-medium text-crt-text"
+                        >
+                          Connections per Large File (HTTP Range)
+                        </label>
+                        {chunkConcurrencyLockedByEnv && (
+                          <EnvLockIndicator envVar="SCRAPER_DOWNLOAD_CHUNK_CONCURRENCY" />
+                        )}
+                      </div>
+                      <select
+                        id="download-chunk-concurrency"
+                        value={downloadChunkConcurrency}
+                        disabled={chunkConcurrencyLockedByEnv}
+                        onChange={(e) => setDownloadChunkConcurrency(Number(e.target.value))}
+                        className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
+                      >
+                        <option value={1}>1 (Disabled · Single stream)</option>
+                        <option value={2}>2 (Conservative · 2 chunks)</option>
+                        <option value={3}>3 (Recommended · 3 chunks)</option>
+                        <option value={4}>4 (Fastest · 4 chunks)</option>
+                      </select>
+                      <p className="text-[11px] text-crt-muted">
+                        Parallel byte-range streams after URL gate; shares 429 cooldown across chunks
+                      </p>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <label
+                          htmlFor="download-chunk-threshold"
+                          className="text-xs font-medium text-crt-text"
+                        >
+                          Multi-Chunk Size Threshold (MiB)
+                        </label>
+                        {chunkThresholdLockedByEnv && (
+                          <EnvLockIndicator envVar="SCRAPER_DOWNLOAD_CHUNK_MIN_SIZE_MB" />
+                        )}
+                      </div>
+                      <input
+                        id="download-chunk-threshold"
+                        type="number"
+                        min={4}
+                        max={64}
+                        step={4}
+                        value={downloadChunkMinSizeMb}
+                        disabled={chunkThresholdLockedByEnv}
+                        onChange={(e) => setDownloadChunkMinSizeMb(Number(e.target.value))}
+                        className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
+                      />
+                      <p className="text-[11px] text-crt-muted">
+                        ROMs at or below this threshold finish in 1 request; larger files split (4–64 MiB)
+                      </p>
                     </div>
                   </div>
                 </div>

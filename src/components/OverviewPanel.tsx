@@ -549,6 +549,23 @@ export function OverviewPanel({
                               · File {status.activeTransfer.fileIndex}/{status.activeTransfer.totalFiles}
                             </span>
                           )}
+                        {status.activeTransfer.activeWorkers &&
+                          status.activeTransfer.activeWorkers > 1 && (
+                            <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums hidden md:inline">
+                              · {status.activeTransfer.activeWorkers} workers
+                            </span>
+                          )}
+                        {status.activeTransfer.activeChunks &&
+                          status.activeTransfer.activeChunks > 1 && (
+                            <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums hidden sm:inline">
+                              · {status.activeTransfer.activeChunks} chunks
+                            </span>
+                          )}
+                        {status.activeTransfer.resumed && (
+                          <span className="text-crt-phosphor/90 whitespace-nowrap shrink-0 hidden md:inline">
+                            · Resumed
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
                         <span>
