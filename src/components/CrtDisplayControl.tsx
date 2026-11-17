@@ -100,7 +100,7 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
       </div>
 
       {/* Always-Open Hardware Tuner Card */}
-      <div className="rounded border border-crt-border bg-crt-bg/80 p-2.5 space-y-3">
+      <div className="crt-tuner-card relative rounded border border-crt-border bg-crt-bg/80 p-2.5 space-y-3">
         {/* Quick Presets & Reset */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between text-[10px] font-mono text-crt-muted">

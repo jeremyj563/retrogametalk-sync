@@ -111,13 +111,36 @@
     background: linear-gradient(
       180deg,
       transparent 0%,
-      rgba(0, 0, 0, 0.24) 22%,
+      rgba(0, 0, 0, 0.22) 22%,
       rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-ultra-hum-alpha, 0.12)) 54%,
-      rgba(255, 255, 255, 0.035) 60%,
+      rgba(255, 255, 255, 0.032) 60%,
       transparent 100%
     );
     transform: translate3d(0, -32vh, 0);
     will-change: transform;
+  }
+
+  /* Secondary high-frequency horizontal flyback retrace trace (activated in Ultra) */
+  .crt-layer-humbar::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 3px;
+    opacity: 0;
+    pointer-events: none;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28) 18%,
+      rgba(255, 255, 255, 0.42) 50%,
+      rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28) 82%,
+      transparent 100%
+    );
+    box-shadow: 0 0 12px 1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.35);
+    transform: translate3d(0, 108vh, 0);
+    will-change: transform, opacity;
   }
 
   .crt-layer-vignette {
@@ -134,6 +157,25 @@
     box-shadow:
       inset 0 0 96px rgba(0, 0, 0, var(--crt-vignette-inset, 0)),
       inset 0 0 36px -8px rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-glow-box-alpha, 0));
+  }
+
+  /* Non-blocking high-voltage CRT degauss surge on engaging Ultra */
+  .crt-layer-degauss {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 63;
+    opacity: 0;
+    background:
+      radial-gradient(
+        ellipse 92% 78% at 50% 50%,
+        rgba(255, 255, 255, 0.14) 0%,
+        rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.24) 42%,
+        rgba(45, 225, 255, 0.12) 68%,
+        transparent 100%
+      );
+    box-shadow: inset 0 0 80px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.48);
+    will-change: transform, opacity;
   }
 
   /* Selective Gauss phosphor bloom & RGB convergence fringe (keeps body & table rows crisp) */
@@ -644,7 +686,7 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   will-change: transform, opacity;
 }
 
-/* Catalog Box-Art Holographic CRT Scan-Sheen Overlay (Ultra mode) */
+/* Catalog Box-Art Holographic CRT Scan-Sheen Overlay */
 .crt-card-holo {
   position: absolute;
   inset: 0;
@@ -652,6 +694,7 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   opacity: 0;
   z-index: 3;
   overflow: hidden;
+  transition: opacity 180ms ease;
 }
 
 .crt-card-holo::after {
@@ -668,6 +711,64 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   );
   transform: translate3d(0, -120%, 0);
   will-change: transform;
+}
+
+/* Bounded Bottom-Edge Return Electron Trace on Bordered Living Panels (Ultra mode; zero overflow clipping) */
+.crt-panel-living.border::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  left: 4%;
+  width: 24%;
+  height: 1.5px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  background: linear-gradient(
+    270deg,
+    transparent 0%,
+    rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-motion-trace-alpha, 0)) 58%,
+    rgba(255, 255, 255, 0.86) 92%,
+    transparent 100%
+  );
+  will-change: transform, opacity;
+}
+
+/* Bounded Desktop Sidebar Right-Border Data-Bus Carrier Lasers (Ultra mode; preserves popover overflow) */
+@media (min-width: 1024px) {
+  .crt-sidebar-rail::before,
+  .crt-sidebar-rail::after {
+    content: "";
+    position: absolute;
+    right: -1px;
+    top: 4%;
+    width: 1.5px;
+    height: 22%;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 25;
+    will-change: transform, opacity;
+  }
+
+  .crt-sidebar-rail::after {
+    background: linear-gradient(
+      180deg,
+      transparent 0%,
+      rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.85) 64%,
+      rgba(255, 255, 255, 0.9) 92%,
+      transparent 100%
+    );
+  }
+
+  .crt-sidebar-rail::before {
+    background: linear-gradient(
+      0deg,
+      transparent 0%,
+      rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.65) 64%,
+      rgba(255, 255, 255, 0.8) 92%,
+      transparent 100%
+    );
+  }
 }
 
 /* Primary CTA Phosphor Hover Sheen */
@@ -878,6 +979,52 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   .crt-stop-active-pulse {
     animation: crt-stop-glow-pulse calc(2.1s * var(--crt-motion-speed, 1)) ease-in-out infinite;
   }
+
+  /* Live daemon & SSE status readout gentle phosphor breathe */
+  .crt-live-readout {
+    animation: crt-phosphor-breathe calc(3.8s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+  }
+
+  /* Tactile catalog card hover/focus lift, phosphor rim & hover-triggered holo cover sweep */
+  .crt-catalog-card {
+    transition:
+      border-color 180ms ease,
+      box-shadow 200ms ease,
+      transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .crt-catalog-card:hover,
+  .crt-catalog-card:focus-visible {
+    transform: translateY(-1.5px);
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.55);
+    box-shadow: 0 0 16px -6px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.32);
+  }
+
+  .crt-catalog-card:hover .crt-card-holo,
+  .crt-catalog-card:focus-visible .crt-card-holo {
+    opacity: 0.85;
+  }
+
+  .crt-catalog-card:hover .crt-card-holo::after,
+  .crt-catalog-card:focus-visible .crt-card-holo::after {
+    animation: crt-holo-cover-drift 1.65s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  /* Table row phosphor laser left-edge hover highlight */
+  .crt-table-row:hover {
+    box-shadow:
+      inset 2px 0 0 var(--color-crt-phosphor),
+      inset 0 0 14px -10px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.26);
+  }
+
+  /* Crisp phosphor focus halo on text inputs, selects & textareas */
+  input:not([type="checkbox"]):not([type="range"]):focus,
+  select:focus,
+  textarea:focus {
+    box-shadow:
+      0 0 0 1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.32),
+      0 0 10px -3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28);
+  }
 }
 
 @keyframes crt-stop-glow-pulse {
@@ -910,7 +1057,9 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
 }
 
 /* --------------------------------------------------------------------------
-   Medium, High & Ultra Tier Enhancements (Ambient Panel Traces, KPI Breathe & Sweep)
+   Medium, High & Ultra Tier — Living Studio Monitor
+   Header laser sweep, staggered panel/drawer/tooltip beams, console & bezel
+   traces, KPI breathing, telemetry sweep & glowing active controls
    -------------------------------------------------------------------------- */
 [data-crt-motion="medium"],
 [data-crt-motion="high"],
@@ -919,29 +1068,114 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
     animation: crt-phosphor-breathe calc(4.6s * var(--crt-motion-speed, 1)) ease-in-out infinite;
   }
 
+  .crt-live-readout {
+    animation: crt-phosphor-breathe calc(3.1s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+  }
+
+  /* Single forward sticky header laser trace */
+  .crt-header-beam > span {
+    opacity: 0.9;
+    animation: crt-header-laser-forward calc(6.2s * var(--crt-motion-speed, 1)) linear infinite;
+  }
+
+  /* Staggered top-edge electron sweeps across all living panels, drawers & sidebar popovers */
+  .crt-panel-living > .crt-edge-beam > span,
+  .crt-drawer-panel > .crt-edge-beam > span,
+  [role="tooltip"] > .crt-edge-beam > span {
+    animation: crt-edge-electron-sweep calc(6.4s * var(--crt-motion-speed, 1)) cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
+  .crt-panel-living:nth-of-type(even) > .crt-edge-beam > span {
+    animation-delay: -3.1s;
+  }
+
   .crt-panel-hero > .crt-edge-beam > span {
-    animation: crt-edge-electron-sweep calc(4.8s * var(--crt-motion-speed, 1)) cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    animation: crt-edge-electron-sweep calc(4.6s * var(--crt-motion-speed, 1)) cubic-bezier(0.4, 0, 0.2, 1) infinite;
   }
 
   .crt-panel-living:hover > .crt-edge-beam > span {
     animation: crt-edge-electron-sweep 2.1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
   }
 
-  .crt-telemetry-raster:not(.crt-telemetry-raster-secondary) {
-    animation: crt-telemetry-raster-scan calc(5.8s * var(--crt-motion-speed, 1)) linear infinite;
+  /* Slide-over drawer vertical left-bezel cathode trace */
+  .crt-drawer-bezel-beam > span {
+    opacity: 0.85;
+    animation: crt-bezel-vertical-sweep calc(4.8s * var(--crt-motion-speed, 1)) cubic-bezier(0.4, 0, 0.2, 1) infinite;
   }
 
-  .crt-live-readout {
-    animation: crt-phosphor-breathe calc(3.2s * var(--crt-motion-speed, 1)) ease-in-out infinite;
+  /* Live scraper console vertical scanline & subtle phosphor bezel tint */
+  .crt-console-shell {
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.24);
+    box-shadow: inset 0 0 16px -10px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.16);
+  }
+
+  .crt-console-scan {
+    animation: crt-console-vertical-scan calc(6.2s * var(--crt-motion-speed, 1)) linear infinite;
+  }
+
+  /* Primary oscilloscope raster sweep across Telemetry Deck */
+  .crt-telemetry-raster:not(.crt-telemetry-raster-secondary) {
+    animation: crt-telemetry-raster-scan calc(5.6s * var(--crt-motion-speed, 1)) linear infinite;
+  }
+
+  /* Glowing active navigation item, segmented tabs & pressed filter buttons */
+  .crt-nav-btn[data-nav-active="true"] {
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.45);
+    box-shadow:
+      0 0 12px -5px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28),
+      inset 0 0 8px -5px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.18);
+  }
+
+  [role="tab"][aria-selected="true"],
+  header [role="group"] button.text-crt-phosphor,
+  .crt-panel-living button.border-crt-border-strong.text-crt-phosphor,
+  button[aria-pressed="true"].text-crt-phosphor {
+    box-shadow:
+      0 0 10px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.34),
+      inset 0 0 6px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.18);
+  }
+
+  button[aria-pressed="true"].text-crt-amber {
+    box-shadow:
+      0 0 10px -4px rgba(245, 158, 11, 0.36),
+      inset 0 0 6px -4px rgba(245, 158, 11, 0.2);
+  }
+}
+
+[data-crt-motion="medium"][data-sync-running="true"],
+[data-crt-motion="high"][data-sync-running="true"] {
+  .crt-header-beam > span {
+    animation-duration: 2.8s;
   }
 }
 
 /* --------------------------------------------------------------------------
-   High & Ultra Tier Hardware Console Kinematics (Staggered Continuous Life)
+   High & Ultra Tier — Broadcast PVM Hardware Suite
+   Subtle rolling V-sync hum bar, tube vignette/grille breath, dual counter
+   beams, dual chart sweeps, ambient holo box-art, periodic CTA sheen &
+   continuous staggered icon kinematics
    -------------------------------------------------------------------------- */
 [data-crt-motion="high"],
 [data-crt-motion="ultra"] {
+  /* Broadcast PVM optical tube atmosphere when CRT Display is ON */
+  &.crt-fx-active .crt-layer-humbar-band {
+    animation: crt-humbar-roll 10.6s linear infinite;
+  }
+
+  &.crt-fx-active .crt-layer-vignette {
+    animation: crt-tube-vignette-pulse 6.4s ease-in-out infinite;
+  }
+
+  &.crt-fx-active .crt-layer-grille {
+    animation: crt-grille-shimmer 5.2s ease-in-out infinite;
+  }
+
   /* Inactive nav icons also run ambiently, waking to full bloom on active/hover */
+  .crt-nav-btn {
+    position: relative;
+    overflow: hidden;
+  }
+
   .crt-nav-btn[data-nav-active="false"] .crt-svg-sync-base {
     stroke-opacity: 0.32;
   }
@@ -970,12 +1204,150 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
     );
   }
 
-  .crt-panel-living > .crt-edge-beam > span {
-    animation: crt-edge-electron-sweep 5.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  /* Periodic active nav button sheen */
+  .crt-nav-btn[data-nav-active="true"] {
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.6);
+  }
+
+  .crt-nav-btn[data-nav-active="true"]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    width: 38%;
+    pointer-events: none;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.13) 50%,
+      transparent 100%
+    );
+    animation: crt-cta-periodic-sheen 5.2s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  }
+
+  /* Dual counter-sweeping header, panel, drawer & tooltip electron beams */
+  .crt-header-beam > span {
+    opacity: 0.96;
+    animation: crt-header-laser-forward 4.8s linear infinite;
+  }
+
+  .crt-header-beam::before {
+    opacity: 0.85;
+    animation: crt-header-laser-reverse 6.6s linear -2.4s infinite;
+  }
+
+  .crt-panel-living > .crt-edge-beam > span,
+  .crt-drawer-panel > .crt-edge-beam > span,
+  [role="tooltip"] > .crt-edge-beam > span {
+    animation: crt-edge-electron-sweep 4.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
+  .crt-panel-living > .crt-edge-beam::before,
+  .crt-drawer-panel > .crt-edge-beam::before,
+  [role="tooltip"] > .crt-edge-beam::before {
+    animation: crt-edge-electron-reverse 6.2s cubic-bezier(0.4, 0, 0.2, 1) -2.2s infinite;
   }
 
   .crt-panel-living:nth-of-type(even) > .crt-edge-beam > span {
-    animation-delay: -2.6s;
+    animation-delay: -2.3s;
+  }
+
+  .crt-panel-living:nth-of-type(even) > .crt-edge-beam::before {
+    animation-delay: -4.1s;
+  }
+
+  .crt-panel-living.border,
+  .crt-drawer-panel,
+  .crt-tuner-card,
+  [role="tooltip"] {
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-ultra-border-alpha, 0.22));
+  }
+
+  /* Periodic primary CTA phosphor sheen & soft button bloom */
+  .crt-cta-beam:not(:disabled) {
+    box-shadow: 0 0 12px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.38);
+  }
+
+  .crt-cta-beam.bg-crt-amber:not(:disabled) {
+    box-shadow: 0 0 12px -4px rgba(245, 158, 11, 0.4);
+  }
+
+  .crt-cta-beam.bg-crt-crimson:not(:disabled) {
+    box-shadow: 0 0 14px -4px rgba(239, 68, 68, 0.44);
+  }
+
+  .crt-cta-beam:not(:disabled)::after {
+    opacity: 1;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.3) 50%,
+      transparent 100%
+    );
+    animation: crt-cta-periodic-sheen 4.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  }
+
+  .crt-cta-beam:not(:disabled):hover::after,
+  .crt-cta-beam:not(:disabled):focus-visible::after {
+    animation: crt-cta-sheen-sweep 620ms cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  }
+
+  /* Dual oscilloscope telemetry counter-sweep */
+  .crt-telemetry-raster:not(.crt-telemetry-raster-secondary) {
+    animation: crt-telemetry-raster-scan 4.1s linear infinite;
+  }
+
+  .crt-telemetry-raster-secondary {
+    animation: crt-telemetry-raster-scan-reverse 5.4s linear -1.9s infinite;
+  }
+
+  /* Continuous staggered holographic drift across catalog box-art */
+  .crt-catalog-card {
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.2);
+  }
+
+  .crt-card-holo {
+    opacity: 0.78;
+  }
+
+  .crt-card-holo::after {
+    animation: crt-holo-cover-drift 6.6s linear infinite;
+  }
+
+  .crt-catalog-card:nth-child(3n + 2) .crt-card-holo::after {
+    animation-delay: -2.2s;
+  }
+
+  .crt-catalog-card:nth-child(3n + 3) .crt-card-holo::after {
+    animation-delay: -4.4s;
+  }
+
+  .crt-catalog-card:hover .crt-card-holo,
+  .crt-catalog-card:focus-visible .crt-card-holo {
+    opacity: 1;
+  }
+
+  .crt-catalog-card:hover .crt-card-holo::after,
+  .crt-catalog-card:focus-visible .crt-card-holo::after {
+    animation: crt-holo-cover-drift 2.4s linear infinite;
+  }
+
+  /* Glowing CRT slider thumbs & ambient drive-head activity */
+  .crt-range::-webkit-slider-thumb {
+    box-shadow:
+      0 0 0 1px var(--color-crt-border-strong),
+      0 0 6px 0.5px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.48);
+  }
+
+  .crt-range::-moz-range-thumb {
+    box-shadow:
+      0 0 0 1px var(--color-crt-border-strong),
+      0 0 6px 0.5px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.48);
+  }
+
+  .crt-drive-activity {
+    color: var(--color-crt-phosphor);
+    filter: drop-shadow(0 0 3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.4));
+    animation: crt-drive-head-flicker 1.6s steps(2, end) infinite;
   }
 
   .crt-section-icon {
@@ -1387,20 +1759,151 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   0%,
   100% {
     box-shadow:
-      0 0 18px -6px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.24),
-      inset 0 1px 0 0 rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.22);
+      0 0 18px -6px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.26),
+      inset 0 1px 0 0 rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.24);
   }
   50% {
     box-shadow:
-      0 0 30px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.42),
-      inset 0 1px 0 0 rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.44);
+      0 0 32px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.46),
+      inset 0 1px 0 0 rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.46);
+  }
+}
+
+@keyframes crt-degauss-surge {
+  0% {
+    opacity: 0;
+    transform: scale(1.018);
+  }
+  16% {
+    opacity: 0.92;
+    transform: scale(0.994);
+  }
+  38% {
+    opacity: 0.38;
+    transform: scale(1.004);
+  }
+  64% {
+    opacity: 0.16;
+    transform: scale(0.999);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
+@keyframes crt-flyback-retrace {
+  0% {
+    transform: translate3d(0, 106vh, 0);
+    opacity: 0;
+  }
+  8% {
+    opacity: 0.85;
+  }
+  92% {
+    opacity: 0.85;
+  }
+  100% {
+    transform: translate3d(0, -10vh, 0);
+    opacity: 0;
+  }
+}
+
+@keyframes crt-panel-bottom-return {
+  0% {
+    transform: translate3d(300%, 0, 0);
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.92;
+  }
+  85% {
+    opacity: 0.92;
+  }
+  100% {
+    transform: translate3d(0%, 0, 0);
+    opacity: 0;
+  }
+}
+
+@keyframes crt-sidebar-bus-down {
+  0% {
+    transform: translate3d(0, 0%, 0);
+    opacity: 0;
+  }
+  14% {
+    opacity: 0.95;
+  }
+  86% {
+    opacity: 0.95;
+  }
+  100% {
+    transform: translate3d(0, 325%, 0);
+    opacity: 0;
+  }
+}
+
+@keyframes crt-sidebar-bus-up {
+  0% {
+    transform: translate3d(0, 325%, 0);
+    opacity: 0;
+  }
+  14% {
+    opacity: 0.82;
+  }
+  86% {
+    opacity: 0.82;
+  }
+  100% {
+    transform: translate3d(0, 0%, 0);
+    opacity: 0;
+  }
+}
+
+@keyframes crt-ultra-rgb-convergence {
+  0%,
+  100% {
+    text-shadow:
+      0 0 var(--crt-glow-radius-sm, 3px) rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-glow-alpha-sm, 0.5)),
+      0 0 var(--crt-glow-radius-lg, 14px) rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-glow-alpha-lg, 0.3)),
+      calc(var(--crt-aberration-offset, 0.7px) * -1) 0 0 rgba(255, 55, 85, var(--crt-aberration-alpha, 0.32)),
+      var(--crt-aberration-offset, 0.7px) 0 0 rgba(45, 225, 255, var(--crt-aberration-alpha, 0.32));
+  }
+  50% {
+    text-shadow:
+      0 0 calc(var(--crt-glow-radius-sm, 3px) * 1.35) rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.78),
+      0 0 calc(var(--crt-glow-radius-lg, 14px) * 1.25) rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.46),
+      calc(var(--crt-aberration-offset, 0.7px) * -1.75) 0 0 rgba(255, 55, 85, 0.56),
+      calc(var(--crt-aberration-offset, 0.7px) * 1.75) 0 0 rgba(45, 225, 255, 0.56);
+  }
+}
+
+@keyframes crt-ultra-pill-surge {
+  0%,
+  100% {
+    box-shadow:
+      0 0 10px -2px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.52),
+      inset 0 0 7px -2px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28);
+  }
+  50% {
+    box-shadow:
+      0 0 18px -1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.82),
+      inset 0 0 11px -1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.45);
   }
 }
 
 [data-crt-motion="ultra"] {
-  /* 1. Full-Screen CRT Broadcast Tube Atmosphere (when CRT FX master toggle is ON) */
+  /* 1. Full-Screen Overclocked Cathode-Ray Tube Atmosphere (when CRT FX master toggle is ON) */
+  &.crt-fx-active .crt-layer-degauss {
+    animation: crt-degauss-surge 640ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
   &.crt-fx-active .crt-layer-humbar-band {
-    animation: crt-humbar-roll 7.2s linear infinite;
+    animation: crt-humbar-roll 6.6s linear infinite;
+  }
+
+  &.crt-fx-active .crt-layer-humbar::after {
+    animation: crt-flyback-retrace 3.9s linear -1.7s infinite;
   }
 
   &.crt-fx-active .crt-layer-scanlines {
@@ -1410,201 +1913,229 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   }
 
   &.crt-fx-active .crt-layer-vignette {
-    animation: crt-tube-vignette-pulse 4.8s ease-in-out infinite;
+    animation: crt-tube-vignette-pulse 4.4s ease-in-out infinite;
   }
 
   &.crt-fx-active .crt-layer-grille {
-    animation: crt-grille-shimmer 3.8s ease-in-out infinite;
+    animation: crt-grille-shimmer 3.4s ease-in-out infinite;
+  }
+
+  /* Live Analog RGB Beam Convergence Pulse on Display Type & Hero Metrics */
+  &.crt-fx-active .font-display:not(.text-crt-bg),
+  &.crt-fx-active .crt-kpi-value {
+    animation: crt-ultra-rgb-convergence 3.8s ease-in-out infinite;
   }
 
   /* 2. Sticky Header Dual Laser Border & Overclocked Cartridge Banner */
+  .crt-header-beam {
+    height: 2px;
+  }
+
   .crt-header-beam > span {
     opacity: 1;
-    animation: crt-header-laser-forward 3.6s linear infinite;
+    animation: crt-header-laser-forward 3.3s linear infinite;
   }
 
   .crt-header-beam::before {
     opacity: 1;
-    animation: crt-header-laser-reverse 4.9s linear -1.8s infinite;
+    animation: crt-header-laser-reverse 4.5s linear -1.6s infinite;
   }
 
   .crt-banner-cartridge {
     filter:
-      drop-shadow(0 0 3px rgba(var(--crt-banner-accent-rgb), 0.65))
-      drop-shadow(0 0 11px rgba(var(--crt-banner-accent-rgb), 0.38));
+      drop-shadow(0 0 3px rgba(var(--crt-banner-accent-rgb), 0.68))
+      drop-shadow(0 0 12px rgba(var(--crt-banner-accent-rgb), 0.42));
   }
 
   .crt-banner-chevrons {
-    animation-duration: 0.82s;
+    animation-duration: 0.78s;
   }
 
   .crt-banner-pin-runner {
-    animation-duration: 1.25s;
+    animation-duration: 1.18s;
   }
 
   .crt-banner-scanline {
-    opacity: 0.56;
-    animation-duration: 1.65s;
+    opacity: 0.58;
+    animation-duration: 1.55s;
   }
 
   .crt-banner-led {
-    animation-duration: 1.15s;
+    animation-duration: 1.08s;
   }
 
   .crt-banner-sync-word {
     text-shadow:
-      0 0 6px rgba(var(--crt-banner-accent-rgb), 0.68),
-      0 0 18px rgba(var(--crt-banner-accent-rgb), 0.42);
+      0 0 6px rgba(var(--crt-banner-accent-rgb), 0.72),
+      0 0 18px rgba(var(--crt-banner-accent-rgb), 0.46),
+      -1px 0 0 rgba(255, 55, 85, 0.36),
+      1px 0 0 rgba(45, 225, 255, 0.36);
   }
 
   .crt-banner-track {
     box-shadow:
-      0 0 8px rgba(var(--crt-banner-accent-rgb), 0.55),
-      inset 0 0 4px rgba(var(--crt-banner-accent-rgb), 0.25);
+      0 0 9px rgba(var(--crt-banner-accent-rgb), 0.58),
+      inset 0 0 4px rgba(var(--crt-banner-accent-rgb), 0.28);
   }
 
   .crt-banner-track-beam {
-    width: 44%;
-    animation-duration: 1.35s;
+    width: 46%;
+    animation-duration: 1.25s;
   }
 
-  /* 3. Turbo Sidebar Navigation, Daemon Readouts & Glowing CRT Studio Controls */
-  .crt-nav-btn {
-    position: relative;
-    overflow: hidden;
+  /* 3. Desktop Sidebar Dual Vertical Data-Bus Carrier Lasers, Nav & Tuner Overdrive */
+  @media (min-width: 1024px) {
+    .crt-sidebar-rail::after {
+      animation: crt-sidebar-bus-down 4.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    }
+
+    .crt-sidebar-rail::before {
+      animation: crt-sidebar-bus-up 5.6s cubic-bezier(0.4, 0, 0.2, 1) -2.3s infinite;
+    }
   }
 
   .crt-nav-btn[data-nav-active="true"] {
-    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.72);
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.76);
     box-shadow:
-      0 0 18px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.45),
-      inset 0 0 12px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28);
+      0 0 18px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.48),
+      inset 0 0 12px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.3);
   }
 
   .crt-nav-btn[data-nav-active="true"]::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    width: 38%;
-    pointer-events: none;
     background: linear-gradient(
       90deg,
       transparent 0%,
-      rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.16) 50%,
+      rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.2) 50%,
       transparent 100%
     );
-    animation: crt-cta-periodic-sheen 3.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+    animation: crt-cta-periodic-sheen 3.1s cubic-bezier(0.16, 1, 0.3, 1) infinite;
   }
 
   .crt-nav-btn[data-nav-active="true"] .crt-living-icon,
   .crt-phase-sync-active .crt-living-icon {
     filter:
-      drop-shadow(0 0 3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.85))
-      drop-shadow(0 0 9px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.55));
+      drop-shadow(0 0 3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.88))
+      drop-shadow(0 0 9px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.58));
   }
 
   .crt-nav-btn[data-nav-active="false"] .crt-living-icon {
-    filter: drop-shadow(0 0 4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.52));
+    filter: drop-shadow(0 0 4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.54));
   }
 
   .crt-nav-btn[data-nav-active="false"] .crt-svg-sync-beam {
     opacity: 1;
-    animation: crt-ecg-travel 1.45s linear infinite;
+    animation: crt-ecg-travel 1.4s linear infinite;
   }
 
   .crt-nav-btn[data-nav-active="false"] .crt-svg-tree-scroll {
-    animation: crt-tree-scroll 2.1s linear infinite;
+    animation: crt-tree-scroll 2.05s linear infinite;
   }
 
   .crt-nav-btn[data-nav-active="false"] .crt-svg-clock-hand {
-    animation: crt-clock-sweep 3.6s linear infinite;
+    animation: crt-clock-sweep 3.4s linear infinite;
   }
 
   .crt-nav-btn[data-nav-active="false"] .crt-svg-cog-rotor {
-    animation: crt-cog-spin 4.4s linear infinite;
+    animation: crt-cog-spin 4.2s linear infinite;
   }
 
   .crt-nav-btn[data-nav-active="false"] .crt-svg-cog-core {
-    animation: crt-cog-core-pulse 1.5s ease-in-out infinite;
+    animation: crt-cog-core-pulse 1.45s ease-in-out infinite;
   }
 
   .crt-ultra-pill-active {
+    animation: crt-ultra-pill-surge 2.8s ease-in-out infinite;
+  }
+
+  .crt-tuner-card {
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.38);
     box-shadow:
-      0 0 12px -2px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.6),
-      inset 0 0 8px -2px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.35);
+      0 0 18px -8px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.32),
+      inset 0 0 14px -8px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.22);
   }
 
   .crt-range::-webkit-slider-thumb {
     box-shadow:
       0 0 0 1px var(--color-crt-border-strong),
-      0 0 9px 1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.68);
+      0 0 10px 1.5px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.72);
   }
 
   .crt-range::-moz-range-thumb {
     box-shadow:
       0 0 0 1px var(--color-crt-border-strong),
-      0 0 9px 1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.68);
+      0 0 10px 1.5px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.72);
   }
 
   .crt-drive-activity {
     color: var(--color-crt-phosphor);
-    filter: drop-shadow(0 0 4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.58));
-    animation: crt-drive-head-flicker 1.15s steps(2, end) infinite;
+    filter: drop-shadow(0 0 4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.62));
+    animation: crt-drive-head-flicker 1.05s steps(2, end) infinite;
   }
 
-  /* 4. Dual Counter-Sweeping Panel Electron Beams & Breathing Neon Perimeter Halos */
+  /* 4. Full-Perimeter Top + Bottom Counter-Sweeping Panel Electron Beams & Neon Halos */
   .crt-edge-beam {
     height: 1.5px;
   }
 
   .crt-panel-living > .crt-edge-beam > span,
-  .crt-drawer-panel > .crt-edge-beam > span {
+  .crt-drawer-panel > .crt-edge-beam > span,
+  [role="tooltip"] > .crt-edge-beam > span {
     width: 32%;
-    animation: crt-edge-electron-sweep 3.1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    animation: crt-edge-electron-sweep 2.9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
   }
 
   .crt-panel-living > .crt-edge-beam::before,
-  .crt-drawer-panel > .crt-edge-beam::before {
-    animation: crt-edge-electron-reverse 4.3s cubic-bezier(0.4, 0, 0.2, 1) -1.6s infinite;
+  .crt-drawer-panel > .crt-edge-beam::before,
+  [role="tooltip"] > .crt-edge-beam::before {
+    animation: crt-edge-electron-reverse 4.1s cubic-bezier(0.4, 0, 0.2, 1) -1.5s infinite;
   }
 
   .crt-panel-living:nth-of-type(even) > .crt-edge-beam > span {
-    animation-delay: -1.4s;
+    animation-delay: -1.3s;
   }
 
   .crt-panel-living:nth-of-type(even) > .crt-edge-beam::before {
-    animation-delay: -3.1s;
+    animation-delay: -2.9s;
   }
 
-  section.crt-panel-living,
-  div.crt-panel-living,
-  .crt-drawer-panel {
-    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-ultra-border-alpha, 0.38));
-    animation: crt-ultra-halo-breathe 4.4s ease-in-out infinite;
+  /* Bottom-edge return electron trace completing full-perimeter panel beams */
+  .crt-panel-living.border::after {
+    animation: crt-panel-bottom-return 3.7s cubic-bezier(0.4, 0, 0.2, 1) -0.9s infinite;
+  }
+
+  .crt-panel-living.border:nth-of-type(even)::after {
+    animation-delay: -2.6s;
+  }
+
+  .crt-panel-living.border,
+  .crt-drawer-panel,
+  [role="tooltip"] {
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), var(--crt-ultra-border-alpha, 0.4));
+    animation: crt-ultra-halo-breathe 4.2s ease-in-out infinite;
   }
 
   .crt-drawer-bezel-beam > span {
     opacity: 1;
-    animation: crt-bezel-vertical-sweep 3.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    animation: crt-bezel-vertical-sweep 3.1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
   }
 
   .crt-section-icon {
     filter:
-      drop-shadow(0 0 3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.72))
-      drop-shadow(0 0 8px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.42));
+      drop-shadow(0 0 3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.75))
+      drop-shadow(0 0 9px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.45));
   }
 
-  /* 5. Continuous Periodic CTA Phosphor Sheen, Glowing Active Segmented Tabs & Focus Halos */
+  /* 5. Turbo Periodic CTA Sheen, Energized Progress Meters & Rich Control Halos */
   .crt-cta-beam:not(:disabled) {
-    box-shadow: 0 0 16px -3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.52);
+    box-shadow: 0 0 18px -3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.56);
   }
 
   .crt-cta-beam.bg-crt-amber:not(:disabled) {
-    box-shadow: 0 0 16px -3px rgba(245, 158, 11, 0.55);
+    box-shadow: 0 0 18px -3px rgba(245, 158, 11, 0.58);
   }
 
   .crt-cta-beam.bg-crt-crimson:not(:disabled) {
-    box-shadow: 0 0 18px -3px rgba(239, 68, 68, 0.58);
+    box-shadow: 0 0 20px -3px rgba(239, 68, 68, 0.62);
   }
 
   .crt-cta-beam:not(:disabled)::after {
@@ -1612,15 +2143,19 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
     background: linear-gradient(
       90deg,
       transparent 0%,
-      rgba(255, 255, 255, 0.38) 50%,
+      rgba(255, 255, 255, 0.42) 50%,
       transparent 100%
     );
-    animation: crt-cta-periodic-sheen 2.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+    animation: crt-cta-periodic-sheen 2.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;
   }
 
   .crt-cta-beam:not(:disabled):hover::after,
   .crt-cta-beam:not(:disabled):focus-visible::after {
-    animation: crt-cta-sheen-sweep 580ms cubic-bezier(0.16, 1, 0.3, 1) infinite;
+    animation: crt-cta-sheen-sweep 540ms cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  }
+
+  progress {
+    filter: drop-shadow(0 0 5px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.45));
   }
 
   [role="tab"][aria-selected="true"],
@@ -1628,64 +2163,60 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   .crt-panel-living button.border-crt-border-strong.text-crt-phosphor,
   button[aria-pressed="true"].text-crt-phosphor {
     box-shadow:
-      0 0 12px -3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.48),
-      inset 0 0 8px -3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.26);
+      0 0 14px -3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.52),
+      inset 0 0 9px -3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28);
   }
 
   button[aria-pressed="true"].text-crt-amber {
     box-shadow:
-      0 0 14px -3px rgba(245, 158, 11, 0.5),
-      inset 0 0 8px -3px rgba(245, 158, 11, 0.28);
+      0 0 15px -3px rgba(245, 158, 11, 0.54),
+      inset 0 0 9px -3px rgba(245, 158, 11, 0.3);
   }
 
   input:not([type="checkbox"]):not([type="range"]):focus,
   select:focus,
   textarea:focus {
     box-shadow:
-      0 0 0 1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.45),
-      0 0 14px -2px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.42);
+      0 0 0 1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.5),
+      0 0 16px -2px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.46);
   }
 
-  /* 6. Dual Oscilloscope Telemetry Sweeps, Console Scan, Holographic Box-Art & Table Laser Hover */
+  /* 6. Turbo Dual Oscilloscope Sweeps, Console Scan, Full-Saturation Holo Box-Art & Table Laser */
   .crt-telemetry-raster:not(.crt-telemetry-raster-secondary) {
-    animation: crt-telemetry-raster-scan 2.8s linear infinite;
+    animation: crt-telemetry-raster-scan 2.6s linear infinite;
   }
 
   .crt-telemetry-raster-secondary {
-    animation: crt-telemetry-raster-scan-reverse 3.9s linear -1.5s infinite;
+    animation: crt-telemetry-raster-scan-reverse 3.7s linear -1.4s infinite;
   }
 
   .crt-chart-trace-glow {
     filter:
-      drop-shadow(0 0 3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.78))
-      drop-shadow(0 0 8px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.45));
+      drop-shadow(0 0 3px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.82))
+      drop-shadow(0 0 9px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.48));
   }
 
   .crt-console-shell {
-    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.34);
-    box-shadow: inset 0 0 22px -10px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.25);
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.38);
+    box-shadow: inset 0 0 24px -10px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28);
   }
 
   .crt-console-scan {
-    animation: crt-console-vertical-scan 4.2s linear infinite;
+    animation: crt-console-vertical-scan 3.8s linear infinite;
   }
 
   .crt-catalog-card {
-    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28);
-    box-shadow: 0 0 14px -6px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.22);
-    transition:
-      border-color 180ms ease,
-      box-shadow 200ms ease,
-      transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.3);
+    box-shadow: 0 0 15px -6px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.24);
   }
 
   .crt-catalog-card:hover,
   .crt-catalog-card:focus-visible {
     transform: translateY(-2px);
-    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.78);
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.82);
     box-shadow:
-      0 0 24px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.48),
-      inset 0 0 12px -6px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28);
+      0 0 26px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.52),
+      inset 0 0 14px -6px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.3);
   }
 
   .crt-card-holo {
@@ -1693,56 +2224,75 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   }
 
   .crt-card-holo::after {
-    animation: crt-holo-cover-drift 4.8s linear infinite;
+    animation: crt-holo-cover-drift 4.4s linear infinite;
   }
 
   .crt-catalog-card:nth-child(3n + 2) .crt-card-holo::after {
-    animation-delay: -1.6s;
+    animation-delay: -1.45s;
   }
 
   .crt-catalog-card:nth-child(3n + 3) .crt-card-holo::after {
-    animation-delay: -3.2s;
+    animation-delay: -2.9s;
   }
 
-  .crt-catalog-card:hover .crt-card-holo::after {
-    animation-duration: 2.2s;
+  .crt-catalog-card:hover .crt-card-holo::after,
+  .crt-catalog-card:focus-visible .crt-card-holo::after {
+    animation-duration: 1.95s;
   }
 
   .crt-table-row:hover {
     box-shadow:
-      inset 2px 0 0 var(--color-crt-phosphor),
-      inset 0 0 20px -10px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.42);
+      inset 2.5px 0 0 var(--color-crt-phosphor),
+      inset 0 0 22px -9px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.46);
   }
 }
 
 /* Active Sync / Dry Run Turbo Escalation on Ultra */
 [data-crt-motion="ultra"][data-sync-running="true"] {
+  &.crt-fx-active .crt-layer-humbar::after {
+    animation-duration: 2.3s;
+  }
+
   .crt-header-beam > span {
-    animation-duration: 1.9s;
+    animation-duration: 1.75s;
   }
 
   .crt-header-beam::before {
-    animation-duration: 2.5s;
+    animation-duration: 2.35s;
+  }
+
+  @media (min-width: 1024px) {
+    .crt-sidebar-rail::after {
+      animation-duration: 2.2s;
+    }
+
+    .crt-sidebar-rail::before {
+      animation-duration: 2.9s;
+    }
+  }
+
+  .crt-panel-living.border::after {
+    animation-duration: 2.1s;
   }
 
   .crt-banner-chevrons {
-    animation-duration: 0.52s;
+    animation-duration: 0.5s;
   }
 
   .crt-banner-pin-runner {
-    animation-duration: 0.78s;
+    animation-duration: 0.75s;
   }
 
   .crt-banner-track-beam {
-    animation-duration: 0.88s;
+    animation-duration: 0.85s;
   }
 
   .crt-telemetry-raster:not(.crt-telemetry-raster-secondary) {
-    animation-duration: 1.9s;
+    animation-duration: 1.8s;
   }
 
   .crt-telemetry-raster-secondary {
-    animation-duration: 2.6s;
+    animation-duration: 2.45s;
   }
 }
 
@@ -1752,9 +2302,14 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
     stroke-opacity: 1 !important;
   }
   .crt-layer-humbar,
+  .crt-layer-humbar::after,
+  .crt-layer-degauss,
   .crt-svg-sync-beam,
   .crt-edge-beam::before,
   .crt-edge-beam > span,
+  .crt-panel-living.border::after,
+  .crt-sidebar-rail::before,
+  .crt-sidebar-rail::after,
   .crt-header-beam::before,
   .crt-header-beam > span,
   .crt-drawer-bezel-beam > span,
@@ -1772,6 +2327,9 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   .crt-layer-grille,
   .crt-panel-living,
   .crt-drawer-panel,
+  [role="tooltip"],
+  .crt-ultra-pill-active,
+  .font-display,
   .crt-svg-tree-scroll,
   .crt-svg-clock-hand,
   .crt-svg-cog-rotor,

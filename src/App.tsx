@@ -880,12 +880,15 @@ export default function App() {
 
   const crtCssVars = computeCrtCssVariables(crtSettings);
   const isUltraMotion = crtSettings.uiMotion === 'ultra';
+  const isHighOrUltraMotion =
+    crtSettings.uiMotion === 'high' || crtSettings.uiMotion === 'ultra';
   const showScanlines = crtSettings.enabled && (crtSettings.scanlines > 0 || isUltraMotion);
   const showGrille = crtSettings.enabled && (crtSettings.apertureGrille > 0 || isUltraMotion);
   const showVignette =
     crtSettings.enabled &&
     (crtSettings.vignette > 0 || crtSettings.gaussGlow > 0 || isUltraMotion);
-  const showHumBar = crtSettings.enabled && isUltraMotion;
+  const showHumBar = crtSettings.enabled && isHighOrUltraMotion;
+  const showDegauss = crtSettings.enabled && isUltraMotion;
 
   return (
     <div
@@ -903,6 +906,7 @@ export default function App() {
         </div>
       )}
       {showVignette && <div aria-hidden="true" className="crt-layer-vignette" />}
+      {showDegauss && <div aria-hidden="true" className="crt-layer-degauss" />}
       {/* Sticky Top Header & Full Sync Confirmation Container */}
       <div className="sticky top-0 z-30">
         <header className="relative bg-crt-bg/95 backdrop-blur border-b border-crt-border px-4 lg:px-6 py-3.5 flex flex-wrap md:flex-nowrap items-center justify-between gap-4">
@@ -1131,7 +1135,7 @@ export default function App() {
       {/* Main Workspace: Sidebar + Content Viewport */}
       <div className="flex-1 flex flex-col lg:flex-row">
         {/* Left Rail Sidebar (240px on Desktop) */}
-        <aside className="relative lg:z-20 lg:w-60 shrink-0 border-b lg:border-b-0 lg:border-r border-crt-border bg-crt-surface/70 p-4 flex flex-col justify-between gap-6">
+        <aside className="crt-sidebar-rail relative lg:z-20 lg:w-60 shrink-0 border-b lg:border-b-0 lg:border-r border-crt-border bg-crt-surface/70 p-4 flex flex-col justify-between gap-6">
           <div className="space-y-6">
             {/* Mobile Section Switcher */}
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-1 gap-1.5">
