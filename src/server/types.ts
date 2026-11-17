@@ -1,4 +1,10 @@
 export type { CatalogSortOption } from '../shared/catalogSort.ts';
+export type {
+  StorageFolderMappingConfig,
+  StorageRomCategoryKey,
+  SystemTypeFolderOverride,
+  SystemTypeSubfolderMode,
+} from '../shared/storageFolderMappings.ts';
 export type RunTrigger = 'scheduled' | 'manual' | 'retry';
 export type SyncScope = 'incremental' | 'full';
 export type RunMode = SyncScope | 'dry_run';
@@ -32,8 +38,7 @@ export interface ScraperConfigPublic {
   romNamingTemplate: string;
   romSanitizeFat32: boolean;
   romMaxFilenameLen: number;
-  devicePreset: string;
-  deviceFolderMap: Record<string, string>;
+  storageFolderConfig: import('../shared/storageFolderMappings.ts').StorageFolderMappingConfig;
   updatedAt: string;
   envOverrides: string[];
 }
@@ -62,8 +67,7 @@ export interface ConfigUpdateInput {
   romNamingTemplate?: string;
   romSanitizeFat32?: boolean;
   romMaxFilenameLen?: number;
-  devicePreset?: string;
-  deviceFolderMap?: Record<string, string>;
+  storageFolderConfig?: import('../shared/storageFolderMappings.ts').StorageFolderMappingConfig;
 }
 
 export interface SyncRunRecord {

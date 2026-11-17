@@ -1,6 +1,12 @@
 export type { CatalogSortOption } from './shared/catalogSort';
+export type {
+  StorageFolderMappingConfig,
+  StorageRomCategoryKey,
+  SystemTypeFolderOverride,
+  SystemTypeSubfolderMode,
+} from './shared/storageFolderMappings';
 export type NavSection = 'monitor' | 'catalog' | 'schedule' | 'operations';
-export type OperationsSectionTarget = 'auth' | 'systems' | 'releaseTypes';
+export type OperationsSectionTarget = 'auth' | 'systems' | 'releaseTypes' | 'storageMappings';
 
 export interface OperationsFocusRequest {
   target: OperationsSectionTarget;
@@ -38,8 +44,7 @@ export interface ScraperConfigPublic {
   romNamingTemplate: string;
   romSanitizeFat32: boolean;
   romMaxFilenameLen: number;
-  devicePreset: string;
-  deviceFolderMap: Record<string, string>;
+  storageFolderConfig: import('./shared/storageFolderMappings').StorageFolderMappingConfig;
   updatedAt: string;
   envOverrides: string[];
 }

@@ -1206,16 +1206,16 @@ export function CatalogPanel({
     if (installedFilter === 'only') {
       tokens.push({
         key: 'installed',
-        groupLabel: 'Storage',
-        valueLabel: 'Installed Only',
+        groupLabel: 'Install',
+        valueLabel: 'Installed',
         matchAll: false,
         onRemove: () => setInstalledFilter('all'),
       });
     } else if (installedFilter === 'exclude') {
       tokens.push({
         key: 'installed',
-        groupLabel: 'Storage',
-        valueLabel: 'Exclude Installed',
+        groupLabel: 'Install',
+        valueLabel: 'Not Installed',
         matchAll: false,
         onRemove: () => setInstalledFilter('all'),
       });
@@ -1542,51 +1542,57 @@ export function CatalogPanel({
               <div
                 role="group"
                 aria-label="Filter by storage device installation"
-                className="inline-flex items-center p-0.5 bg-crt-bg border border-crt-border rounded shrink-0"
+                className="inline-flex items-center gap-1.5 shrink-0"
               >
                 <button
                   type="button"
-                  onClick={() => setInstalledFilter('all')}
-                  title="Include both installed and uninstalled games"
-                  className={`px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    installedFilter === 'all'
-                      ? 'bg-crt-elevated text-crt-text border border-crt-border-strong font-medium'
-                      : 'text-crt-muted hover:text-crt-text border border-transparent'
-                  }`}
-                >
-                  All Devices
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setInstalledFilter('only')}
-                  title="Show only games installed to a storage device"
-                  className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  aria-pressed={installedFilter === 'only'}
+                  onClick={() =>
+                    setInstalledFilter((prev) => (prev === 'only' ? 'all' : 'only'))
+                  }
+                  title={
                     installedFilter === 'only'
-                      ? 'bg-crt-phosphor/15 text-crt-phosphor border border-crt-phosphor/60 font-medium'
-                      : 'text-crt-muted hover:text-crt-text border border-transparent'
+                      ? 'Click to clear Installed filter and show all games'
+                      : 'Show only games installed to a storage device'
+                  }
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    installedFilter === 'only'
+                      ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
+                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
                   }`}
                 >
-                  <HardDrive className="h-3 w-3 shrink-0" />
+                  <HardDrive
+                    className={`h-3.5 w-3.5 shrink-0 ${
+                      installedFilter === 'only' ? 'text-crt-phosphor' : 'text-crt-muted'
+                    }`}
+                  />
                   <span>Installed</span>
                   {facets.counts?.installed && (
-                    <span className="font-mono text-[11px] tabular-nums opacity-80">
+                    <span className="font-mono text-[11px] tabular-nums text-crt-muted">
                       ({facets.counts.installed.installed})
                     </span>
                   )}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setInstalledFilter('exclude')}
-                  title="Exclude games already installed to a storage device"
-                  className={`px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  aria-pressed={installedFilter === 'exclude'}
+                  onClick={() =>
+                    setInstalledFilter((prev) => (prev === 'exclude' ? 'all' : 'exclude'))
+                  }
+                  title={
                     installedFilter === 'exclude'
-                      ? 'bg-crt-amber/15 text-crt-amber border border-crt-amber/60 font-medium'
-                      : 'text-crt-muted hover:text-crt-text border border-transparent'
+                      ? 'Click to clear Not Installed filter and show all games'
+                      : 'Show only games not yet installed to a storage device'
+                  }
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    installedFilter === 'exclude'
+                      ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
+                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
                   }`}
                 >
                   <span>Not Installed</span>
                   {facets.counts?.installed && (
-                    <span className="font-mono text-[11px] tabular-nums opacity-80 ml-1">
+                    <span className="font-mono text-[11px] tabular-nums text-crt-muted">
                       ({facets.counts.installed.notInstalled})
                     </span>
                   )}

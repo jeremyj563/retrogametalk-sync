@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { resolveSystemFolderForDevice } from '../shared/devicePresets';
+import { classifyReleaseTagToTypeKey } from '../shared/releaseTypeFilter';
 import { sanitizeFat32Filename } from '../shared/romNaming';
 import {
   selectSmartPrimaryTargetsForItem,
   type SmartInspectItemInput,
   type SmartRomFilterContext,
 } from '../shared/smartRomPicker';
+import {
+  classifyStorageRomCategory,
+  resolveTargetStorageFolder,
+  type StorageFolderMappingConfig,
+  type StorageRomCategoryKey,
+} from '../shared/storageFolderMappings';
 import type {
   ArchiveInspectResult,
   PlayableExportTarget,
@@ -54,6 +60,7 @@ export interface ExportQueueRow {
   fileId: number;
   title: string;
   systemName: string;
+  releaseTags: string[];
   sourceFilename: string;
   fileRole?: string;
   fileDisplayLabel?: string;
@@ -122,6 +129,45 @@ interface UseBulkStorageInstallerOptions {
 const EXPRESS_INSPECT_CHUNK_SIZE = 15;
 const REVIEW_INSPECT_CHUNK_SIZE = 30;
 
+function extractPreferredTypeKeys(filterContext?: SmartRomFilterContext | null): string[] {
+  if (!filterContext) return [];
+  const keys = new Set<string>();
+  for (const tag of filterContext.tags || []) {
+    keys.add(classifyReleaseTagToTypeKey(tag));
+  }
+  if (filterContext.languages && filterContext.languages.length > 0) {
+    keys.add('translation:other');
+  }
+  for (const allowed of filterContext.syncIncludeTags || []) {
+    keys.add(classifyReleaseTagToTypeKey(allowed));
+  }
+  return Array.from(keys);
+}
+
+export function resolveRowTargetCategoryAndFolder(
+  row: Pick<
+    ExportQueueRow,
+    'systemName' | 'releaseTags' | 'fileRole' | 'fileDisplayLabel'
+  >,
+  target: Pick<PlayableExportTarget, 'roleBadge' | 'displayName'> | null,
+  storageConfig?: StorageFolderMappingConfig | null,
+  filterContext?: SmartRomFilterContext | null,
+): { category: StorageRomCategoryKey; folder: string } {
+  const category = classifyStorageRomCategory({
+    systemName: row.systemName,
+    releaseTags: row.releaseTags,
+    fileRole: row.fileRole,
+    fileDisplayLabel: row.fileDisplayLabel,
+    targetRoleBadge: target?.roleBadge ?? null,
+    targetDisplayName: target?.displayName ?? null,
+    preferredFilterTypeKeys: extractPreferredTypeKeys(filterContext),
+  });
+  const folder = row.systemName
+    ? resolveTargetStorageFolder(row.systemName, category, storageConfig)
+    : 'ROMS';
+  return { category, folder };
+}
+
 function buildRowsFromInspectedItem(
   entry: SdExportBatchItemResult,
   mode: 'express' | 'review',
@@ -135,6 +181,7 @@ function buildRowsFromInspectedItem(
         fileId: 0,
         title: entry.title,
         systemName: entry.systemName,
+        releaseTags: entry.releaseTags || [],
         sourceFilename: '—',
         targets: [],
         selectedTargetIds: [],
@@ -219,6 +266,7 @@ function buildRowsFromInspectedItem(
       fileId: insp.fileId,
       title: entry.title,
       systemName: entry.systemName,
+      releaseTags: entry.releaseTags || [],
       sourceFilename: insp.sourceFilename,
       fileRole: insp.fileRole,
       fileDisplayLabel: insp.fileDisplayLabel,
@@ -260,24 +308,8 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
   const [folderScans, setFolderScans] = useState<Record<string, SdScanFolderResult>>({});
   const [scanningCard, setScanningCard] = useState(false);
 
-  const [devicePreset, setDevicePreset] = useState<string>(config?.devicePreset || 'everdrive');
-  const [folderMapDraft, setFolderMapDraft] = useState<Record<string, string>>(
-    config?.deviceFolderMap || {},
-  );
-
-  useEffect(() => {
-    if (config) {
-      setDevicePreset(config.devicePreset || 'everdrive');
-      setFolderMapDraft(config.deviceFolderMap || {});
-    }
-  }, [config?.devicePreset, config?.deviceFolderMap]);
-
   const configRef = useRef(config);
   configRef.current = config;
-  const devicePresetRef = useRef(devicePreset);
-  devicePresetRef.current = devicePreset;
-  const folderMapDraftRef = useRef(folderMapDraft);
-  folderMapDraftRef.current = folderMapDraft;
   const sdRootHandleRef = useRef(sdRootHandle);
   sdRootHandleRef.current = sdRootHandle;
   const onItemsInstalledRef = useRef(onItemsInstalled);
@@ -339,45 +371,67 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
     [],
   );
 
-  const rescanMountedSdFolders = useCallback(
-    async (systemsOverride?: string[]) => {
-      const handle = sdRootHandleRef.current;
-      const currentRows = jobRef.current?.rows || [];
-      const systems =
-        systemsOverride ||
-        Array.from(new Set(currentRows.map((r) => r.systemName).filter(Boolean)));
-      if (!handle || systems.length === 0) {
-        if (!handle) setFolderScans({});
-        return {};
-      }
-      setScanningCard(true);
-      try {
-        const nextScans: Record<string, SdScanFolderResult> = {};
-        for (const sys of systems) {
-          const folder = resolveSystemFolderForDevice(
-            sys,
-            devicePresetRef.current,
-            folderMapDraftRef.current,
+  const rescanMountedSdFolders = useCallback(async (explicitFolders?: string[]) => {
+    const handle = sdRootHandleRef.current;
+    const currentJob = jobRef.current;
+    const currentRows = currentJob?.rows || [];
+    const storageCfg = configRef.current?.storageFolderConfig;
+
+    let foldersToScan: string[] = [];
+    if (explicitFolders && explicitFolders.length > 0) {
+      foldersToScan = Array.from(new Set(explicitFolders.filter(Boolean)));
+    } else {
+      const folderSet = new Set<string>();
+      for (const r of currentRows) {
+        if (!r.systemName) continue;
+        if (r.targets.length === 0) {
+          folderSet.add(
+            resolveRowTargetCategoryAndFolder(r, null, storageCfg, currentJob?.filterContext).folder,
           );
-          if (!nextScans[folder]) {
-            nextScans[folder] = await scanTargetFolder(handle, folder);
+        } else {
+          for (const t of r.targets) {
+            folderSet.add(
+              resolveRowTargetCategoryAndFolder(r, t, storageCfg, currentJob?.filterContext).folder,
+            );
           }
         }
-        setFolderScans((prev) => ({ ...prev, ...nextScans }));
-        return nextScans;
-      } catch (err) {
-        setMountError(err instanceof Error ? err.message : String(err));
-        return {};
-      } finally {
-        setScanningCard(false);
       }
-    },
-    [],
-  );
+      foldersToScan = Array.from(folderSet);
+    }
+
+    if (!handle || foldersToScan.length === 0) {
+      if (!handle) setFolderScans({});
+      return {};
+    }
+    setScanningCard(true);
+    try {
+      const nextScans: Record<string, SdScanFolderResult> = {};
+      for (const folder of foldersToScan) {
+        if (!nextScans[folder]) {
+          nextScans[folder] = await scanTargetFolder(handle, folder);
+        }
+      }
+      setFolderScans((prev) => ({ ...prev, ...nextScans }));
+      return nextScans;
+    } catch (err) {
+      setMountError(err instanceof Error ? err.message : String(err));
+      return {};
+    } finally {
+      setScanningCard(false);
+    }
+  }, []);
+
+  // Re-scan target folders if the user updates Storage Folder Mappings in Operations while a device is mounted
+  useEffect(() => {
+    if (sdRootHandle && job && job.phase === 'ready') {
+      void rescanMountedSdFolders();
+    }
+  }, [config?.storageFolderConfig, sdRootHandle, job?.phase, rescanMountedSdFolders]);
 
   const writeSingleRowToDevice = useCallback(
     async (
       row: ExportQueueRow,
+      filterContext: SmartRomFilterContext | null,
       rootHandle: SdDirectoryHandle,
       scanCache: Record<string, SdScanFolderResult>,
       dirCache: Map<string, SdDirectoryHandle>,
@@ -395,40 +449,13 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
       const cfg = configRef.current;
       const sanitizeFat32 = cfg?.romSanitizeFat32 ?? true;
       const maxFilenameLen = cfg?.romMaxFilenameLen ?? 0;
-
-      const targetFolderRel = resolveSystemFolderForDevice(
-        row.systemName,
-        devicePresetRef.current,
-        folderMapDraftRef.current,
-      );
-
-      if (!scanCache[targetFolderRel]) {
-        scanCache[targetFolderRel] = await scanTargetFolder(rootHandle, targetFolderRel);
-        setFolderScans((prev) => ({ ...prev, [targetFolderRel]: scanCache[targetFolderRel] }));
-      }
-      const scan = scanCache[targetFolderRel];
-
-      let systemDirHandle = dirCache.get(targetFolderRel) || null;
-      if (!systemDirHandle) {
-        systemDirHandle = await resolveOrCreateSubdirectory(rootHandle, targetFolderRel, true);
-        if (systemDirHandle) {
-          dirCache.set(targetFolderRel, systemDirHandle);
-        }
-      }
-
-      if (!systemDirHandle) {
-        return {
-          nextState: 'error',
-          detail: `Could not create folder /${targetFolderRel}`,
-          bytesWritten: 0,
-          installedSuccess: false,
-        };
-      }
+      const storageCfg = cfg?.storageFolderConfig;
 
       let rowBytes = 0;
       let upgradedOldName: string | null = null;
       let allSkipped = true;
       let rowFailed: string | null = null;
+      const touchedFolders = new Set<string>();
 
       for (const targetId of row.selectedTargetIds) {
         if (signal.aborted) {
@@ -436,6 +463,37 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
         }
         const target = row.targets.find((t) => t.id === targetId);
         if (!target) continue;
+
+        const { folder: targetFolderRel } = resolveRowTargetCategoryAndFolder(
+          row,
+          target,
+          storageCfg,
+          filterContext,
+        );
+        touchedFolders.add(`/${targetFolderRel}`);
+
+        if (!scanCache[targetFolderRel]) {
+          scanCache[targetFolderRel] = await scanTargetFolder(rootHandle, targetFolderRel);
+          setFolderScans((prev) => ({ ...prev, [targetFolderRel]: scanCache[targetFolderRel] }));
+        }
+        const scan = scanCache[targetFolderRel];
+
+        let systemDirHandle = dirCache.get(targetFolderRel) || null;
+        if (!systemDirHandle) {
+          systemDirHandle = await resolveOrCreateSubdirectory(rootHandle, targetFolderRel, true);
+          if (systemDirHandle) {
+            dirCache.set(targetFolderRel, systemDirHandle);
+          }
+        }
+
+        if (!systemDirHandle) {
+          return {
+            nextState: 'error',
+            detail: `Could not create folder /${targetFolderRel}`,
+            bytesWritten: rowBytes,
+            installedSuccess: false,
+          };
+        }
 
         const rawDesiredName = (row.outputNamesByTargetId[targetId] || target.suggestedFilename).trim();
         const finalName = sanitizeFat32
@@ -508,6 +566,11 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
         }
       }
 
+      const folderSummary =
+        touchedFolders.size > 0
+          ? Array.from(touchedFolders).join(', ')
+          : `/${resolveRowTargetCategoryAndFolder(row, null, storageCfg, filterContext).folder}`;
+
       if (rowFailed) {
         return {
           nextState: 'error',
@@ -519,7 +582,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
       if (allSkipped) {
         return {
           nextState: 'skipped',
-          detail: `Already on device in /${targetFolderRel}`,
+          detail: `Already on device in ${folderSummary}`,
           bytesWritten: 0,
           installedSuccess: true,
         };
@@ -527,14 +590,14 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
       if (upgradedOldName) {
         return {
           nextState: 'upgraded',
-          detail: `Updated in /${targetFolderRel} (replaced ${upgradedOldName}) · ${formatBytes(rowBytes)}`,
+          detail: `Updated in ${folderSummary} (replaced ${upgradedOldName}) · ${formatBytes(rowBytes)}`,
           bytesWritten: rowBytes,
           installedSuccess: true,
         };
       }
       return {
         nextState: 'written',
-        detail: `Saved to /${targetFolderRel} · ${formatBytes(rowBytes)}`,
+        detail: `Saved to ${folderSummary} · ${formatBytes(rowBytes)}`,
         bytesWritten: rowBytes,
         installedSuccess: true,
       };
@@ -584,6 +647,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
           fileId: 0,
           title: meta?.title || `Catalog Release #${id}`,
           systemName: meta?.systemName || '',
+          releaseTags: [],
           sourceFilename: 'Queued for inspection...',
           targets: [],
           selectedTargetIds: [],
@@ -714,6 +778,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
 
               const outcome = await writeSingleRowToDevice(
                 row,
+                filterContext,
                 activeHandle!,
                 scanCache,
                 dirCache,
@@ -837,6 +902,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
           fileId: 0,
           title: meta?.title || `Catalog Release #${id}`,
           systemName: meta?.systemName || '',
+          releaseTags: [],
           sourceFilename: 'Inspecting archive...',
           targets: [],
           selectedTargetIds: [],
@@ -870,7 +936,8 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
       });
 
       try {
-        const allSystems = new Set<string>();
+        const allTargetFolders = new Set<string>();
+        const storageCfg = configRef.current?.storageFolderConfig;
         for (let offset = 0; offset < cleanIds.length; offset += REVIEW_INSPECT_CHUNK_SIZE) {
           if (controller.signal.aborted) {
             throw new DOMException('Inspection canceled.', 'AbortError');
@@ -893,8 +960,22 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
 
           const expandedChunkRows: ExportQueueRow[] = [];
           for (const entry of parsed.data.results) {
-            if (entry.systemName) allSystems.add(entry.systemName);
-            expandedChunkRows.push(...buildRowsFromInspectedItem(entry, 'review', filterContext));
+            const built = buildRowsFromInspectedItem(entry, 'review', filterContext);
+            for (const r of built) {
+              if (!r.systemName) continue;
+              if (r.targets.length === 0) {
+                allTargetFolders.add(
+                  resolveRowTargetCategoryAndFolder(r, null, storageCfg, filterContext).folder,
+                );
+              } else {
+                for (const t of r.targets) {
+                  allTargetFolders.add(
+                    resolveRowTargetCategoryAndFolder(r, t, storageCfg, filterContext).folder,
+                  );
+                }
+              }
+            }
+            expandedChunkRows.push(...built);
           }
 
           setJob((prev) => {
@@ -921,8 +1002,8 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
           prev && prev.jobId === jobId ? { ...prev, phase: 'ready' } : prev,
         );
 
-        if (sdRootHandleRef.current && allSystems.size > 0) {
-          await rescanMountedSdFolders(Array.from(allSystems));
+        if (sdRootHandleRef.current && allTargetFolders.size > 0) {
+          await rescanMountedSdFolders(Array.from(allTargetFolders));
         }
       } catch (err) {
         if (isAbortError(err) || controller.signal.aborted) {
@@ -1031,6 +1112,7 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
 
           const outcome = await writeSingleRowToDevice(
             row,
+            currentJob.filterContext,
             activeHandle!,
             scanCache,
             dirCache,
@@ -1306,10 +1388,6 @@ export function useBulkStorageInstaller({ config, onItemsInstalled }: UseBulkSto
     job,
     metrics,
     isBusy,
-    devicePreset,
-    setDevicePreset,
-    folderMapDraft,
-    setFolderMapDraft,
     folderScans,
     scanningCard,
     rescanMountedSdFolders,

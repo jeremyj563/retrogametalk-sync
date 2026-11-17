@@ -18,7 +18,6 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import { DEVICE_PRESETS, type DevicePresetId } from '../shared/devicePresets';
 import {
   CURATED_RELEASE_TYPE_OPTIONS,
   MACHINE_TRANSLATION_KEY,
@@ -30,6 +29,11 @@ import {
   normalizeAllowedReleaseTypes,
 } from '../shared/releaseTypeFilter';
 import { formatPreparedRomName, ROM_NAMING_PRESETS } from '../shared/romNaming';
+import {
+  canonicalStorageFolderConfigJson,
+  normalizeStorageFolderConfig,
+  type StorageFolderMappingConfig,
+} from '../shared/storageFolderMappings';
 import {
   filterValidSystemSlugs,
   groupSystemsByBrand,
@@ -44,6 +48,7 @@ import type {
 import { formatBytes } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
 import { EnvLockIndicator } from './EnvLockIndicator';
+import { StorageFolderMappingsSection } from './StorageFolderMappingsSection';
 
 export interface OperationsDirtyState {
   isDirty: boolean;
@@ -108,12 +113,15 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
   const [romNamingTemplate, setRomNamingTemplate] = useState(config.romNamingTemplate);
   const [romSanitizeFat32, setRomSanitizeFat32] = useState(config.romSanitizeFat32);
   const [romMaxFilenameLen, setRomMaxFilenameLen] = useState(config.romMaxFilenameLen);
-  const [devicePreset, setDevicePreset] = useState(config.devicePreset || 'everdrive');
+  const [storageFolderConfig, setStorageFolderConfig] = useState<StorageFolderMappingConfig>(() =>
+    normalizeStorageFolderConfig(config.storageFolderConfig),
+  );
 
   const [spotlight, setSpotlight] = useState<OperationsFocusRequest | null>(null);
   const authSectionRef = useRef<HTMLElement | null>(null);
   const systemsSectionRef = useRef<HTMLElement | null>(null);
   const releaseTypesSectionRef = useRef<HTMLElement | null>(null);
+  const storageMappingsSectionRef = useRef<HTMLElement | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
@@ -147,7 +155,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
     setRomNamingTemplate(target.romNamingTemplate);
     setRomSanitizeFat32(target.romSanitizeFat32);
     setRomMaxFilenameLen(target.romMaxFilenameLen);
-    setDevicePreset(target.devicePreset || 'everdrive');
+    setStorageFolderConfig(normalizeStorageFolderConfig(target.storageFolderConfig));
   }, []);
 
   useEffect(() => {
@@ -176,6 +184,13 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
       ...Array.from(selectedSystems),
     ]);
   }, [config.discoveredSystems, authResult, selectedSystems]);
+
+  const discoveredAndSyncedSlugs = useMemo(() => {
+    return filterValidSystemSlugs([
+      ...availableSystems,
+      ...status.systems.map((s) => s.systemName),
+    ]);
+  }, [availableSystems, status.systems]);
 
   const allBrandGroups = useMemo(
     () => groupSystemsByBrand(availableSystems),
@@ -388,7 +403,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
     romNamingTemplate,
     romSanitizeFat32,
     romMaxFilenameLen,
-    devicePreset,
+    storageFolderConfig: normalizeStorageFolderConfig(storageFolderConfig),
   });
 
   const namingPreviews = useMemo(() => {
@@ -471,9 +486,13 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
     const namingChanged =
       romNamingTemplate !== config.romNamingTemplate ||
       romSanitizeFat32 !== config.romSanitizeFat32 ||
-      romMaxFilenameLen !== config.romMaxFilenameLen ||
-      (devicePreset || 'everdrive') !== (config.devicePreset || 'everdrive');
+      romMaxFilenameLen !== config.romMaxFilenameLen;
     if (namingChanged) changedSections.push('ROM Naming & Export');
+
+    const storageMappingsChanged =
+      canonicalStorageFolderConfigJson(storageFolderConfig) !==
+      canonicalStorageFolderConfigJson(config.storageFolderConfig);
+    if (storageMappingsChanged) changedSections.push('Storage Folder Mappings');
 
     return {
       isDirty: changedSections.length > 0,
@@ -492,7 +511,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
     romNamingTemplate,
     romSanitizeFat32,
     romMaxFilenameLen,
-    devicePreset,
+    storageFolderConfig,
     usernameLockedByEnv,
     passwordLockedByEnv,
     downloadDirLockedByEnv,
@@ -619,6 +638,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
       auth: authSectionRef.current,
       systems: systemsSectionRef.current,
       releaseTypes: releaseTypesSectionRef.current,
+      storageMappings: storageMappingsSectionRef.current,
     } as const;
     const targetEl = targetMap[focusRequest.target];
     if (!targetEl) return;
@@ -1476,7 +1496,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-12 gap-5 items-start">
-          <div className="md:col-span-6 space-y-1.5">
+          <div className="md:col-span-8 space-y-1.5">
             <label className="block text-xs font-medium text-crt-text">
               Filename Pattern Template
             </label>
@@ -1492,27 +1512,7 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
             </p>
           </div>
 
-          <div className="md:col-span-3 space-y-1.5">
-            <label className="block text-xs font-medium text-crt-text">
-              Default Storage Device Preset
-            </label>
-            <select
-              value={devicePreset}
-              onChange={(e) => setDevicePreset(e.target.value)}
-              className="w-full px-3 py-2 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
-            >
-              {Object.values(DEVICE_PRESETS).map((preset) => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.name}
-                </option>
-              ))}
-            </select>
-            <p className="text-[11px] text-crt-muted">
-              {DEVICE_PRESETS[devicePreset as DevicePresetId]?.description}
-            </p>
-          </div>
-
-          <div className="md:col-span-3 space-y-1.5">
+          <div className="md:col-span-4 space-y-1.5">
             <label className="block text-xs font-medium text-crt-text">
               Max Filename Length (0 = unlimited)
             </label>
@@ -1549,6 +1549,15 @@ export const OperationsPanel = forwardRef<OperationsPanelHandle, OperationsPanel
           </div>
         </div>
       </section>
+
+      {/* Storage Device Console & ROM-Type Folder Mappings */}
+      <StorageFolderMappingsSection
+        sectionRef={storageMappingsSectionRef}
+        spotlightNonce={spotlight?.target === 'storageMappings' ? spotlight.nonce : null}
+        value={storageFolderConfig}
+        onChange={setStorageFolderConfig}
+        discoveredAndSyncedSlugs={discoveredAndSyncedSlugs}
+      />
 
       {/* Sticky Dirty-Only Save / Discard Bar */}
       {(dirtyState.isDirty || saving || Boolean(saveErr) || Boolean(saveMsg)) && (

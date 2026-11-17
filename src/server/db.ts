@@ -6,6 +6,10 @@ import { LATEST_SCHEMA_VERSION, runDatabaseMigrations } from './migrations.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import { normalizeCatalogSort } from '../shared/catalogSort.ts';
 import { normalizeAllowedReleaseTypes } from '../shared/releaseTypeFilter.ts';
+import {
+  createDefaultStorageFolderConfig,
+  normalizeStorageFolderConfig,
+} from '../shared/storageFolderMappings.ts';
 import { filterValidSystemSlugs, sanitizeSystemFilterString } from '../shared/systemCatalog.ts';
 import type {
   ActivityLogRecord,
@@ -365,18 +369,12 @@ export function getInternalConfig(): ScraperConfigInternal {
     discoveredSystems = [];
   }
 
-  let deviceFolderMap: Record<string, string> = {};
+  let storageFolderConfig = createDefaultStorageFolderConfig();
   try {
-    const parsedMap = JSON.parse(String(row.device_folder_map_json || '{}'));
-    if (parsedMap && typeof parsedMap === 'object' && !Array.isArray(parsedMap)) {
-      for (const [k, v] of Object.entries(parsedMap)) {
-        if (typeof v === 'string') {
-          deviceFolderMap[String(k)] = v;
-        }
-      }
-    }
+    const parsedFolderConfig = JSON.parse(String(row.storage_folder_config_json || '{}'));
+    storageFolderConfig = normalizeStorageFolderConfig(parsedFolderConfig);
   } catch {
-    deviceFolderMap = {};
+    storageFolderConfig = createDefaultStorageFolderConfig();
   }
 
   let allowedReleaseTypes: string[] = [];
@@ -417,8 +415,7 @@ export function getInternalConfig(): ScraperConfigInternal {
     romNamingTemplate: String(row.rom_naming_template || '{title}{regionParen}{tagBracket}'),
     romSanitizeFat32: row.rom_sanitize_fat32 !== undefined ? Boolean(row.rom_sanitize_fat32) : true,
     romMaxFilenameLen: Math.max(0, Number(row.rom_max_filename_len || 0)),
-    devicePreset: String(row.device_preset || 'everdrive'),
-    deviceFolderMap,
+    storageFolderConfig,
     updatedAt: String(row.updated_at),
     envOverrides,
   };
@@ -547,22 +544,11 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
   const rawMaxLen = Number(input.romMaxFilenameLen ?? current.rom_max_filename_len ?? 0);
   const nextRomMaxFilenameLen =
     !Number.isFinite(rawMaxLen) || rawMaxLen <= 0 ? 0 : Math.max(24, Math.min(255, Math.round(rawMaxLen)));
-  const nextDevicePreset =
-    input.devicePreset !== undefined
-      ? (input.devicePreset.trim() || 'everdrive')
-      : String(current.device_preset || 'everdrive');
-
-  let nextDeviceFolderMapJson = String(current.device_folder_map_json || '{}');
-  if (input.deviceFolderMap !== undefined && input.deviceFolderMap && typeof input.deviceFolderMap === 'object') {
-    const cleanMap: Record<string, string> = {};
-    for (const [k, v] of Object.entries(input.deviceFolderMap)) {
-      const key = String(k).trim().toLowerCase();
-      const val = typeof v === 'string' ? v.trim().replace(/^\/+|\/+$/g, '') : '';
-      if (key && val) {
-        cleanMap[key] = val;
-      }
-    }
-    nextDeviceFolderMapJson = JSON.stringify(cleanMap);
+  let nextStorageFolderConfigJson = String(current.storage_folder_config_json || '{}');
+  if (input.storageFolderConfig !== undefined) {
+    nextStorageFolderConfigJson = JSON.stringify(
+      normalizeStorageFolderConfig(input.storageFolderConfig),
+    );
   }
 
   let nextAllowedReleaseTypesJson = String(current.allowed_release_types_json || '[]');
@@ -595,8 +581,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       rom_naming_template = ?,
       rom_sanitize_fat32 = ?,
       rom_max_filename_len = ?,
-      device_preset = ?,
-      device_folder_map_json = ?,
+      storage_folder_config_json = ?,
       last_authenticated_at = ?,
       updated_at = ?
     WHERE id = 1
@@ -622,8 +607,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     nextRomNamingTemplate,
     nextRomSanitizeFat32,
     nextRomMaxFilenameLen,
-    nextDevicePreset,
-    nextDeviceFolderMapJson,
+    nextStorageFolderConfigJson,
     authCredentialsChanged ? null : (current.last_authenticated_at ? String(current.last_authenticated_at) : null),
     now,
   );
