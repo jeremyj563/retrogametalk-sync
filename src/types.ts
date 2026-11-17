@@ -327,6 +327,9 @@ export interface ArchiveInspectResult {
   itemId: number;
   fileId: number;
   sourceFilename: string;
+  fileRole?: string;
+  fileDisplayLabel?: string;
+  fileDownloadedAt?: string | null;
   archiveFormat: ArchiveFormat;
   playableTargets: PlayableExportTarget[];
   ignoredEntriesCount: number;

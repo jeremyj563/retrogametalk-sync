@@ -9,6 +9,7 @@ import {
   initDb,
   listActivityLogs,
   listSyncRuns,
+  queryRepositoryItemIds,
   queryRepositoryItems,
   setCatalogItemsInstalled,
 } from './src/server/db.ts';
@@ -171,6 +172,27 @@ async function bootstrap() {
     res.json(result);
   });
 
+  app.get('/api/items/ids', (req, res) => {
+    const result = queryRepositoryItemIds({
+      search: typeof req.query.search === 'string' ? req.query.search : undefined,
+      system: parseQueryFilterParam(req.query.system),
+      status: parseQueryFilterParam(req.query.status),
+      installed: typeof req.query.installed === 'string' ? req.query.installed : undefined,
+      tag: parseQueryFilterParam(req.query.tag),
+      tagMode: typeof req.query.tagMode === 'string' ? req.query.tagMode : undefined,
+      genre: parseQueryFilterParam(req.query.genre),
+      genreMode: typeof req.query.genreMode === 'string' ? req.query.genreMode : undefined,
+      region: parseQueryFilterParam(req.query.region),
+      regionMode: typeof req.query.regionMode === 'string' ? req.query.regionMode : undefined,
+      language: parseQueryFilterParam(req.query.language),
+      languageMode: typeof req.query.languageMode === 'string' ? req.query.languageMode : undefined,
+      source: parseQueryFilterParam(req.query.source),
+      sourceMode: typeof req.query.sourceMode === 'string' ? req.query.sourceMode : undefined,
+      sort: typeof req.query.sort === 'string' ? req.query.sort : undefined,
+    });
+    res.json(result);
+  });
+
   app.get('/api/items/:id', (req, res) => {
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId) || itemId <= 0) {
@@ -269,14 +291,26 @@ async function bootstrap() {
       itemId: number;
       title: string;
       systemName: string;
-      inspections: Awaited<ReturnType<typeof orchestrator.inspectItemArchive>>[];
+      releaseTags: string[];
+      languages: string[];
+      regions: string[];
+      inspections: NonNullable<Awaited<ReturnType<typeof orchestrator.inspectItemArchive>>>[];
       error: string | null;
     }[] = [];
 
     for (const itemId of ids.slice(0, 100)) {
       const item = getRepositoryItemById(itemId);
       if (!item) {
-        results.push({ itemId, title: `#${itemId}`, systemName: '', inspections: [], error: 'Catalog item not found' });
+        results.push({
+          itemId,
+          title: `#${itemId}`,
+          systemName: '',
+          releaseTags: [],
+          languages: [],
+          regions: [],
+          inspections: [],
+          error: 'Catalog item not found',
+        });
         continue;
       }
       const availableFiles = item.files.filter((f) => f.status === 'downloaded' || f.status === 'skipped');
@@ -285,12 +319,15 @@ async function bootstrap() {
           itemId: item.id,
           title: item.title,
           systemName: item.systemName,
+          releaseTags: item.releaseTags || [],
+          languages: item.languages || [],
+          regions: item.regions || [],
           inspections: [],
           error: 'No downloaded archive on disk yet',
         });
         continue;
       }
-      const inspections = [];
+      const inspections: NonNullable<Awaited<ReturnType<typeof orchestrator.inspectItemArchive>>>[] = [];
       let itemErr: string | null = null;
       for (const file of availableFiles) {
         try {
@@ -304,6 +341,9 @@ async function bootstrap() {
         itemId: item.id,
         title: item.title,
         systemName: item.systemName,
+        releaseTags: item.releaseTags || [],
+        languages: item.languages || [],
+        regions: item.regions || [],
         inspections,
         error: inspections.length === 0 ? (itemErr || 'Mirrored archive missing on disk') : null,
       });

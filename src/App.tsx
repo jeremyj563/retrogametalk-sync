@@ -8,6 +8,7 @@ import {
   Square,
 } from 'lucide-react';
 import { BrandMark } from './components/BrandMark';
+import { BulkInstallDock } from './components/BulkInstallDock';
 import { CatalogPanel } from './components/CatalogPanel';
 import { CrtDisplayControl } from './components/CrtDisplayControl';
 import { LivingNavIcon } from './components/LivingNavIcon';
@@ -18,6 +19,8 @@ import {
 } from './components/OperationsPanel';
 import { OverviewPanel } from './components/OverviewPanel';
 import { SchedulePanel } from './components/SchedulePanel';
+import { SdCardExportModal } from './components/SdCardExportModal';
+import { useBulkStorageInstaller } from './hooks/useBulkStorageInstaller';
 import {
   computeCrtCssVariables,
   type CrtDisplaySettings,
@@ -194,6 +197,13 @@ export default function App() {
   const [activeRetryItemId, setActiveRetryItemId] = useState<number | null>(null);
   const activeRetryRunRef = useRef<{ runId: number; itemId: number } | null>(null);
   const prevActiveRunRef = useRef<SyncRunRecord | null>(null);
+
+  const bulkInstaller = useBulkStorageInstaller({
+    config,
+    onItemsInstalled: () => {
+      setCatalogRevision((rev) => rev + 1);
+    },
+  });
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -1061,6 +1071,9 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Non-blocking Background Storage Device Installer Progress Dock */}
+      <BulkInstallDock installer={bulkInstaller} />
       </div>
 
       {/* Main Workspace: Sidebar + Content Viewport */}
@@ -1246,9 +1259,9 @@ export default function App() {
                 <CatalogPanel
                   config={config}
                   status={status}
+                  installer={bulkInstaller}
                   catalogRevision={catalogRevision}
                   activeRetryItemId={activeRetryItemId}
-                  onSaveConfig={handleSaveConfig}
                   onRetryItem={handleRetryItem}
                   onRefreshStatus={loadInitialData}
                 />
@@ -1289,6 +1302,15 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* App-Wide Storage Device Installer Modal (can be closed & reopened while transfers run) */}
+      {config && (
+        <SdCardExportModal
+          installer={bulkInstaller}
+          config={config}
+          onSaveConfig={handleSaveConfig}
+        />
+      )}
 
       {/* Unsaved Operations Changes Guard Modal */}
       {pendingNavIntent && (

@@ -12,6 +12,7 @@ export interface SdDirectoryHandle {
 export interface SdFileWritableStream extends WritableStream<Uint8Array> {
   write(data: Uint8Array | ArrayBuffer | Blob | string): Promise<void>;
   close(): Promise<void>;
+  abort(reason?: unknown): Promise<void>;
 }
 
 export interface SdFileHandle {
@@ -98,6 +99,30 @@ export async function scanTargetFolder(
   return { exactNames, exactNamesLower, entries };
 }
 
+export function registerWrittenEntryInScan(
+  scan: SdScanFolderResult,
+  name: string,
+  kind: 'file' | 'directory',
+  removedOldName?: string | null,
+): void {
+  if (removedOldName) {
+    scan.exactNames.delete(removedOldName);
+    scan.exactNamesLower.delete(removedOldName.toLowerCase());
+    const oldIdx = scan.entries.findIndex((e) => e.name.toLowerCase() === removedOldName.toLowerCase());
+    if (oldIdx >= 0) scan.entries.splice(oldIdx, 1);
+  }
+  const lower = name.toLowerCase();
+  if (!scan.exactNamesLower.has(lower)) {
+    scan.exactNames.add(name);
+    scan.exactNamesLower.set(lower, name);
+    scan.entries.push({
+      name,
+      kind,
+      stemInfo: buildUpgradeMatchStem(name),
+    });
+  }
+}
+
 export function findUpgradeCandidateOnCard(
   targetName: string,
   scan: SdScanFolderResult | undefined,
@@ -128,15 +153,38 @@ export function findUpgradeCandidateOnCard(
   return { exactMatch: false, olderEntryName: null };
 }
 
+export function isAbortError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof DOMException && err.name === 'AbortError') return true;
+  if (err instanceof Error && err.name === 'AbortError') return true;
+  return false;
+}
+
 export async function streamHttpPayloadToSdFile(
   url: string,
   dirHandle: SdDirectoryHandle,
   filename: string,
+  options?: { signal?: AbortSignal; hadExistingFile?: boolean },
 ): Promise<number> {
-  const res = await fetch(url);
+  const signal = options?.signal;
+  if (signal?.aborted) {
+    throw new DOMException('Installation canceled by user.', 'AbortError');
+  }
+
+  const res = await fetch(url, { signal });
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     throw new Error(errText || `Extraction failed (HTTP ${res.status})`);
+  }
+
+  let existedBefore = Boolean(options?.hadExistingFile);
+  if (!existedBefore) {
+    try {
+      await dirHandle.getFileHandle(filename, { create: false });
+      existedBefore = true;
+    } catch {
+      existedBefore = false;
+    }
   }
 
   const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
@@ -147,9 +195,17 @@ export async function streamHttpPayloadToSdFile(
       const reader = res.body.getReader();
       let written = 0;
       while (true) {
+        if (signal?.aborted) {
+          await reader.cancel().catch(() => undefined);
+          throw new DOMException('Installation canceled by user.', 'AbortError');
+        }
         const { done, value } = await reader.read();
         if (done) break;
         if (value) {
+          if (signal?.aborted) {
+            await reader.cancel().catch(() => undefined);
+            throw new DOMException('Installation canceled by user.', 'AbortError');
+          }
           await writable.write(value);
           written += value.byteLength;
         }
@@ -159,14 +215,29 @@ export async function streamHttpPayloadToSdFile(
     }
 
     const buf = await res.arrayBuffer();
+    if (signal?.aborted) {
+      throw new DOMException('Installation canceled by user.', 'AbortError');
+    }
     await writable.write(buf);
     await writable.close();
     return buf.byteLength;
   } catch (err) {
     try {
-      await writable.close();
+      if (typeof writable.abort === 'function') {
+        await writable.abort();
+      } else {
+        await writable.close();
+      }
     } catch {
-      // Ignore secondary close error
+      // Ignore secondary abort/close error
+    }
+    // Remove newly created 0-byte placeholder file if the transfer aborted or failed before closing
+    if (!existedBefore) {
+      try {
+        await dirHandle.removeEntry(filename);
+      } catch {
+        // Non-fatal
+      }
     }
     throw err;
   }
