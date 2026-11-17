@@ -16,6 +16,7 @@ export interface CrtDisplaySettings extends CrtFxValues {
   enabled: boolean;
   palette: CrtPalette;
   uiMotion: CrtUiMotionLevel;
+  customValues?: CrtFxValues;
 }
 
 export const CRT_DISPLAY_STORAGE_KEY = 'rgt_sync_crt_display_v1';
@@ -117,6 +118,16 @@ export function clampCrtPct(val: unknown, fallback: number): number {
   return Math.max(0, Math.min(100, Math.round(num)));
 }
 
+export function extractCrtFxValues(values: CrtFxValues): CrtFxValues {
+  return {
+    scanlines: values.scanlines,
+    gaussGlow: values.gaussGlow,
+    vignette: values.vignette,
+    apertureGrille: values.apertureGrille,
+    chromaticAberration: values.chromaticAberration,
+  };
+}
+
 function isValidPalette(val: unknown): val is CrtPalette {
   return val === 'green' || val === 'amber' || val === 'cyan';
 }
@@ -131,6 +142,25 @@ function isValidUiMotionLevel(val: unknown): val is CrtUiMotionLevel {
   );
 }
 
+function parseSavedCustomFxValues(raw: unknown): CrtFxValues | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const candidate = raw as Partial<CrtFxValues>;
+  const sanitized: CrtFxValues = {
+    scanlines: clampCrtPct(candidate.scanlines, DEFAULT_CRT_DISPLAY_SETTINGS.scanlines),
+    gaussGlow: clampCrtPct(candidate.gaussGlow, DEFAULT_CRT_DISPLAY_SETTINGS.gaussGlow),
+    vignette: clampCrtPct(candidate.vignette, DEFAULT_CRT_DISPLAY_SETTINGS.vignette),
+    apertureGrille: clampCrtPct(
+      candidate.apertureGrille,
+      DEFAULT_CRT_DISPLAY_SETTINGS.apertureGrille,
+    ),
+    chromaticAberration: clampCrtPct(
+      candidate.chromaticAberration,
+      DEFAULT_CRT_DISPLAY_SETTINGS.chromaticAberration,
+    ),
+  };
+  return detectActiveCrtPreset(sanitized) === 'custom' ? sanitized : undefined;
+}
+
 export function loadInitialCrtDisplaySettings(): CrtDisplaySettings {
   try {
     if (typeof window === 'undefined' || !window.localStorage) {
@@ -139,20 +169,32 @@ export function loadInitialCrtDisplaySettings(): CrtDisplaySettings {
     const raw = window.localStorage.getItem(CRT_DISPLAY_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<CrtDisplaySettings>;
+      const activeFx: CrtFxValues = {
+        scanlines: clampCrtPct(parsed.scanlines, DEFAULT_CRT_DISPLAY_SETTINGS.scanlines),
+        gaussGlow: clampCrtPct(parsed.gaussGlow, DEFAULT_CRT_DISPLAY_SETTINGS.gaussGlow),
+        vignette: clampCrtPct(parsed.vignette, DEFAULT_CRT_DISPLAY_SETTINGS.vignette),
+        apertureGrille: clampCrtPct(
+          parsed.apertureGrille,
+          DEFAULT_CRT_DISPLAY_SETTINGS.apertureGrille,
+        ),
+        chromaticAberration: clampCrtPct(
+          parsed.chromaticAberration,
+          DEFAULT_CRT_DISPLAY_SETTINGS.chromaticAberration,
+        ),
+      };
+      const customValues =
+        detectActiveCrtPreset(activeFx) === 'custom'
+          ? activeFx
+          : parseSavedCustomFxValues(parsed.customValues);
+
       return {
         enabled: typeof parsed.enabled === 'boolean' ? parsed.enabled : true,
         palette: isValidPalette(parsed.palette) ? parsed.palette : 'green',
         uiMotion: isValidUiMotionLevel(parsed.uiMotion)
           ? parsed.uiMotion
           : DEFAULT_CRT_DISPLAY_SETTINGS.uiMotion,
-        scanlines: clampCrtPct(parsed.scanlines, DEFAULT_CRT_DISPLAY_SETTINGS.scanlines),
-        gaussGlow: clampCrtPct(parsed.gaussGlow, DEFAULT_CRT_DISPLAY_SETTINGS.gaussGlow),
-        vignette: clampCrtPct(parsed.vignette, DEFAULT_CRT_DISPLAY_SETTINGS.vignette),
-        apertureGrille: clampCrtPct(parsed.apertureGrille, DEFAULT_CRT_DISPLAY_SETTINGS.apertureGrille),
-        chromaticAberration: clampCrtPct(
-          parsed.chromaticAberration,
-          DEFAULT_CRT_DISPLAY_SETTINGS.chromaticAberration,
-        ),
+        ...activeFx,
+        ...(customValues ? { customValues } : {}),
       };
     }
 
@@ -162,11 +204,16 @@ export function loadInitialCrtDisplaySettings(): CrtDisplaySettings {
       const legacy = JSON.parse(legacyRaw) as { enabled?: boolean; intensity?: number };
       const scanlines = clampCrtPct(legacy.intensity, DEFAULT_CRT_DISPLAY_SETTINGS.scanlines);
       const enabled = typeof legacy.enabled === 'boolean' ? legacy.enabled : scanlines > 0;
-      return {
+      const migrated: CrtDisplaySettings = {
         ...DEFAULT_CRT_DISPLAY_SETTINGS,
         enabled,
         scanlines,
       };
+      const migratedFx = extractCrtFxValues(migrated);
+      if (detectActiveCrtPreset(migratedFx) === 'custom') {
+        migrated.customValues = migratedFx;
+      }
+      return migrated;
     }
 
     return { ...DEFAULT_CRT_DISPLAY_SETTINGS };

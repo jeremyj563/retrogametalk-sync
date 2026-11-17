@@ -11,6 +11,7 @@ import {
   type CrtPresetId,
   DEFAULT_CRT_DISPLAY_SETTINGS,
   detectActiveCrtPreset,
+  extractCrtFxValues,
 } from '../shared/crtDisplay';
 
 interface CrtDisplayControlProps {
@@ -30,8 +31,16 @@ const SLIDER_FIELDS: {
   { key: 'chromaticAberration', label: 'RGB Fringe', hint: 'Subtle horizontal beam convergence shift' },
 ];
 
+function formatCustomSummary(values: CrtFxValues): string {
+  return `Scan ${values.scanlines}% · Glow ${values.gaussGlow}% · Vig ${values.vignette}% · Grille ${values.apertureGrille}% · RGB ${values.chromaticAberration}%`;
+}
+
 export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps) {
   const activePreset = detectActiveCrtPreset(settings);
+  const savedCustom =
+    activePreset === 'custom' ? extractCrtFxValues(settings) : settings.customValues;
+  const canRestoreCustom = activePreset !== 'custom' && Boolean(savedCustom);
+
   const presetStatus = !settings.enabled
     ? 'Bypassed'
     : activePreset === 'custom'
@@ -42,11 +51,28 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
     onChange({ ...settings, enabled: !settings.enabled });
   };
 
+  const handleRestoreCustom = () => {
+    if (!savedCustom) return;
+    onChange({
+      ...settings,
+      enabled: true,
+      ...savedCustom,
+      customValues: savedCustom,
+    });
+  };
+
   const handleSelectPreset = (id: CrtPresetId) => {
+    const isCurrentlySelected = settings.enabled && activePreset === id;
+    if (isCurrentlySelected && savedCustom) {
+      handleRestoreCustom();
+      return;
+    }
+
     onChange({
       ...settings,
       enabled: true,
       ...CRT_PRESETS[id].values,
+      ...(savedCustom ? { customValues: savedCustom } : {}),
     });
   };
 
@@ -63,11 +89,16 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
 
   const handleSliderChange = (key: keyof CrtFxValues, raw: number) => {
     const nextVal = clampCrtPct(raw, settings[key]);
-    onChange({
+    const nextSettings: CrtDisplaySettings = {
       ...settings,
       enabled: nextVal > 0 ? true : settings.enabled,
       [key]: nextVal,
-    });
+    };
+    const nextFx = extractCrtFxValues(nextSettings);
+    if (detectActiveCrtPreset(nextFx) === 'custom') {
+      nextSettings.customValues = nextFx;
+    }
+    onChange(nextSettings);
   };
 
   return (
@@ -103,27 +134,50 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
       <div className="crt-tuner-card relative rounded border border-crt-border bg-crt-bg/80 p-2.5 space-y-3">
         {/* Quick Presets & Reset */}
         <div className="space-y-1.5">
-          <div className="flex items-center justify-between text-[10px] font-mono text-crt-muted">
+          <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-crt-muted">
             <span>Presets</span>
-            <button
-              type="button"
-              onClick={handleResetDefault}
-              title="Reset palette, motion, and sliders back to Subtle defaults"
-              className="inline-flex items-center gap-1 text-crt-muted hover:text-crt-phosphor transition-colors cursor-pointer whitespace-nowrap"
-            >
-              <RotateCcw className="h-2.5 w-2.5" />
-              <span>Reset</span>
-            </button>
+            <div className="flex items-center gap-1.5">
+              {canRestoreCustom && savedCustom && (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleRestoreCustom}
+                    title={`Restore saved Custom settings (${formatCustomSummary(savedCustom)}) — or click the active preset again to untoggle`}
+                    className="text-crt-phosphor/85 hover:text-crt-phosphor transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    Custom
+                  </button>
+                  <span aria-hidden="true" className="text-crt-border-strong">
+                    ·
+                  </span>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={handleResetDefault}
+                title="Reset palette, motion, and sliders back to Subtle defaults"
+                className="inline-flex items-center gap-1 text-crt-muted hover:text-crt-phosphor transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <RotateCcw className="h-2.5 w-2.5" />
+                <span>Reset</span>
+              </button>
+            </div>
           </div>
           <div className="grid grid-cols-3 gap-1">
             {(['subtle', 'pvm', 'arcade'] as const).map((id) => {
               const isSelected = settings.enabled && activePreset === id;
+              const canUntoggle = isSelected && Boolean(savedCustom);
+              const tooltip =
+                canUntoggle && savedCustom
+                  ? `${CRT_PRESETS[id].description} — click again to untoggle back to Custom (${formatCustomSummary(savedCustom)})`
+                  : CRT_PRESETS[id].description;
               return (
                 <button
                   key={id}
                   type="button"
+                  aria-pressed={isSelected}
                   onClick={() => handleSelectPreset(id)}
-                  title={CRT_PRESETS[id].description}
+                  title={tooltip}
                   className={`px-1.5 py-1 text-[11px] font-mono rounded border transition-colors whitespace-nowrap cursor-pointer ${
                     isSelected
                       ? 'border-crt-phosphor/60 bg-crt-elevated text-crt-phosphor font-medium'
