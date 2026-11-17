@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -39,6 +39,7 @@ import type {
   SyncRunRecord,
   SyncScope,
 } from './types';
+import { formatLocalDateTimeWithAge } from './utils/format';
 import { readJsonSafely } from './utils/http';
 
 const SYNC_SCOPE_STORAGE_KEY = 'rgt_sync_scope_v1';
@@ -64,28 +65,54 @@ function BuildFooterMeta({
   build: ServiceStatusSnapshot['build'];
   className: string;
 }) {
+  const [activeTarget, setActiveTarget] = useState<'version' | 'sha' | null>(null);
+  const tooltipId = useId();
   const branchUrl = buildGitBranchUrl(build.gitUrl, build.version);
   const commitUrl = buildGitCommitUrl(build.gitUrl, build.gitSha);
-  const shortSha =
-    build.gitSha && build.gitSha !== 'unknown' ? build.gitSha.slice(0, 7) : 'local';
+  const hasRealSha = Boolean(build.gitSha && build.gitSha !== 'unknown');
+  const shortSha = hasRealSha ? build.gitSha.slice(0, 7) : 'local';
+  const displaySha = hasRealSha ? build.gitSha.slice(0, 12) : 'local (untracked)';
+  const isSemverRelease = /^\d+\.\d+\.\d+(?:[-+].+)?$/.test(build.version.trim());
+  const builtInfo = formatLocalDateTimeWithAge(build.builtAt);
+  const activeLinkHint =
+    activeTarget === 'version' && branchUrl
+      ? 'Click to open ref in repository'
+      : activeTarget === 'sha' && commitUrl
+        ? 'Click to open commit in repository'
+        : null;
 
   return (
     <div
-      className={className}
-      title={`Version: ${build.version} · Revision: ${build.gitSha}`}
+      className={`relative ${className}`}
+      onMouseLeave={() => setActiveTarget(null)}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') setActiveTarget(null);
+      }}
     >
       {branchUrl ? (
         <a
           href={branchUrl}
           target="_blank"
           rel="noopener noreferrer"
-          title={`Open branch/ref ${build.version} (${branchUrl})`}
+          aria-describedby={activeTarget === 'version' ? tooltipId : undefined}
+          onMouseEnter={() => setActiveTarget('version')}
+          onFocus={() => setActiveTarget('version')}
+          onBlur={() => setActiveTarget((prev) => (prev === 'version' ? null : prev))}
           className="truncate hover:text-crt-phosphor hover:underline underline-offset-2 focus-visible:outline-none focus-visible:text-crt-phosphor focus-visible:underline transition-colors"
         >
           {build.version}
         </a>
       ) : (
-        <span className="truncate">{build.version}</span>
+        <span
+          tabIndex={0}
+          aria-describedby={activeTarget === 'version' ? tooltipId : undefined}
+          onMouseEnter={() => setActiveTarget('version')}
+          onFocus={() => setActiveTarget('version')}
+          onBlur={() => setActiveTarget((prev) => (prev === 'version' ? null : prev))}
+          className="truncate cursor-default hover:text-crt-phosphor focus-visible:outline-none focus-visible:text-crt-phosphor focus-visible:underline underline-offset-2 transition-colors"
+        >
+          {build.version}
+        </span>
       )}
 
       {commitUrl ? (
@@ -93,13 +120,101 @@ function BuildFooterMeta({
           href={commitUrl}
           target="_blank"
           rel="noopener noreferrer"
-          title={`Open commit ${build.gitSha} (${commitUrl})`}
+          aria-describedby={activeTarget === 'sha' ? tooltipId : undefined}
+          onMouseEnter={() => setActiveTarget('sha')}
+          onFocus={() => setActiveTarget('sha')}
+          onBlur={() => setActiveTarget((prev) => (prev === 'sha' ? null : prev))}
           className="tabular-nums shrink-0 hover:text-crt-phosphor hover:underline underline-offset-2 focus-visible:outline-none focus-visible:text-crt-phosphor focus-visible:underline transition-colors"
         >
           {shortSha}
         </a>
       ) : (
-        <span className="tabular-nums shrink-0">{shortSha}</span>
+        <span
+          tabIndex={0}
+          aria-describedby={activeTarget === 'sha' ? tooltipId : undefined}
+          onMouseEnter={() => setActiveTarget('sha')}
+          onFocus={() => setActiveTarget('sha')}
+          onBlur={() => setActiveTarget((prev) => (prev === 'sha' ? null : prev))}
+          className="tabular-nums shrink-0 cursor-default hover:text-crt-phosphor focus-visible:outline-none focus-visible:text-crt-phosphor focus-visible:underline underline-offset-2 transition-colors"
+        >
+          {shortSha}
+        </span>
+      )}
+
+      {activeTarget && (
+        <div
+          id={tooltipId}
+          role="tooltip"
+          className={`pointer-events-none absolute bottom-full mb-2.5 lg:bottom-0 lg:mb-0 lg:left-full lg:right-auto lg:ml-3 z-40 w-72 max-w-[calc(100vw-2.5rem)] rounded-md border border-crt-border-strong bg-crt-surface/98 p-3.5 shadow-2xl backdrop-blur-md text-left ${
+            activeTarget === 'sha' ? 'right-0' : 'left-0'
+          }`}
+        >
+          <div aria-hidden="true" className="crt-edge-beam">
+            <span />
+          </div>
+
+          <div className="space-y-0.5 min-w-0">
+            <div className="font-display text-sm font-semibold text-crt-text leading-snug">
+              Build &amp; Release Provenance
+            </div>
+            <div className="text-[11px] font-mono text-crt-muted truncate">
+              {activeTarget === 'version' ? 'Version / Release Tag' : 'Commit / Revision Hash'}
+            </div>
+          </div>
+
+          <dl className="mt-2.5 pt-2.5 border-t border-crt-border space-y-1.5 text-[11px] font-mono tabular-nums">
+            <div className="flex items-center justify-between gap-3">
+              <dt className="text-crt-muted shrink-0">Version</dt>
+              <dd
+                className={`text-right truncate ${
+                  activeTarget === 'version'
+                    ? 'text-crt-phosphor font-semibold'
+                    : 'text-crt-text'
+                }`}
+              >
+                {build.version}
+              </dd>
+            </div>
+
+            <div className="flex items-center justify-between gap-3">
+              <dt className="text-crt-muted shrink-0">Revision</dt>
+              <dd
+                className={`text-right truncate ${
+                  activeTarget === 'sha'
+                    ? 'text-crt-phosphor font-semibold'
+                    : 'text-crt-text'
+                }`}
+              >
+                {displaySha}
+              </dd>
+            </div>
+
+            <div className="flex items-baseline justify-between gap-3">
+              <dt className="text-crt-muted shrink-0">
+                {isSemverRelease ? 'Released' : 'Built'}
+              </dt>
+              <dd className="text-right text-crt-text">
+                {builtInfo ? (
+                  <span>
+                    {builtInfo.formatted}
+                    <span aria-hidden="true" className="text-crt-muted">
+                      {' · '}
+                    </span>
+                    <span className="text-crt-phosphor">{builtInfo.relative}</span>
+                  </span>
+                ) : (
+                  <span className="text-crt-muted/80">Not reported in status</span>
+                )}
+              </dd>
+            </div>
+          </dl>
+
+          {activeLinkHint && (
+            <div className="mt-2.5 pt-2 border-t border-crt-border text-[10px] font-mono text-crt-phosphor/90 truncate">
+              {activeLinkHint}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

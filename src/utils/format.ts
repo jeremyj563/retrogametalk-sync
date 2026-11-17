@@ -65,3 +65,34 @@ export function formatUptime(seconds: number | null | undefined): string {
   return `${s}s`;
 }
 
+export function formatRelativeAge(iso: string | null | undefined, nowMs = Date.now()): string | null {
+  if (!iso) return null;
+  const target = Date.parse(iso);
+  if (Number.isNaN(target)) return null;
+  const diffSec = Math.round((nowMs - target) / 1000);
+  if (diffSec < 45) return 'just now';
+  if (diffSec < 3600) return `${Math.max(1, Math.round(diffSec / 60))}m ago`;
+  if (diffSec < 86400) return `${Math.round(diffSec / 3600)}h ago`;
+  if (diffSec < 86400 * 30) return `${Math.round(diffSec / 86400)}d ago`;
+  if (diffSec < 86400 * 365) return `${Math.round(diffSec / (86400 * 30))}mo ago`;
+  return `${Math.round(diffSec / (86400 * 365))}y ago`;
+}
+
+export function formatLocalDateTimeWithAge(
+  iso: string | null | undefined,
+): { formatted: string; relative: string } | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  let formatted: string;
+  try {
+    formatted = d.toLocaleString([], {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+  } catch {
+    formatted = formatDateTime(iso);
+  }
+  const relative = formatRelativeAge(iso) || 'just now';
+  return { formatted, relative };
+}
