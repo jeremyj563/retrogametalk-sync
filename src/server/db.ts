@@ -10,7 +10,12 @@ import {
   createDefaultStorageFolderConfig,
   normalizeStorageFolderConfig,
 } from '../shared/storageFolderMappings.ts';
-import { filterValidSystemSlugs, sanitizeSystemFilterString } from '../shared/systemCatalog.ts';
+import {
+  canonicalizeSystemSlug,
+  expandSystemAliases,
+  filterValidSystemSlugs,
+  sanitizeSystemFilterString,
+} from '../shared/systemCatalog.ts';
 import type {
   ActivityLogRecord,
   CatalogFacetCounts,
@@ -945,6 +950,7 @@ export function upsertCatalogRelease(input: {
   screenshotLocalPaths?: string[];
 }): RepositoryItemRecord {
   const canonicalUrl = input.remoteUrl.split('#')[0];
+  const canonicalSystemName = canonicalizeSystemSlug(input.systemName) || input.systemName;
   const now = new Date().toISOString();
   const meta = input.metadata ?? null;
 
@@ -955,7 +961,7 @@ export function upsertCatalogRelease(input: {
   const releaseTags =
     meta?.releaseTags && meta.releaseTags.length > 0
       ? meta.releaseTags
-      : deriveReleaseTags({ genres, languages, sources, systemName: input.systemName }, []);
+      : deriveReleaseTags({ genres, languages, sources, systemName: canonicalSystemName }, []);
   const primaryType = releaseTags[0] || 'Retail ROM';
 
   const wpPostId = meta?.wpPostId ?? null;
@@ -1012,7 +1018,7 @@ export function upsertCatalogRelease(input: {
     wpPostType,
     input.remotePath,
     input.localPath,
-    input.systemName,
+    canonicalSystemName,
     primaryType,
     tagsJson,
     input.title,
@@ -1501,7 +1507,7 @@ function buildCatalogWhereAndOrder(params: CatalogQueryFilterParams): {
     args.push(q, q, q, q, q, q, q);
   }
 
-  const systems = normalizeFilterList(params.system);
+  const systems = expandSystemAliases(normalizeFilterList(params.system));
   if (systems.length === 1) {
     conditions.push('system_name = ?');
     args.push(systems[0]);
@@ -1691,8 +1697,14 @@ export function listReleasesNeedingRetry(options?: {
   const args: unknown[] = [];
 
   if (options?.system && options.system !== 'all') {
-    conditions.push('system_name = ?');
-    args.push(options.system);
+    const retrySystems = expandSystemAliases([options.system]);
+    if (retrySystems.length === 1) {
+      conditions.push('system_name = ?');
+      args.push(retrySystems[0]);
+    } else if (retrySystems.length > 1) {
+      conditions.push(`system_name IN (${retrySystems.map(() => '?').join(', ')})`);
+      args.push(...retrySystems);
+    }
   }
 
   if (options?.ids && options.ids.length > 0) {

@@ -43,6 +43,7 @@ import {
   type ScheduleVisualMode,
 } from '../shared/syncSchedule';
 import {
+  canonicalizeSystemSlug,
   filterValidSystemSlugs,
   groupSystemsByBrand,
   resolveSystemDisplayInfo,
@@ -73,8 +74,8 @@ function canonicalSystemFilterKey(raw: string): string {
   for (const part of raw.split(',')) {
     const trimmed = part.trim();
     if (!trimmed) continue;
-    const lower = trimmed.toLowerCase();
-    if (seen.has(lower)) continue;
+    const lower = canonicalizeSystemSlug(trimmed).toLowerCase();
+    if (!lower || seen.has(lower)) continue;
     seen.add(lower);
     list.push(lower);
   }
@@ -291,13 +292,7 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
 
     // Target consoles helpers
     const selectedSystems = useMemo(
-      () =>
-        new Set(
-          systemFilter
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean),
-        ),
+      () => new Set(filterValidSystemSlugs(systemFilter.split(','))),
       [systemFilter],
     );
 
@@ -329,7 +324,8 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
         return (
           info.slug.toLowerCase().includes(q) ||
           info.displayName.toLowerCase().includes(q) ||
-          info.brandLabel.toLowerCase().includes(q)
+          info.brandLabel.toLowerCase().includes(q) ||
+          info.aliases.some((alias) => alias.toLowerCase().includes(q))
         );
       });
     }, [availableSystems, consoleSearch]);

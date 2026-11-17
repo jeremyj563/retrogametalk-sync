@@ -11,7 +11,12 @@ import { getCookieJarPath } from './db.ts';
 import { formatErrorDetails, isDebugLoggingEnabled, logServer } from './logger.ts';
 import type { AdaptiveRateLimiter } from './rateLimiter.ts';
 import { classifyFileRole, decodeHtmlEntities, deriveReleaseTags } from './releaseTags.ts';
-import { filterValidSystemSlugs, isNonSystemSlug } from '../shared/systemCatalog.ts';
+import {
+  CANONICAL_SYSTEM_ALIAS_GROUPS,
+  canonicalizeSystemSlug,
+  filterValidSystemSlugs,
+  isNonSystemSlug,
+} from '../shared/systemCatalog.ts';
 import type {
   AuthSessionStatus,
   AuthTestResult,
@@ -61,24 +66,18 @@ const IGNORED_REPO_PREFIXES = new Set([
   'category',
 ]);
 
-// RetroGameTalk permalink prefixes whose URL directory slug differs from their WP REST CPT rest_base
-const RGT_SLUG_ALIAS_GROUPS: string[][] = [
-  ['gameboy-roms', 'gb_roms', 'gb-roms'],
-  ['gameboy-color-roms', 'gbc_roms', 'gbc-roms'],
-  ['gamecube', 'gcn-iso', 'gcn_iso'],
-  ['psx2psp-eboots', 'psx2psp'],
-];
-
 function expandSystemFilterAliases(filters: string[]): Set<string> {
   const expanded = new Set<string>();
   for (const raw of filters) {
     const clean = raw.trim().toLowerCase();
     if (!clean) continue;
+    const canonical = canonicalizeSystemSlug(clean).toLowerCase();
     expanded.add(clean);
+    expanded.add(canonical);
     expanded.add(clean.replace(/_/g, '-'));
     expanded.add(clean.replace(/-/g, '_'));
-    for (const group of RGT_SLUG_ALIAS_GROUPS) {
-      if (group.includes(clean)) {
+    for (const group of CANONICAL_SYSTEM_ALIAS_GROUPS) {
+      if (group.includes(clean) || group.includes(canonical)) {
         for (const alias of group) expanded.add(alias);
       }
     }
@@ -395,7 +394,7 @@ export function resolveMirroredPaths(
     remotePath,
     localPath,
     filename: relativeSegments[relativeSegments.length - 1],
-    systemName: relativeSegments[0] || 'uncategorized',
+    systemName: canonicalizeSystemSlug(relativeSegments[0] || 'uncategorized'),
   };
 }
 
@@ -2325,17 +2324,19 @@ export class RetroGameTalkClient {
       if (isUnderRepo && (IGNORED_REPO_PREFIXES.has(firstSegLower) || isNonSystemSlug(firstSegLower))) return;
 
       const paramPlatform = resolved.searchParams.get('platform');
-      const systemCandidate = paramPlatform
+      const rawSystemCandidate = paramPlatform
         ? sanitizePathSegment(paramPlatform)
         : relSegs[0]
           ? sanitizePathSegment(relSegs[0])
           : 'uncategorized';
+      const systemCandidate = canonicalizeSystemSlug(rawSystemCandidate) || rawSystemCandidate;
 
       if (
         systemFilters.size > 0 &&
         (isUnderRepo || Boolean(paramPlatform)) &&
         relSegs.length > 0 &&
         firstSegLower !== 'page' &&
+        !systemFilters.has(rawSystemCandidate.toLowerCase()) &&
         !systemFilters.has(systemCandidate.toLowerCase())
       ) {
         return;
@@ -2380,9 +2381,11 @@ export class RetroGameTalkClient {
           remotePath: mirrored.remotePath,
           filename: mirrored.filename,
           displayLabel: cleanLabel,
-          systemName: resolved.searchParams.get('platform')
-            ? sanitizePathSegment(resolved.searchParams.get('platform')!)
-            : mirrored.systemName,
+          systemName: canonicalizeSystemSlug(
+            resolved.searchParams.get('platform')
+              ? sanitizePathSegment(resolved.searchParams.get('platform')!)
+              : mirrored.systemName,
+          ),
           releaseType: inferReleaseType(`${anchorText} ${pageTitle}`, hrefStr),
           title: anchorText && anchorText.toLowerCase() !== 'download'
             ? anchorText
@@ -2593,7 +2596,9 @@ export class RetroGameTalkClient {
           remotePath: mirrored.remotePath,
           filename: mirrored.filename,
           displayLabel: anchorText && !/^download$/i.test(anchorText) ? anchorText : mirrored.filename,
-          systemName: platformParam ? sanitizePathSegment(platformParam) : mirrored.systemName,
+          systemName: canonicalizeSystemSlug(
+            platformParam ? sanitizePathSegment(platformParam) : mirrored.systemName,
+          ),
           releaseType: inferReleaseType(`${pageTitle} ${anchorText}`, filename),
           title: pageTitle || mirrored.filename,
           publishedAt: pageTime,
@@ -2669,7 +2674,7 @@ export class RetroGameTalkClient {
           remotePath: mirrored.remotePath,
           filename: mirrored.filename,
           displayLabel: btnLabel || mirrored.filename,
-          systemName: mirrored.systemName,
+          systemName: canonicalizeSystemSlug(mirrored.systemName),
           releaseType: inferReleaseType(`${pageTitle} ${btnLabel}`, filename),
           title: pageTitle || mirrored.filename,
           publishedAt: pageTime,
@@ -3172,7 +3177,7 @@ export class RetroGameTalkClient {
       if (!map.has(hyphenated)) map.set(hyphenated, restBase);
       const underscored = clean.replace(/-/g, '_');
       if (!map.has(underscored)) map.set(underscored, restBase);
-      for (const group of RGT_SLUG_ALIAS_GROUPS) {
+      for (const group of CANONICAL_SYSTEM_ALIAS_GROUPS) {
         if (group.includes(clean)) {
           for (const extra of group) {
             if (!map.has(extra)) map.set(extra, restBase);
@@ -3216,7 +3221,7 @@ export class RetroGameTalkClient {
     return map;
   }
 
-  private async resolveWpRestBaseForSystem(
+  async resolveWpRestBaseForSystem(
     systemSlug: string,
     config: ScraperConfigInternal,
     signal?: AbortSignal,
