@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
+import { normalizeStorageFolderConfig } from '../shared/storageFolderMappings.ts';
 import { filterValidSystemSlugs, sanitizeSystemFilterString } from '../shared/systemCatalog.ts';
 import type { AppliedMigrationRecord, DatabaseMigrationReport } from './types.ts';
 
@@ -386,6 +387,174 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
         db.prepare(`ALTER TABLE catalog_releases ADD COLUMN installed_device_label TEXT`).run();
       }
       db.exec(`CREATE INDEX IF NOT EXISTS idx_releases_installed_at ON catalog_releases(installed_at);`);
+    },
+  },
+  {
+    version: 14,
+    name: 'storage_folder_mappings_and_retire_presets',
+    description: 'Add storage_folder_config_json to scraper_config for console and per-ROM-type folder mappings while migrating legacy custom folder overrides',
+    up: (db) => {
+      if (!tableHasColumn(db, 'scraper_config', 'storage_folder_config_json')) {
+        db.prepare(
+          `ALTER TABLE scraper_config ADD COLUMN storage_folder_config_json TEXT NOT NULL DEFAULT '{}'`,
+        ).run();
+      }
+
+      const row = db
+        .prepare(
+          `SELECT device_preset, device_folder_map_json, storage_folder_config_json FROM scraper_config WHERE id = 1`,
+        )
+        .get() as
+        | {
+            device_preset?: string;
+            device_folder_map_json?: string;
+            storage_folder_config_json?: string;
+          }
+        | undefined;
+      if (!row) return;
+
+      const legacyPresetMaps: Record<string, Record<string, string>> = {
+        mister: {
+          'nes-roms': 'games/NES',
+          'fds-roms': 'games/NES',
+          famicom_disk_system: 'games/NES',
+          'snes-roms': 'games/SNES',
+          'snes-rom': 'games/SNES',
+          'n64-roms': 'games/N64',
+          'gb-roms': 'games/GAMEBOY',
+          'gameboy-roms': 'games/GAMEBOY',
+          'gbc-roms': 'games/GAMEBOY2P',
+          'gameboy-color-roms': 'games/GAMEBOY2P',
+          'gba-roms': 'games/GBA',
+          'genesis-roms': 'games/Genesis',
+          sega_genesis_roms: 'games/Genesis',
+          'sega-cd-iso': 'games/MegaCD',
+          sega_cd_isos: 'games/MegaCD',
+          '32x-roms': 'games/S32X',
+          sega_32x_roms: 'games/S32X',
+          'sms-roms': 'games/SMS',
+          sms_roms: 'games/SMS',
+          'gg-roms': 'games/SMS',
+          'game-gear': 'games/SMS',
+          'pc-engine-roms': 'games/TGFX16',
+          'turbografx-16': 'games/TGFX16',
+          'pce-cd-iso': 'games/TGFX16-CD',
+          'turbografx-cd': 'games/TGFX16-CD',
+          'psx-iso': 'games/PSX',
+          'ps1-iso': 'games/PSX',
+          'saturn-iso': 'games/Saturn',
+          sega_saturn_isos: 'games/Saturn',
+          'neogeo-roms': 'games/NeoGeo',
+          'neo-geo-cd': 'games/NeoGeo',
+          wonderswan: 'games/WonderSwan',
+          'msx-roms': 'games/MSX',
+        },
+        onion: {
+          'nes-roms': 'Roms/FC',
+          'fds-roms': 'Roms/FDS',
+          famicom_disk_system: 'Roms/FDS',
+          'snes-roms': 'Roms/SFC',
+          'snes-rom': 'Roms/SFC',
+          'gb-roms': 'Roms/GB',
+          'gameboy-roms': 'Roms/GB',
+          'gbc-roms': 'Roms/GBC',
+          'gameboy-color-roms': 'Roms/GBC',
+          'gba-roms': 'Roms/GBA',
+          'genesis-roms': 'Roms/MD',
+          sega_genesis_roms: 'Roms/MD',
+          'sega-cd-iso': 'Roms/SEGACD',
+          sega_cd_isos: 'Roms/SEGACD',
+          '32x-roms': 'Roms/THIRTYTWOX',
+          sega_32x_roms: 'Roms/THIRTYTWOX',
+          'sms-roms': 'Roms/MS',
+          sms_roms: 'Roms/MS',
+          'gg-roms': 'Roms/GG',
+          'game-gear': 'Roms/GG',
+          'pc-engine-roms': 'Roms/PCE',
+          'turbografx-16': 'Roms/PCE',
+          'pce-cd-iso': 'Roms/PCECD',
+          'turbografx-cd': 'Roms/PCECD',
+          'psx-iso': 'Roms/PS',
+          'ps1-iso': 'Roms/PS',
+          'nds-roms': 'Roms/NDS',
+          'ngp-roms': 'Roms/NGP',
+          'neo-geo-pocket': 'Roms/NGP',
+          'neo-geo-cd': 'Roms/NEOCD',
+          'ws-roms': 'Roms/WS',
+          wonderswan: 'Roms/WS',
+          'msx-roms': 'Roms/MSX',
+        },
+        analogue: {
+          'nes-roms': 'Assets/nes/common',
+          'snes-roms': 'Assets/snes/common',
+          'snes-rom': 'Assets/snes/common',
+          'gb-roms': 'Assets/gb/common',
+          'gameboy-roms': 'Assets/gb/common',
+          'gbc-roms': 'Assets/gbc/common',
+          'gameboy-color-roms': 'Assets/gbc/common',
+          'gba-roms': 'Assets/gba/common',
+          'genesis-roms': 'Assets/genesis/common',
+          sega_genesis_roms: 'Assets/genesis/common',
+          'sms-roms': 'Assets/sms/common',
+          sms_roms: 'Assets/sms/common',
+          'gg-roms': 'Assets/gg/common',
+          'game-gear': 'Assets/gg/common',
+          'pc-engine-roms': 'Assets/pce/common',
+          'turbografx-16': 'Assets/pce/common',
+          'pce-cd-iso': 'Assets/pcecd/common',
+          'turbografx-cd': 'Assets/pcecd/common',
+          'neogeo-roms': 'Assets/ng/common',
+          wonderswan: 'Assets/wonderswan/common',
+        },
+        ode: {
+          'gamecube-iso': 'games',
+          gamecube: 'games',
+          'wii-iso': 'wbfs',
+        },
+      };
+
+      const mergedSystemFolders: Record<string, string> = {};
+      const presetKey = String(row.device_preset || '').trim().toLowerCase();
+      if (legacyPresetMaps[presetKey]) {
+        Object.assign(mergedSystemFolders, legacyPresetMaps[presetKey]);
+      }
+
+      try {
+        const parsedLegacyMap = JSON.parse(String(row.device_folder_map_json || '{}'));
+        if (parsedLegacyMap && typeof parsedLegacyMap === 'object' && !Array.isArray(parsedLegacyMap)) {
+          for (const [k, v] of Object.entries(parsedLegacyMap)) {
+            if (typeof v === 'string' && v.trim()) {
+              mergedSystemFolders[String(k).trim().toLowerCase()] = v.trim();
+            }
+          }
+        }
+      } catch {
+        // Ignore malformed legacy JSON
+      }
+
+      let existingConfigRaw: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(String(row.storage_folder_config_json || '{}'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          existingConfigRaw = parsed as Record<string, unknown>;
+        }
+      } catch {
+        existingConfigRaw = {};
+      }
+
+      const normalized = normalizeStorageFolderConfig({
+        ...existingConfigRaw,
+        systemFolders: {
+          ...mergedSystemFolders,
+          ...(existingConfigRaw.systemFolders && typeof existingConfigRaw.systemFolders === 'object'
+            ? (existingConfigRaw.systemFolders as Record<string, unknown>)
+            : {}),
+        },
+      });
+
+      db.prepare(`UPDATE scraper_config SET storage_folder_config_json = ? WHERE id = 1`).run(
+        JSON.stringify(normalized),
+      );
     },
   },
 ];

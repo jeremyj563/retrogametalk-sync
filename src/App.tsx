@@ -62,6 +62,7 @@ const OPERATIONS_TARGET_HASH_SLUG: Record<OperationsSectionTarget, string> = {
   auth: 'auth',
   systems: 'systems',
   releaseTypes: 'release-types',
+  storageMappings: 'storage-mappings',
 };
 
 const HASH_SLUG_TO_OPERATIONS_TARGET: Record<string, OperationsSectionTarget> = {
@@ -69,6 +70,8 @@ const HASH_SLUG_TO_OPERATIONS_TARGET: Record<string, OperationsSectionTarget> = 
   systems: 'systems',
   'release-types': 'releaseTypes',
   releasetypes: 'releaseTypes',
+  'storage-mappings': 'storageMappings',
+  storagemappings: 'storageMappings',
 };
 
 function parseLocationHash(rawHash: string): {
@@ -1308,7 +1311,10 @@ export default function App() {
         <SdCardExportModal
           installer={bulkInstaller}
           config={config}
-          onSaveConfig={handleSaveConfig}
+          onEditFolderMappings={() => {
+            bulkInstaller.closeModal();
+            requestSectionChange('operations', 'storageMappings');
+          }}
         />
       )}
 

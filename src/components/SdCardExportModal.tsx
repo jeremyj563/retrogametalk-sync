@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Download,
   FolderInput,
+  FolderTree,
   HardDrive,
   Loader2,
   RefreshCw,
@@ -13,12 +14,11 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import type { BulkStorageInstallerController } from '../hooks/useBulkStorageInstaller';
 import {
-  DEVICE_PRESETS,
-  resolveSystemFolderForDevice,
-  type DevicePresetId,
-} from '../shared/devicePresets';
+  resolveRowTargetCategoryAndFolder,
+  type BulkStorageInstallerController,
+} from '../hooks/useBulkStorageInstaller';
+import { getStorageRomCategoryShortLabel } from '../shared/storageFolderMappings';
 import type { ScraperConfigPublic } from '../types';
 import { formatBytes } from '../utils/format';
 import { findUpgradeCandidateOnCard, isFileSystemAccessSupported } from '../utils/sdCardFs';
@@ -26,13 +26,13 @@ import { findUpgradeCandidateOnCard, isFileSystemAccessSupported } from '../util
 interface SdCardExportModalProps {
   installer: BulkStorageInstallerController;
   config: ScraperConfigPublic;
-  onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
+  onEditFolderMappings: () => void;
 }
 
 export function SdCardExportModal({
   installer,
   config,
-  onSaveConfig,
+  onEditFolderMappings,
 }: SdCardExportModalProps) {
   const {
     modalOpen,
@@ -43,10 +43,6 @@ export function SdCardExportModal({
     sdRootHandle,
     promptMountSdCard,
     mountError,
-    devicePreset,
-    setDevicePreset,
-    folderMapDraft,
-    setFolderMapDraft,
     folderScans,
     scanningCard,
     rescanMountedSdFolders,
@@ -60,8 +56,6 @@ export function SdCardExportModal({
   } = installer;
 
   const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
-  const [showFolderEditor, setShowFolderEditor] = useState(false);
-  const [savingDevicePrefs, setSavingDevicePrefs] = useState(false);
 
   // Spotlight & round-robin jump state for unresolved multi-ROM items
   const rowElementRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -87,12 +81,15 @@ export function SdCardExportModal({
   }, [modalOpen, closeModal]);
 
   const rows = job?.rows || [];
+  const storageConfig = config.storageFolderConfig;
 
-  const uniqueSystemsInQueue = useMemo(() => {
-    return Array.from(new Set(rows.map((r) => r.systemName).filter(Boolean))).sort((a, b) =>
-      a.localeCompare(b),
-    );
-  }, [rows]);
+  const customizedCount = useMemo(() => {
+    const slugs = new Set<string>([
+      ...Object.keys(storageConfig.systemFolders),
+      ...Object.keys(storageConfig.systemTypeOverrides),
+    ]);
+    return slugs.size;
+  }, [storageConfig.systemFolders, storageConfig.systemTypeOverrides]);
 
   // Compute unresolved multi-ROM items (items with >1 competing playable variants and 0 currently checked)
   const unresolvedMultiItems = useMemo(() => {
@@ -135,18 +132,6 @@ export function SdCardExportModal({
 
   const totalSelectedTargets = rows.reduce((acc, r) => acc + r.selectedTargetIds.length, 0);
 
-  const handleSaveDevicePrefs = async () => {
-    setSavingDevicePrefs(true);
-    try {
-      await onSaveConfig({
-        devicePreset,
-        deviceFolderMap: folderMapDraft,
-      });
-    } finally {
-      setSavingDevicePrefs(false);
-    }
-  };
-
   const handleJumpToNextUnresolved = () => {
     if (unresolvedMultiItems.length === 0) return;
     const nextIdx = (jumpCursorRef.current + 1) % unresolvedMultiItems.length;
@@ -184,7 +169,7 @@ export function SdCardExportModal({
               <p className="text-xs text-crt-muted truncate">
                 {isBusy
                   ? 'Transfers continue in the background if you close this window.'
-                  : 'Extracts playable ROMs & ODE disc sets directly into console folders on your target storage device.'}
+                  : 'Extracts playable ROMs & ODE disc sets directly into configured console folders on your target storage device.'}
               </p>
             </div>
           </div>
@@ -199,7 +184,7 @@ export function SdCardExportModal({
           </button>
         </header>
 
-        {/* Device Mount & Folder Mapping Strip */}
+        {/* Device Mount & Read-Only Folder Routing Strip */}
         <div className="px-6 py-4 border-b border-crt-border bg-crt-surface space-y-3 shrink-0">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2.5">
@@ -223,28 +208,26 @@ export function SdCardExportModal({
                 <span className="text-xs font-mono text-crt-amber">{fsSupport.reason}</span>
               )}
 
-              <select
-                value={devicePreset}
-                disabled={isRunning}
-                onChange={(e) => setDevicePreset(e.target.value)}
-                aria-label="Select target device folder preset"
-                className="px-3 py-2 text-xs bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-50"
-              >
-                {Object.values(DEVICE_PRESETS).map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    Preset: {preset.name}
-                  </option>
-                ))}
-              </select>
-
-              <button
-                type="button"
-                disabled={isRunning}
-                onClick={() => setShowFolderEditor((v) => !v)}
-                className="px-3 py-2 text-xs border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
-              >
-                {showFolderEditor ? 'Hide Folder Map' : 'Edit Folder Map'}
-              </button>
+              <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-crt-muted">
+                <span>
+                  {storageConfig.typeSubfoldersEnabled
+                    ? 'ROM Type subfolders enabled'
+                    : 'Single console folder'}
+                  {customizedCount > 0
+                    ? ` · ${customizedCount} custom console${customizedCount === 1 ? '' : 's'}`
+                    : ''}
+                </span>
+                <span aria-hidden="true">·</span>
+                <button
+                  type="button"
+                  onClick={onEditFolderMappings}
+                  title="Open Storage Device Folder Mappings in Operations"
+                  className="inline-flex items-center gap-1.5 text-xs font-mono text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <FolderTree className="h-3.5 w-3.5 shrink-0" />
+                  <span>Edit in Operations</span>
+                </button>
+              </div>
             </div>
 
             {sdRootHandle && (
@@ -310,46 +293,6 @@ export function SdCardExportModal({
               />
             </div>
           )}
-
-          {showFolderEditor && uniqueSystemsInQueue.length > 0 && (
-            <div className="pt-3 border-t border-crt-border space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                <span className="text-crt-muted">
-                  Map each console in this queue to its relative folder on the target storage device (
-                  {DEVICE_PRESETS[devicePreset as DevicePresetId]?.name || 'Custom'}).
-                </span>
-                <button
-                  type="button"
-                  disabled={savingDevicePrefs}
-                  onClick={() => void handleSaveDevicePrefs()}
-                  className="px-2.5 py-1 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  {savingDevicePrefs ? 'Saving...' : 'Save Mapping Defaults'}
-                </button>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                {uniqueSystemsInQueue.map((sys) => {
-                  const key = sys.toLowerCase();
-                  const resolved = resolveSystemFolderForDevice(sys, devicePreset, folderMapDraft);
-                  return (
-                    <div key={sys} className="flex items-center gap-2 text-xs font-mono">
-                      <span className="text-crt-muted truncate w-28 shrink-0">{sys}</span>
-                      <span className="text-crt-muted">→</span>
-                      <input
-                        type="text"
-                        value={folderMapDraft[key] ?? ''}
-                        placeholder={resolved}
-                        onChange={(e) =>
-                          setFolderMapDraft((prev) => ({ ...prev, [key]: e.target.value }))
-                        }
-                        className="flex-1 min-w-0 px-2 py-1 bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Queue Body */}
@@ -366,10 +309,25 @@ export function SdCardExportModal({
             </div>
           ) : (
             rows.map((row) => {
-              const folder = row.systemName
-                ? resolveSystemFolderForDevice(row.systemName, devicePreset, folderMapDraft)
-                : 'ROMs';
-              const scan = folderScans[folder];
+              const resolvedTargetMeta = row.targets.map((t) =>
+                resolveRowTargetCategoryAndFolder(row, t, storageConfig, job.filterContext),
+              );
+              const distinctRowFolders = Array.from(
+                new Set(
+                  resolvedTargetMeta.length > 0
+                    ? resolvedTargetMeta.map((m) => m.folder)
+                    : [
+                        resolveRowTargetCategoryAndFolder(
+                          row,
+                          null,
+                          storageConfig,
+                          job.filterContext,
+                        ).folder,
+                      ],
+                ),
+              );
+              const primaryRowFolder = distinctRowFolders[0] || 'ROMS';
+
               const isMulti = row.targets.length > 1 || row.isMultiChoiceItem;
               const isSpotlighted = spotlightItem?.itemId === row.itemId;
 
@@ -396,7 +354,12 @@ export function SdCardExportModal({
                         {row.systemName && (
                           <>
                             <span className="font-mono text-crt-muted">·</span>
-                            <span className="font-mono text-crt-phosphor">/{folder}/</span>
+                            <span className="font-mono text-crt-phosphor">
+                              /{primaryRowFolder}/
+                              {distinctRowFolders.length > 1
+                                ? ` (+${distinctRowFolders.length - 1} folder)`
+                                : ''}
+                            </span>
                           </>
                         )}
                         {row.fileRole && row.fileRole !== 'ROM' && (
@@ -487,12 +450,23 @@ export function SdCardExportModal({
                         </div>
                       )}
 
-                      {row.targets.map((target) => {
+                      {row.targets.map((target, idx) => {
                         const checked = row.selectedTargetIds.includes(target.id);
                         const isRecommended = row.recommendedTargetIds.includes(target.id);
                         const smartReason = row.smartReasonsByTargetId[target.id];
                         const outName =
                           row.outputNamesByTargetId[target.id] ?? target.suggestedFilename;
+
+                        const targetMeta =
+                          resolvedTargetMeta[idx] ||
+                          resolveRowTargetCategoryAndFolder(
+                            row,
+                            target,
+                            storageConfig,
+                            job.filterContext,
+                          );
+                        const targetFolder = targetMeta.folder;
+                        const scan = folderScans[targetFolder];
                         const cardCheck = findUpgradeCandidateOnCard(outName, scan);
                         const browserDownloadHref = `/api/items/${row.itemId}/download-rom?fileId=${row.fileId}&targetId=${encodeURIComponent(target.id)}&name=${encodeURIComponent(outName)}`;
 
@@ -519,9 +493,11 @@ export function SdCardExportModal({
                                 <div className="font-mono text-[11px] text-crt-muted flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                   <span>
                                     {target.kind === 'disc_set'
-                                      ? `ODE subfolder /${folder}/${outName}/`
-                                      : `Target: /${folder}/`}
+                                      ? `ODE subfolder /${targetFolder}/${outName}/`
+                                      : `Target: /${targetFolder}/`}
                                   </span>
+                                  <span aria-hidden="true">·</span>
+                                  <span>{getStorageRomCategoryShortLabel(targetMeta.category)}</span>
                                   {target.detectedVersion && (
                                     <>
                                       <span aria-hidden="true">·</span>
