@@ -51,3 +51,17 @@ export function formatRunDuration(startedAt: string, finishedAt: string | null):
   if (Number.isNaN(start) || Number.isNaN(end)) return '—';
   return formatDurationMs(Math.max(0, end - start));
 }
+
+export function formatUptime(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds) || seconds < 0) return '—';
+  const total = Math.floor(seconds);
+  const d = Math.floor(total / 86400);
+  const h = Math.floor((total % 86400) / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+

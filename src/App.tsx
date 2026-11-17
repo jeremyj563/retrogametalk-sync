@@ -20,6 +20,7 @@ import {
 import { OverviewPanel } from './components/OverviewPanel';
 import { SchedulePanel } from './components/SchedulePanel';
 import { SdCardExportModal } from './components/SdCardExportModal';
+import { ServiceTelemetrySidebar } from './components/ServiceTelemetrySidebar';
 import { useBulkStorageInstaller } from './hooks/useBulkStorageInstaller';
 import {
   computeCrtCssVariables,
@@ -40,7 +41,6 @@ import type {
   SyncRunRecord,
   SyncScope,
 } from './types';
-import { formatBytes, formatCountdown } from './utils/format';
 import { readJsonSafely } from './utils/http';
 
 const SYNC_SCOPE_STORAGE_KEY = 'rgt_sync_scope_v1';
@@ -1166,60 +1166,14 @@ export default function App() {
               })}
             </div>
 
-            {/* Real Daemon & Storage Readout */}
+            {/* Real Daemon & Storage Telemetry Readout */}
             {status && (
-              <div className="hidden lg:block border-t border-crt-border pt-4 space-y-3 text-xs font-mono">
-                <div
-                  className="flex items-center justify-between text-crt-muted"
-                  title="Local browser SSE telemetry stream to this app backend (independent of RetroGameTalk login)"
-                >
-                  <span>UI Event Stream</span>
-                  <span
-                    className={
-                      sseConnected
-                        ? 'text-crt-phosphor crt-live-readout'
-                        : 'text-crt-amber'
-                    }
-                  >
-                    {sseConnected ? 'Live' : 'Reconnecting'}
-                  </span>
-                </div>
-                <div
-                  className="flex items-center justify-between text-crt-muted"
-                  title={status.auth.lastMessage || undefined}
-                >
-                  <span>Auth Session</span>
-                  <span
-                    className={
-                      status.auth.authenticated
-                        ? 'text-crt-phosphor'
-                        : status.auth.lastCheckedAt
-                          ? 'text-crt-crimson'
-                          : status.auth.configured
-                            ? 'text-crt-amber'
-                            : 'text-crt-muted'
-                    }
-                  >
-                    {status.auth.authenticated
-                      ? 'Active'
-                      : status.auth.lastCheckedAt
-                        ? 'Failed'
-                        : status.auth.hasCompletedLogin
-                          ? 'Standby'
-                          : status.auth.configured
-                            ? 'Unverified'
-                            : 'Unset'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-crt-muted">
-                  <span>Next Schedule</span>
-                  <span className="text-crt-text tabular-nums">{formatCountdown(status.nextScheduledRunAt)}</span>
-                </div>
-                <div className="flex items-center justify-between text-crt-muted">
-                  <span>Disk Used</span>
-                  <span className="text-crt-text tabular-nums">{formatBytes(status.storage.totalBytesOnDisk)}</span>
-                </div>
-              </div>
+              <ServiceTelemetrySidebar
+                status={status}
+                config={config}
+                runs={runs}
+                sseConnected={sseConnected}
+              />
             )}
 
             {/* Discovered Systems Breakdown */}
