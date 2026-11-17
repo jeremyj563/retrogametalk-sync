@@ -11,6 +11,9 @@ data:
   DOWNLOAD_DIR: {{ .Values.scraper.downloadDir | quote }}
   RGT_BASE_URL: {{ .Values.scraper.baseUrl | quote }}
   RGT_LOGIN_URL: {{ .Values.scraper.loginUrl | quote }}
+  {{- if .Values.scraper.gitUrl }}
+  GIT_URL: {{ .Values.scraper.gitUrl | quote }}
+  {{- end }}
   {{- if ne (toString .Values.scraper.scheduleEnabled) "" }}
   SCRAPER_SCHEDULE_ENABLED: {{ .Values.scraper.scheduleEnabled | quote }}
   {{- end }}
