@@ -1,22 +1,110 @@
-name: Build and Publish Container Image
+name: Release and Publish Container Image
 
 on:
   push:
     branches:
       - main
     tags:
-      - "*"
+      - "v*"
   pull_request:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      allow_major_bump:
+        description: "Allow MAJOR version >= 2 when minting a release tag"
+        required: false
+        default: false
+        type: boolean
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  release:
+    name: Validate SemVer, Tag & Create GitHub Release
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: write
+    outputs:
+      release_tag: ${{ steps.mint.outputs.release_tag }}
+      semver_full: ${{ steps.mint.outputs.semver_full }}
+      semver_minor: ${{ steps.mint.outputs.semver_minor }}
+      minted: ${{ steps.mint.outputs.minted }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Validate v1.x.y SemVer & mint tag + GitHub Release
+        id: mint
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALLOW_MAJOR_INPUT: ${{ inputs.allow_major_bump }}
+          ALLOW_MAJOR_VAR: ${{ vars.ALLOW_MAJOR_VERSION_BUMP }}
+        run: |
+          set -euo pipefail
+
+          PKG_VERSION="$(node -e "const p=require('./package.json'); console.log(String(p.version||'').trim())")"
+          if [[ ! "$PKG_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::package.json version '$PKG_VERSION' is not strict X.Y.Z SemVer."
+            exit 1
+          fi
+
+          MAJOR="${BASH_REMATCH[1]}"
+          MINOR="${BASH_REMATCH[2]}"
+          PATCH="${BASH_REMATCH[3]}"
+
+          if [ "$MAJOR" -ne 1 ] && [ "${ALLOW_MAJOR_INPUT:-false}" != "true" ] && [ "${ALLOW_MAJOR_VAR:-false}" != "true" ]; then
+            echo "::error::Version v${PKG_VERSION} violates the v1.x.y SemVer constraint (MAJOR=${MAJOR}). Explicit approval is required to unlock MAJOR >= 2."
+            exit 1
+          fi
+
+          CHART_APP_VERSION="$(sed -nE 's/^appVersion:[[:space:]]*["'\'']?([^"'\''[:space:]]+)["'\'']?/\1/p' k8s/charts/retrogametalk-sync/Chart.yaml | head -n 1)"
+          if [ -n "$CHART_APP_VERSION" ] && [ "$CHART_APP_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Helm Chart appVersion ($CHART_APP_VERSION) does not match package.json version ($PKG_VERSION)."
+            exit 1
+          fi
+
+          TAG="v${PKG_VERSION}"
+
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists; skipping duplicate tag/release creation."
+            echo "release_tag=" >> "$GITHUB_OUTPUT"
+            echo "semver_full=" >> "$GITHUB_OUTPUT"
+            echo "semver_minor=" >> "$GITHUB_OUTPUT"
+            echo "minted=false" >> "$GITHUB_OUTPUT"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            git push origin "refs/tags/${TAG}"
+
+            if gh release view "${TAG}" >/dev/null 2>&1; then
+              echo "GitHub Release ${TAG} already exists; skipping creation."
+            else
+              gh release create "${TAG}" \
+                --target "${GITHUB_SHA}" \
+                --title "${TAG}" \
+                --generate-notes
+            fi
+
+            echo "release_tag=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "semver_full=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "semver_minor=${MAJOR}.${MINOR}" >> "$GITHUB_OUTPUT"
+            echo "minted=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build-and-push:
+    name: Build & Publish GHCR Container Image
+    needs: [release]
+    if: always() && (needs.release.result == 'success' || needs.release.result == 'skipped')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -31,11 +119,26 @@ jobs:
 
       - name: Resolve version and git tag
         id: version
+        env:
+          MINTED_TAG: ${{ needs.release.outputs.release_tag }}
+          MINTED_SEMVER_FULL: ${{ needs.release.outputs.semver_full }}
+          MINTED_SEMVER_MINOR: ${{ needs.release.outputs.semver_minor }}
         run: |
+          set -euo pipefail
+
           if [ "${{ github.ref_type }}" = "tag" ]; then
             GIT_TAG="${{ github.ref_name }}"
+          elif [ -n "$MINTED_TAG" ]; then
+            GIT_TAG="$MINTED_TAG"
           else
-            GIT_TAG="$(git tag --points-at HEAD | head -n 1)"
+            GIT_TAG="$(git tag --points-at HEAD | head -n 1 || true)"
+          fi
+
+          SEMVER_FULL="${MINTED_SEMVER_FULL}"
+          SEMVER_MINOR="${MINTED_SEMVER_MINOR}"
+          if [[ "$GIT_TAG" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            SEMVER_FULL="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+            SEMVER_MINOR="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
           fi
 
           if [ -n "$GIT_TAG" ]; then
@@ -45,6 +148,8 @@ jobs:
           fi
 
           echo "git_tag=${GIT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "semver_full=${SEMVER_FULL}" >> "$GITHUB_OUTPUT"
+          echo "semver_minor=${SEMVER_MINOR}" >> "$GITHUB_OUTPUT"
           echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
@@ -66,11 +171,11 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=tag
-            type=raw,value=${{ steps.version.outputs.git_tag || 'untagged' }},enable=${{ steps.version.outputs.git_tag != '' }}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ steps.version.outputs.git_tag }},enable=${{ steps.version.outputs.git_tag != '' }}
+            type=raw,value=${{ steps.version.outputs.semver_full }},enable=${{ steps.version.outputs.semver_full != '' }}
+            type=raw,value=${{ steps.version.outputs.semver_minor }},enable=${{ steps.version.outputs.semver_minor != '' }}
             type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
@@ -87,4 +192,3 @@ jobs:
             GIT_URL=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
