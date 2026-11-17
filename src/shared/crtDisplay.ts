@@ -14,7 +14,6 @@ export interface CrtFxValues {
 
 export interface CrtDisplaySettings extends CrtFxValues {
   enabled: boolean;
-  panelOpen: boolean;
   palette: CrtPalette;
   uiMotion: CrtUiMotionLevel;
 }
@@ -63,11 +62,11 @@ export const CRT_PRESETS: Record<
 
 export const CRT_PALETTES: Record<
   CrtPalette,
-  { label: string; swatch: string; rgb: string }
+  { label: string; swatch: string; swatchClass: string; rgb: string }
 > = {
-  green: { label: 'Green', swatch: '#38e56b', rgb: '56, 229, 107' },
-  amber: { label: 'Amber', swatch: '#ffb000', rgb: '255, 176, 0' },
-  cyan: { label: 'Cyan', swatch: '#38d9f5', rgb: '56, 217, 245' },
+  green: { label: 'Green', swatch: '#38e56b', swatchClass: 'bg-[#38e56b]', rgb: '56, 229, 107' },
+  amber: { label: 'Amber', swatch: '#ffb000', swatchClass: 'bg-[#ffb000]', rgb: '255, 176, 0' },
+  cyan: { label: 'Cyan', swatch: '#38d9f5', swatchClass: 'bg-[#38d9f5]', rgb: '56, 217, 245' },
 };
 
 export const CRT_UI_MOTION_LEVELS: Record<
@@ -104,7 +103,6 @@ export const CRT_UI_MOTION_LEVELS: Record<
 
 export const DEFAULT_CRT_DISPLAY_SETTINGS: CrtDisplaySettings = {
   enabled: true,
-  panelOpen: false,
   palette: 'green',
   uiMotion: 'low',
   ...CRT_PRESETS.subtle.values,
@@ -140,7 +138,6 @@ export function loadInitialCrtDisplaySettings(): CrtDisplaySettings {
       const parsed = JSON.parse(raw) as Partial<CrtDisplaySettings>;
       return {
         enabled: typeof parsed.enabled === 'boolean' ? parsed.enabled : true,
-        panelOpen: typeof parsed.panelOpen === 'boolean' ? parsed.panelOpen : false,
         palette: isValidPalette(parsed.palette) ? parsed.palette : 'green',
         uiMotion: isValidUiMotionLevel(parsed.uiMotion)
           ? parsed.uiMotion

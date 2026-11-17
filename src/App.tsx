@@ -1230,19 +1230,20 @@ export default function App() {
                 storageFolderConfig={config?.storageFolderConfig}
               />
             )}
+
+            {/* Permanent CRT Display & Living UI Motion Controls */}
+            <CrtDisplayControl settings={crtSettings} onChange={setCrtSettings} />
           </div>
 
-          {/* CRT Display Studio & Inconspicuous Build Footer */}
-          <div className="hidden lg:block border-t border-crt-border pt-4 space-y-2.5">
-            <CrtDisplayControl settings={crtSettings} onChange={setCrtSettings} />
-
-            {status?.build && (
+          {/* Inconspicuous Build Footer */}
+          {status?.build && (
+            <div className="hidden lg:block border-t border-crt-border pt-3">
               <BuildFooterMeta
                 build={status.build}
                 className="flex items-center justify-between gap-2 px-1 text-[11px] font-mono text-crt-muted/60 hover:text-crt-muted transition-colors"
               />
-            )}
-          </div>
+            </div>
+          )}
         </aside>
 
         {/* Main Content Viewport */}
