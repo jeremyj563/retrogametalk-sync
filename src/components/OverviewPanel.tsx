@@ -585,15 +585,18 @@ export function OverviewPanel({
             className="font-display text-lg sm:text-xl font-semibold tracking-tight text-crt-text leading-snug min-w-0"
           >
             {activeDownloadHeader ? (
-              <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0">
+              <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 min-w-0">
                 <span className="text-crt-muted font-medium text-sm sm:text-base whitespace-nowrap shrink-0">
                   {activeDownloadHeader.prefix}
                 </span>
                 <span
                   title={activeDownloadHeader.filename}
-                  className="crt-active-filename truncate min-w-0 font-bold tracking-tight"
+                  className="crt-active-filename min-w-0 font-bold tracking-tight"
                 >
-                  {activeDownloadHeader.filename}
+                  <span aria-hidden="true" className="crt-active-filename-sheen" />
+                  <span className="crt-active-filename-label truncate min-w-0">
+                    {activeDownloadHeader.filename}
+                  </span>
                 </span>
               </span>
             ) : (
