@@ -170,6 +170,14 @@ export function MirroredSystemsSidebar({
                 {activeSystem.totalItems.toLocaleString()} ({tooltipMeta.completionPct}%)
               </dd>
             </div>
+            {activeSystem.availableItems > 0 && (
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-crt-muted">Available (Indexed)</dt>
+                <dd className="text-crt-phosphor/85 text-right whitespace-nowrap">
+                  {activeSystem.availableItems.toLocaleString()}
+                </dd>
+              </div>
+            )}
 
             {(activeSystem.queuedItems > 0 || activeSystem.failedItems > 0) && (
               <div className="flex items-center justify-between gap-3">

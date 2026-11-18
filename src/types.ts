@@ -39,12 +39,35 @@ export interface ConfigPanelHandle {
   save: () => Promise<boolean>;
   discard: () => void;
 }
+export type RunTrigger = 'scheduled' | 'manual' | 'retry' | 'download';
 export type SyncScope = 'incremental' | 'full';
 export type RunMode = SyncScope | 'dry_run';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'failed';
-export type FileItemStatus = 'queued' | 'downloading' | 'downloaded' | 'skipped' | 'failed';
+export type FileItemStatus = 'available' | 'queued' | 'downloading' | 'downloaded' | 'skipped' | 'failed';
 export type ItemStatus = FileItemStatus | 'partial';
 export type LogLevel = 'debug' | 'info' | 'download' | 'throttle' | 'warn' | 'error';
+
+export interface SystemIndexCursor {
+  lastIndexedAt: string;
+  totalWpPosts: number;
+  totalPages: number;
+  pagesIndexed: number;
+  fullyIndexed: boolean;
+  scope: 'filtered' | 'full';
+}
+
+export interface CatalogIndexerStatus {
+  active: boolean;
+  scope: 'filtered' | 'full' | null;
+  currentSystem: string | null;
+  systemsCompleted: number;
+  systemsTotal: number;
+  currentPage: number;
+  totalPages: number;
+  indexedCount: number;
+  remainingUnindexedSystems: number;
+  lastError: string | null;
+}
 
 export interface ScraperConfigPublic {
   baseUrl: string;
@@ -74,13 +97,15 @@ export interface ScraperConfigPublic {
   romSanitizeFat32: boolean;
   romMaxFilenameLen: number;
   storageFolderConfig: import('./shared/storageFolderMappings').StorageFolderMappingConfig;
+  autoDownloadNewReleases: boolean;
+  systemIndexState?: Record<string, SystemIndexCursor>;
   updatedAt: string;
   envOverrides: string[];
 }
 
 export interface SyncRunRecord {
   id: number;
-  triggerType: 'scheduled' | 'manual' | 'retry';
+  triggerType: RunTrigger;
   mode: RunMode;
   dryRun: boolean;
   status: RunStatus;
@@ -125,6 +150,7 @@ export interface ReleaseMetadata {
   screenshotUrls: string[];
   screenshotLocalRelPaths: string[];
   screenshotsFullResVersion?: number;
+  downloadHints?: { filename: string; fileSize: string }[];
   sourcePageUrl: string;
   fetchedAt: string;
 }
@@ -184,6 +210,7 @@ export interface RepositoryItemRecord {
   releaseTags: string[];
   title: string;
   fileSizeBytes: number;
+  sizeIsEstimated?: boolean;
   publishedAt: string | null;
   remoteUpdatedAt: string | null;
   status: ItemStatus;
@@ -277,6 +304,7 @@ export interface ReleaseTypeBreakdown {
 export interface SystemBreakdown {
   systemName: string;
   totalItems: number;
+  availableItems: number;
   downloadedItems: number;
   skippedItems: number;
   failedItems: number;
@@ -328,8 +356,10 @@ export interface ServiceStatusSnapshot {
     diskFreeBytes: number | null;
     diskTotalBytes: number | null;
   };
+  indexer?: CatalogIndexerStatus;
   totals: {
     totalCatalogItems: number;
+    availableItems: number;
     downloadedItems: number;
     skippedItems: number;
     failedItems: number;

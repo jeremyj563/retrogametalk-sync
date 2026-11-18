@@ -38,6 +38,7 @@ import type {
   ScraperConfigPublic,
   SyncRunRecord,
   SystemBreakdown,
+  SystemIndexCursor,
 } from './types.ts';
 
 const DATA_DIR = path.resolve(process.env.DATA_DIR || '/run/repo/.rgt-data');
@@ -318,6 +319,8 @@ export function getInternalConfig(): ScraperConfigInternal {
   }
 
   let scheduleEnabled = Boolean(row.schedule_enabled);
+  let autoDownloadNewReleases =
+    row.auto_download_new_releases !== undefined ? Boolean(row.auto_download_new_releases) : true;
   let baseDelayMs = Number(row.base_delay_ms);
   let minDelayMs = Number(row.min_delay_ms);
   let maxDelayMs = Number(row.max_delay_ms);
@@ -338,6 +341,15 @@ export function getInternalConfig(): ScraperConfigInternal {
   if (process.env.SCRAPER_SCHEDULE_ENABLED !== undefined && process.env.SCRAPER_SCHEDULE_ENABLED !== '') {
     scheduleEnabled = process.env.SCRAPER_SCHEDULE_ENABLED === 'true' || process.env.SCRAPER_SCHEDULE_ENABLED === '1';
     envOverrides.push('SCRAPER_SCHEDULE_ENABLED');
+  }
+  if (
+    process.env.SCRAPER_AUTO_DOWNLOAD_NEW_RELEASES !== undefined &&
+    process.env.SCRAPER_AUTO_DOWNLOAD_NEW_RELEASES !== ''
+  ) {
+    autoDownloadNewReleases =
+      process.env.SCRAPER_AUTO_DOWNLOAD_NEW_RELEASES === 'true' ||
+      process.env.SCRAPER_AUTO_DOWNLOAD_NEW_RELEASES === '1';
+    envOverrides.push('SCRAPER_AUTO_DOWNLOAD_NEW_RELEASES');
   }
   if (process.env.SCRAPER_BASE_DELAY_MS) {
     baseDelayMs = Number(process.env.SCRAPER_BASE_DELAY_MS);
@@ -417,6 +429,16 @@ export function getInternalConfig(): ScraperConfigInternal {
     }
   }
 
+  let systemIndexState: Record<string, SystemIndexCursor> = {};
+  try {
+    const parsedIndexState = JSON.parse(String(row.system_index_state_json || '{}'));
+    if (parsedIndexState && typeof parsedIndexState === 'object' && !Array.isArray(parsedIndexState)) {
+      systemIndexState = parsedIndexState as Record<string, SystemIndexCursor>;
+    }
+  } catch {
+    systemIndexState = {};
+  }
+
   return {
     baseUrl,
     loginUrl,
@@ -445,6 +467,8 @@ export function getInternalConfig(): ScraperConfigInternal {
     romSanitizeFat32: row.rom_sanitize_fat32 !== undefined ? Boolean(row.rom_sanitize_fat32) : true,
     romMaxFilenameLen: Math.max(0, Number(row.rom_max_filename_len || 0)),
     storageFolderConfig,
+    autoDownloadNewReleases,
+    systemIndexState,
     updatedAt: String(row.updated_at),
     envOverrides,
   };
@@ -452,6 +476,34 @@ export function getInternalConfig(): ScraperConfigInternal {
 
 export function getPublicConfig(): ScraperConfigPublic {
   return getInternalConfig();
+}
+
+export function getSystemIndexState(): Record<string, SystemIndexCursor> {
+  const row = getDb()
+    .prepare('SELECT system_index_state_json FROM scraper_config WHERE id = 1')
+    .get() as { system_index_state_json?: string } | undefined;
+  try {
+    const parsed = JSON.parse(String(row?.system_index_state_json || '{}'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, SystemIndexCursor>;
+    }
+  } catch {
+    // ignore malformed state
+  }
+  return {};
+}
+
+export function updateSystemIndexCursor(systemSlug: string, cursor: SystemIndexCursor): Record<string, SystemIndexCursor> {
+  const canonical = canonicalizeSystemSlug(systemSlug) || systemSlug.trim().toLowerCase();
+  const tx = getDb().transaction(() => {
+    const current = getSystemIndexState();
+    current[canonical] = cursor;
+    getDb()
+      .prepare('UPDATE scraper_config SET system_index_state_json = ?, updated_at = ? WHERE id = 1')
+      .run(JSON.stringify(current), new Date().toISOString());
+    return current;
+  });
+  return tx();
 }
 
 export function saveDiscoveredSystems(systems: string[]): string[] {
@@ -613,6 +665,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       rom_sanitize_fat32 = ?,
       rom_max_filename_len = ?,
       storage_folder_config_json = ?,
+      auto_download_new_releases = ?,
       last_authenticated_at = ?,
       updated_at = ?
     WHERE id = 1
@@ -647,6 +700,9 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     nextRomSanitizeFat32,
     nextRomMaxFilenameLen,
     nextStorageFolderConfigJson,
+    input.autoDownloadNewReleases !== undefined
+      ? (input.autoDownloadNewReleases ? 1 : 0)
+      : Number(current.auto_download_new_releases ?? 1),
     authCredentialsChanged ? null : (current.last_authenticated_at ? String(current.last_authenticated_at) : null),
     now,
   );
@@ -836,6 +892,7 @@ function mapReleaseRow(row: Record<string, unknown>, files: ReleaseFileRecord[])
     releaseTags,
     title: String(row.title),
     fileSizeBytes: Number(row.file_size_bytes || 0),
+    sizeIsEstimated: Boolean(row.size_is_estimated),
     publishedAt: row.published_at ? String(row.published_at) : (parsedMeta?.publishedAt ?? null),
     remoteUpdatedAt: row.remote_updated_at ? String(row.remote_updated_at) : (parsedMeta?.remoteUpdatedAt ?? null),
     status: String(row.status) as ItemStatus,
@@ -901,6 +958,7 @@ export function recomputeReleaseRollup(releaseId: number): RepositoryItemRecord 
   let downloadedCount = 0;
   let failedCount = 0;
   let downloadingCount = 0;
+  let availableCount = 0;
   let firstError: string | null = null;
   let latestDownloadedAt: string | null = row.downloaded_at ? String(row.downloaded_at) : null;
 
@@ -912,6 +970,8 @@ export function recomputeReleaseRollup(releaseId: number): RepositoryItemRecord 
       if (!firstError && file.errorMessage) firstError = `${file.filename}: ${file.errorMessage}`;
     } else if (file.status === 'downloading') {
       downloadingCount += 1;
+    } else if (file.status === 'available') {
+      availableCount += 1;
     }
     if (file.downloadedAt && (!latestDownloadedAt || file.downloadedAt > latestDownloadedAt)) {
       latestDownloadedAt = file.downloadedAt;
@@ -922,12 +982,27 @@ export function recomputeReleaseRollup(releaseId: number): RepositoryItemRecord 
   if (files.length > 0) {
     if (downloadingCount > 0) status = 'downloading';
     else if (failedCount === files.length) status = 'failed';
-    else if (failedCount > 0 || downloadedCount < files.length) {
-      status = downloadedCount > 0 ? 'partial' : 'queued';
-    } else {
-      status = 'downloaded';
-    }
+    else if (downloadedCount === files.length) status = 'downloaded';
+    else if (downloadedCount > 0) status = 'partial';
+    else if (availableCount === files.length) status = 'available';
+    else status = 'queued';
   }
+
+  // Preserve estimated parent byte size when indexed releases do not yet have file records
+  const existingBytes = Number(row.file_size_bytes || 0);
+  const resolvedBytes =
+    totalBytes > 0
+      ? totalBytes
+      : status === 'available' || status === 'queued'
+        ? existingBytes
+        : 0;
+  const sizeIsEstimated =
+    downloadedCount === 0 &&
+    (status === 'available' || status === 'queued') &&
+    Boolean(row.size_is_estimated) &&
+    resolvedBytes > 0
+      ? 1
+      : 0;
 
   // Keep embedded metadata.releaseTags synchronized when metadata_json exists
   let metadataJson = row.metadata_json ? String(row.metadata_json) : null;
@@ -946,6 +1021,7 @@ export function recomputeReleaseRollup(releaseId: number): RepositoryItemRecord 
       release_type = ?,
       release_tags_json = ?,
       file_size_bytes = ?,
+      size_is_estimated = ?,
       status = ?,
       error_message = ?,
       downloaded_at = ?,
@@ -954,7 +1030,8 @@ export function recomputeReleaseRollup(releaseId: number): RepositoryItemRecord 
   `).run(
     primaryType,
     JSON.stringify(releaseTags),
-    totalBytes,
+    resolvedBytes,
+    sizeIsEstimated,
     status,
     files.length === 0 && status === 'failed'
       ? (row.error_message ? String(row.error_message) : 'Interrupted or failed before file download')
@@ -1084,6 +1161,196 @@ export function upsertCatalogRelease(input: {
   return recomputeReleaseRollup(Number(row.id))!;
 }
 
+export function upsertIndexedWpRelease(input: {
+  remoteUrl: string;
+  remotePath: string;
+  localPath: string;
+  systemName: string;
+  title: string;
+  publishedAt?: string | null;
+  remoteUpdatedAt?: string | null;
+  estimatedBytes?: number;
+  metadata: ReleaseMetadata;
+  lastRunId?: number | null;
+}): RepositoryItemRecord {
+  const canonicalUrl = input.remoteUrl.split('#')[0];
+  const canonicalSystemName = canonicalizeSystemSlug(input.systemName) || input.systemName;
+  const now = new Date().toISOString();
+  const estimatedBytes = Math.max(0, Math.round(Number(input.estimatedBytes || 0)));
+
+  const genres = input.metadata.genres || [];
+  const regions = input.metadata.regions || [];
+  const languages = input.metadata.languages || [];
+  const sources = input.metadata.sources || [];
+  const releaseTags =
+    input.metadata.releaseTags && input.metadata.releaseTags.length > 0
+      ? input.metadata.releaseTags
+      : deriveReleaseTags({ genres, languages, sources, systemName: canonicalSystemName }, []);
+  const primaryType = releaseTags[0] || 'Retail ROM';
+
+  const existing = getCatalogReleaseByRemoteUrl(canonicalUrl);
+  let mergedMetadata: ReleaseMetadata = {
+    ...input.metadata,
+    releaseTags,
+  };
+  if (existing?.metadata) {
+    const prev = existing.metadata;
+    mergedMetadata = {
+      ...prev,
+      ...input.metadata,
+      title: input.title || prev.title,
+      coverUrl: input.metadata.coverUrl || prev.coverUrl,
+      coverLocalRelPath: prev.coverLocalRelPath ?? input.metadata.coverLocalRelPath ?? null,
+      screenshotUrls:
+        input.metadata.screenshotUrls.length > 0 ? input.metadata.screenshotUrls : prev.screenshotUrls,
+      screenshotLocalRelPaths: prev.screenshotLocalRelPaths ?? [],
+      screenshotsFullResVersion: prev.screenshotsFullResVersion,
+      specs: prev.specs?.length ? prev.specs : input.metadata.specs,
+      downloadsCount: prev.downloadsCount ?? input.metadata.downloadsCount,
+      descriptionHtml:
+        prev.descriptionHtml && prev.descriptionHtml.length >= (input.metadata.descriptionHtml?.length || 0)
+          ? prev.descriptionHtml
+          : input.metadata.descriptionHtml,
+      descriptionText:
+        prev.descriptionText && prev.descriptionText.length >= (input.metadata.descriptionText?.length || 0)
+          ? prev.descriptionText
+          : input.metadata.descriptionText,
+      downloadHints: input.metadata.downloadHints?.length
+        ? input.metadata.downloadHints
+        : prev.downloadHints,
+      releaseTags,
+    };
+  }
+
+  const effectivePublishedAt = input.publishedAt ?? mergedMetadata.publishedAt ?? null;
+  const effectiveRemoteUpdatedAt = input.remoteUpdatedAt ?? mergedMetadata.remoteUpdatedAt ?? null;
+
+  getDb().prepare(`
+    INSERT INTO catalog_releases (
+      remote_url, wp_post_id, wp_post_type, remote_path, local_path, system_name,
+      release_type, release_tags_json, title, file_size_bytes, size_is_estimated,
+      published_at, remote_updated_at, status, last_run_id, discovered_at,
+      publisher, developer, release_year, genres_json, regions_json, languages_json, sources_json,
+      cover_local_path, screenshots_json, metadata_json
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
+      ?, ?, 'available', ?, ?,
+      ?, ?, ?, ?, ?, ?, ?,
+      NULL, '[]', ?
+    )
+    ON CONFLICT(remote_url) DO UPDATE SET
+      wp_post_id = COALESCE(excluded.wp_post_id, catalog_releases.wp_post_id),
+      wp_post_type = COALESCE(excluded.wp_post_type, catalog_releases.wp_post_type),
+      remote_path = excluded.remote_path,
+      system_name = excluded.system_name,
+      release_type = excluded.release_type,
+      release_tags_json = excluded.release_tags_json,
+      title = COALESCE(NULLIF(excluded.title, ''), catalog_releases.title),
+      file_size_bytes = CASE
+        WHEN catalog_releases.status = 'available' AND excluded.file_size_bytes > 0 THEN excluded.file_size_bytes
+        ELSE catalog_releases.file_size_bytes
+      END,
+      size_is_estimated = CASE
+        WHEN catalog_releases.status = 'available' AND excluded.file_size_bytes > 0 THEN 1
+        ELSE catalog_releases.size_is_estimated
+      END,
+      published_at = COALESCE(excluded.published_at, catalog_releases.published_at),
+      remote_updated_at = COALESCE(excluded.remote_updated_at, catalog_releases.remote_updated_at),
+      publisher = COALESCE(excluded.publisher, catalog_releases.publisher),
+      developer = COALESCE(excluded.developer, catalog_releases.developer),
+      release_year = COALESCE(excluded.release_year, catalog_releases.release_year),
+      genres_json = excluded.genres_json,
+      regions_json = excluded.regions_json,
+      languages_json = excluded.languages_json,
+      sources_json = excluded.sources_json,
+      metadata_json = excluded.metadata_json
+  `).run(
+    canonicalUrl,
+    mergedMetadata.wpPostId ?? null,
+    mergedMetadata.wpPostType ?? null,
+    input.remotePath,
+    input.localPath,
+    canonicalSystemName,
+    primaryType,
+    JSON.stringify(releaseTags),
+    input.title,
+    estimatedBytes,
+    estimatedBytes > 0 ? 1 : 0,
+    effectivePublishedAt,
+    effectiveRemoteUpdatedAt,
+    input.lastRunId ?? null,
+    now,
+    mergedMetadata.publisher ?? null,
+    mergedMetadata.developer ?? null,
+    mergedMetadata.releaseYear ?? null,
+    JSON.stringify(genres),
+    JSON.stringify(regions),
+    JSON.stringify(languages),
+    JSON.stringify(sources),
+    JSON.stringify(mergedMetadata),
+  );
+
+  return getCatalogReleaseByRemoteUrl(canonicalUrl)!;
+}
+
+export function updateCatalogCoverPath(releaseId: number, coverLocalPath: string): void {
+  getDb()
+    .prepare('UPDATE catalog_releases SET cover_local_path = ? WHERE id = ?')
+    .run(coverLocalPath, releaseId);
+}
+
+export function markCatalogItemsQueued(
+  ids: number[],
+  runId?: number | null,
+): number[] {
+  const cleanIds = Array.from(
+    new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
+  );
+  if (cleanIds.length === 0) return [];
+
+  const tx = getDb().transaction(() => {
+    const queuedIds: number[] = [];
+    for (const releaseId of cleanIds) {
+      const row = getDb()
+        .prepare('SELECT id, status FROM catalog_releases WHERE id = ?')
+        .get(releaseId) as { id: number; status: string } | undefined;
+      if (!row) continue;
+      if (!['available', 'failed', 'partial', 'queued'].includes(row.status)) {
+        continue;
+      }
+
+      getDb()
+        .prepare(`
+          UPDATE catalog_release_files
+          SET status = 'queued',
+              error_message = NULL,
+              last_run_id = COALESCE(?, last_run_id)
+          WHERE release_id = ? AND status IN ('available', 'failed')
+        `)
+        .run(runId ?? null, releaseId);
+
+      if (row.status === 'available' || row.status === 'failed') {
+        getDb()
+          .prepare(`
+            UPDATE catalog_releases
+            SET status = 'queued',
+                error_message = NULL,
+                last_run_id = COALESCE(?, last_run_id)
+            WHERE id = ?
+          `)
+          .run(runId ?? null, releaseId);
+      }
+
+      recomputeReleaseRollup(releaseId);
+      queuedIds.push(releaseId);
+    }
+    return queuedIds;
+  });
+
+  return tx();
+}
+
 export function markCatalogReleaseFailed(
   releaseId: number,
   errorMessage: string,
@@ -1092,6 +1359,7 @@ export function markCatalogReleaseFailed(
   getDb().prepare(`
     UPDATE catalog_releases
     SET status = 'failed',
+        size_is_estimated = 0,
         error_message = ?,
         last_run_id = COALESCE(?, last_run_id)
     WHERE id = ?
@@ -1407,6 +1675,7 @@ function listStatusFacetCounts(): Record<string, number> {
 
   return {
     ...raw,
+    available: raw.available || 0,
     downloaded: (raw.downloaded || 0) + (raw.skipped || 0),
     needs_retry: (raw.failed || 0) + (raw.partial || 0),
     partial: raw.partial || 0,
@@ -1595,26 +1864,44 @@ function buildCatalogWhereAndOrder(params: CatalogQueryFilterParams): {
 export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   ids: number[];
   downloadableIds: number[];
+  queueableIds: number[];
+  estimatedQueueBytes: number;
+  alreadyDownloadedCount: number;
   total: number;
 } {
   const { where, args, orderBy } = buildCatalogWhereAndOrder(params);
   const rows = getDb()
-    .prepare(`SELECT id, status FROM catalog_releases ${where} ORDER BY ${orderBy}`)
-    .all(...args) as { id: number; status: string }[];
+    .prepare(`SELECT id, status, file_size_bytes FROM catalog_releases ${where} ORDER BY ${orderBy}`)
+    .all(...args) as { id: number; status: string; file_size_bytes: number }[];
 
   const ids: number[] = [];
   const downloadableIds: number[] = [];
+  const queueableIds: number[] = [];
+  let estimatedQueueBytes = 0;
+  let alreadyDownloadedCount = 0;
+
   for (const row of rows) {
     const numId = Number(row.id);
     ids.push(numId);
-    if (row.status === 'downloaded' || row.status === 'skipped' || row.status === 'partial') {
+    if (row.status === 'downloaded' || row.status === 'skipped') {
       downloadableIds.push(numId);
+      alreadyDownloadedCount += 1;
+    } else if (row.status === 'partial') {
+      downloadableIds.push(numId);
+      queueableIds.push(numId);
+      estimatedQueueBytes += Number(row.file_size_bytes || 0);
+    } else if (row.status === 'available' || row.status === 'failed') {
+      queueableIds.push(numId);
+      estimatedQueueBytes += Number(row.file_size_bytes || 0);
     }
   }
 
   return {
     ids,
     downloadableIds,
+    queueableIds,
+    estimatedQueueBytes,
+    alreadyDownloadedCount,
     total: ids.length,
   };
 }
@@ -1766,6 +2053,7 @@ export function listReleasesNeedingRetry(options?: {
 export function getCatalogTotalsAndSystems(): {
   totals: {
     totalCatalogItems: number;
+    availableItems: number;
     downloadedItems: number;
     skippedItems: number;
     failedItems: number;
@@ -1780,6 +2068,7 @@ export function getCatalogTotalsAndSystems(): {
   const totalsRow = getDb().prepare(`
     SELECT
       COUNT(*) as total_items,
+      SUM(CASE WHEN status = 'available' THEN 1 ELSE 0 END) as available_items,
       SUM(CASE WHEN status = 'downloaded' THEN 1 ELSE 0 END) as downloaded_items,
       SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_items,
       SUM(CASE WHEN status IN ('failed', 'partial') THEN 1 ELSE 0 END) as failed_items,
@@ -1804,6 +2093,7 @@ export function getCatalogTotalsAndSystems(): {
     SELECT
       r.system_name,
       COUNT(*) as total_items,
+      SUM(CASE WHEN r.status = 'available' THEN 1 ELSE 0 END) as available_items,
       SUM(CASE WHEN r.status = 'downloaded' THEN 1 ELSE 0 END) as downloaded_items,
       SUM(CASE WHEN r.status = 'skipped' THEN 1 ELSE 0 END) as skipped_items,
       SUM(CASE WHEN r.status IN ('failed', 'partial') THEN 1 ELSE 0 END) as failed_items,
@@ -1848,6 +2138,7 @@ export function getCatalogTotalsAndSystems(): {
   return {
     totals: {
       totalCatalogItems: Number(totalsRow.total_items || 0),
+      availableItems: Number(totalsRow.available_items || 0),
       downloadedItems: Number(totalsRow.downloaded_items || 0),
       skippedItems: Number(totalsRow.skipped_items || 0),
       failedItems: Number(totalsRow.failed_items || 0),
@@ -1863,6 +2154,7 @@ export function getCatalogTotalsAndSystems(): {
       return {
         systemName: String(r.system_name),
         totalItems: Number(r.total_items || 0),
+        availableItems: Number(r.available_items || 0),
         downloadedItems,
         skippedItems,
         failedItems: Number(r.failed_items || 0),

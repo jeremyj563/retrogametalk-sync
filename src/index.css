@@ -377,6 +377,49 @@
   overflow: hidden;
 }
 
+/* Mellow lazy-cached cover art cross-fade & smooth background indexer bar */
+.crt-cover-lazy {
+  opacity: 0;
+  transition: opacity 320ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity;
+}
+
+.crt-cover-lazy[data-loaded="true"] {
+  opacity: 1;
+}
+
+.crt-indexer-bar {
+  position: relative;
+  overflow: hidden;
+  transition: width 360ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+[data-crt-motion="low"] .crt-indexer-bar::after,
+[data-crt-motion="medium"] .crt-indexer-bar::after,
+[data-crt-motion="high"] .crt-indexer-bar::after,
+[data-crt-motion="ultra"] .crt-indexer-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--color-crt-phosphor) 55%, white 20%) 50%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: crt-indexer-sheen 2.4s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+@keyframes crt-indexer-sheen {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
 /* ==========================================================================
    Mellow Telemetry Deck Carousel, Sliding Tab Pill & Smooth Chart Tooltips
    ========================================================================== */
@@ -604,6 +647,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .crt-accordion-grid,
+  .crt-cover-lazy,
+  .crt-indexer-bar,
   .crt-deck-tab-pill,
   .crt-deck-slide,
   .crt-deck-meta-item,
@@ -3596,7 +3641,8 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   .crt-banner-track-return,
   .crt-banner-pin-tail,
   .crt-active-filename-sheen::after,
-  .crt-card-holo {
+  .crt-card-holo,
+  .crt-indexer-bar::after {
     opacity: 0 !important;
     animation: none !important;
   }

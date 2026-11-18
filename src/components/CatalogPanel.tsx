@@ -6,6 +6,7 @@ import {
   ArrowUpDown,
   CheckCircle2,
   ChevronRight,
+  Cloud,
   Download,
   FileArchive,
   Folder,
@@ -15,6 +16,7 @@ import {
   LayoutGrid,
   List,
   Loader2,
+  Pause,
   RefreshCw,
   RotateCcw,
   Search,
@@ -23,6 +25,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
+import { readJsonSafely } from '../utils/http';
 import type {
   BulkInstallKnownItemMeta,
   BulkStorageInstallerController,
@@ -55,14 +58,148 @@ interface CatalogPanelProps {
   catalogRevision?: number;
   activeRetryItemId?: number | null;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
+  onQueueDownload?: (payload: {
+    ids?: number[];
+    filters?: Record<string, unknown>;
+  }) => Promise<{ queuedCount?: number; skippedCount?: number } | void>;
+  onStartCatalogIndex?: (scope: 'filtered' | 'full') => Promise<void>;
+  onStopCatalogIndex?: () => Promise<void>;
   onRefreshStatus: () => Promise<void>;
 }
 
+interface LazyCoverImageProps {
+  itemId: number;
+  title: string;
+  systemName: string;
+  hasLocalCover: boolean;
+  hasRemoteCover: boolean;
+  assetVersion: string;
+  failed: boolean;
+  compact?: boolean;
+  padBottom?: boolean;
+  onError: () => void;
+}
+
+function LazyCoverImage({
+  itemId,
+  title,
+  systemName,
+  hasLocalCover,
+  hasRemoteCover,
+  assetVersion,
+  failed,
+  compact = false,
+  padBottom = false,
+  onError,
+}: LazyCoverImageProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [shouldLoad, setShouldLoad] = useState(() => hasLocalCover);
+  const [loaded, setLoaded] = useState(false);
+
+  const canShowImage = (hasLocalCover || hasRemoteCover) && !failed;
+  const src = hasLocalCover
+    ? `/api/items/${itemId}/asset?kind=cover${assetVersion}`
+    : `/api/items/${itemId}/asset?kind=cover&lazy=1${assetVersion}`;
+
+  useEffect(() => {
+    setLoaded(false);
+  }, [itemId, src]);
+
+  useEffect(() => {
+    if (hasLocalCover) {
+      setShouldLoad(true);
+      return;
+    }
+    if (!hasRemoteCover || failed) {
+      setShouldLoad(false);
+      return;
+    }
+    const el = containerRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') {
+      setShouldLoad(true);
+      return;
+    }
+    let active = true;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!active) return;
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setShouldLoad(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '160px' },
+    );
+    observer.observe(el);
+    return () => {
+      active = false;
+      observer.disconnect();
+    };
+  }, [hasLocalCover, hasRemoteCover, failed, itemId]);
+
+  if (compact) {
+    return (
+      <div
+        ref={containerRef}
+        className="relative w-8 h-10 rounded border border-crt-border bg-crt-bg flex items-center justify-center overflow-hidden shrink-0"
+      >
+        <Gamepad2 className="h-3.5 w-3.5 text-crt-border-strong" />
+        {canShowImage && shouldLoad && (
+          <img
+            src={src}
+            alt={`${title} cover`}
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            data-loaded={loaded ? 'true' : 'false'}
+            onLoad={() => setLoaded(true)}
+            onError={onError}
+            className="crt-cover-lazy absolute inset-0 w-full h-full object-cover"
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} className="relative w-full h-full">
+      <div
+        className={`w-full h-full flex flex-col items-center justify-center p-4 text-center space-y-2 ${
+          padBottom ? 'pb-16' : ''
+        }`}
+      >
+        <Gamepad2 className="h-8 w-8 text-crt-border-strong" />
+        <span className="font-mono text-[11px] text-crt-muted">{systemName}</span>
+      </div>
+      {canShowImage && shouldLoad && (
+        <img
+          src={src}
+          alt={`${title} cover art`}
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          data-loaded={loaded ? 'true' : 'false'}
+          onLoad={() => setLoaded(true)}
+          onError={onError}
+          className="crt-cover-lazy absolute inset-0 w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-300"
+        />
+      )}
+    </div>
+  );
+}
+
 const CATALOG_VIEW_STORAGE_KEY = 'rgt_sync_catalog_view_v1';
-const VALID_STATUS_VALUES = new Set(['downloaded', 'partial', 'failed', 'needs_retry', 'queued', 'downloading']);
+const VALID_STATUS_VALUES = new Set([
+  'available',
+  'downloaded',
+  'partial',
+  'failed',
+  'needs_retry',
+  'queued',
+  'downloading',
+]);
 const VALID_VIEW_MODES = new Set(['catalog', 'filesystem']);
 
 const STATUS_LABELS: Record<string, string> = {
+  available: 'Available',
   downloaded: 'Downloaded',
   needs_retry: 'Needs Attention',
   partial: 'Partial',
@@ -267,6 +404,9 @@ export function CatalogPanel({
   catalogRevision = 0,
   activeRetryItemId = null,
   onRetryItem,
+  onQueueDownload,
+  onStartCatalogIndex,
+  onStopCatalogIndex,
   onRefreshStatus,
 }: CatalogPanelProps) {
   const initialViewMode: CatalogViewPrefs['viewMode'] = memoryCatalogViewPrefs.viewMode;
@@ -325,6 +465,27 @@ export function CatalogPanel({
   const [selectedCatalogIds, setSelectedCatalogIds] = useState<Set<number>>(new Set());
   const [confirmCatalogBulk, setConfirmCatalogBulk] = useState(false);
 
+  // On-demand download queueing & background indexer UI state
+  const [queueingIds, setQueueingIds] = useState<Set<number>>(new Set());
+  const [queueingBulk, setQueueingBulk] = useState(false);
+  const [filteredDownloadConfirm, setFilteredDownloadConfirm] = useState<{
+    open: boolean;
+    loading: boolean;
+    queueableIds: number[];
+    alreadyDownloadedCount: number;
+    estimatedQueueBytes: number;
+    error: string | null;
+  }>({
+    open: false,
+    loading: false,
+    queueableIds: [],
+    alreadyDownloadedCount: 0,
+    estimatedQueueBytes: 0,
+    error: null,
+  });
+  const [queueNotice, setQueueNotice] = useState<string | null>(null);
+  const [indexerBusy, setIndexerBusy] = useState(false);
+
   const { sdRootHandle } = installer;
 
   // Local Disk Tree state + search filter + selection
@@ -376,8 +537,15 @@ export function CatalogPanel({
       prevFilterSelectionKeyRef.current = filterSelectionKey;
       setSelectedCatalogIds(new Set());
       setConfirmCatalogBulk(false);
+      setFilteredDownloadConfirm((prev) => (prev.open ? { ...prev, open: false, error: null } : prev));
     }
   }, [filterSelectionKey]);
+
+  useEffect(() => {
+    if (!queueNotice) return;
+    const t = window.setTimeout(() => setQueueNotice(null), 4500);
+    return () => window.clearTimeout(t);
+  }, [queueNotice]);
 
   useEffect(() => {
     const nextPrefs: CatalogViewPrefs = {
@@ -542,12 +710,12 @@ export function CatalogPanel({
           setFailedCovers(new Set());
           setConfirmCatalogBulk(false);
         } else {
-          // Clear any cover-load error entry if an item now reports a mirrored cover
+          // Clear any cover-load error entry if an item now reports a cover path or remote cover
           setFailedCovers((prev) => {
             if (prev.size === 0) return prev;
             const next = new Set(prev);
             for (const item of nextItems) {
-              if (item.coverLocalPath) next.delete(item.id);
+              if (item.coverLocalPath || item.metadata?.coverUrl) next.delete(item.id);
             }
             return next;
           });
@@ -939,6 +1107,145 @@ export function CatalogPanel({
     }
   };
 
+  const buildFilterPayload = useCallback(() => {
+    return {
+      search,
+      sort,
+      system: systems,
+      status: statuses,
+      installed: installedFilter !== 'all' ? installedFilter : undefined,
+      tag: tags,
+      tagMode: tags.length > 1 ? tagsMode : undefined,
+      genre: genres,
+      genreMode: genres.length > 1 ? genresMode : undefined,
+      region: regions,
+      regionMode: regions.length > 1 ? regionsMode : undefined,
+      language: languages,
+      languageMode: languages.length > 1 ? languagesMode : undefined,
+      source: sources,
+      sourceMode: sources.length > 1 ? sourcesMode : undefined,
+    };
+  }, [
+    search,
+    sort,
+    systems,
+    statuses,
+    installedFilter,
+    tags,
+    tagsMode,
+    genres,
+    genresMode,
+    regions,
+    regionsMode,
+    languages,
+    languagesMode,
+    sources,
+    sourcesMode,
+  ]);
+
+  const handleQueueIds = async (ids: number[], clearSelection = false) => {
+    if (!onQueueDownload || ids.length === 0) return;
+    if (ids.length === 1) {
+      setQueueingIds((prev) => new Set(prev).add(ids[0]));
+    } else {
+      setQueueingBulk(true);
+    }
+    setQueueNotice(null);
+    try {
+      const outcome = await onQueueDownload({ ids });
+      const queuedCount = outcome?.queuedCount ?? ids.length;
+      const skippedCount = outcome?.skippedCount ?? 0;
+      setQueueNotice(
+        skippedCount > 0
+          ? `Queued ${queuedCount} release${queuedCount === 1 ? '' : 's'} for download (${skippedCount} already downloaded skipped).`
+          : `Queued ${queuedCount} release${queuedCount === 1 ? '' : 's'} for download.`,
+      );
+      if (clearSelection) {
+        setSelectedCatalogIds(new Set());
+      }
+      await loadCatalog(true);
+    } catch (err) {
+      setQueueNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (ids.length === 1) {
+        setQueueingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(ids[0]);
+          return next;
+        });
+      } else {
+        setQueueingBulk(false);
+      }
+    }
+  };
+
+  const handleOpenFilteredDownloadConfirm = async () => {
+    if (filteredDownloadConfirm.open && !filteredDownloadConfirm.loading) {
+      setFilteredDownloadConfirm((prev) => ({ ...prev, open: false }));
+      return;
+    }
+    setFilteredDownloadConfirm({
+      open: true,
+      loading: true,
+      queueableIds: [],
+      alreadyDownloadedCount: 0,
+      estimatedQueueBytes: 0,
+      error: null,
+    });
+    try {
+      const qs = buildCatalogSearchParams(1, 0);
+      const res = await fetch(`/api/items/ids?${qs.toString()}`);
+      const parsed = await readJsonSafely<{
+        queueableIds?: number[];
+        alreadyDownloadedCount?: number;
+        estimatedQueueBytes?: number;
+        error?: string;
+      }>(res);
+      if (!parsed.ok || !parsed.data) {
+        throw new Error(parsed.errorMessage || `Failed to inspect filtered releases (HTTP ${res.status})`);
+      }
+      setFilteredDownloadConfirm({
+        open: true,
+        loading: false,
+        queueableIds: parsed.data.queueableIds || [],
+        alreadyDownloadedCount: parsed.data.alreadyDownloadedCount || 0,
+        estimatedQueueBytes: parsed.data.estimatedQueueBytes || 0,
+        error: null,
+      });
+    } catch (err) {
+      setFilteredDownloadConfirm((prev) => ({
+        ...prev,
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+  };
+
+  const handleConfirmDownloadFiltered = async () => {
+    if (!onQueueDownload || queueingBulk || filteredDownloadConfirm.queueableIds.length === 0) return;
+    setQueueingBulk(true);
+    setQueueNotice(null);
+    try {
+      const outcome = await onQueueDownload({ filters: buildFilterPayload() });
+      const queuedCount = outcome?.queuedCount ?? filteredDownloadConfirm.queueableIds.length;
+      const skippedCount = outcome?.skippedCount ?? filteredDownloadConfirm.alreadyDownloadedCount;
+      setFilteredDownloadConfirm((prev) => ({ ...prev, open: false }));
+      setQueueNotice(
+        skippedCount > 0
+          ? `Queued ${queuedCount} filtered release${queuedCount === 1 ? '' : 's'} (~${formatBytes(filteredDownloadConfirm.estimatedQueueBytes)}), ${skippedCount} already downloaded skipped.`
+          : `Queued ${queuedCount} filtered release${queuedCount === 1 ? '' : 's'} for download.`,
+      );
+      await loadCatalog(true);
+    } catch (err) {
+      setFilteredDownloadConfirm((prev) => ({
+        ...prev,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    } finally {
+      setQueueingBulk(false);
+    }
+  };
+
   const handleDeleteCatalogItems = async (ids: number[]) => {
     if (ids.length === 0) return;
     setDeletingKey(ids.length === 1 ? `item-${ids[0]}` : 'catalog-bulk');
@@ -1083,6 +1390,11 @@ export function CatalogPanel({
   const statusOptions = useMemo<FilterDropdownOption[]>(() => {
     const counts = facets.counts?.statuses;
     const base: FilterDropdownOption[] = [
+      {
+        value: 'available',
+        label: 'Available (Not Downloaded)',
+        count: counts?.available ?? status.totals.availableItems,
+      },
       {
         value: 'downloaded',
         label: 'Downloaded',
@@ -1330,6 +1642,29 @@ export function CatalogPanel({
 
           {viewMode === 'catalog' ? (
             <div className="flex flex-wrap items-center gap-2 self-start lg:self-auto">
+              {onQueueDownload && totalItems > 0 && (
+                <button
+                  type="button"
+                  disabled={!status.auth.hasCompletedLogin}
+                  aria-expanded={filteredDownloadConfirm.open}
+                  onClick={() => void handleOpenFilteredDownloadConfirm()}
+                  title={
+                    !status.auth.hasCompletedLogin
+                      ? 'Verify login in System Settings before queueing downloads'
+                      : hasActiveFilters
+                        ? `Preview and queue all un-downloaded releases matching your active filters (${totalItems})`
+                        : `Preview and queue all un-downloaded releases in the catalog (${totalItems})`
+                  }
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer ${
+                    filteredDownloadConfirm.open
+                      ? 'border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor'
+                      : 'border-crt-phosphor/60 bg-crt-bg text-crt-phosphor hover:bg-crt-phosphor/10'
+                  }`}
+                >
+                  <Download className="h-3.5 w-3.5 shrink-0" />
+                  <span>{hasActiveFilters ? 'Download Filtered' : 'Download All'}</span>
+                </button>
+              )}
               {totalItems > 0 && selectedCatalogIds.size < totalItems && (
                 <button
                   type="button"
@@ -1660,6 +1995,214 @@ export function CatalogPanel({
                 </button>
               </div>
             )}
+            {/* Mellow Smooth Accordion: Download Filtered Confirmation Strip */}
+            <div
+              aria-hidden={!filteredDownloadConfirm.open}
+              inert={!filteredDownloadConfirm.open || undefined}
+              data-open={filteredDownloadConfirm.open ? 'true' : 'false'}
+              className={`crt-accordion-grid transition-opacity duration-250 motion-reduce:transition-none ${
+                filteredDownloadConfirm.open ? 'opacity-100' : 'opacity-0 pointer-events-none'
+              }`}
+            >
+              <div className="crt-accordion-inner">
+                <div className="mt-1 border border-crt-phosphor/45 bg-crt-bg rounded-md px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  {filteredDownloadConfirm.loading ? (
+                    <div className="inline-flex items-center gap-2 font-mono text-crt-muted">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-crt-phosphor" />
+                      <span>Calculating queueable releases and estimated archive footprint…</span>
+                    </div>
+                  ) : filteredDownloadConfirm.error ? (
+                    <span className="font-mono text-crt-crimson">{filteredDownloadConfirm.error}</span>
+                  ) : filteredDownloadConfirm.queueableIds.length === 0 ? (
+                    <span className="font-mono text-crt-muted">
+                      All {filteredDownloadConfirm.alreadyDownloadedCount.toLocaleString()} matching release
+                      {filteredDownloadConfirm.alreadyDownloadedCount === 1 ? ' is' : 's are'} already downloaded on disk.
+                    </span>
+                  ) : (
+                    <div className="font-mono text-crt-text tabular-nums flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="text-crt-phosphor font-semibold">
+                        {filteredDownloadConfirm.queueableIds.length.toLocaleString()} un-downloaded release
+                        {filteredDownloadConfirm.queueableIds.length === 1 ? '' : 's'}
+                      </span>
+                      {filteredDownloadConfirm.estimatedQueueBytes > 0 && (
+                        <>
+                          <span aria-hidden="true" className="text-crt-muted">·</span>
+                          <span>~{formatBytes(filteredDownloadConfirm.estimatedQueueBytes)} est.</span>
+                        </>
+                      )}
+                      {filteredDownloadConfirm.alreadyDownloadedCount > 0 && (
+                        <>
+                          <span aria-hidden="true" className="text-crt-muted">·</span>
+                          <span className="text-crt-muted">
+                            {filteredDownloadConfirm.alreadyDownloadedCount.toLocaleString()} already downloaded skipped
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2 shrink-0 ml-auto">
+                    <button
+                      type="button"
+                      disabled={queueingBulk}
+                      onClick={() => setFilteredDownloadConfirm((prev) => ({ ...prev, open: false }))}
+                      className="px-3 py-1.5 text-xs font-medium border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    {!filteredDownloadConfirm.loading &&
+                      filteredDownloadConfirm.queueableIds.length > 0 && (
+                        <button
+                          type="button"
+                          disabled={queueingBulk}
+                          onClick={() => void handleConfirmDownloadFiltered()}
+                          className="crt-cta-beam inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+                        >
+                          <Download className="h-3.5 w-3.5 shrink-0" />
+                          {queueingBulk
+                            ? 'Queueing...'
+                            : `Queue ${filteredDownloadConfirm.queueableIds.length.toLocaleString()} Download${
+                                filteredDownloadConfirm.queueableIds.length === 1 ? '' : 's'
+                              }`}
+                        </button>
+                      )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Mellow Smooth Accordion: Background Catalog Indexer Banner */}
+            {status.auth.hasCompletedLogin && status.indexer && (() => {
+              const indexer = status.indexer;
+              const isOpen = indexer.active || indexer.remainingUnindexedSystems > 0;
+              return (
+                <div
+                  aria-hidden={!isOpen}
+                  inert={!isOpen || undefined}
+                  data-open={isOpen ? 'true' : 'false'}
+                  className={`crt-accordion-grid transition-opacity duration-300 motion-reduce:transition-none ${
+                    isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                  }`}
+                >
+                  <div className="crt-accordion-inner">
+                    <div className="pt-2 border-t border-crt-border/70 flex flex-wrap items-center justify-between gap-3 text-xs">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2 font-mono tabular-nums">
+                          {indexer.active ? (
+                            <>
+                              <span className="text-crt-phosphor font-medium">
+                                Indexing Catalog {indexer.systemsCompleted + (indexer.currentSystem ? 1 : 0)}/
+                                {Math.max(1, indexer.systemsTotal)}
+                              </span>
+                              {indexer.currentSystem && (
+                                <>
+                                  <span aria-hidden="true" className="text-crt-muted">·</span>
+                                  <span className="text-crt-text">{indexer.currentSystem}</span>
+                                </>
+                              )}
+                              {indexer.totalPages > 0 && (
+                                <>
+                                  <span aria-hidden="true" className="text-crt-muted">·</span>
+                                  <span className="text-crt-muted">
+                                    Page {indexer.currentPage}/{indexer.totalPages}
+                                  </span>
+                                </>
+                              )}
+                              <span aria-hidden="true" className="text-crt-muted">·</span>
+                              <span className="text-crt-muted">
+                                {indexer.indexedCount.toLocaleString()} indexed
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-crt-muted">
+                              {indexer.remainingUnindexedSystems} console
+                              {indexer.remainingUnindexedSystems === 1 ? '' : 's'} remaining outside your current filter
+                            </span>
+                          )}
+                        </div>
+                        {indexer.active && (
+                          <div className="h-1 w-full max-w-md bg-crt-bg border border-crt-border rounded-sm overflow-hidden">
+                            <div
+                              className="h-full bg-crt-phosphor crt-indexer-bar"
+                              style={{
+                                width: `${Math.min(
+                                  100,
+                                  Math.max(
+                                    6,
+                                    Math.round(
+                                      ((indexer.systemsCompleted +
+                                        (indexer.totalPages > 0
+                                          ? indexer.currentPage / indexer.totalPages
+                                          : 0)) /
+                                        Math.max(1, indexer.systemsTotal)) *
+                                        100,
+                                    ),
+                                  ),
+                                )}%`,
+                              }}
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        {indexer.active && onStopCatalogIndex && (
+                          <button
+                            type="button"
+                            disabled={indexerBusy}
+                            onClick={async () => {
+                              setIndexerBusy(true);
+                              try {
+                                await onStopCatalogIndex();
+                              } finally {
+                                setIndexerBusy(false);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                          >
+                            <Pause className="h-3 w-3" />
+                            Pause Indexing
+                          </button>
+                        )}
+                        {(!indexer.active || indexer.scope === 'filtered') &&
+                          indexer.remainingUnindexedSystems > 0 &&
+                          onStartCatalogIndex && (
+                            <button
+                              type="button"
+                              disabled={indexerBusy}
+                              onClick={async () => {
+                                setIndexerBusy(true);
+                                try {
+                                  await onStartCatalogIndex('full');
+                                } finally {
+                                  setIndexerBusy(false);
+                                }
+                              }}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                            >
+                              <RefreshCw className={`h-3 w-3 ${indexerBusy ? 'animate-spin' : ''}`} />
+                              Index All Remaining Consoles ({indexer.remainingUnindexedSystems})
+                            </button>
+                          )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {queueNotice && (
+              <div className="border border-crt-phosphor/45 bg-crt-phosphor/8 rounded px-3 py-2 text-xs font-mono text-crt-phosphor flex items-center justify-between gap-3">
+                <span>{queueNotice}</span>
+                <button
+                  type="button"
+                  onClick={() => setQueueNotice(null)}
+                  className="text-crt-muted hover:text-crt-text shrink-0 cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -1687,6 +2230,22 @@ export function CatalogPanel({
             <div className="flex flex-wrap items-center gap-2">
               {!confirmCatalogBulk && (
                 <>
+                  {onQueueDownload && (
+                    <button
+                      type="button"
+                      disabled={queueingBulk || !status.auth.hasCompletedLogin}
+                      title={
+                        !status.auth.hasCompletedLogin
+                          ? 'Verify login in System Settings before queueing downloads'
+                          : 'Queue un-downloaded or failed releases in your selection for background download'
+                      }
+                      onClick={() => void handleQueueIds(Array.from(selectedCatalogIds), true)}
+                      className="crt-cta-beam inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      <Download className="h-3.5 w-3.5 shrink-0" />
+                      {queueingBulk ? 'Queueing...' : `Queue Downloads (${selectedCatalogIds.size})`}
+                    </button>
+                  )}
                   <button
                     type="button"
                     disabled={installer.isBusy}
@@ -1702,7 +2261,7 @@ export function CatalogPanel({
                         knownItemMetaMap,
                       )
                     }
-                    className="crt-cta-beam inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                   >
                     <FolderInput className="h-3.5 w-3.5 shrink-0" />
                     Express Install ({selectedCatalogIds.size})
@@ -2026,25 +2585,23 @@ export function CatalogPanel({
                         </td>
                         <td className="px-3 py-2 max-w-md">
                           <div className="flex items-center gap-3 min-w-0">
-                            {showCoverThumb ? (
-                              <img
-                                src={`/api/items/${item.id}/asset?kind=cover${assetVersion}`}
-                                alt={`${item.title} cover`}
-                                loading="lazy"
-                                onError={() =>
-                                  setFailedCovers((prev) => {
-                                    const next = new Set(prev);
-                                    next.add(item.id);
-                                    return next;
-                                  })
-                                }
-                                className="w-8 h-10 object-cover rounded border border-crt-border bg-crt-bg shrink-0"
-                              />
-                            ) : (
-                              <div className="w-8 h-10 rounded border border-crt-border bg-crt-bg flex items-center justify-center shrink-0">
-                                <Gamepad2 className="h-3.5 w-3.5 text-crt-border-strong" />
-                              </div>
-                            )}
+                            <LazyCoverImage
+                              itemId={item.id}
+                              title={item.title}
+                              systemName={item.systemName}
+                              hasLocalCover={Boolean(item.coverLocalPath)}
+                              hasRemoteCover={Boolean(item.metadata?.coverUrl)}
+                              assetVersion={assetVersion}
+                              failed={failedCovers.has(item.id)}
+                              compact
+                              onError={() =>
+                                setFailedCovers((prev) => {
+                                  const next = new Set(prev);
+                                  next.add(item.id);
+                                  return next;
+                                })
+                              }
+                            />
                             <div className="min-w-0">
                               <div className="font-medium text-crt-text truncate">{item.title}</div>
                               {subMeta && (
@@ -2073,7 +2630,9 @@ export function CatalogPanel({
                                 : transfer.bytesReceived > 0
                                   ? formatBytes(transfer.bytesReceived)
                                   : 'Pending'
-                            : formatBytes(item.fileSizeBytes)}
+                            : item.sizeIsEstimated && item.fileSizeBytes > 0
+                              ? `~${formatBytes(item.fileSizeBytes)}`
+                              : formatBytes(item.fileSizeBytes)}
                         </td>
                         <td className="px-3 py-2 font-mono whitespace-nowrap">
                           {transfer.active ? (
@@ -2161,14 +2720,17 @@ export function CatalogPanel({
                                 className={`inline-flex items-center gap-1.5 ${
                                   item.status === 'downloaded'
                                     ? 'text-crt-phosphor'
-                                    : item.status === 'skipped'
-                                      ? 'text-crt-muted'
-                                      : item.status === 'failed'
-                                        ? 'text-crt-crimson'
-                                        : 'text-crt-amber'
+                                    : item.status === 'available'
+                                      ? 'text-crt-phosphor/80'
+                                      : item.status === 'skipped'
+                                        ? 'text-crt-muted'
+                                        : item.status === 'failed'
+                                          ? 'text-crt-crimson'
+                                          : 'text-crt-amber'
                                 }`}
                               >
                                 {item.status === 'downloaded' && <CheckCircle2 className="h-3.5 w-3.5" />}
+                                {item.status === 'available' && <Cloud className="h-3.5 w-3.5" />}
                                 {item.status === 'skipped' && <SkipForward className="h-3.5 w-3.5" />}
                                 {item.status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
                                 {item.status === 'partial' && <AlertCircle className="h-3.5 w-3.5" />}
@@ -2193,7 +2755,22 @@ export function CatalogPanel({
                           onClick={(e) => e.stopPropagation()}
                         >
                           <div className="inline-flex items-center justify-end gap-2">
-                            {item.status === 'failed' || item.status === 'partial' ? (
+                            {item.status === 'available' && onQueueDownload ? (
+                              <button
+                                type="button"
+                                disabled={queueingIds.has(item.id) || !status.auth.hasCompletedLogin}
+                                title={
+                                  !status.auth.hasCompletedLogin
+                                    ? 'Verify login in System Settings before downloading'
+                                    : 'Queue this release for download'
+                                }
+                                onClick={() => void handleQueueIds([item.id])}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                              >
+                                <Download className="h-3 w-3" />
+                                {queueingIds.has(item.id) ? 'Queueing...' : 'Download'}
+                              </button>
+                            ) : item.status === 'failed' || item.status === 'partial' ? (
                               <button
                                 type="button"
                                 disabled={effectiveRetryingId === item.id || Boolean(status.activeRun) || !status.auth.hasCompletedLogin}
@@ -2322,30 +2899,23 @@ export function CatalogPanel({
                       {/* Cover Art Container */}
                       <div className="relative aspect-[3/4] bg-crt-surface border-b border-crt-border overflow-hidden">
                         <div aria-hidden="true" className="crt-card-holo" />
-                        {showCover ? (
-                          <img
-                            src={`/api/items/${item.id}/asset?kind=cover${assetVersion}`}
-                            alt={`${item.title} cover art`}
-                            loading="lazy"
-                            onError={() =>
-                              setFailedCovers((prev) => {
-                                const next = new Set(prev);
-                                next.add(item.id);
-                                return next;
-                              })
-                            }
-                            className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-200"
-                          />
-                        ) : (
-                          <div
-                            className={`w-full h-full flex flex-col items-center justify-center p-4 text-center space-y-2 ${
-                              transfer.active ? 'pb-16' : ''
-                            }`}
-                          >
-                            <Gamepad2 className="h-8 w-8 text-crt-border-strong" />
-                            <span className="font-mono text-[11px] text-crt-muted">{item.systemName}</span>
-                          </div>
-                        )}
+                        <LazyCoverImage
+                          itemId={item.id}
+                          title={item.title}
+                          systemName={item.systemName}
+                          hasLocalCover={Boolean(item.coverLocalPath)}
+                          hasRemoteCover={Boolean(item.metadata?.coverUrl)}
+                          assetVersion={assetVersion}
+                          failed={failedCovers.has(item.id)}
+                          padBottom={transfer.active}
+                          onError={() =>
+                            setFailedCovers((prev) => {
+                              const next = new Set(prev);
+                              next.add(item.id);
+                              return next;
+                            })
+                          }
+                        />
 
                         {transfer.active && (
                           <div className="absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-crt-bg via-crt-bg/92 to-transparent pt-10 px-3 pb-2.5 space-y-1.5">
@@ -2495,25 +3065,49 @@ export function CatalogPanel({
                         ) : (
                           <div className="pt-2 border-t border-crt-border flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
                             <span className="text-crt-text truncate">
+                              {item.sizeIsEstimated && item.fileSizeBytes > 0 ? '~' : ''}
                               {formatBytes(item.fileSizeBytes)} · {item.filesCount}f
                             </span>
-                            <span
-                              className={`inline-flex items-center gap-1 shrink-0 ${
-                                item.status === 'downloaded'
-                                  ? 'text-crt-phosphor'
-                                  : item.status === 'skipped'
-                                    ? 'text-crt-muted'
-                                    : item.status === 'failed'
-                                      ? 'text-crt-crimson'
-                                      : 'text-crt-amber'
-                              }`}
-                            >
-                              {item.status === 'downloaded' && <CheckCircle2 className="h-3 w-3" />}
-                              {item.status === 'skipped' && <SkipForward className="h-3 w-3" />}
-                              {item.status === 'failed' && <XCircle className="h-3 w-3" />}
-                              {item.status === 'partial' && <AlertCircle className="h-3 w-3" />}
-                              {item.status}
-                            </span>
+                            {item.status === 'available' && onQueueDownload ? (
+                              <button
+                                type="button"
+                                disabled={queueingIds.has(item.id) || !status.auth.hasCompletedLogin}
+                                title={
+                                  !status.auth.hasCompletedLogin
+                                    ? 'Verify login in System Settings before downloading'
+                                    : 'Queue this release for download'
+                                }
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleQueueIds([item.id]);
+                                }}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                              >
+                                <Download className="h-3 w-3" />
+                                {queueingIds.has(item.id) ? 'Queueing' : 'Download'}
+                              </button>
+                            ) : (
+                              <span
+                                className={`inline-flex items-center gap-1 shrink-0 ${
+                                  item.status === 'downloaded'
+                                    ? 'text-crt-phosphor'
+                                    : item.status === 'available'
+                                      ? 'text-crt-phosphor/80'
+                                      : item.status === 'skipped'
+                                        ? 'text-crt-muted'
+                                        : item.status === 'failed'
+                                          ? 'text-crt-crimson'
+                                          : 'text-crt-amber'
+                                }`}
+                              >
+                                {item.status === 'downloaded' && <CheckCircle2 className="h-3 w-3" />}
+                                {item.status === 'available' && <Cloud className="h-3 w-3" />}
+                                {item.status === 'skipped' && <SkipForward className="h-3 w-3" />}
+                                {item.status === 'failed' && <XCircle className="h-3 w-3" />}
+                                {item.status === 'partial' && <AlertCircle className="h-3 w-3" />}
+                                {item.status}
+                              </span>
+                            )}
                           </div>
                         )}
                       </div>
@@ -2673,6 +3267,7 @@ export function CatalogPanel({
         onClose={closeDetailDrawer}
         onItemUpdated={handleItemUpdated}
         onRetryItem={handleRetry}
+        onQueueDownload={onQueueDownload ? (ids) => handleQueueIds(ids) : undefined}
         onExportToSdCard={(id) =>
           void installer.openReviewQueue([id], currentSmartFilterContext, knownItemMetaMap)
         }

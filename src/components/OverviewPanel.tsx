@@ -1224,6 +1224,12 @@ export function OverviewPanel({
             <span>
               {status.totals.downloadedItems.toLocaleString()} downloaded
             </span>
+            {status.totals.availableItems > 0 && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{status.totals.availableItems.toLocaleString()} available</span>
+              </>
+            )}
             {(status.totals.failedItems > 0 || failedQueueOpen) && (
               <>
                 <span aria-hidden="true">·</span>
@@ -1374,9 +1380,11 @@ export function OverviewPanel({
                     const baseScope =
                       run.triggerType === 'retry'
                         ? 'retry'
-                        : run.mode === 'dry_run'
-                          ? 'incremental'
-                          : run.mode;
+                        : run.triggerType === 'download'
+                          ? 'queue'
+                          : run.mode === 'dry_run'
+                            ? 'incremental'
+                            : run.mode;
                     const wouldDownload = Math.max(0, run.newFound - run.skippedCount - run.failedCount);
                     return (
                       <tr key={run.id} className="crt-table-row h-9 hover:bg-crt-elevated transition-colors">

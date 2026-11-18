@@ -4328,17 +4328,18 @@ export class RetroGameTalkClient {
       signal?: AbortSignal;
       log?: LoggerFn;
       onPageFetched?: (page: number, totalPages: number) => void;
+      onPostsPage?: (posts: WpPostMetadata[], page: number, totalPages: number) => void | Promise<void>;
     } = {},
-  ): Promise<{ supported: boolean; posts: WpPostMetadata[] }> {
-    const { modifiedAfterIso, signal, log, onPageFetched } = options;
+  ): Promise<{ supported: boolean; posts: WpPostMetadata[]; totalPages: number }> {
+    const { modifiedAfterIso, signal, log, onPageFetched, onPostsPage } = options;
     const cleanSlug = systemSlug.trim().toLowerCase();
-    if (!cleanSlug) return { supported: false, posts: [] };
+    if (!cleanSlug) return { supported: false, posts: [], totalPages: 0 };
 
     const restBase = await this.resolveWpRestBaseForSystem(cleanSlug, config, signal, log);
 
     // Built-in core types ('posts', 'pages', 'media') are not console CPTs unless explicitly requested
     if (!restBase || restBase === 'pages' || restBase === 'media' || restBase === 'blocks') {
-      return { supported: false, posts: [] };
+      return { supported: false, posts: [], totalPages: 0 };
     }
 
     if (restBase.toLowerCase() !== cleanSlug) {
@@ -4431,7 +4432,7 @@ export class RetroGameTalkClient {
         await response.body?.cancel().catch(() => undefined);
         if (page === 1) {
           log?.('debug', `[WP REST] "${restBase}" endpoint returned HTTP 404 on page 1; marking unsupported`);
-          return { supported: false, posts: [] };
+          return { supported: false, posts: [], totalPages: 0 };
         }
         log?.('warn', `WP REST pagination for ${restBase} stopped early at page ${page}/${totalPages} (HTTP 404)`);
         break;
@@ -4444,7 +4445,7 @@ export class RetroGameTalkClient {
         }
         if (page === 1) {
           log?.('debug', `[WP REST] "${restBase}" returned HTTP ${response.status} on page 1; marking unsupported`, errBody.replace(/\s+/g, ' ').trim().slice(0, 140));
-          return { supported: false, posts: [] };
+          return { supported: false, posts: [], totalPages: 0 };
         }
         log?.('warn', `WP REST pagination for ${restBase} stopped early at page ${page}/${totalPages} (HTTP ${response.status})`);
         break;
@@ -4455,7 +4456,7 @@ export class RetroGameTalkClient {
         await response.body?.cancel().catch(() => undefined);
         if (page === 1) {
           log?.('debug', `[WP REST] "${restBase}" returned non-JSON content-type "${contentType}" on page 1`);
-          return { supported: false, posts: [] };
+          return { supported: false, posts: [], totalPages: 0 };
         }
         log?.('warn', `WP REST pagination for ${restBase} returned non-JSON at page ${page}/${totalPages}`);
         break;
@@ -4474,6 +4475,7 @@ export class RetroGameTalkClient {
       }
 
       let anyNewerOnThisPage = false;
+      const pagePosts: WpPostMetadata[] = [];
       for (const entry of rawList) {
         if (!entry || typeof entry !== 'object') continue;
         const parsed = this.parseWpPostObject(entry as Record<string, unknown>, restBase);
@@ -4493,7 +4495,12 @@ export class RetroGameTalkClient {
         }
 
         seenIds.add(parsed.wpPostId);
+        pagePosts.push(parsed);
         collected.push(parsed);
+      }
+
+      if (onPostsPage && pagePosts.length > 0 && !signal?.aborted) {
+        await onPostsPage(pagePosts, page, totalPages);
       }
 
       if (fallbackClientCutoffMode && cutoffMs !== null && fallbackOrderBy === 'modified' && !anyNewerOnThisPage) {
@@ -4510,7 +4517,7 @@ export class RetroGameTalkClient {
       page += 1;
     }
 
-    return { supported: true, posts: collected };
+    return { supported: true, posts: collected, totalPages };
   }
 
   /**
@@ -5074,6 +5081,26 @@ export class RetroGameTalkClient {
     }
 
     return null;
+  }
+
+  async fetchCoverToFile(
+    candidateUrls: string[],
+    refererUrl: string,
+    targetBasePathWithoutExt: string,
+    config: ScraperConfigInternal,
+    signal?: AbortSignal,
+    log?: LoggerFn,
+  ): Promise<string | null> {
+    const expanded = expandFullResImageCandidates(candidateUrls, refererUrl);
+    if (expanded.length === 0) return null;
+    const saved = await this.downloadAssetWithFallback(
+      expanded,
+      targetBasePathWithoutExt,
+      refererUrl,
+      config,
+      { forceRefresh: false, signal, log },
+    );
+    return saved?.filePath ?? null;
   }
 
   async mirrorReleaseAssets(

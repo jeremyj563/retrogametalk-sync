@@ -722,6 +722,30 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 18,
+    name: 'decoupled_catalog_indexing',
+    description:
+      'Add auto_download_new_releases and system_index_state_json to scraper_config, size_is_estimated and status index to catalog_releases',
+    up: (db) => {
+      if (!tableHasColumn(db, 'scraper_config', 'auto_download_new_releases')) {
+        db.exec(
+          `ALTER TABLE scraper_config ADD COLUMN auto_download_new_releases INTEGER NOT NULL DEFAULT 1;`,
+        );
+      }
+      if (!tableHasColumn(db, 'scraper_config', 'system_index_state_json')) {
+        db.exec(
+          `ALTER TABLE scraper_config ADD COLUMN system_index_state_json TEXT NOT NULL DEFAULT '{}';`,
+        );
+      }
+      if (!tableHasColumn(db, 'catalog_releases', 'size_is_estimated')) {
+        db.exec(
+          `ALTER TABLE catalog_releases ADD COLUMN size_is_estimated INTEGER NOT NULL DEFAULT 0;`,
+        );
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_catalog_releases_status ON catalog_releases(status);`);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
