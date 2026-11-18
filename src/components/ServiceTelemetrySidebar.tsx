@@ -450,8 +450,8 @@ export function ServiceTelemetrySidebar({
                   <span>{config?.maxConcurrency ?? 1}x Worker</span>
                   <span aria-hidden="true"> · </span>
                   <span>
-                    {(config?.downloadChunkConcurrency ?? 3) > 1
-                      ? `${config?.downloadChunkConcurrency ?? 3}x Chunks`
+                    {(config?.downloadChunkConcurrency ?? 1) > 1
+                      ? `${config?.downloadChunkConcurrency ?? 1}x Chunks`
                       : '1x Stream'}
                   </span>
                 </div>

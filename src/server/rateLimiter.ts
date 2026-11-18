@@ -35,6 +35,8 @@ export class AdaptiveRateLimiter {
   private consecutiveSuccesses = 0;
   private rateLimitHits = 0;
   private cooldownUntilMs: number | null = null;
+  private lastThrottleEscalationAt = 0;
+  private lastErrorEscalationAt = 0;
   private lastRequestAt = 0;
   private totalRequests = 0;
   private totalLatencyMs = 0;
@@ -143,10 +145,11 @@ export class AdaptiveRateLimiter {
     this.totalLatencyMs += latencyMs;
     this.consecutiveSuccesses += 1;
 
-    // Gentle additive tightening after sustained healthy responses
-    if (this.consecutiveSuccesses >= 5 && this.currentDelayMs > this.minDelayMs) {
+    const recoveryThreshold = this.currentDelayMs > this.baseDelayMs * 2 ? 3 : 4;
+    if (this.consecutiveSuccesses >= recoveryThreshold && this.currentDelayMs > this.minDelayMs) {
       const prevDelay = this.currentDelayMs;
-      const step = Math.max(50, Math.round((this.currentDelayMs - this.minDelayMs) * 0.15));
+      const decayRatio = this.currentDelayMs > this.baseDelayMs * 2 ? 0.25 : 0.18;
+      const step = Math.max(60, Math.round((this.currentDelayMs - this.minDelayMs) * decayRatio));
       this.currentDelayMs = Math.max(this.minDelayMs, this.currentDelayMs - step);
       this.consecutiveSuccesses = 0;
       logServer(
@@ -160,20 +163,66 @@ export class AdaptiveRateLimiter {
     this.pushSample(latencyMs, false);
   }
 
-  recordThrottle(retryAfterSeconds?: number, latencyMs = 0): number {
+  recordThrottle(
+    retryAfterSeconds?: number,
+    latencyMs = 0,
+    options: { escalateGlobalDelay?: boolean; localSettleMs?: number } = {},
+  ): number {
     this.totalRequests += 1;
     this.totalLatencyMs += latencyMs;
+    const now = Date.now();
+    const retryMs = retryAfterSeconds ? Math.round(retryAfterSeconds * 1000) : 0;
+
+    // Mirror multi-connection 503 rejections (e.g. parallel HTTP Range slices) should step down
+    // the mirror connection count locally without poisoning global WordPress API pacing.
+    if (options.escalateGlobalDelay === false) {
+      const localCooldownMs = Math.min(
+        8000,
+        Math.max(2000, retryMs || options.localSettleMs || 2500),
+      );
+      logServer(
+        'RATE_LIMITER',
+        'debug',
+        `Mirror connection limit detected; keeping API delay at ${this.currentDelayMs}ms (local settle=${localCooldownMs}ms)`,
+        `retryAfter=${retryAfterSeconds ?? 'none'}s`,
+      );
+      this.pushSample(latencyMs, true);
+      return localCooldownMs;
+    }
+
     this.consecutiveSuccesses = 0;
     this.rateLimitHits += 1;
 
+    // Deduplicate overlapping 429/503 rejections from concurrent workers within an active
+    // cooldown or 2.5s burst window so delay never multiplies exponentially (e.g. 1.8^N).
+    const withinCooldownBurst =
+      (this.cooldownUntilMs !== null && now < this.cooldownUntilMs) ||
+      now - this.lastThrottleEscalationAt < 2500;
+
+    if (withinCooldownBurst) {
+      const remaining = this.getCooldownRemainingMs();
+      const cooldownMs = Math.max(remaining, retryMs, this.currentDelayMs);
+      this.cooldownUntilMs = Math.max(this.cooldownUntilMs ?? 0, now + cooldownMs);
+      logServer(
+        'RATE_LIMITER',
+        'debug',
+        `Coalesced concurrent throttle burst (delay steady at ${this.currentDelayMs}ms, cooldown=${cooldownMs}ms)`,
+        `retryAfter=${retryAfterSeconds ?? 'none'}s, hits=${this.rateLimitHits}`,
+      );
+      this.pushSample(latencyMs, true);
+      return cooldownMs;
+    }
+
     const prevDelay = this.currentDelayMs;
-    const multiplied = Math.round(Math.max(this.baseDelayMs, this.currentDelayMs) * this.backoffMultiplier);
-    const retryMs = retryAfterSeconds ? Math.round(retryAfterSeconds * 1000) : 0;
+    const multiplied = Math.round(
+      Math.max(this.baseDelayMs, this.currentDelayMs) * this.backoffMultiplier,
+    );
     const nextDelay = Math.min(this.maxDelayMs, Math.max(multiplied, retryMs));
 
     this.currentDelayMs = nextDelay;
-    const cooldownMs = Math.max(nextDelay, retryMs || nextDelay);
-    this.cooldownUntilMs = Date.now() + cooldownMs;
+    this.lastThrottleEscalationAt = now;
+    const cooldownMs = Math.min(this.maxDelayMs, Math.max(nextDelay, retryMs || nextDelay));
+    this.cooldownUntilMs = now + cooldownMs;
 
     logServer(
       'RATE_LIMITER',
@@ -190,14 +239,19 @@ export class AdaptiveRateLimiter {
     this.totalRequests += 1;
     this.totalLatencyMs += latencyMs;
     this.consecutiveSuccesses = 0;
-    const prevDelay = this.currentDelayMs;
-    this.currentDelayMs = Math.min(this.maxDelayMs, Math.round(this.currentDelayMs * 1.4));
-    logServer(
-      'RATE_LIMITER',
-      'debug',
-      `AIMD error backoff ${prevDelay}ms -> ${this.currentDelayMs}ms`,
-      `latency=${Math.round(latencyMs)}ms`,
-    );
+    const now = Date.now();
+    if (now - this.lastErrorEscalationAt >= 2500) {
+      const prevDelay = this.currentDelayMs;
+      const errorCap = Math.min(this.maxDelayMs, Math.max(this.baseDelayMs * 4, 8000));
+      this.currentDelayMs = Math.min(errorCap, Math.max(this.currentDelayMs, Math.round(this.currentDelayMs * 1.25)));
+      this.lastErrorEscalationAt = now;
+      logServer(
+        'RATE_LIMITER',
+        'debug',
+        `AIMD error backoff ${prevDelay}ms -> ${this.currentDelayMs}ms`,
+        `latency=${Math.round(latencyMs)}ms`,
+      );
+    }
     this.pushSample(latencyMs, false);
   }
 

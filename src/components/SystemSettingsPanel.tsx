@@ -267,7 +267,7 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
           ? {
               downloadChunkConcurrency: Math.max(
                 1,
-                Math.min(4, Math.round(Number(downloadChunkConcurrency) || 3)),
+                Math.min(4, Math.round(Number(downloadChunkConcurrency) || 1)),
               ),
             }
           : {}),
@@ -275,7 +275,7 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
           ? {
               downloadChunkMinSizeMb: Math.max(
                 4,
-                Math.min(64, Math.round(Number(downloadChunkMinSizeMb) || 8)),
+                Math.min(128, Math.round(Number(downloadChunkMinSizeMb) || 32)),
               ),
             }
           : {}),
@@ -327,10 +327,10 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
         (!maxRetriesLockedByEnv && maxRetries !== config.maxRetries) ||
         (!concurrencyLockedByEnv && maxConcurrency !== config.maxConcurrency) ||
         (!chunkConcurrencyLockedByEnv &&
-          Math.max(1, Math.min(4, Math.round(Number(downloadChunkConcurrency) || 3))) !==
+          Math.max(1, Math.min(4, Math.round(Number(downloadChunkConcurrency) || 1))) !==
             config.downloadChunkConcurrency) ||
         (!chunkThresholdLockedByEnv &&
-          Math.max(4, Math.min(64, Math.round(Number(downloadChunkMinSizeMb) || 8))) !==
+          Math.max(4, Math.min(128, Math.round(Number(downloadChunkMinSizeMb) || 32))) !==
             config.downloadChunkMinSizeMb) ||
         (!timeoutLockedByEnv && requestTimeoutMs !== config.requestTimeoutMs) ||
         (!userAgentLockedByEnv && userAgent !== config.userAgent);
@@ -1033,13 +1033,13 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
                         onChange={(e) => setDownloadChunkConcurrency(Number(e.target.value))}
                         className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
                       >
-                        <option value={1}>1 (Disabled · Single stream)</option>
-                        <option value={2}>2 (Conservative · 2 chunks)</option>
-                        <option value={3}>3 (Recommended · 3 chunks)</option>
-                        <option value={4}>4 (Fastest · 4 chunks)</option>
+                        <option value={1}>1 (Recommended · Single stream — Safe for RGT)</option>
+                        <option value={2}>2 (Experimental · May trigger mirror 503)</option>
+                        <option value={3}>3 (Aggressive · High mirror 503 risk)</option>
+                        <option value={4}>4 (Max · Not recommended for RGT mirrors)</option>
                       </select>
                       <p className="text-[11px] text-crt-muted">
-                        Parallel byte-range streams after URL gate; auto-steps down to 1x if a mirror limits concurrent connections
+                        RGT download mirrors enforce strict concurrent connection limits (/503.html); steps straight to 1x if throttled without inflating API pacing
                       </p>
                     </div>
 
@@ -1059,7 +1059,7 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
                         id="download-chunk-threshold"
                         type="number"
                         min={4}
-                        max={64}
+                        max={128}
                         step={4}
                         value={downloadChunkMinSizeMb}
                         disabled={chunkThresholdLockedByEnv}
@@ -1067,7 +1067,7 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
                         className="w-full px-3 py-2 text-sm font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
                       />
                       <p className="text-[11px] text-crt-muted">
-                        ROMs at or below this threshold finish in 1 request; larger files split (4–64 MiB)
+                        ROMs at or below this size finish in 1 stream; larger archives split when multi-chunk is enabled (4–128 MiB; default 32 MiB)
                       </p>
                     </div>
                   </div>

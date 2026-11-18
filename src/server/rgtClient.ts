@@ -335,15 +335,64 @@ class RangeThrottleError extends Error {
   readonly cooldownMs: number;
   readonly retryAfterSec?: number;
   readonly hostname: string;
+  readonly isLocalMirrorLimit: boolean;
 
-  constructor(status: number, cooldownMs: number, retryAfterSec: number | undefined, hostname: string) {
+  constructor(
+    status: number,
+    cooldownMs: number,
+    retryAfterSec: number | undefined,
+    hostname: string,
+    isLocalMirrorLimit = false,
+  ) {
     super(`HTTP ${status} rate limit from ${hostname}`);
     this.name = 'RangeThrottleError';
     this.status = status;
     this.cooldownMs = cooldownMs;
     this.retryAfterSec = retryAfterSec;
     this.hostname = hostname;
+    this.isLocalMirrorLimit = isLocalMirrorLimit;
   }
+}
+
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function waitPromiseWithAbort(promise: Promise<void>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  }
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      () => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      },
+      () => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      },
+    );
+  });
 }
 
 function isThrottleErrorPageUrl(urlStr: string): boolean {
@@ -620,6 +669,7 @@ export class RetroGameTalkClient {
   private wpTypesCache: Map<string, string> | null = null;
   private wpTypesCacheBaseUrl: string | null = null;
   private hostChunkCaps = new Map<string, { maxChunks: number; updatedAt: number }>();
+  private hostStreamQueues = new Map<string, Promise<void>>();
   private authStatus: AuthSessionStatus = {
     configured: false,
     authenticated: false,
@@ -643,8 +693,8 @@ export class RetroGameTalkClient {
     const host = safeHostname(urlStr);
     const entry = this.hostChunkCaps.get(host);
     if (!entry) return configured;
-    // Expire learned mirror ceiling after 15 minutes so capacity can re-probe in future runs
-    if (Date.now() - entry.updatedAt > 15 * 60_000) {
+    // Remember learned mirror ceilings for 60 minutes to avoid repeated /503.html waves
+    if (Date.now() - entry.updatedAt > 60 * 60_000) {
       this.hostChunkCaps.delete(host);
       return configured;
     }
@@ -655,9 +705,51 @@ export class RetroGameTalkClient {
     const host = safeHostname(urlStr);
     const clamped = Math.max(1, Math.min(4, Math.round(maxChunks)));
     const existing = this.hostChunkCaps.get(host);
-    if (!existing || Date.now() - existing.updatedAt > 15 * 60_000 || clamped < existing.maxChunks) {
+    if (!existing || Date.now() - existing.updatedAt > 60 * 60_000 || clamped < existing.maxChunks) {
       this.hostChunkCaps.set(host, { maxChunks: clamped, updatedAt: Date.now() });
     }
+  }
+
+  private isHostSingleStreamLimited(urlStr: string): boolean {
+    const host = safeHostname(urlStr);
+    const entry = this.hostChunkCaps.get(host);
+    if (!entry) return false;
+    if (Date.now() - entry.updatedAt > 60 * 60_000) {
+      this.hostChunkCaps.delete(host);
+      return false;
+    }
+    return entry.maxChunks <= 1;
+  }
+
+  private async acquireHostStreamSlot(urlStr: string, signal: AbortSignal): Promise<() => void> {
+    const host = safeHostname(urlStr);
+    const prev = this.hostStreamQueues.get(host) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((res) => {
+      release = res;
+    });
+    const tail = prev.then(() => current, () => current);
+    this.hostStreamQueues.set(host, tail);
+
+    try {
+      await waitPromiseWithAbort(prev, signal);
+    } catch (err) {
+      release();
+      if (this.hostStreamQueues.get(host) === tail) {
+        this.hostStreamQueues.delete(host);
+      }
+      throw err;
+    }
+
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      release();
+      if (this.hostStreamQueues.get(host) === tail) {
+        this.hostStreamQueues.delete(host);
+      }
+    };
   }
 
   private switchBrowserProfile(profile: Browser): void {
@@ -972,6 +1064,7 @@ export class RetroGameTalkClient {
     log?: LoggerFn,
     maxRedirects = 8,
     timeoutMsOverride?: number,
+    escalateGlobalThrottle = true,
   ): Promise<{ response: ImpitResponse; finalUrl: string; latencyMs: number }> {
     let currentUrl = url;
     let attempt = 0;
@@ -1070,13 +1163,20 @@ export class RetroGameTalkClient {
       if (res.status === 429 || res.status === 503) {
         await res.body?.cancel().catch(() => undefined);
         const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
-        const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency);
+        const shouldEscalateGlobal = escalateGlobalThrottle || res.status === 429 || retryAfterSec !== undefined;
+        const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency, {
+          escalateGlobalDelay: shouldEscalateGlobal,
+          localSettleMs: 2500,
+        });
         attempt += 1;
         log?.(
           'throttle',
           `HTTP ${res.status} rate limit from ${new URL(currentUrl).hostname}; backing off ${Math.round(cooldownMs / 1000)}s`,
           `Attempt ${attempt}/${config.maxRetries}${retryAfterSec ? ` · Retry-After: ${retryAfterSec}s` : ''}`,
         );
+        if (!shouldEscalateGlobal) {
+          throw new RangeThrottleError(res.status, cooldownMs, retryAfterSec, safeHostname(currentUrl), true);
+        }
         if (attempt > config.maxRetries) {
           throw new Error(`Exceeded max retries (${config.maxRetries}) after HTTP ${res.status} from ${new URL(currentUrl).hostname}`);
         }
@@ -1090,13 +1190,20 @@ export class RetroGameTalkClient {
         if (isThrottleErrorPageUrl(nextUrl)) {
           const inferredStatus = inferThrottleStatusFromUrl(nextUrl);
           const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
-          const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency);
+          const shouldEscalateGlobal = escalateGlobalThrottle || inferredStatus === 429 || retryAfterSec !== undefined;
+          const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency, {
+            escalateGlobalDelay: shouldEscalateGlobal,
+            localSettleMs: 2500,
+          });
           attempt += 1;
           log?.(
             'throttle',
             `HTTP ${inferredStatus} throttle redirect (${new URL(nextUrl).pathname}) from ${safeHostname(currentUrl)}; backing off ${Math.round(cooldownMs / 1000)}s`,
             `Attempt ${attempt}/${config.maxRetries}${retryAfterSec ? ` · Retry-After: ${retryAfterSec}s` : ''}`,
           );
+          if (!shouldEscalateGlobal) {
+            throw new RangeThrottleError(inferredStatus, cooldownMs, retryAfterSec, safeHostname(currentUrl), true);
+          }
           if (attempt > config.maxRetries) {
             throw new RangeThrottleError(inferredStatus, cooldownMs, retryAfterSec, safeHostname(currentUrl));
           }
@@ -2934,6 +3041,7 @@ export class RetroGameTalkClient {
     config: ScraperConfigInternal,
     signal: AbortSignal,
     timeoutMs: number,
+    isMultiChunkWave: boolean,
     log?: LoggerFn,
   ): Promise<{ response: ImpitResponse; finalUrl: string; latencyMs: number }> {
     // Respect any active global 429/503 cooldown before issuing sibling range traffic
@@ -3011,8 +3119,18 @@ export class RetroGameTalkClient {
     if (res.status === 429 || res.status === 503) {
       await res.body?.cancel().catch(() => undefined);
       const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
-      const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency);
-      throw new RangeThrottleError(res.status, cooldownMs, retryAfterSec, safeHostname(targetUrl));
+      const shouldEscalateGlobal = !isMultiChunkWave || res.status === 429 || retryAfterSec !== undefined;
+      const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency, {
+        escalateGlobalDelay: shouldEscalateGlobal,
+        localSettleMs: 2500,
+      });
+      throw new RangeThrottleError(
+        res.status,
+        cooldownMs,
+        retryAfterSec,
+        safeHostname(targetUrl),
+        !shouldEscalateGlobal,
+      );
     }
 
     if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
@@ -3021,8 +3139,18 @@ export class RetroGameTalkClient {
       if (isThrottleErrorPageUrl(redirectLocation)) {
         const inferredStatus = inferThrottleStatusFromUrl(redirectLocation);
         const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
-        const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency);
-        throw new RangeThrottleError(inferredStatus, cooldownMs, retryAfterSec, safeHostname(targetUrl));
+        const shouldEscalateGlobal = !isMultiChunkWave || inferredStatus === 429 || retryAfterSec !== undefined;
+        const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency, {
+          escalateGlobalDelay: shouldEscalateGlobal,
+          localSettleMs: 2500,
+        });
+        throw new RangeThrottleError(
+          inferredStatus,
+          cooldownMs,
+          retryAfterSec,
+          safeHostname(targetUrl),
+          !shouldEscalateGlobal,
+        );
       }
       logServer('HTTP', 'debug', `Redirect HTTP ${res.status} -> ${redirectLocation}`, `from=${targetUrl}`);
       const redirected = await this.fetchWithRedirects(
@@ -3040,12 +3168,23 @@ export class RetroGameTalkClient {
         log,
         6,
         timeoutMs,
+        !isMultiChunkWave,
       );
       if (isThrottleErrorPageUrl(redirected.finalUrl)) {
         await redirected.response.body?.cancel().catch(() => undefined);
         const inferredStatus = inferThrottleStatusFromUrl(redirected.finalUrl);
-        const cooldownMs = this.rateLimiter.recordThrottle(undefined, redirected.latencyMs);
-        throw new RangeThrottleError(inferredStatus, cooldownMs, undefined, safeHostname(redirected.finalUrl));
+        const shouldEscalateGlobal = !isMultiChunkWave || inferredStatus === 429;
+        const cooldownMs = this.rateLimiter.recordThrottle(undefined, redirected.latencyMs, {
+          escalateGlobalDelay: shouldEscalateGlobal,
+          localSettleMs: 2500,
+        });
+        throw new RangeThrottleError(
+          inferredStatus,
+          cooldownMs,
+          undefined,
+          safeHostname(redirected.finalUrl),
+          !shouldEscalateGlobal,
+        );
       }
       return redirected;
     }
@@ -3086,8 +3225,8 @@ export class RetroGameTalkClient {
     // Decouple binary archive transfer timeout from short API/page requestTimeoutMs
     const streamTimeoutMs = Math.min(600_000, Math.max(config.requestTimeoutMs * 6, 180_000));
     const maxStreamAttempts = Math.min(4, Math.max(1, (config.maxRetries ?? 2) + 1));
-    const configuredChunkConcurrency = Math.max(1, Math.min(4, Math.round(config.downloadChunkConcurrency ?? 3)));
-    const chunkThresholdBytes = Math.max(4, Math.min(64, Math.round(config.downloadChunkMinSizeMb ?? 8))) * 1024 * 1024;
+    const configuredChunkConcurrency = Math.max(1, Math.min(4, Math.round(config.downloadChunkConcurrency ?? 1)));
+    const chunkThresholdBytes = Math.max(4, Math.min(128, Math.round(config.downloadChunkMinSizeMb ?? 32))) * 1024 * 1024;
     let effectiveChunks = this.getEffectiveHostChunkConcurrency(release.downloadUrl, configuredChunkConcurrency);
     let disableResumeForFreshRestart = false;
 
@@ -3098,6 +3237,9 @@ export class RetroGameTalkClient {
 
       let partPath: string | null = null;
       let keepPartialOnError = false;
+      const releaseHostSlot = this.isHostSingleStreamLimited(release.downloadUrl)
+        ? await this.acquireHostStreamSlot(release.downloadUrl, signal)
+        : null;
 
       try {
         const expectedPartPath = `${expectedLocalPath}.part`;
@@ -3164,6 +3306,7 @@ export class RetroGameTalkClient {
           log,
           8,
           streamTimeoutMs,
+          effectiveChunks <= 1,
         );
 
         // Stale resume range (e.g. remote file shrunk): discard .part and restart cleanly
@@ -3214,14 +3357,27 @@ export class RetroGameTalkClient {
           if (isThrottleErrorPageUrl(finalUrl) || isHtmlThrottleBody(htmlSnippet)) {
             const inferredStatus = inferThrottleStatusFromUrl(finalUrl);
             const retryAfterSec = parseRetryAfter(response.headers.get('retry-after'));
-            const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, 0);
+            const wasMultiChunkProbe = effectiveChunks > 1;
+            const shouldEscalateGlobal =
+              !wasMultiChunkProbe || inferredStatus === 429 || retryAfterSec !== undefined;
+            const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, 0, {
+              escalateGlobalDelay: shouldEscalateGlobal,
+              localSettleMs: 2500,
+            });
             effectiveChunks = 1;
             this.recordHostChunkCap(finalUrl, 1);
+            this.recordHostChunkCap(release.downloadUrl, 1);
             if (fs.existsSync(expectedPartPath)) {
               partPath = expectedPartPath;
               keepPartialOnError = true;
             }
-            throw new RangeThrottleError(inferredStatus, cooldownMs, retryAfterSec, safeHostname(finalUrl));
+            throw new RangeThrottleError(
+              inferredStatus,
+              cooldownMs,
+              retryAfterSec,
+              safeHostname(finalUrl),
+              !shouldEscalateGlobal,
+            );
           }
           if (
             finalUrl.includes('/login') ||
@@ -3525,6 +3681,7 @@ export class RetroGameTalkClient {
                   config,
                   waveController.signal,
                   streamTimeoutMs,
+                  activeWorkersCount > 1,
                   log,
                 );
 
@@ -3539,8 +3696,19 @@ export class RetroGameTalkClient {
                   if (isThrottleErrorPageUrl(sliceFinalUrl) || isHtmlThrottleBody(htmlSnippet)) {
                     const inferredStatus = inferThrottleStatusFromUrl(sliceFinalUrl);
                     const retryAfterSec = parseRetryAfter(sliceRes.headers.get('retry-after'));
-                    const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, sliceLatency);
-                    throw new RangeThrottleError(inferredStatus, cooldownMs, retryAfterSec, safeHostname(sliceFinalUrl));
+                    const shouldEscalateGlobal =
+                      activeWorkersCount <= 1 || inferredStatus === 429 || retryAfterSec !== undefined;
+                    const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, sliceLatency, {
+                      escalateGlobalDelay: shouldEscalateGlobal,
+                      localSettleMs: 2500,
+                    });
+                    throw new RangeThrottleError(
+                      inferredStatus,
+                      cooldownMs,
+                      retryAfterSec,
+                      safeHostname(sliceFinalUrl),
+                      !shouldEscalateGlobal,
+                    );
                   }
                   throw new Error(`Expected archive binary on range slice but received HTML (${sliceFinalUrl}); session or nonce may have expired`);
                 }
@@ -3627,18 +3795,22 @@ export class RetroGameTalkClient {
               if (waveThrottleError) {
                 const throttleErr = waveThrottleError as RangeThrottleError;
                 currentWaveThrottleRetries += 1;
-                effectiveChunks = activeWorkersCount > 2 ? 2 : 1;
-                this.recordHostChunkCap(finalUrl, effectiveChunks);
-                this.recordHostChunkCap(release.downloadUrl, effectiveChunks);
+                effectiveChunks = 1;
+                this.recordHostChunkCap(finalUrl, 1);
+                this.recordHostChunkCap(release.downloadUrl, 1);
                 log?.(
                   'throttle',
-                  `HTTP ${throttleErr.status} limit on chunk transfer for ${finalFilename}; pausing all chunks (${Math.round(throttleErr.cooldownMs / 1000)}s, stepping down to ${effectiveChunks}x)`,
-                  `Wave throttle ${currentWaveThrottleRetries}/${maxWaveThrottleRetries}${throttleErr.retryAfterSec ? ` · Retry-After: ${throttleErr.retryAfterSec}s` : ''}`,
+                  `HTTP ${throttleErr.status} limit on chunk transfer for ${finalFilename}; settling ${(throttleErr.cooldownMs / 1000).toFixed(1)}s and stepping directly down to 1x stream`,
+                  `Wave throttle ${currentWaveThrottleRetries}/${maxWaveThrottleRetries}${throttleErr.isLocalMirrorLimit ? ' · local mirror limit' : ''}${throttleErr.retryAfterSec ? ` · Retry-After: ${throttleErr.retryAfterSec}s` : ''}`,
                 );
                 if (currentWaveThrottleRetries > maxWaveThrottleRetries) {
                   throw throttleErr;
                 }
-                await this.rateLimiter.waitForCooldown(signal);
+                if (throttleErr.isLocalMirrorLimit) {
+                  await sleepWithAbort(throttleErr.cooldownMs, signal);
+                } else {
+                  await this.rateLimiter.waitForCooldown(signal);
+                }
                 continue;
               }
 
@@ -3808,24 +3980,17 @@ export class RetroGameTalkClient {
           errMsg,
         );
         if (err instanceof RangeThrottleError) {
-          await this.rateLimiter.waitForCooldown(signal);
-        }
-        const retryWaitMs = Math.min(2000, Math.max(100, config.minDelayMs) * streamAttempt);
-        await new Promise<void>((resolve, reject) => {
-          if (signal.aborted) {
-            reject(new DOMException('Aborted', 'AbortError'));
-            return;
+          if (err.isLocalMirrorLimit) {
+            await sleepWithAbort(err.cooldownMs, signal);
+          } else {
+            await this.rateLimiter.waitForCooldown(signal);
           }
-          const onAbort = () => {
-            clearTimeout(timer);
-            reject(new DOMException('Aborted', 'AbortError'));
-          };
-          const timer = setTimeout(() => {
-            signal.removeEventListener('abort', onAbort);
-            resolve();
-          }, retryWaitMs);
-          signal.addEventListener('abort', onAbort, { once: true });
-        });
+        } else {
+          const retryWaitMs = Math.min(2000, Math.max(100, config.minDelayMs) * streamAttempt);
+          await sleepWithAbort(retryWaitMs, signal);
+        }
+      } finally {
+        releaseHostSlot?.();
       }
     }
 
