@@ -16,6 +16,8 @@ import {
   Gamepad2,
   KeyRound,
   Languages,
+  Pause,
+  RefreshCw,
   Search,
   X,
 } from 'lucide-react';
@@ -65,6 +67,8 @@ interface SyncRulesPanelProps {
   focusRequest?: ConfigFocusRequest | null;
   onDirtyChange?: (state: ConfigDirtyState) => void;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
+  onStartCatalogIndex?: (scope: 'filtered' | 'full') => Promise<void>;
+  onStopCatalogIndex?: () => Promise<void>;
   onNavigateToAuth?: () => void;
 }
 
@@ -107,6 +111,8 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
       focusRequest = null,
       onDirtyChange,
       onSaveConfig,
+      onStartCatalogIndex,
+      onStopCatalogIndex,
       onNavigateToAuth,
     },
     ref,
@@ -117,6 +123,9 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
     );
 
     const [scheduleEnabled, setScheduleEnabled] = useState(config.scheduleEnabled);
+    const [autoDownloadNewReleases, setAutoDownloadNewReleases] = useState(
+      config.autoDownloadNewReleases,
+    );
     const [cronSchedule, setCronSchedule] = useState(config.cronSchedule);
     const [scheduleMode, setScheduleMode] = useState<ScheduleVisualMode>(initialParsedSchedule.mode);
     const [everyHours, setEveryHours] = useState<number>(initialParsedSchedule.everyHours);
@@ -125,6 +134,7 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
     const [daysOfWeek, setDaysOfWeek] = useState<number[]>(initialParsedSchedule.daysOfWeek);
 
     const [systemFilter, setSystemFilter] = useState(config.systemFilter);
+    const [indexerBusy, setIndexerBusy] = useState(false);
     const [consoleSearch, setConsoleSearch] = useState('');
     const [showAdvancedSystemFilter, setShowAdvancedSystemFilter] = useState(false);
 
@@ -156,12 +166,14 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
 
     const cronLockedByEnv = config.envOverrides.includes('CRON_SCHEDULE');
     const scheduleEnabledLockedByEnv = config.envOverrides.includes('SCRAPER_SCHEDULE_ENABLED');
+    const autoDownloadLockedByEnv = config.envOverrides.includes('SCRAPER_AUTO_DOWNLOAD_NEW_RELEASES');
     const filterLockedByEnv = config.envOverrides.includes('SCRAPER_SYSTEM_FILTER');
     const typeFilterLockedByEnv = config.envOverrides.includes('SCRAPER_RELEASE_TYPE_FILTER');
 
     const resetFormToConfig = useCallback((target: ScraperConfigPublic) => {
       const parsed = parseCronToVisualState(target.cronSchedule);
       setScheduleEnabled(target.scheduleEnabled);
+      setAutoDownloadNewReleases(target.autoDownloadNewReleases);
       setCronSchedule(target.cronSchedule);
       setScheduleMode(parsed.mode);
       setEveryHours(parsed.everyHours);
@@ -506,6 +518,7 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
 
       const scheduleChanged =
         (!scheduleEnabledLockedByEnv && scheduleEnabled !== config.scheduleEnabled) ||
+        (!autoDownloadLockedByEnv && autoDownloadNewReleases !== config.autoDownloadNewReleases) ||
         (!cronLockedByEnv && cronSchedule.trim() !== config.cronSchedule.trim());
       if (scheduleChanged) changedSections.push('Sync Schedule');
 
@@ -532,11 +545,13 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
     }, [
       config,
       scheduleEnabled,
+      autoDownloadNewReleases,
       cronSchedule,
       systemFilter,
       releaseTypeMode,
       allowedReleaseTypes,
       scheduleEnabledLockedByEnv,
+      autoDownloadLockedByEnv,
       cronLockedByEnv,
       filterLockedByEnv,
       typeFilterLockedByEnv,
@@ -584,6 +599,7 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
       try {
         await onSaveConfig({
           ...(!scheduleEnabledLockedByEnv ? { scheduleEnabled } : {}),
+          ...(!autoDownloadLockedByEnv ? { autoDownloadNewReleases } : {}),
           ...(!cronLockedByEnv ? { cronSchedule: cronSchedule.trim() } : {}),
           ...(!filterLockedByEnv ? { systemFilter } : {}),
           ...(!typeFilterLockedByEnv
@@ -610,6 +626,8 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
       onSaveConfig,
       scheduleEnabledLockedByEnv,
       scheduleEnabled,
+      autoDownloadLockedByEnv,
+      autoDownloadNewReleases,
       cronSchedule,
       filterLockedByEnv,
       systemFilter,
@@ -986,6 +1004,57 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
             </div>
           </div>
 
+          {/* Scheduled Run Acquisition Behavior */}
+          <div className="border border-crt-border bg-crt-bg rounded-md p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="space-y-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold text-crt-text">
+                  New Releases Behavior on Scheduled Runs
+                </span>
+                {autoDownloadLockedByEnv && (
+                  <EnvLockIndicator envVar="SCRAPER_AUTO_DOWNLOAD_NEW_RELEASES" />
+                )}
+              </div>
+              <p className="text-[11px] text-crt-muted leading-relaxed">
+                {autoDownloadNewReleases
+                  ? 'Scheduled incremental runs index new/modified releases and automatically download items matching your Target Consoles and Allowed Types.'
+                  : 'Scheduled runs only refresh the Catalog index as Available — nothing downloads until you click Download in the Catalog.'}
+              </p>
+            </div>
+            <div
+              role="group"
+              aria-label="Scheduled run acquisition behavior"
+              className="relative grid grid-cols-2 p-1 bg-crt-surface border border-crt-border rounded-md shrink-0"
+            >
+              <span
+                aria-hidden="true"
+                className={`pointer-events-none absolute top-1 bottom-1 left-1 w-[calc((100%-0.5rem)/2)] rounded bg-crt-elevated border border-crt-border-strong transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${
+                  autoDownloadNewReleases ? 'translate-x-0' : 'translate-x-full'
+                }`}
+              />
+              <button
+                type="button"
+                disabled={autoDownloadLockedByEnv}
+                onClick={() => setAutoDownloadNewReleases(true)}
+                className={`relative z-10 px-3 py-1.5 text-xs font-medium rounded transition-colors duration-200 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-55 ${
+                  autoDownloadNewReleases ? 'text-crt-phosphor' : 'text-crt-muted hover:text-crt-text'
+                }`}
+              >
+                Auto-Download
+              </button>
+              <button
+                type="button"
+                disabled={autoDownloadLockedByEnv}
+                onClick={() => setAutoDownloadNewReleases(false)}
+                className={`relative z-10 px-3 py-1.5 text-xs font-medium rounded transition-colors duration-200 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-55 ${
+                  !autoDownloadNewReleases ? 'text-crt-phosphor' : 'text-crt-muted hover:text-crt-text'
+                }`}
+              >
+                Index Only
+              </button>
+            </div>
+          </div>
+
           {/* Schedule Status & Cutoff Readout */}
           <div className="pt-1 text-xs font-mono text-crt-muted tabular-nums flex flex-wrap items-center justify-between gap-x-6 gap-y-1.5">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -1057,6 +1126,120 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
               )}
             </div>
           </div>
+
+          {/* Background Catalog Indexer Strip */}
+          {(onStartCatalogIndex || onStopCatalogIndex) && status.auth.hasCompletedLogin && status.indexer && (() => {
+            const indexer = status.indexer;
+            return (
+              <div className="border border-crt-border bg-crt-bg rounded-md px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-mono tabular-nums">
+                    <span className="font-semibold text-crt-text">Catalog Metadata Indexer</span>
+                    <span aria-hidden="true" className="text-crt-muted">·</span>
+                    {indexer.active ? (
+                      <span className="text-crt-phosphor">
+                        Indexing {indexer.systemsCompleted + (indexer.currentSystem ? 1 : 0)}/
+                        {Math.max(1, indexer.systemsTotal)}
+                        {indexer.currentSystem ? ` · ${indexer.currentSystem}` : ''}
+                        {indexer.totalPages > 0
+                          ? ` · Page ${indexer.currentPage}/${indexer.totalPages}`
+                          : ''}
+                        {` · ${indexer.indexedCount} cataloged`}
+                      </span>
+                    ) : (
+                      <span className="text-crt-muted">
+                        {indexer.remainingUnindexedSystems > 0
+                          ? `${indexer.remainingUnindexedSystems} remaining console(s) ready to index`
+                          : 'All discovered consoles indexed'}
+                      </span>
+                    )}
+                  </div>
+                  {indexer.active && (
+                    <div className="h-1 w-full max-w-md bg-crt-surface border border-crt-border rounded-sm overflow-hidden">
+                      <div
+                        className="h-full bg-crt-phosphor crt-indexer-bar"
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            Math.max(
+                              6,
+                              Math.round(
+                                ((indexer.systemsCompleted +
+                                  (indexer.totalPages > 0
+                                    ? indexer.currentPage / indexer.totalPages
+                                    : 0)) /
+                                  Math.max(1, indexer.systemsTotal)) *
+                                  100,
+                              ),
+                            ),
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {indexer.active ? (
+                    <button
+                      type="button"
+                      disabled={indexerBusy}
+                      onClick={async () => {
+                        if (!onStopCatalogIndex) return;
+                        setIndexerBusy(true);
+                        try {
+                          await onStopCatalogIndex();
+                        } finally {
+                          setIndexerBusy(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      <Pause className="h-3.5 w-3.5" />
+                      Pause Indexing
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        disabled={indexerBusy || !onStartCatalogIndex}
+                        onClick={async () => {
+                          if (!onStartCatalogIndex) return;
+                          setIndexerBusy(true);
+                          try {
+                            await onStartCatalogIndex('filtered');
+                          } finally {
+                            setIndexerBusy(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-border bg-crt-surface hover:border-crt-phosphor text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 ${indexerBusy ? 'animate-spin' : ''}`} />
+                        Index Target Consoles
+                      </button>
+                      {indexer.remainingUnindexedSystems > 0 && (
+                        <button
+                          type="button"
+                          disabled={indexerBusy || !onStartCatalogIndex}
+                          onClick={async () => {
+                            if (!onStartCatalogIndex) return;
+                            setIndexerBusy(true);
+                            try {
+                              await onStartCatalogIndex('full');
+                            } finally {
+                              setIndexerBusy(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                        >
+                          Index All Remaining Consoles ({indexer.remainingUnindexedSystems})
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {availableSystems.length === 0 ? (
             <div className="border border-crt-border bg-crt-bg rounded p-6 text-center space-y-3">

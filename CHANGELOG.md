@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-11-18
+
+- Decoupled catalog discovery from ROM archive downloading via a pauseable WordPress REST background **Catalog Indexer** (targeted consoles first upon authentication, with one-click expansion to all remaining consoles).
+- Introduced first-class `available` release status, estimated archive size hints (`~Est. Size`), and SQLite schema migration `v18` (`auto_download_new_releases`, `system_index_state_json`, `size_is_estimated`) while keeping un-downloaded entries separate from mirrored totals and failure counters.
+- Added viewport-driven lazy cover artwork caching (`GET /api/items/:id/asset?kind=cover&lazy=1`) under bounded concurrency with smooth CSS opacity fades inside fixed `aspect-[3/4]` frames and zero-layout shift.
+- Enabled single-click `Download`, multi-select `Queue Downloads (N)`, and bulk `Download Filtered` / `Download All` confirmation flows backed by `POST /api/items/download` and `POST /api/items/:id/download-queue`.
+- Added the `Auto-Download` vs `Index Only` scheduled incremental behavior toggle in Sync Rules and Living UI Motion-synchronized Catalog Indexer progress strips.
+
 ## [1.3.1] - 2026-11-18
 
 - Redesigned the Sync Status header on the Sync overview into a cohesive two-tier layout separating global run/sync-type and a compact high-contrast `system · progress` context block from the active target/file readout.

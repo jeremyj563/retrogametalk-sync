@@ -21,21 +21,29 @@ import {
   getReleaseFileById,
   getRepositoryItemById,
   getSchemaMigrationReport,
+  getSystemIndexState,
   listReleasesNeedingRetry,
   listSyncRuns,
+  markCatalogItemsQueued,
   markCatalogReleaseFailed,
+  queryRepositoryItemIds,
   recordSuccessfulLogin,
   releaseDistributedLock,
   saveDiscoveredSystems,
   setWatermark,
+  updateCatalogCoverPath,
   updateCatalogReleaseMetadata,
   updateConfig,
   updateSyncRun,
+  updateSystemIndexCursor,
   upsertCatalogRelease,
+  upsertIndexedWpRelease,
   upsertReleaseFile,
+  type CatalogQueryFilterParams,
 } from './db.ts';
 import { AdaptiveRateLimiter } from './rateLimiter.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
+import { estimateDownloadHintsBytes } from '../shared/fileSize.ts';
 import {
   classifyFileRoleToTypeKeys,
   classifyReleaseTagsToTypeKeys,
@@ -59,6 +67,7 @@ import type {
   ActiveTransferState,
   ArchiveInspectResult,
   AuthTestResult,
+  CatalogIndexerStatus,
   ConfigUpdateInput,
   FsTreeNode,
   LogLevel,
@@ -76,6 +85,21 @@ import type {
 } from './types.ts';
 
 const POD_ID = process.env.HOSTNAME || os.hostname() || 'rgt-sync-pod';
+
+const AUTO_INDEX_PRIORITY_SYSTEMS = [
+  'nes-roms',
+  'snes-roms',
+  'n64-roms',
+  'gba-roms',
+  'gameboy-color-roms',
+  'gameboy-roms',
+  'nds-roms',
+  'psx-iso',
+  'psp-iso',
+  'genesis-roms',
+  'dreamcast-iso',
+  'arcade-roms',
+];
 
 let cachedLocalGitFallback: {
   version: string;
@@ -313,6 +337,25 @@ export class ScraperOrchestrator extends EventEmitter {
   private lockRenewTimer: NodeJS.Timeout | null = null;
   private shuttingDown = false;
   private inFlightAssetUpgrades = new Map<number, Promise<RepositoryItemRecord | null>>();
+  private inFlightLazyCovers = new Map<number, Promise<void>>();
+  private activeLazyCoverSlots = 0;
+  private lazyCoverWaiters: (() => void)[] = [];
+  private indexerState: CatalogIndexerStatus = {
+    active: false,
+    scope: null,
+    currentSystem: null,
+    systemsCompleted: 0,
+    systemsTotal: 0,
+    currentPage: 0,
+    totalPages: 0,
+    indexedCount: 0,
+    remainingUnindexedSystems: 0,
+    lastError: null,
+  };
+  private indexerAbortController: AbortController | null = null;
+  private runFinishedWaiters: (() => void)[] = [];
+  private pendingDownloadQueueIds: number[] = [];
+  private pendingDownloadQueueSet = new Set<number>();
 
   constructor() {
     super();
@@ -350,6 +393,14 @@ export class ScraperOrchestrator extends EventEmitter {
     );
 
     this.reconfigureScheduler(refreshedCfg);
+
+    if (authSnap.hasCompletedLogin && refreshedCfg.username && refreshedCfg.password) {
+      setTimeout(() => {
+        if (!this.shuttingDown && !this.indexerState.active) {
+          void this.startCatalogIndex('filtered', { auto: true }).catch(() => undefined);
+        }
+      }, 1500).unref();
+    }
   }
 
   private reconcileDiskCatalog(cfg: ScraperConfigInternal): { releasesImported: number; filesImported: number } {
@@ -731,6 +782,9 @@ export class ScraperOrchestrator extends EventEmitter {
       `Latency ${result.latencyMs}ms`,
     );
     this.emitStatus();
+    if (result.authenticated && !this.shuttingDown) {
+      void this.startCatalogIndex('filtered', { auto: true }).catch(() => undefined);
+    }
     return result;
   }
 
@@ -962,6 +1016,9 @@ export class ScraperOrchestrator extends EventEmitter {
           this.log('debug', `Non-fatal error cleaning release directory ${releaseDir}`, formatErrorDetails(cleanupErr));
         }
       }
+      for (const ext of ['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.bmp']) {
+        fs.rmSync(path.join(this.getCoverCacheDir(), `${item.id}${ext}`), { force: true });
+      }
     }
 
     if (removedItems.length > 0) {
@@ -979,6 +1036,10 @@ export class ScraperOrchestrator extends EventEmitter {
     };
   }
 
+  private getCoverCacheDir(): string {
+    return path.join(getDataDir(), 'cache', 'covers');
+  }
+
   resolveItemAssetFile(
     itemId: number,
     kind: 'cover' | 'screenshot',
@@ -988,25 +1049,34 @@ export class ScraperOrchestrator extends EventEmitter {
     if (!item) return null;
     const cfg = getInternalConfig();
     const root = path.resolve(cfg.downloadDir);
+    const cacheDir = path.resolve(this.getCoverCacheDir());
     const releaseDir = this.resolveReleaseDir(item, root);
-    if (!releaseDir || (!releaseDir.startsWith(root + path.sep) && releaseDir !== root)) return null;
 
     if (kind === 'cover') {
       const candidates: string[] = [];
       if (item.coverLocalPath) candidates.push(path.resolve(item.coverLocalPath));
-      if (item.metadata?.coverLocalRelPath) {
+      if (releaseDir && item.metadata?.coverLocalRelPath) {
         candidates.push(path.resolve(releaseDir, item.metadata.coverLocalRelPath));
       }
+      if (releaseDir) {
+        for (const ext of ['.jpg', '.png', '.webp', '.avif', '.gif', '.bmp']) {
+          candidates.push(path.join(releaseDir, `cover${ext}`));
+        }
+      }
       for (const ext of ['.jpg', '.png', '.webp', '.avif', '.gif', '.bmp']) {
-        candidates.push(path.join(releaseDir, `cover${ext}`));
+        candidates.push(path.join(cacheDir, `${itemId}${ext}`));
       }
       for (const candidate of candidates) {
-        if (candidate.startsWith(releaseDir + path.sep) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        const insideRelease = Boolean(releaseDir && candidate.startsWith(releaseDir + path.sep));
+        const insideCache = candidate.startsWith(cacheDir + path.sep);
+        if ((insideRelease || insideCache) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
           return { absPath: candidate, filename: path.basename(candidate) };
         }
       }
       return null;
     }
+
+    if (!releaseDir || (!releaseDir.startsWith(root + path.sep) && releaseDir !== root)) return null;
 
     const relShots = item.metadata?.screenshotLocalRelPaths || [];
     if (index >= 0 && index < relShots.length) {
@@ -1028,6 +1098,65 @@ export class ScraperOrchestrator extends EventEmitter {
       }
     }
     return null;
+  }
+
+  private async acquireLazyCoverSlot(): Promise<void> {
+    if (this.activeLazyCoverSlots < 2) {
+      this.activeLazyCoverSlots += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.lazyCoverWaiters.push(resolve);
+    });
+    this.activeLazyCoverSlots += 1;
+  }
+
+  private releaseLazyCoverSlot(): void {
+    this.activeLazyCoverSlots = Math.max(0, this.activeLazyCoverSlots - 1);
+    const next = this.lazyCoverWaiters.shift();
+    if (next) next();
+  }
+
+  async ensureLazyCoverAsset(itemId: number): Promise<void> {
+    if (this.resolveItemAssetFile(itemId, 'cover', 0)) return;
+    const inflight = this.inFlightLazyCovers.get(itemId);
+    if (inflight) return inflight;
+
+    const item = getRepositoryItemById(itemId);
+    const coverUrl = item?.metadata?.coverUrl;
+    if (!item || !coverUrl) return;
+
+    const task = (async () => {
+      await this.acquireLazyCoverSlot();
+      try {
+        if (this.resolveItemAssetFile(itemId, 'cover', 0)) return;
+        const cfg = getInternalConfig();
+        const auth = this.client.getAuthStatus(cfg, getLastAuthenticatedAt());
+        if (!auth.authenticated && cfg.username && cfg.password) {
+          await this.client.login(cfg).catch(() => undefined);
+        }
+        const cacheDir = this.getCoverCacheDir();
+        fs.mkdirSync(cacheDir, { recursive: true });
+        const targetBase = path.join(cacheDir, String(itemId));
+        const savedPath = await this.client.fetchCoverToFile(
+          [coverUrl],
+          item.metadata?.sourcePageUrl || cfg.baseUrl,
+          targetBase,
+          cfg,
+        );
+        if (savedPath) {
+          updateCatalogCoverPath(itemId, savedPath);
+        }
+      } catch (err) {
+        logServer('ASSET', 'debug', `Lazy cover fetch skipped for itemId=${itemId}`, formatErrorDetails(err));
+      } finally {
+        this.releaseLazyCoverSlot();
+        this.inFlightLazyCovers.delete(itemId);
+      }
+    })();
+
+    this.inFlightLazyCovers.set(itemId, task);
+    return task;
   }
 
   resolveItemFileContext(
@@ -1454,10 +1583,553 @@ export class ScraperOrchestrator extends EventEmitter {
       rateLimiter: this.rateLimiter.getTelemetry(),
       auth: this.client.getAuthStatus(cfg, getLastAuthenticatedAt()),
       storage,
+      indexer: this.getCatalogIndexerStatus(cfg),
       totals,
       systems,
       releaseTypes,
     };
+  }
+
+  private getCatalogIndexerStatus(cfg: ScraperConfigInternal): CatalogIndexerStatus {
+    return {
+      ...this.indexerState,
+      remainingUnindexedSystems: this.computeRemainingUnindexedSystemsCount(cfg),
+    };
+  }
+
+  private computeRemainingUnindexedSystemsCount(cfg: ScraperConfigInternal): number {
+    const valid = filterValidSystemSlugs(cfg.discoveredSystems);
+    if (valid.length === 0) return 0;
+    const state = getSystemIndexState();
+    const seen = new Set<string>();
+    let remaining = 0;
+    for (const rawSlug of valid) {
+      const canonical = (canonicalizeSystemSlug(rawSlug) || rawSlug).toLowerCase();
+      if (seen.has(canonical)) continue;
+      seen.add(canonical);
+      if (!state[canonical]?.fullyIndexed) {
+        remaining += 1;
+      }
+    }
+    return remaining;
+  }
+
+  private notifyActiveRunFinished(): void {
+    const waiters = this.runFinishedWaiters.splice(0, this.runFinishedWaiters.length);
+    for (const resolve of waiters) {
+      resolve();
+    }
+  }
+
+  private async waitIfActiveRunBusy(signal: AbortSignal): Promise<void> {
+    while (this.activeRun !== null && !signal.aborted && !this.shuttingDown) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          resolve();
+        }, 1200);
+        this.runFinishedWaiters.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+  }
+
+  private buildWpReleaseRecordInput(
+    post: WpPostMetadata,
+    systemSlug: string,
+    cfg: ScraperConfigInternal,
+    runId?: number | null,
+  ) {
+    const link = (post.link || '').split('#')[0];
+    const canonicalSystem = canonicalizeSystemSlug(systemSlug) || systemSlug;
+    const mirrored = resolveMirroredPaths(cfg.baseUrl, link, cfg.downloadDir, 'probe.zip');
+    const releaseDir = path.dirname(mirrored.localPath);
+    const remotePath = path.relative(path.resolve(cfg.downloadDir), releaseDir).split(path.sep).join('/');
+    const fileRoles = (post.downloadHints || []).map((h) =>
+      classifyFileRole(h.filename, '', {
+        genres: post.genres,
+        languages: post.languages,
+        sources: post.sources,
+        title: post.title || undefined,
+        systemName: canonicalSystem,
+      }),
+    );
+    const baseMeta = this.client.extractReleaseMetadata('', link, post, fileRoles);
+    const metadata: ReleaseMetadata = {
+      ...baseMeta,
+      downloadHints: post.downloadHints?.length ? post.downloadHints : baseMeta.downloadHints,
+    };
+    const estimatedBytes = estimateDownloadHintsBytes(post.downloadHints);
+    return {
+      remoteUrl: link,
+      remotePath,
+      localPath: releaseDir,
+      systemName: canonicalSystem,
+      title: metadata.title,
+      publishedAt: metadata.publishedAt ?? null,
+      remoteUpdatedAt: metadata.remoteUpdatedAt ?? null,
+      estimatedBytes,
+      metadata,
+      lastRunId: runId ?? null,
+    };
+  }
+
+  async startCatalogIndex(
+    scope: 'filtered' | 'full' = 'filtered',
+    options: { auto?: boolean } = {},
+  ): Promise<{ started: boolean; targets: string[] }> {
+    const cfg = getInternalConfig();
+    const auth = this.client.getAuthStatus(cfg, getLastAuthenticatedAt());
+    if (!auth.hasCompletedLogin && !auth.authenticated) {
+      if (options.auto) return { started: false, targets: [] };
+      throw new Error('Verify RetroGameTalk credentials in System Settings before indexing the catalog.');
+    }
+
+    if (this.indexerState.active) {
+      if (scope === 'full' && this.indexerState.scope === 'filtered') {
+        this.indexerAbortController?.abort();
+      } else {
+        return { started: false, targets: [] };
+      }
+    }
+
+    let validDiscovered = filterValidSystemSlugs(cfg.discoveredSystems).map((s) => s.toLowerCase());
+    if (validDiscovered.length === 0 && !options.auto) {
+      const probe = await this.client.testAuthAndDiscovery(cfg);
+      if (probe.discoveredSystems.length > 0) {
+        validDiscovered = saveDiscoveredSystems(probe.discoveredSystems).map((s) => s.toLowerCase());
+      }
+    }
+
+    const indexState = getSystemIndexState();
+    const explicitFilters = filterValidSystemSlugs(
+      cfg.systemFilter.split(',').map((s) => s.trim()).filter(Boolean),
+    ).map((s) => s.toLowerCase());
+
+    let candidateTargets: string[] = [];
+    if (scope === 'filtered') {
+      if (explicitFilters.length > 0) {
+        candidateTargets = explicitFilters;
+      } else {
+        const prioritized = AUTO_INDEX_PRIORITY_SYSTEMS.filter((s) => validDiscovered.includes(s));
+        candidateTargets =
+          prioritized.length > 0 ? prioritized.slice(0, 6) : validDiscovered.slice(0, 6);
+      }
+    } else {
+      const seen = new Set<string>();
+      for (const s of [...explicitFilters, ...AUTO_INDEX_PRIORITY_SYSTEMS, ...validDiscovered]) {
+        const canonical = (canonicalizeSystemSlug(s) || s).toLowerCase();
+        if (!validDiscovered.includes(canonical) && !explicitFilters.includes(canonical)) continue;
+        if (!seen.has(canonical)) {
+          seen.add(canonical);
+          candidateTargets.push(canonical);
+        }
+      }
+    }
+
+    const unindexedTargets = candidateTargets.filter((slug) => !indexState[slug]?.fullyIndexed);
+    const targets =
+      unindexedTargets.length > 0 ? unindexedTargets : options.auto ? [] : candidateTargets;
+
+    if (targets.length === 0) {
+      this.emitStatus();
+      return { started: false, targets: [] };
+    }
+
+    this.indexerAbortController = new AbortController();
+    const signal = this.indexerAbortController.signal;
+    this.indexerState = {
+      active: true,
+      scope,
+      currentSystem: targets[0],
+      systemsCompleted: 0,
+      systemsTotal: targets.length,
+      currentPage: 0,
+      totalPages: 0,
+      indexedCount: 0,
+      remainingUnindexedSystems: this.computeRemainingUnindexedSystemsCount(cfg),
+      lastError: null,
+    };
+    this.emitStatus();
+    this.log(
+      'info',
+      `Catalog indexer started (${scope === 'full' ? 'Full Site' : 'Target Consoles'}): ${targets.length} system(s)`,
+      targets.join(', '),
+    );
+
+    void (async () => {
+      const indexerLogger: LoggerFn = (level, msg, detail) => {
+        if (level === 'warn' || level === 'error') {
+          this.log(level, msg, detail ?? null);
+        } else {
+          logServer('INDEXER', 'debug', msg, detail ?? null);
+        }
+      };
+
+      const indexedRestBases = new Set<string>();
+      try {
+        const latestCfg = getInternalConfig();
+        if (!this.client.getAuthStatus(latestCfg, getLastAuthenticatedAt()).authenticated) {
+          const loginRes = await this.client.login(latestCfg, signal, indexerLogger);
+          if (loginRes.authenticated) {
+            const ts = recordSuccessfulLogin();
+            this.client.setPersistedLastAuthenticatedAt(ts);
+          }
+        }
+
+        for (let i = 0; i < targets.length; i += 1) {
+          if (signal.aborted || this.shuttingDown) break;
+          await this.waitIfActiveRunBusy(signal);
+          if (signal.aborted || this.shuttingDown) break;
+
+          const systemSlug = targets[i];
+          const activeCfg = getInternalConfig();
+          const restBase = await this.client.resolveWpRestBaseForSystem(systemSlug, activeCfg, signal, indexerLogger);
+          if (restBase && indexedRestBases.has(restBase.toLowerCase())) {
+            this.indexerState.systemsCompleted = i + 1;
+            continue;
+          }
+          if (restBase) indexedRestBases.add(restBase.toLowerCase());
+
+          this.indexerState = {
+            ...this.indexerState,
+            currentSystem: systemSlug,
+            currentPage: 1,
+            totalPages: 1,
+          };
+          this.emitStatus();
+
+          let pagesForSystem = 0;
+          let postsForSystem = 0;
+          const res = await this.client.listConsoleReleasesViaWpRest(systemSlug, activeCfg, {
+            signal,
+            log: indexerLogger,
+            onPageFetched: (page, totalPages) => {
+              pagesForSystem = Math.max(pagesForSystem, page);
+              this.indexerState = {
+                ...this.indexerState,
+                currentSystem: systemSlug,
+                currentPage: page,
+                totalPages,
+              };
+              this.emitStatus();
+            },
+            onPostsPage: async (posts, page, totalPages) => {
+              for (const post of posts) {
+                if (!post.link) continue;
+                upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, activeCfg));
+                postsForSystem += 1;
+                this.indexerState.indexedCount += 1;
+              }
+              this.indexerState.currentPage = page;
+              this.indexerState.totalPages = totalPages;
+              this.emitCatalogUpdated('indexer_page');
+              this.emitStatus();
+              await this.waitIfActiveRunBusy(signal);
+            },
+          });
+
+          if (!signal.aborted && !this.shuttingDown) {
+            updateSystemIndexCursor(systemSlug, {
+              lastIndexedAt: new Date().toISOString(),
+              totalWpPosts: postsForSystem,
+              totalPages: res.totalPages || pagesForSystem,
+              pagesIndexed: pagesForSystem,
+              fullyIndexed: true,
+              scope,
+            });
+          }
+
+          this.indexerState.systemsCompleted = i + 1;
+          this.emitStatus();
+        }
+
+        if (!signal.aborted && !this.shuttingDown) {
+          this.log(
+            'info',
+            `Catalog indexing complete: ${this.indexerState.indexedCount} release(s) cataloged across ${this.indexerState.systemsCompleted} console(s)`,
+          );
+        }
+      } catch (err) {
+        if (!signal.aborted) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.indexerState.lastError = msg;
+          this.log('warn', `Catalog indexing paused: ${msg}`);
+        }
+      } finally {
+        this.indexerState = {
+          ...this.indexerState,
+          active: false,
+          currentSystem: null,
+        };
+        this.indexerAbortController = null;
+        this.emitCatalogUpdated('indexer_finished');
+        this.emitStatus();
+      }
+    })();
+
+    return { started: true, targets };
+  }
+
+  stopCatalogIndex(): boolean {
+    if (!this.indexerState.active || !this.indexerAbortController) return false;
+    this.indexerAbortController.abort();
+    this.indexerState = {
+      ...this.indexerState,
+      active: false,
+      currentSystem: null,
+    };
+    this.log('info', 'Catalog background indexing paused by user');
+    this.emitStatus();
+    return true;
+  }
+
+  async queueCatalogDownloads(options: {
+    ids?: number[];
+    filters?: CatalogQueryFilterParams;
+  }): Promise<{ run: SyncRunRecord; queuedCount: number }> {
+    const resolvedIds = options.filters
+      ? queryRepositoryItemIds(options.filters).queueableIds
+      : Array.from(
+          new Set(
+            (options.ids || [])
+              .map((v) => Number(v))
+              .filter((id) => Number.isInteger(id) && id > 0),
+          ),
+        );
+
+    if (resolvedIds.length === 0) {
+      throw new Error('No downloadable or pending catalog releases matched your selection.');
+    }
+
+    if (this.activeRun && this.activeRun.triggerType !== 'download') {
+      throw new Error(`Sync run #${this.activeRun.id} is already in progress`);
+    }
+
+    const cfg = getInternalConfig();
+    this.assertCanRunSync(cfg);
+
+    // Append cleanly to an already-active download queue run
+    if (this.activeRun && this.activeRun.triggerType === 'download') {
+      const queuedIds = markCatalogItemsQueued(resolvedIds, this.activeRun.id);
+      for (const id of queuedIds) {
+        if (!this.pendingDownloadQueueSet.has(id)) {
+          this.pendingDownloadQueueSet.add(id);
+          this.pendingDownloadQueueIds.push(id);
+        }
+      }
+      this.log(
+        'info',
+        `Appended ${queuedIds.length} release(s) to active download queue (Run #${this.activeRun.id})`,
+        null,
+        this.activeRun.id,
+      );
+      this.emitCatalogUpdated('items_queued');
+      this.emitStatus();
+      return { run: this.activeRun, queuedCount: queuedIds.length };
+    }
+
+    const lockKey = 'download:queue';
+    if (!acquireDistributedLock(lockKey, POD_ID, 180)) {
+      throw new Error(`Another pod holds distributed lock "${lockKey}"`);
+    }
+
+    const run = createSyncRun('download', 'incremental', false);
+    const queuedIds = markCatalogItemsQueued(resolvedIds, run.id);
+    if (queuedIds.length === 0) {
+      releaseDistributedLock(lockKey, POD_ID);
+      throw new Error('All selected releases are already downloaded.');
+    }
+
+    this.pendingDownloadQueueIds = [...queuedIds];
+    this.pendingDownloadQueueSet = new Set(queuedIds);
+    this.activeRun = run;
+    this.abortController = new AbortController();
+    this.currentPhase = `Downloading ${queuedIds.length} queued release${queuedIds.length === 1 ? '' : 's'}`;
+
+    this.lockRenewTimer = setInterval(() => {
+      acquireDistributedLock(lockKey, POD_ID, 180);
+    }, 60_000);
+
+    this.log(
+      'info',
+      `Started on-demand download queue Run #${run.id} for ${queuedIds.length} release(s)`,
+      null,
+      run.id,
+    );
+    this.emitCatalogUpdated('items_queued');
+    this.emitStatus();
+
+    void this.executeDownloadQueue(run, cfg, lockKey);
+    return { run, queuedCount: queuedIds.length };
+  }
+
+  private async executeDownloadQueue(
+    run: SyncRunRecord,
+    cfg: ScraperConfigInternal,
+    lockKey: string,
+  ): Promise<void> {
+    const signal = this.abortController!.signal;
+    const root = path.resolve(cfg.downloadDir);
+    const runLogger: LoggerFn = (level, msg, detail) => this.log(level, msg, detail ?? null, run.id);
+
+    let attemptedFiles = 0;
+    let downloaded = 0;
+    let skipped = 0;
+    let failed = 0;
+    let bytes = 0;
+
+    try {
+      if (!cfg.username || !cfg.password) {
+        throw new Error('Credentials missing: configure Repository Username and Password before downloading.');
+      }
+      if (!this.client.getAuthStatus(cfg, getLastAuthenticatedAt()).authenticated) {
+        this.currentPhase = 'Authenticating with retrogametalk.com';
+        this.emitStatus();
+        const loginRes = await this.client.login(cfg, signal, runLogger);
+        if (!loginRes.authenticated) {
+          throw new Error(loginRes.message);
+        }
+        const ts = recordSuccessfulLogin();
+        this.client.setPersistedLastAuthenticatedAt(ts);
+      }
+
+      let processedReleases = 0;
+      while (this.pendingDownloadQueueIds.length > 0 && !signal.aborted) {
+        const batchIds = this.pendingDownloadQueueIds.splice(0, this.pendingDownloadQueueIds.length);
+        const totalInQueue = processedReleases + batchIds.length;
+
+        await runWithConcurrency(batchIds, cfg.maxConcurrency, signal, async (itemId) => {
+          if (signal.aborted) return;
+          this.pendingDownloadQueueSet.delete(itemId);
+          const item = getRepositoryItemById(itemId);
+          if (!item) return;
+
+          const filesToDownload = item.files.filter(
+            (f) =>
+              f.status === 'available' ||
+              f.status === 'queued' ||
+              f.status === 'failed' ||
+              f.status === 'downloading' ||
+              !f.localPath ||
+              !fs.existsSync(f.localPath),
+          );
+
+          processedReleases += 1;
+          this.currentPhase = `Queue (${processedReleases}/${totalInQueue}): ${item.systemName} / ${item.title}`;
+          this.emitStatus();
+
+          try {
+            const outcome = await this.retryReleaseEntry(
+              item,
+              filesToDownload,
+              cfg,
+              run.id,
+              root,
+              signal,
+              runLogger,
+              false,
+            );
+            attemptedFiles += Math.max(
+              filesToDownload.length,
+              outcome.downloaded + outcome.skipped + outcome.failed,
+            );
+            downloaded += outcome.downloaded;
+            skipped += outcome.skipped;
+            failed += outcome.failed;
+            bytes += outcome.bytes;
+          } catch (itemErr) {
+            if (signal.aborted) return;
+            const errMsg = itemErr instanceof Error ? itemErr.message : String(itemErr);
+            if (/Cloudflare|Authentication|Re-authentication/i.test(errMsg)) {
+              throw itemErr;
+            }
+            if (filesToDownload.length > 0) {
+              attemptedFiles += filesToDownload.length;
+              for (const f of filesToDownload) {
+                upsertReleaseFile({
+                  releaseId: item.id,
+                  targetFileId: f.id,
+                  remoteUrl: f.remoteUrl,
+                  downloadUrl: f.downloadUrl,
+                  remotePath: f.remotePath,
+                  localPath: f.localPath,
+                  filename: f.filename,
+                  displayLabel: f.displayLabel,
+                  fileRole: f.fileRole,
+                  status: 'failed',
+                  errorMessage: errMsg,
+                  lastRunId: run.id,
+                });
+                failed += 1;
+              }
+            } else {
+              attemptedFiles += 1;
+              failed += 1;
+              markCatalogReleaseFailed(item.id, errMsg, run.id);
+            }
+            runLogger('error', `Download failed for ${item.title}: ${errMsg}`, item.remoteUrl);
+            this.emitCatalogUpdated('file_failed', item.id);
+          }
+
+          this.activeRun = updateSyncRun(run.id, {
+            newFound: attemptedFiles,
+            downloadedCount: downloaded,
+            skippedCount: skipped,
+            failedCount: failed,
+            bytesDownloaded: bytes,
+            avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
+          });
+          this.emitStatus();
+        });
+      }
+
+      const finalStatus = signal.aborted ? 'stopped' : 'completed';
+      updateSyncRun(run.id, {
+        status: finalStatus,
+        finishedAt: new Date().toISOString(),
+        newFound: attemptedFiles,
+        downloadedCount: downloaded,
+        skippedCount: skipped,
+        failedCount: failed,
+        bytesDownloaded: bytes,
+        avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
+      });
+      runLogger(
+        'info',
+        `Download queue #${run.id} ${finalStatus}: ${downloaded} downloaded, ${skipped} already on disk, ${failed} failed`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      updateSyncRun(run.id, {
+        status: signal.aborted ? 'stopped' : 'failed',
+        finishedAt: new Date().toISOString(),
+        newFound: attemptedFiles,
+        downloadedCount: downloaded,
+        skippedCount: skipped,
+        failedCount: Math.max(1, failed),
+        bytesDownloaded: bytes,
+        errorSummary: msg,
+      });
+      if (!signal.aborted) {
+        runLogger('error', `Download queue #${run.id} failed: ${msg}`);
+      }
+    } finally {
+      this.pendingDownloadQueueIds = [];
+      this.pendingDownloadQueueSet.clear();
+      if (this.lockRenewTimer) {
+        clearInterval(this.lockRenewTimer);
+        this.lockRenewTimer = null;
+      }
+      releaseDistributedLock(lockKey, POD_ID);
+      this.clearAllActiveTransfers();
+      this.activeRun = null;
+      this.abortController = null;
+      this.currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
+      this.emitStatus();
+      this.notifyActiveRunFinished();
+    }
   }
 
   private assertCanRunSync(cfg: ScraperConfigInternal): void {
@@ -1952,6 +2624,7 @@ export class ScraperOrchestrator extends EventEmitter {
         this.abortController = null;
         this.currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
         this.emitStatus();
+        this.notifyActiveRunFinished();
       }
     })();
 
@@ -2175,6 +2848,7 @@ export class ScraperOrchestrator extends EventEmitter {
         this.abortController = null;
         this.currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
         this.emitStatus();
+        this.notifyActiveRunFinished();
       }
     })();
 
@@ -2972,7 +3646,31 @@ export class ScraperOrchestrator extends EventEmitter {
           };
 
           if (wpRes.supported) {
-            if (isDeltaMode) {
+            if (!isDryRun && wpRes.posts.length > 0) {
+              for (const post of wpRes.posts) {
+                if (!post.link) continue;
+                upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, cfg, run.id));
+              }
+              this.emitCatalogUpdated('sync_indexed');
+            }
+
+            const isIndexOnlyScheduled =
+              isDeltaMode && run.triggerType === 'scheduled' && !cfg.autoDownloadNewReleases;
+
+            if (isIndexOnlyScheduled && !isDryRun) {
+              if (wpRes.posts.length > 0) {
+                for (const post of wpRes.posts) {
+                  if (!post.link) continue;
+                  recordObservedTimestamp(post.dateGmt);
+                  recordObservedTimestamp(post.modifiedGmt);
+                  newFound += 1;
+                }
+                runLogger(
+                  'info',
+                  `[Scheduled Index] Cataloged ${wpRes.posts.length} new/updated release(s) in ${systemSlug} as Available (auto-download paused)`,
+                );
+              }
+            } else if (isDeltaMode) {
               if (wpRes.posts.length > 0) {
                 runLogger(
                   'info',
@@ -3112,6 +3810,7 @@ export class ScraperOrchestrator extends EventEmitter {
       this.abortController = null;
       this.currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
       this.emitStatus();
+      this.notifyActiveRunFinished();
     }
   }
 
@@ -3418,10 +4117,14 @@ export class ScraperOrchestrator extends EventEmitter {
       this.cronJob.stop();
       this.cronJob = null;
     }
+    if (this.indexerAbortController) {
+      this.indexerAbortController.abort();
+    }
     if (this.activeRun && this.abortController) {
       this.log('warn', 'SIGTERM received; gracefully halting active sync run');
       this.abortController.abort();
       await new Promise((r) => setTimeout(r, 500));
     }
+    this.notifyActiveRunFinished();
   }
 }

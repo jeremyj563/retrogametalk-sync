@@ -198,6 +198,89 @@ async function bootstrap() {
     res.json(result);
   });
 
+  app.post('/api/catalog/index', async (req, res) => {
+    const scope = req.body?.scope === 'full' ? 'full' : 'filtered';
+    try {
+      const result = await orchestrator.startCatalogIndex(scope);
+      res.status(202).json({
+        ...result,
+        status: orchestrator.getStatusSnapshot(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const code = /Verify RetroGameTalk/i.test(msg) ? 400 : 409;
+      res.status(code).json({ error: msg });
+    }
+  });
+
+  app.post('/api/catalog/index/stop', (_req, res) => {
+    const stopped = orchestrator.stopCatalogIndex();
+    res.json({
+      ok: true,
+      stopped,
+      status: orchestrator.getStatusSnapshot(),
+    });
+  });
+
+  app.post('/api/items/download', async (req, res) => {
+    const rawIds: unknown[] | undefined = Array.isArray(req.body?.ids) ? req.body.ids : undefined;
+    const rawFilters =
+      req.body?.filters && typeof req.body.filters === 'object' ? (req.body.filters as Record<string, unknown>) : undefined;
+
+    if (!rawIds && !rawFilters) {
+      res.status(400).json({ error: 'Provide either item ids or catalog filters to queue downloads' });
+      return;
+    }
+
+    try {
+      if (rawFilters) {
+        const filters = {
+          search: typeof rawFilters.search === 'string' ? rawFilters.search : undefined,
+          system: parseQueryFilterParam(rawFilters.system),
+          status: parseQueryFilterParam(rawFilters.status),
+          installed: typeof rawFilters.installed === 'string' ? rawFilters.installed : undefined,
+          tag: parseQueryFilterParam(rawFilters.tag),
+          tagMode: typeof rawFilters.tagMode === 'string' ? rawFilters.tagMode : undefined,
+          genre: parseQueryFilterParam(rawFilters.genre),
+          genreMode: typeof rawFilters.genreMode === 'string' ? rawFilters.genreMode : undefined,
+          region: parseQueryFilterParam(rawFilters.region),
+          regionMode: typeof rawFilters.regionMode === 'string' ? rawFilters.regionMode : undefined,
+          language: parseQueryFilterParam(rawFilters.language),
+          languageMode: typeof rawFilters.languageMode === 'string' ? rawFilters.languageMode : undefined,
+          source: parseQueryFilterParam(rawFilters.source),
+          sourceMode: typeof rawFilters.sourceMode === 'string' ? rawFilters.sourceMode : undefined,
+          sort: typeof rawFilters.sort === 'string' ? rawFilters.sort : undefined,
+        };
+        const preview = queryRepositoryItemIds(filters);
+        const result = await orchestrator.queueCatalogDownloads({ filters });
+        res.status(202).json({
+          ...result,
+          skippedCount: preview.alreadyDownloadedCount,
+        });
+        return;
+      }
+
+      const cleanIds = Array.from(
+        new Set(
+          (rawIds || []).map((v) => Number(v)).filter((id) => Number.isInteger(id) && id > 0),
+        ),
+      );
+      if (cleanIds.length === 0) {
+        res.status(400).json({ error: 'Provide one or more valid catalog release IDs to download' });
+        return;
+      }
+      const result = await orchestrator.queueCatalogDownloads({ ids: cleanIds });
+      res.status(202).json({
+        ...result,
+        skippedCount: Math.max(0, cleanIds.length - result.queuedCount),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const statusCode = /No downloadable|already downloaded|Provide/i.test(msg) ? 400 : 409;
+      res.status(statusCode).json({ error: msg });
+    }
+  });
+
   app.get('/api/items/:id', (req, res) => {
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId) || itemId <= 0) {
@@ -221,20 +304,28 @@ async function bootstrap() {
     const kind = req.query.kind === 'screenshot' ? 'screenshot' : 'cover';
     const index = Number(req.query.index || 0);
     const wantFullRes = req.query.full === '1';
+    const wantLazy = req.query.lazy === '1';
 
     let item = getRepositoryItemById(itemId);
     if (wantFullRes && item && (item.metadata?.screenshotsFullResVersion ?? 0) < 1) {
       item = (await orchestrator.ensureFullResItemAssets(itemId)) ?? item;
     }
 
-    const asset = orchestrator.resolveItemAssetFile(itemId, kind, Number.isNaN(index) ? 0 : index);
+    let asset = orchestrator.resolveItemAssetFile(itemId, kind, Number.isNaN(index) ? 0 : index);
+    if (!asset && kind === 'cover' && wantLazy && item?.metadata?.coverUrl) {
+      await orchestrator.ensureLazyCoverAsset(itemId);
+      asset = orchestrator.resolveItemAssetFile(itemId, 'cover', 0);
+    }
     if (!asset) {
       res.status(404).json({ error: 'Artwork asset not found locally' });
       return;
     }
 
     const isFullResVerified = (item?.metadata?.screenshotsFullResVersion ?? 0) >= 1;
-    res.setHeader('Cache-Control', isFullResVerified ? 'public, max-age=3600' : 'no-cache');
+    res.setHeader(
+      'Cache-Control',
+      isFullResVerified || kind === 'cover' ? 'public, max-age=3600' : 'no-cache',
+    );
     res.sendFile(asset.absPath);
   });
 
@@ -528,6 +619,25 @@ async function bootstrap() {
       res.status(202).json({ run });
     } catch (err) {
       res.status(409).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post('/api/items/:id/download-queue', async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    try {
+      const result = await orchestrator.queueCatalogDownloads({ ids: [itemId] });
+      res.status(202).json({
+        ...result,
+        skippedCount: result.queuedCount > 0 ? 0 : 1,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const statusCode = /No downloadable|already downloaded/i.test(msg) ? 400 : 409;
+      res.status(statusCode).json({ error: msg });
     }
   });
 

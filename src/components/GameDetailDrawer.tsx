@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Cloud,
   Download,
   ExternalLink,
   FileArchive,
@@ -49,6 +50,7 @@ interface GameDetailDrawerProps {
   onClose: () => void;
   onItemUpdated: (updated: RepositoryItemRecord) => void;
   onRetryItem: (id: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
+  onQueueDownload?: (ids: number[]) => Promise<unknown>;
   onDeleteItem: (id: number) => Promise<void>;
   onExportToSdCard?: (id: number) => void;
 }
@@ -75,6 +77,7 @@ export function GameDetailDrawer({
   onClose,
   onItemUpdated,
   onRetryItem,
+  onQueueDownload,
   onDeleteItem,
   onExportToSdCard,
 }: GameDetailDrawerProps) {
@@ -82,6 +85,7 @@ export function GameDetailDrawer({
   const [upgradingAssets, setUpgradingAssets] = useState(false);
   const [metaError, setMetaError] = useState<string | null>(null);
   const [retryingKey, setRetryingKey] = useState<string | null>(null);
+  const [queueingDownload, setQueueingDownload] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [coverFailed, setCoverFailed] = useState(false);
@@ -117,6 +121,7 @@ export function GameDetailDrawer({
     setInspectError(null);
     setPreparedNames({});
     setTogglingInstalled(false);
+    setQueueingDownload(false);
     bodyScrollRef.current?.scrollTo({ top: 0, behavior: 'auto' });
   }, [item?.id]);
 
@@ -255,7 +260,14 @@ export function GameDetailDrawer({
       { label: 'Publisher', value: item.publisher || '—' },
       { label: 'Developer', value: item.developer || '—' },
       { label: 'Year', value: item.releaseYear || '—', mono: true },
-      { label: 'Total Size', value: item.fileSizeBytes > 0 ? formatBytes(item.fileSizeBytes) : '—', mono: true },
+      {
+        label: item.sizeIsEstimated && item.fileSizeBytes > 0 ? 'Est. Size' : 'Total Size',
+        value:
+          item.fileSizeBytes > 0
+            ? `${item.sizeIsEstimated ? '~' : ''}${formatBytes(item.fileSizeBytes)}`
+            : '—',
+        mono: true,
+      },
       { label: 'Included Files', value: `${item.filesCount} archive${item.filesCount === 1 ? '' : 's'}`, mono: true },
     ];
 
@@ -307,12 +319,18 @@ export function GameDetailDrawer({
 
   if (!item) return null;
 
-  const hasCover = Boolean(item.coverLocalPath) && !coverFailed;
-  const coverSrc = `/api/items/${item.id}/asset?kind=cover${assetVersion}`;
+  const hasCover = Boolean(item.coverLocalPath || item.metadata?.coverUrl) && !coverFailed;
+  const coverSrc = item.coverLocalPath
+    ? `/api/items/${item.id}/asset?kind=cover${assetVersion}`
+    : `/api/items/${item.id}/asset?kind=cover&lazy=1${assetVersion}`;
   const sourceUrl = item.metadata?.sourcePageUrl || item.remoteUrl.split('#')[0];
   const primaryDownloadFile =
     item.files.find((f) => f.status === 'downloaded' || f.status === 'skipped') || null;
   const hasFailedFiles = item.status === 'failed' || item.status === 'partial' || item.files.some((f) => f.status === 'failed');
+  const canQueueRelease =
+    Boolean(onQueueDownload) &&
+    !primaryDownloadFile &&
+    (item.status === 'available' || item.status === 'failed' || item.status === 'partial');
 
   const handleFetchMetadata = async () => {
     setFetchingMeta(true);
@@ -350,6 +368,19 @@ export function GameDetailDrawer({
       await onRetryItem(item.id, fileId, { dryRun });
     } finally {
       setRetryingKey(null);
+    }
+  };
+
+  const handleQueueReleaseDownload = async () => {
+    if (!onQueueDownload || queueingDownload) return;
+    setQueueingDownload(true);
+    setMetaError(null);
+    try {
+      await onQueueDownload([item.id]);
+    } catch (err) {
+      setMetaError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQueueingDownload(false);
     }
   };
 
@@ -477,14 +508,17 @@ export function GameDetailDrawer({
                 className={`inline-flex items-center gap-1.5 font-mono text-xs tabular-nums ${
                   item.status === 'downloaded' || (itemTransfer.active && itemTransfer.mode !== 'preparing')
                     ? 'text-crt-phosphor'
-                    : item.status === 'skipped'
-                      ? 'text-crt-muted'
-                      : item.status === 'failed'
-                        ? 'text-crt-crimson'
-                        : 'text-crt-amber'
+                    : item.status === 'available'
+                      ? 'text-crt-phosphor/80'
+                      : item.status === 'skipped'
+                        ? 'text-crt-muted'
+                        : item.status === 'failed'
+                          ? 'text-crt-crimson'
+                          : 'text-crt-amber'
                 }`}
               >
                 {item.status === 'downloaded' && <CheckCircle2 className="h-3.5 w-3.5" />}
+                {item.status === 'available' && !itemTransfer.active && <Cloud className="h-3.5 w-3.5" />}
                 {item.status === 'skipped' && <SkipForward className="h-3.5 w-3.5" />}
                 {item.status === 'failed' && <XCircle className="h-3.5 w-3.5" />}
                 {item.status === 'partial' && <AlertCircle className="h-3.5 w-3.5" />}
@@ -723,6 +757,7 @@ export function GameDetailDrawer({
                   <img
                     src={coverSrc}
                     alt={`${item.title} cover art`}
+                    referrerPolicy="no-referrer"
                     onError={() => setCoverFailed(true)}
                     className="w-full h-full object-contain bg-crt-bg"
                   />
@@ -871,7 +906,7 @@ export function GameDetailDrawer({
                                     ? formatBytes(fileTransfer.bytesReceived)
                                     : 'Size pending'
                               : file.fileSizeBytes > 0
-                                ? formatBytes(file.fileSizeBytes)
+                                ? `${file.status === 'available' ? '~' : ''}${formatBytes(file.fileSizeBytes)}`
                                 : 'Size pending'}
                           </span>
                           <span>·</span>
@@ -880,14 +915,17 @@ export function GameDetailDrawer({
                               file.status === 'downloaded' ||
                               (fileTransfer.active && fileTransfer.mode !== 'preparing')
                                 ? 'text-crt-phosphor'
-                                : file.status === 'skipped'
-                                  ? 'text-crt-muted'
-                                  : file.status === 'failed'
-                                    ? 'text-crt-crimson'
-                                    : 'text-crt-amber'
+                                : file.status === 'available'
+                                  ? 'text-crt-phosphor/80'
+                                  : file.status === 'skipped'
+                                    ? 'text-crt-muted'
+                                    : file.status === 'failed'
+                                      ? 'text-crt-crimson'
+                                      : 'text-crt-amber'
                             }`}
                           >
                             {file.status === 'downloaded' && <CheckCircle2 className="h-3 w-3" />}
+                            {file.status === 'available' && !fileTransfer.active && <Cloud className="h-3 w-3" />}
                             {file.status === 'skipped' && <SkipForward className="h-3 w-3" />}
                             {file.status === 'failed' && <XCircle className="h-3 w-3" />}
                             {fileTransfer.active && <Download className="h-3 w-3" />}
@@ -999,6 +1037,17 @@ export function GameDetailDrawer({
                               ? `${fileTransfer.percent}%`
                               : fileTransfer.speedLabel || 'preparing'}
                           </span>
+                        ) : file.status === 'available' && onQueueDownload ? (
+                          <button
+                            type="button"
+                            disabled={queueingDownload || !canSync}
+                            title={!canSync ? 'Verify login in System Settings before downloading' : 'Queue this release for download'}
+                            onClick={() => void handleQueueReleaseDownload()}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            {queueingDownload ? 'Queueing...' : 'Download'}
+                          </button>
                         ) : (
                           <span className="font-mono text-[11px] text-crt-muted px-2">
                             {file.status}
@@ -1232,13 +1281,36 @@ export function GameDetailDrawer({
                   Raw Archive
                 </a>
               </>
+            ) : canQueueRelease ? (
+              <button
+                type="button"
+                disabled={queueingDownload || !canSync}
+                title={
+                  !canSync
+                    ? 'Verify login in System Settings before downloading'
+                    : 'Queue this release and mirror its files to local storage'
+                }
+                onClick={() => void handleQueueReleaseDownload()}
+                className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              >
+                <Download className="h-3.5 w-3.5" />
+                {queueingDownload ? 'Queueing...' : 'Download Release'}
+              </button>
             ) : (
               <span
-                title="No mirrored ROM archive is currently available on disk"
+                title={
+                  item.status === 'queued' || item.status === 'downloading'
+                    ? 'Release is currently queued or downloading'
+                    : 'No mirrored ROM archive is currently available on disk'
+                }
                 className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-elevated text-crt-muted border border-crt-border rounded opacity-60 cursor-not-allowed whitespace-nowrap"
               >
                 <FileArchive className="h-3.5 w-3.5" />
-                ROM Unavailable
+                {item.status === 'queued'
+                  ? 'Queued'
+                  : item.status === 'downloading'
+                    ? 'Downloading...'
+                    : 'ROM Unavailable'}
               </span>
             )}
 

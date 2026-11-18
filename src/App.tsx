@@ -784,6 +784,74 @@ export default function App() {
     await loadInitialData();
   };
 
+  const handleQueueDownload = async (payload: {
+    ids?: number[];
+    filters?: Record<string, unknown>;
+  }): Promise<{ queuedCount?: number; skippedCount?: number } | void> => {
+    setErrorBanner(null);
+    const res = await fetch('/api/items/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const parsed = await readJsonSafely<{
+      run?: SyncRunRecord;
+      queuedCount?: number;
+      skippedCount?: number;
+      error?: string;
+    }>(res);
+    if (!parsed.ok) {
+      const msg = parsed.errorMessage || `Failed to queue downloads (HTTP ${res.status})`;
+      setErrorBanner(msg);
+      throw new Error(msg);
+    }
+    await loadInitialData();
+    return {
+      queuedCount: parsed.data?.queuedCount,
+      skippedCount: parsed.data?.skippedCount,
+    };
+  };
+
+  const handleStartCatalogIndex = async (scope: 'filtered' | 'full' = 'filtered') => {
+    setErrorBanner(null);
+    const res = await fetch('/api/catalog/index', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope }),
+    });
+    const parsed = await readJsonSafely<{
+      started?: boolean;
+      targets?: string[];
+      status?: ServiceStatusSnapshot;
+      error?: string;
+    }>(res);
+    if (!parsed.ok) {
+      const msg = parsed.errorMessage || `Failed to start catalog indexing (HTTP ${res.status})`;
+      setErrorBanner(msg);
+      throw new Error(msg);
+    }
+    if (parsed.data?.status) {
+      setStatus(parsed.data.status);
+    } else {
+      await loadInitialData();
+    }
+  };
+
+  const handleStopCatalogIndex = async () => {
+    setErrorBanner(null);
+    const res = await fetch('/api/catalog/index/stop', { method: 'POST' });
+    const parsed = await readJsonSafely<{ status?: ServiceStatusSnapshot; error?: string }>(res);
+    if (!parsed.ok) {
+      setErrorBanner(parsed.errorMessage || `Failed to pause catalog indexing (HTTP ${res.status})`);
+      return;
+    }
+    if (parsed.data?.status) {
+      setStatus(parsed.data.status);
+    } else {
+      await loadInitialData();
+    }
+  };
+
   const navItems: { id: NavSection; label: string }[] = [
     { id: 'monitor', label: 'Sync' },
     { id: 'catalog', label: 'Catalog' },
@@ -1254,9 +1322,11 @@ export default function App() {
                       ? 'Stop Dry Run'
                       : status.activeRun.triggerType === 'retry'
                         ? 'Stop Retry'
-                        : status.activeRun.mode === 'full'
-                          ? 'Stop Full Sync'
-                          : 'Stop Incremental'
+                        : status.activeRun.triggerType === 'download'
+                          ? 'Stop Queue'
+                          : status.activeRun.mode === 'full'
+                            ? 'Stop Full Sync'
+                            : 'Stop Incremental'
                 }
               />
             ) : (
@@ -1478,6 +1548,9 @@ export default function App() {
                   catalogRevision={catalogRevision}
                   activeRetryItemId={activeRetryItemId}
                   onRetryItem={handleRetryItem}
+                  onQueueDownload={handleQueueDownload}
+                  onStartCatalogIndex={handleStartCatalogIndex}
+                  onStopCatalogIndex={handleStopCatalogIndex}
                   onRefreshStatus={loadInitialData}
                 />
               )}
@@ -1489,6 +1562,8 @@ export default function App() {
                   focusRequest={configFocus}
                   onDirtyChange={setConfigDirty}
                   onSaveConfig={handleSaveConfig}
+                  onStartCatalogIndex={handleStartCatalogIndex}
+                  onStopCatalogIndex={handleStopCatalogIndex}
                   onNavigateToAuth={() => requestSectionChange('settings', 'auth')}
                 />
               )}

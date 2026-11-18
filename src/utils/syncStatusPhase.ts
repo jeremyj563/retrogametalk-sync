@@ -18,6 +18,9 @@ export function deriveRunSyncTypeLabel(activeRun: SyncRunRecord | null): string 
   if (activeRun.triggerType === 'retry') {
     return isDry ? 'Dry Run (Retry)' : 'Retry Failed';
   }
+  if (activeRun.triggerType === 'download') {
+    return isDry ? 'Dry Run (Queue)' : 'Download Queue';
+  }
   if (activeRun.mode === 'full') {
     return isDry ? 'Dry Run (Full)' : 'Full Sync';
   }
@@ -264,6 +267,33 @@ export function parseSyncStatusHeader(params: {
       actionPrefix: 'Retrying',
       subject: singleRetryMatch[2].trim(),
       subjectKind: 'title',
+      workerCount: 0,
+    };
+  }
+
+  // 6b. On-demand Download Queue phases
+  const queueItemMatch = phase.match(/^Queue\s+\((\d+\/\d+)\):\s+([^/]+?)\s*\/\s*(.+)$/i);
+  if (queueItemMatch) {
+    return {
+      syncType: runSyncType ?? 'Download Queue',
+      systemName: queueItemMatch[2].trim(),
+      progressLabel: queueItemMatch[1].trim(),
+      actionPrefix: 'Downloading',
+      subject: queueItemMatch[3].trim(),
+      subjectKind: 'title',
+      workerCount: 0,
+    };
+  }
+
+  const queueStartMatch = phase.match(/^Downloading\s+(\d+\s+queued\s+releases?)$/i);
+  if (queueStartMatch) {
+    return {
+      syncType: runSyncType ?? 'Download Queue',
+      systemName: null,
+      progressLabel: null,
+      actionPrefix: 'Queueing',
+      subject: queueStartMatch[1].trim(),
+      subjectKind: 'detail',
       workerCount: 0,
     };
   }

@@ -5,13 +5,35 @@ export type {
   SystemTypeFolderOverride,
   SystemTypeSubfolderMode,
 } from '../shared/storageFolderMappings.ts';
-export type RunTrigger = 'scheduled' | 'manual' | 'retry';
+export type RunTrigger = 'scheduled' | 'manual' | 'retry' | 'download';
 export type SyncScope = 'incremental' | 'full';
 export type RunMode = SyncScope | 'dry_run';
 export type RunStatus = 'running' | 'completed' | 'stopped' | 'failed';
-export type FileItemStatus = 'queued' | 'downloading' | 'downloaded' | 'skipped' | 'failed';
+export type FileItemStatus = 'available' | 'queued' | 'downloading' | 'downloaded' | 'skipped' | 'failed';
 export type ItemStatus = FileItemStatus | 'partial';
 export type LogLevel = 'debug' | 'info' | 'download' | 'throttle' | 'warn' | 'error';
+
+export interface SystemIndexCursor {
+  lastIndexedAt: string;
+  totalWpPosts: number;
+  totalPages: number;
+  pagesIndexed: number;
+  fullyIndexed: boolean;
+  scope: 'filtered' | 'full';
+}
+
+export interface CatalogIndexerStatus {
+  active: boolean;
+  scope: 'filtered' | 'full' | null;
+  currentSystem: string | null;
+  systemsCompleted: number;
+  systemsTotal: number;
+  currentPage: number;
+  totalPages: number;
+  indexedCount: number;
+  remainingUnindexedSystems: number;
+  lastError: string | null;
+}
 
 export interface ScraperConfigPublic {
   baseUrl: string;
@@ -41,6 +63,8 @@ export interface ScraperConfigPublic {
   romSanitizeFat32: boolean;
   romMaxFilenameLen: number;
   storageFolderConfig: import('../shared/storageFolderMappings.ts').StorageFolderMappingConfig;
+  autoDownloadNewReleases: boolean;
+  systemIndexState?: Record<string, SystemIndexCursor>;
   updatedAt: string;
   envOverrides: string[];
 }
@@ -72,6 +96,7 @@ export interface ConfigUpdateInput {
   romSanitizeFat32?: boolean;
   romMaxFilenameLen?: number;
   storageFolderConfig?: import('../shared/storageFolderMappings.ts').StorageFolderMappingConfig;
+  autoDownloadNewReleases?: boolean;
 }
 
 export interface SyncRunRecord {
@@ -123,6 +148,7 @@ export interface ReleaseMetadata {
   screenshotsFullResVersion?: number;
   coverCandidates?: string[];
   screenshotCandidates?: string[][];
+  downloadHints?: { filename: string; fileSize: string }[];
   sourcePageUrl: string;
   fetchedAt: string;
 }
@@ -182,6 +208,7 @@ export interface RepositoryItemRecord {
   releaseTags: string[];
   title: string;
   fileSizeBytes: number;
+  sizeIsEstimated?: boolean;
   publishedAt: string | null;
   remoteUpdatedAt: string | null;
   status: ItemStatus;
@@ -279,6 +306,7 @@ export interface TransferSpeedSample {
 export interface SystemBreakdown {
   systemName: string;
   totalItems: number;
+  availableItems: number;
   downloadedItems: number;
   skippedItems: number;
   failedItems: number;
@@ -330,8 +358,10 @@ export interface ServiceStatusSnapshot {
   rateLimiter: RateLimiterTelemetry;
   auth: AuthSessionStatus;
   storage: StorageStats;
+  indexer: CatalogIndexerStatus;
   totals: {
     totalCatalogItems: number;
+    availableItems: number;
     downloadedItems: number;
     skippedItems: number;
     failedItems: number;

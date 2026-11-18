@@ -614,6 +614,14 @@ export function ServiceTelemetrySidebar({
               </div>
 
               <dl className="mt-2.5 pt-2.5 border-t border-crt-border space-y-1.5 text-[11px] font-mono tabular-nums">
+                {status.totals.availableItems > 0 && (
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-crt-muted">Available (Indexed)</dt>
+                    <dd className="text-crt-phosphor/85 text-right whitespace-nowrap">
+                      {status.totals.availableItems.toLocaleString()}
+                    </dd>
+                  </div>
+                )}
                 <div className="flex items-center justify-between gap-3">
                   <dt className="text-crt-muted">Queued / Active</dt>
                   <dd
@@ -642,7 +650,7 @@ export function ServiceTelemetrySidebar({
                   </dd>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <dt className="text-crt-muted">Indexed Size</dt>
+                  <dt className="text-crt-muted">Mirrored Size</dt>
                   <dd className="text-crt-text text-right whitespace-nowrap">
                     {formatBytes(status.totals.totalBytesMirrored)}
                   </dd>
