@@ -26,6 +26,7 @@ import {
   listSyncRuns,
   markCatalogItemsQueued,
   markCatalogReleaseFailed,
+  mergeCatalogReleaseDetailMetadata,
   queryRepositoryItemIds,
   recordSuccessfulLogin,
   releaseDistributedLock,
@@ -337,9 +338,13 @@ export class ScraperOrchestrator extends EventEmitter {
   private lockRenewTimer: NodeJS.Timeout | null = null;
   private shuttingDown = false;
   private inFlightAssetUpgrades = new Map<number, Promise<RepositoryItemRecord | null>>();
+  private inFlightDetailHydrations = new Map<number, Promise<RepositoryItemRecord | null>>();
   private inFlightLazyCovers = new Map<number, Promise<void>>();
   private activeLazyCoverSlots = 0;
   private lazyCoverWaiters: (() => void)[] = [];
+  private inFlightLazyScreenshots = new Map<string, Promise<void>>();
+  private activeLazyScreenshotSlots = 0;
+  private lazyScreenshotWaiters: (() => void)[] = [];
   private indexerState: CatalogIndexerStatus = {
     active: false,
     scope: null,
@@ -1019,6 +1024,7 @@ export class ScraperOrchestrator extends EventEmitter {
       for (const ext of ['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.bmp']) {
         fs.rmSync(path.join(this.getCoverCacheDir(), `${item.id}${ext}`), { force: true });
       }
+      fs.rmSync(this.getScreenshotCacheDir(item.id), { recursive: true, force: true });
     }
 
     if (removedItems.length > 0) {
@@ -1038,6 +1044,11 @@ export class ScraperOrchestrator extends EventEmitter {
 
   private getCoverCacheDir(): string {
     return path.join(getDataDir(), 'cache', 'covers');
+  }
+
+  private getScreenshotCacheDir(itemId?: number): string {
+    const base = path.join(getDataDir(), 'cache', 'screenshots');
+    return itemId !== undefined ? path.join(base, String(itemId)) : base;
   }
 
   resolveItemAssetFile(
@@ -1076,25 +1087,54 @@ export class ScraperOrchestrator extends EventEmitter {
       return null;
     }
 
-    if (!releaseDir || (!releaseDir.startsWith(root + path.sep) && releaseDir !== root)) return null;
+    if (!Number.isInteger(index) || index < 0) return null;
 
-    const relShots = item.metadata?.screenshotLocalRelPaths || [];
-    if (index >= 0 && index < relShots.length) {
-      const candidate = path.resolve(releaseDir, relShots[index]);
-      if (candidate.startsWith(releaseDir + path.sep) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-        return { absPath: candidate, filename: path.basename(candidate) };
+    const validReleaseDir =
+      releaseDir && (releaseDir.startsWith(root + path.sep) || releaseDir === root) ? releaseDir : null;
+    const knownExts = ['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.bmp'];
+    const paddedIndex = String(index + 1).padStart(2, '0');
+
+    if (validReleaseDir) {
+      const relShots = item.metadata?.screenshotLocalRelPaths || [];
+      if (index < relShots.length) {
+        const candidate = path.resolve(validReleaseDir, relShots[index]);
+        if (candidate.startsWith(validReleaseDir + path.sep) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return { absPath: candidate, filename: path.basename(candidate) };
+        }
+      }
+
+      const shotsDir = path.join(validReleaseDir, 'screenshots');
+      for (const ext of knownExts) {
+        const numberedCandidate = path.join(shotsDir, `${paddedIndex}${ext}`);
+        if (fs.existsSync(numberedCandidate) && fs.statSync(numberedCandidate).isFile()) {
+          return { absPath: numberedCandidate, filename: path.basename(numberedCandidate) };
+        }
       }
     }
 
-    const shotsDir = path.join(releaseDir, 'screenshots');
-    if (fs.existsSync(shotsDir)) {
-      const files = fs
-        .readdirSync(shotsDir)
-        .filter((f) => !f.startsWith('.') && !isEphemeralPartFile(f))
-        .sort();
-      if (index >= 0 && index < files.length) {
-        const candidate = path.join(shotsDir, files[index]);
-        return { absPath: candidate, filename: files[index] };
+    const screenshotCacheDir = path.resolve(this.getScreenshotCacheDir(itemId));
+    for (const ext of knownExts) {
+      const cachedCandidate = path.join(screenshotCacheDir, `${paddedIndex}${ext}`);
+      if (
+        cachedCandidate.startsWith(screenshotCacheDir + path.sep) &&
+        fs.existsSync(cachedCandidate) &&
+        fs.statSync(cachedCandidate).isFile()
+      ) {
+        return { absPath: cachedCandidate, filename: path.basename(cachedCandidate) };
+      }
+    }
+
+    if (validReleaseDir) {
+      const shotsDir = path.join(validReleaseDir, 'screenshots');
+      if (fs.existsSync(shotsDir)) {
+        const files = fs
+          .readdirSync(shotsDir)
+          .filter((f) => !f.startsWith('.') && !isEphemeralPartFile(f))
+          .sort();
+        if (index < files.length) {
+          const candidate = path.join(shotsDir, files[index]);
+          return { absPath: candidate, filename: files[index] };
+        }
       }
     }
     return null;
@@ -1156,6 +1196,87 @@ export class ScraperOrchestrator extends EventEmitter {
     })();
 
     this.inFlightLazyCovers.set(itemId, task);
+    return task;
+  }
+
+  private async acquireLazyScreenshotSlot(): Promise<void> {
+    if (this.activeLazyScreenshotSlots < 3) {
+      this.activeLazyScreenshotSlots += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.lazyScreenshotWaiters.push(resolve);
+    });
+    this.activeLazyScreenshotSlots += 1;
+  }
+
+  private releaseLazyScreenshotSlot(): void {
+    this.activeLazyScreenshotSlots = Math.max(0, this.activeLazyScreenshotSlots - 1);
+    const next = this.lazyScreenshotWaiters.shift();
+    if (next) next();
+  }
+
+  async ensureLazyScreenshotAsset(
+    itemId: number,
+    index: number,
+    isCancelled?: () => boolean,
+  ): Promise<void> {
+    if (!Number.isInteger(index) || index < 0) return;
+    if (this.resolveItemAssetFile(itemId, 'screenshot', index)) return;
+    const key = `${itemId}:${index}`;
+    const inflight = this.inFlightLazyScreenshots.get(key);
+    if (inflight) return inflight;
+
+    const item = getRepositoryItemById(itemId);
+    const candidateUrls =
+      item?.metadata?.screenshotCandidates?.[index]?.length
+        ? item.metadata.screenshotCandidates[index]
+        : item?.metadata?.screenshotUrls?.[index]
+          ? [item.metadata.screenshotUrls[index]]
+          : [];
+    if (!item || candidateUrls.length === 0) return;
+
+    const task = (async () => {
+      await this.acquireLazyScreenshotSlot();
+      try {
+        if (isCancelled?.()) return;
+        if (this.resolveItemAssetFile(itemId, 'screenshot', index)) return;
+
+        const cfg = getInternalConfig();
+        const auth = this.client.getAuthStatus(cfg, getLastAuthenticatedAt());
+        if (!auth.authenticated && cfg.username && cfg.password) {
+          await this.client.login(cfg).catch(() => undefined);
+        }
+
+        const root = path.resolve(cfg.downloadDir);
+        const releaseDir = item.status !== 'available' ? this.resolveReleaseDir(item, root) : null;
+        const targetDir =
+          releaseDir && fs.existsSync(releaseDir)
+            ? path.join(releaseDir, 'screenshots')
+            : this.getScreenshotCacheDir(itemId);
+        fs.mkdirSync(targetDir, { recursive: true });
+        const targetBase = path.join(targetDir, String(index + 1).padStart(2, '0'));
+
+        await this.client.fetchCoverToFile(
+          candidateUrls,
+          item.metadata?.sourcePageUrl || item.remoteUrl || cfg.baseUrl,
+          targetBase,
+          cfg,
+        );
+      } catch (err) {
+        logServer(
+          'ASSET',
+          'debug',
+          `Lazy screenshot fetch skipped for itemId=${itemId} index=${index}`,
+          formatErrorDetails(err),
+        );
+      } finally {
+        this.releaseLazyScreenshotSlot();
+        this.inFlightLazyScreenshots.delete(key);
+      }
+    })();
+
+    this.inFlightLazyScreenshots.set(key, task);
     return task;
   }
 
@@ -1296,12 +1417,19 @@ export class ScraperOrchestrator extends EventEmitter {
     );
 
     const extractedMeta = this.client.extractReleaseMetadata(pageData.html, pageData.finalUrl, wpData, fileRoles);
+    const hydratedMeta: ReleaseMetadata = {
+      ...extractedMeta,
+      downloadHints:
+        extractedMeta.downloadHints?.length
+          ? extractedMeta.downloadHints
+          : item.metadata?.downloadHints,
+    };
     const releaseDir =
       this.resolveReleaseDir(item, root) ||
       path.dirname(resolveMirroredPaths(cfg.baseUrl, pageData.finalUrl, cfg.downloadDir, 'probe.zip').localPath);
 
     const mirrored = await this.client.mirrorReleaseAssets(
-      extractedMeta,
+      hydratedMeta,
       releaseDir,
       cfg,
       undefined,
@@ -1327,6 +1455,137 @@ export class ScraperOrchestrator extends EventEmitter {
     this.emitCatalogUpdated('metadata_updated', updated.id);
     this.emitStatus();
     return updated;
+  }
+
+  async hydrateItemDetails(itemId: number): Promise<RepositoryItemRecord | null> {
+    const existing = getRepositoryItemById(itemId);
+    if (!existing) return null;
+    if (existing.metadata?.detailHydrated) {
+      return existing;
+    }
+
+    const activePromise = this.inFlightDetailHydrations.get(itemId);
+    if (activePromise) {
+      return activePromise;
+    }
+
+    const hydrationPromise = (async (): Promise<RepositoryItemRecord | null> => {
+      try {
+        const pageUrl = existing.remoteUrl.split('#')[0];
+        if (!pageUrl.startsWith('http')) {
+          return existing;
+        }
+
+        const cfg = getInternalConfig();
+        const runLogger: LoggerFn = (level, msg, detail) => this.log(level, msg, detail ?? null);
+        if (cfg.username && cfg.password && !this.client.getAuthStatus(cfg, getLastAuthenticatedAt()).authenticated) {
+          await this.client.login(cfg, undefined, runLogger);
+        }
+
+        const pageData = await this.client.fetchPageHtml(pageUrl, cfg, undefined, runLogger);
+        if (pageData.status >= 400) {
+          throw new Error(`Failed to fetch release page (HTTP ${pageData.status})`);
+        }
+
+        const wpPostIdHint = existing.wpPostId ?? this.client.extractWpPostIdHint(pageData.html);
+        const needsWpFetch =
+          !existing.hasMetadata ||
+          !existing.wpPostId ||
+          !existing.metadata?.downloadHints?.length;
+        const wpData: WpPostMetadata | null = needsWpFetch
+          ? await this.client.fetchReleaseWpMetadata(pageData.finalUrl, wpPostIdHint, cfg, undefined, runLogger)
+          : {
+              wpPostId: existing.wpPostId ?? 0,
+              wpPostType: existing.wpPostType ?? 'post',
+              link: pageUrl,
+              dateGmt: existing.publishedAt,
+              modifiedGmt: existing.remoteUpdatedAt,
+              title: existing.title,
+              originalTitle: null,
+              publisher: existing.publisher,
+              developer: existing.developer,
+              releaseYear: existing.releaseYear,
+              genres: existing.genres,
+              regions: existing.regions,
+              languages: existing.languages,
+              sources: existing.sources,
+              formats: existing.metadata?.formats ?? [],
+              descriptionHtml: existing.metadata?.descriptionHtml ?? '',
+              coverUrl: existing.metadata?.coverUrl ?? null,
+              screenshotUrls: existing.metadata?.screenshotUrls ?? [],
+              downloadHints: existing.metadata?.downloadHints ?? [],
+            };
+
+        const roleInputs =
+          existing.files.length > 0
+            ? existing.files.map((f) => ({ filename: f.filename, displayLabel: f.displayLabel }))
+            : (wpData?.downloadHints ?? existing.metadata?.downloadHints ?? []).map((h) => ({
+                filename: h.filename,
+                displayLabel: '',
+              }));
+        const fileRoles = roleInputs.map((f) =>
+          classifyFileRole(f.filename, f.displayLabel, {
+            genres: wpData?.genres ?? existing.genres,
+            languages: wpData?.languages ?? existing.languages,
+            sources: wpData?.sources ?? existing.sources,
+            title: wpData?.title ?? existing.title,
+            systemName: existing.systemName,
+          }),
+        );
+
+        const extractedMeta = this.client.extractReleaseMetadata(
+          pageData.html,
+          pageData.finalUrl,
+          wpData,
+          fileRoles,
+        );
+        const prevMeta = existing.metadata;
+        const mergedMeta: ReleaseMetadata = {
+          ...extractedMeta,
+          detailHydrated: true,
+          coverUrl: extractedMeta.coverUrl || prevMeta?.coverUrl || null,
+          coverLocalRelPath: prevMeta?.coverLocalRelPath ?? null,
+          screenshotUrls:
+            extractedMeta.screenshotUrls.length > 0
+              ? extractedMeta.screenshotUrls
+              : (prevMeta?.screenshotUrls ?? []),
+          screenshotLocalRelPaths: prevMeta?.screenshotLocalRelPaths ?? [],
+          screenshotsFullResVersion: prevMeta?.screenshotsFullResVersion,
+          downloadHints:
+            extractedMeta.downloadHints?.length
+              ? extractedMeta.downloadHints
+              : prevMeta?.downloadHints,
+          fetchedAt: prevMeta?.fetchedAt ?? extractedMeta.fetchedAt,
+        };
+
+        if (existing.status !== 'available') {
+          const root = path.resolve(cfg.downloadDir);
+          const releaseDir = this.resolveReleaseDir(existing, root);
+          if (releaseDir && fs.existsSync(releaseDir)) {
+            const metaPath = path.join(releaseDir, 'metadata.json');
+            try {
+              const { coverCandidates: _cc, screenshotCandidates: _sc, ...sidecarSafe } = mergedMeta;
+              void _cc;
+              void _sc;
+              await fs.promises.writeFile(metaPath, JSON.stringify(sidecarSafe, null, 2), 'utf8');
+            } catch {
+              // Non-fatal sidecar write
+            }
+          }
+        }
+
+        const updated = mergeCatalogReleaseDetailMetadata(existing.id, mergedMeta);
+        if (!updated) return getRepositoryItemById(itemId);
+
+        this.emitCatalogUpdated('metadata_updated', updated.id);
+        return updated;
+      } finally {
+        this.inFlightDetailHydrations.delete(itemId);
+      }
+    })();
+
+    this.inFlightDetailHydrations.set(itemId, hydrationPromise);
+    return hydrationPromise;
   }
 
   async ensureFullResItemAssets(itemId: number): Promise<RepositoryItemRecord | null> {

@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-11-18
+
+- Added automatic background detail hydration (`POST /api/items/:id/metadata?lazy=1`) and progressive per-screenshot lazy caching (`GET /api/items/:id/asset?kind=screenshot&index=N&lazy=1`) when opening any Catalog item in `GameDetailDrawer`, preserving fast WordPress REST catalog indexing while loading full screenshots, specs, stats, and release notes on demand without creating folders in the download directory for un-downloaded releases.
+- Added mellow CRT skeleton placeholders (`.crt-skeleton` / `.crt-skeleton-bar`, synchronized with Living UI Motion and `prefers-reduced-motion`) across Cover Art, Screenshots, Game Information specs, Included Downloads (including `downloadHints` preview & direct queue action), and Release Notes while lazy details and images dissolve cleanly into view.
+- Hardened metadata merging (`mergeCatalogReleaseDetailMetadata` and `upsertIndexedWpRelease`) with `detailHydrated` tracking so subsequent background WordPress re-indexing preserves HTML-discovered screenshots, specs, stats, and descriptions.
+
 ## [1.5.5] - 2026-11-18
 
 - Separated the Catalog quick-filter toggle groups (**`Downloaded` / `Not Downloaded`** and **`Installed` / `Not Installed`**) and the **Sort** dropdown onto their own dedicated toolbar row below the Search box and metadata filter dropdowns so quick actions remain cleanly separated across all viewport widths and zoom levels.

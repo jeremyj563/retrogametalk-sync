@@ -388,6 +388,74 @@
   opacity: 1;
 }
 
+/* Mellow CRT skeleton placeholders for lazy-hydrated detail metadata & screenshots */
+.crt-skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--color-crt-surface);
+}
+
+.crt-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 18%,
+    rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.085) 48%,
+    rgba(255, 255, 255, 0.04) 52%,
+    transparent 82%
+  );
+  transform: translateX(-120%);
+  will-change: transform, opacity;
+}
+
+.crt-skeleton-bar {
+  position: relative;
+  overflow: hidden;
+  border-radius: 3px;
+  background-color: color-mix(in srgb, var(--color-crt-border) 68%, var(--color-crt-surface));
+}
+
+.crt-skeleton-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.14) 50%,
+    transparent 100%
+  );
+  transform: translateX(-120%);
+  will-change: transform, opacity;
+}
+
+@keyframes crt-skeleton-shimmer {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(120%);
+  }
+}
+
+[data-crt-motion="low"] .crt-skeleton::after,
+[data-crt-motion="medium"] .crt-skeleton::after,
+[data-crt-motion="high"] .crt-skeleton::after,
+[data-crt-motion="ultra"] .crt-skeleton::after,
+[data-crt-motion="low"] .crt-skeleton-bar::after,
+[data-crt-motion="medium"] .crt-skeleton-bar::after,
+[data-crt-motion="high"] .crt-skeleton-bar::after,
+[data-crt-motion="ultra"] .crt-skeleton-bar::after {
+  opacity: 1;
+  animation: crt-skeleton-shimmer calc(2.4s * var(--crt-motion-speed, 1)) cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
 .crt-indexer-bar {
   position: relative;
   overflow: hidden;
@@ -648,6 +716,8 @@
 @media (prefers-reduced-motion: reduce) {
   .crt-accordion-grid,
   .crt-cover-lazy,
+  .crt-skeleton::after,
+  .crt-skeleton-bar::after,
   .crt-indexer-bar,
   .crt-deck-tab-pill,
   .crt-deck-slide,

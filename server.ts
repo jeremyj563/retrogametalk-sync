@@ -315,7 +315,7 @@ async function bootstrap() {
     const wantLazy = req.query.lazy === '1';
 
     let item = getRepositoryItemById(itemId);
-    if (wantFullRes && item && (item.metadata?.screenshotsFullResVersion ?? 0) < 1) {
+    if (wantFullRes && !wantLazy && item && item.status !== 'available' && (item.metadata?.screenshotsFullResVersion ?? 0) < 1) {
       item = (await orchestrator.ensureFullResItemAssets(itemId)) ?? item;
     }
 
@@ -323,6 +323,16 @@ async function bootstrap() {
     if (!asset && kind === 'cover' && wantLazy && item?.metadata?.coverUrl) {
       await orchestrator.ensureLazyCoverAsset(itemId);
       asset = orchestrator.resolveItemAssetFile(itemId, 'cover', 0);
+    } else if (
+      !asset &&
+      kind === 'screenshot' &&
+      wantLazy &&
+      Number.isInteger(index) &&
+      index >= 0 &&
+      item?.metadata?.screenshotUrls?.[index]
+    ) {
+      await orchestrator.ensureLazyScreenshotAsset(itemId, index, () => req.destroyed);
+      asset = orchestrator.resolveItemAssetFile(itemId, 'screenshot', index);
     }
     if (!asset) {
       res.status(404).json({ error: 'Artwork asset not found locally' });
@@ -332,7 +342,7 @@ async function bootstrap() {
     const isFullResVerified = (item?.metadata?.screenshotsFullResVersion ?? 0) >= 1;
     res.setHeader(
       'Cache-Control',
-      isFullResVerified || kind === 'cover' ? 'public, max-age=3600' : 'no-cache',
+      isFullResVerified || kind === 'cover' || wantLazy ? 'public, max-age=3600' : 'no-cache',
     );
     res.sendFile(asset.absPath);
   });
@@ -568,6 +578,15 @@ async function bootstrap() {
       return;
     }
     try {
+      if (req.query.lazy === '1') {
+        const item = await orchestrator.hydrateItemDetails(itemId);
+        if (!item) {
+          res.status(404).json({ error: 'Catalog item not found' });
+          return;
+        }
+        res.json({ item });
+        return;
+      }
       if (req.query.upgradeAssets === '1') {
         const item = await orchestrator.ensureFullResItemAssets(itemId);
         if (!item) {
