@@ -13,12 +13,15 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  Database,
   Download,
   Gamepad2,
   HardDrive,
   Layers,
   Repeat,
+  ShieldCheck,
 } from 'lucide-react';
+import * as d3 from 'd3';
 import type {
   RateLimitSample,
   ReleaseTypeBreakdown,
@@ -34,7 +37,9 @@ export type TelemetrySlideId =
   | 'outcomes'
   | 'consoles'
   | 'types'
-  | 'percentiles';
+  | 'percentiles'
+  | 'index'
+  | 'health';
 
 type DeckSlideMotionState =
   | 'active'
@@ -62,6 +67,8 @@ const SLIDE_ORDER: TelemetrySlideId[] = [
   'consoles',
   'types',
   'percentiles',
+  'index',
+  'health',
 ];
 
 const SLIDE_META: Record<
@@ -97,6 +104,16 @@ const SLIDE_META: Record<
     tabLabel: 'Latency',
     title: 'Upstream Latency Percentiles',
     subtitle: 'Rolling p50 median, p95 tail & peak HTTP response times',
+  },
+  index: {
+    tabLabel: 'Index',
+    title: 'Catalog Index & Queue Coverage',
+    subtitle: 'Mirrored vs available library completion and active download queue',
+  },
+  health: {
+    tabLabel: 'Health',
+    title: 'Transfer Reliability & Throttle Guard',
+    subtitle: 'Rolling HTTP 200 success rate vs 429/503 backoff resilience',
   },
 };
 
@@ -439,6 +456,53 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
     });
   }, [delaySeries]);
 
+  // Rolling HTTP request reliability & throttle hit rate (window = 12)
+  const rollingReliability = useMemo(() => {
+    const windowSize = 12;
+    return delaySeries.map((sample, i) => {
+      const start = Math.max(0, i - windowSize + 1);
+      const slice = delaySeries.slice(start, i + 1);
+      const throttledCount = slice.filter((s) => s.throttled).length;
+      const okPct = Math.round(((slice.length - throttledCount) / Math.max(1, slice.length)) * 100);
+      return {
+        timestamp: sample.timestamp,
+        throttled: sample.throttled,
+        delayMs: sample.delayMs,
+        okPct,
+        throttledInWindow: throttledCount,
+        windowLen: slice.length,
+      };
+    });
+  }, [delaySeries]);
+
+  const reliabilityStats = useMemo(() => {
+    const total = Math.max(status.rateLimiter.totalRequests, delaySeries.length);
+    const windowThrottles = delaySeries.filter((s) => s.throttled).length;
+    const recentOkPct =
+      delaySeries.length > 0
+        ? ((delaySeries.length - windowThrottles) / delaySeries.length) * 100
+        : status.rateLimiter.totalRequests > 0
+          ? Math.max(
+              0,
+              ((status.rateLimiter.totalRequests - status.rateLimiter.rateLimitHits) /
+                status.rateLimiter.totalRequests) *
+                100,
+            )
+          : 100;
+    return {
+      totalRequests: total,
+      windowThrottles,
+      recentOkPct,
+    };
+  }, [delaySeries, status.rateLimiter]);
+
+  // Systems ranked by total indexed library size for Catalog Index & Coverage slide
+  const indexCoverageSystems = useMemo(() => {
+    return [...status.systems]
+      .filter((s) => s.totalItems > 0)
+      .sort((a, b) => b.totalItems - a.totalItems || b.downloadedItems - a.downloadedItems);
+  }, [status.systems]);
+
   // Overall stats for Pacing & Latency
   const pacingStats = useMemo(() => {
     if (delaySeries.length === 0) {
@@ -532,6 +596,8 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
     outcomes: `${chronologicalRuns.length} runs`,
     consoles: `${rankedSystems.length} consoles`,
     types: `${releaseTypesData.rows.length} types`,
+    index: `${status.totals.totalCatalogItems.toLocaleString()} indexed`,
+    health: `${reliabilityStats.recentOkPct.toFixed(0)}% ok`,
   };
 
   return (
@@ -2008,6 +2074,365 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
             })()
           )}
           </div>
+
+          {/* SLIDE 7: CATALOG INDEX & QUEUE COVERAGE */}
+          <div
+            data-slide-state={resolveSlideState('index')}
+            aria-hidden={activeSlide !== 'index'}
+            inert={activeSlide !== 'index' || undefined}
+            className="crt-deck-slide"
+          >
+            {status.totals.totalCatalogItems === 0 ? (
+              <div className="text-center space-y-1.5 py-6">
+                <Database className="h-5 w-5 text-crt-muted mx-auto" />
+                <p className="text-xs text-crt-text font-medium">Catalog Indexer Standby</p>
+                <p className="text-xs text-crt-muted max-w-xs mx-auto">
+                  Connect RetroGameTalk credentials or start a Sync to index consoles and queue coverage here.
+                </p>
+              </div>
+            ) : (
+              (() => {
+                const total = Math.max(1, status.totals.totalCatalogItems);
+                const mirroredCnt = status.totals.downloadedItems + status.totals.skippedItems;
+                const queuedCnt = status.totals.queuedItems;
+                const availCnt = status.totals.availableItems;
+                const failCnt = status.totals.failedItems;
+                const mirroredPct = (mirroredCnt / total) * 100;
+                const queuedPct = (queuedCnt / total) * 100;
+                const availPct = (availCnt / total) * 100;
+                const failPct = (failCnt / total) * 100;
+
+                const activeHover = activeSlide === 'index' ? hoverState : null;
+                const hIdx = activeHover?.index ?? null;
+                const hSys = hIdx !== null ? indexCoverageSystems[hIdx] : null;
+
+                return (
+                  <div
+                    className="relative w-full h-full flex flex-col gap-2"
+                    onPointerLeave={() => setHoverState(null)}
+                  >
+                    {/* Overall Library Composition Strip */}
+                    <div className="px-1.5 pt-0.5 space-y-1 shrink-0">
+                      <div className="flex items-center justify-between text-[11px] font-mono tabular-nums">
+                        <span className="text-crt-text font-medium">
+                          Library Coverage:{' '}
+                          <span className="text-crt-phosphor">{mirroredPct.toFixed(1)}%</span>
+                        </span>
+                        <span className="text-crt-muted">
+                          {mirroredCnt.toLocaleString()} / {status.totals.totalCatalogItems.toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="h-2 w-full bg-crt-surface border border-crt-border rounded-xs overflow-hidden flex">
+                        {mirroredPct > 0 && (
+                          <div
+                            className="h-full transition-all duration-300"
+                            style={{
+                              width: `${mirroredPct}%`,
+                              backgroundColor: 'var(--color-crt-phosphor)',
+                            }}
+                          />
+                        )}
+                        {queuedPct > 0 && (
+                          <div
+                            className="h-full bg-sky-400 transition-all duration-300"
+                            style={{ width: `${queuedPct}%` }}
+                          />
+                        )}
+                        {availPct > 0 && (
+                          <div
+                            className="h-full transition-all duration-300"
+                            style={{
+                              width: `${availPct}%`,
+                              backgroundColor: 'var(--color-crt-border-strong)',
+                              opacity: 0.65,
+                            }}
+                          />
+                        )}
+                        {failPct > 0 && (
+                          <div
+                            className="h-full transition-all duration-300"
+                            style={{
+                              width: `${failPct}%`,
+                              backgroundColor: 'var(--color-crt-crimson)',
+                            }}
+                          />
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Per-Console Mirrored vs Indexed Progress Rows */}
+                    <div className="flex-1 overflow-y-auto pr-1 space-y-1">
+                      {indexCoverageSystems.map((sys, idx) => {
+                        const sysMirrored = sys.downloadedItems + sys.skippedItems;
+                        const sysTotal = Math.max(1, sys.totalItems);
+                        const sysMirPct = (sysMirrored / sysTotal) * 100;
+                        const sysQueuePct = (sys.queuedItems / sysTotal) * 100;
+                        const hovered = hIdx === idx;
+                        return (
+                          <div
+                            key={sys.systemName}
+                            onPointerEnter={() =>
+                              setHoverState({
+                                index: idx,
+                                normX: 0.5,
+                                normY: idx / Math.max(1, indexCoverageSystems.length),
+                              })
+                            }
+                            className={`px-2 py-1 rounded transition-colors duration-200 cursor-crosshair ${
+                              hovered ? 'bg-crt-elevated' : 'hover:bg-crt-elevated/60'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums mb-0.5">
+                              <span className="text-crt-text font-medium truncate">
+                                {sys.systemName}
+                              </span>
+                              <span className="text-crt-muted shrink-0">
+                                <span className="text-crt-phosphor">{sysMirrored}</span>/
+                                {sys.totalItems} ({sysMirPct.toFixed(0)}%)
+                              </span>
+                            </div>
+                            <div className="h-1.5 w-full bg-crt-surface rounded-xs overflow-hidden flex">
+                              <div
+                                className="h-full transition-all duration-300"
+                                style={{
+                                  width: `${Math.max(sysMirrored > 0 ? 1.5 : 0, sysMirPct)}%`,
+                                  backgroundColor: 'var(--color-crt-phosphor)',
+                                }}
+                              />
+                              {sysQueuePct > 0 && (
+                                <div
+                                  className="h-full bg-sky-400 transition-all duration-300"
+                                  style={{ width: `${sysQueuePct}%` }}
+                                />
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {hSys && (
+                      <div className="crt-chart-tooltip-static pointer-events-none absolute bottom-2 right-2 z-20 w-56 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1">
+                        <div className="flex items-center justify-between border-b border-crt-border pb-1">
+                          <span className="text-crt-text font-semibold">{hSys.systemName}</span>
+                          <span className="text-crt-phosphor">
+                            {((hSys.downloadedItems + hSys.skippedItems) / Math.max(1, hSys.totalItems) * 100).toFixed(1)}%
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-crt-phosphor">Mirrored</span>
+                          <span className="text-crt-text">{hSys.downloadedItems + hSys.skippedItems}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-crt-muted">Available / Queued</span>
+                          <span className="text-crt-text">
+                            {hSys.availableItems} / <span className="text-sky-400">{hSys.queuedItems}</span>
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-crt-muted">Installed on SD</span>
+                          <span className="text-crt-text">{hSys.installedItems}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()
+            )}
+          </div>
+
+          {/* SLIDE 8: TRANSFER RELIABILITY & THROTTLE HEALTH */}
+          <div
+            data-slide-state={resolveSlideState('health')}
+            aria-hidden={activeSlide !== 'health'}
+            inert={activeSlide !== 'health' || undefined}
+            className="crt-deck-slide"
+          >
+            {rollingReliability.length < 2 ? (
+              <div className="text-center space-y-1.5 py-6">
+                <ShieldCheck className="h-5 w-5 text-crt-muted mx-auto" />
+                <p className="text-xs text-crt-text font-medium">Awaiting HTTP reliability telemetry</p>
+                <p className="text-xs text-crt-muted max-w-xs mx-auto">
+                  Rolling HTTP 200 success rate and 429/503 throttle defense traces appear as requests complete.
+                </p>
+              </div>
+            ) : (
+              (() => {
+                const xScale = d3
+                  .scaleLinear()
+                  .domain([0, Math.max(1, rollingReliability.length - 1)])
+                  .range([PAD_L, VB_W - PAD_R]);
+                const yScale = d3.scaleLinear().domain([0, 100]).range([PAD_T + PLOT_H, PAD_T]);
+
+                const okLinePath =
+                  d3
+                    .line<(typeof rollingReliability)[number]>()
+                    .x((_, i) => xScale(i))
+                    .y((d) => yScale(d.okPct))
+                    .curve(d3.curveMonotoneX)(rollingReliability) || '';
+                const okAreaPath =
+                  d3
+                    .area<(typeof rollingReliability)[number]>()
+                    .x((_, i) => xScale(i))
+                    .y0(PAD_T + PLOT_H)
+                    .y1((d) => yScale(d.okPct))
+                    .curve(d3.curveMonotoneX)(rollingReliability) || '';
+
+                const activeHover = activeSlide === 'health' ? hoverState : null;
+                const hIdx =
+                  activeHover !== null
+                    ? Math.min(rollingReliability.length - 1, Math.max(0, activeHover.index))
+                    : null;
+                const hPt = hIdx !== null ? rollingReliability[hIdx] : null;
+                const hX = hIdx !== null ? xScale(hIdx) : 0;
+
+                return (
+                  <div className="relative w-full h-full">
+                    <svg
+                      viewBox={`0 0 ${VB_W} ${VB_H}`}
+                      className="w-full h-full overflow-visible cursor-crosshair"
+                      aria-label="HTTP request reliability and throttle health chart"
+                      onPointerMove={(e) =>
+                        handleSvgPointerMove(e, rollingReliability.length, 'line')
+                      }
+                      onPointerLeave={() => setHoverState(null)}
+                    >
+                      <defs>
+                        <linearGradient id="crtHealthArea" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="var(--color-crt-phosphor)" stopOpacity="0.22" />
+                          <stop offset="100%" stopColor="var(--color-crt-phosphor)" stopOpacity="0.0" />
+                        </linearGradient>
+                      </defs>
+
+                      {[0, 50, 100].map((pct) => {
+                        const y = yScale(pct);
+                        return (
+                          <g key={pct}>
+                            <line
+                              x1={PAD_L}
+                              y1={y}
+                              x2={VB_W - PAD_R}
+                              y2={y}
+                              stroke="var(--color-crt-border)"
+                              strokeDasharray={pct === 0 ? undefined : '3 3'}
+                              strokeWidth="1"
+                            />
+                            <text
+                              x={PAD_L - 6}
+                              y={y + 3}
+                              textAnchor="end"
+                              fill="var(--color-crt-muted)"
+                              fontSize="8.5"
+                              fontFamily="var(--font-mono)"
+                            >
+                              {pct}%
+                            </text>
+                          </g>
+                        );
+                      })}
+
+                      {[0, Math.floor((rollingReliability.length - 1) / 2), rollingReliability.length - 1]
+                        .filter((v, idx, arr) => arr.indexOf(v) === idx)
+                        .map((idx) => (
+                          <text
+                            key={idx}
+                            x={xScale(idx)}
+                            y={VB_H - 4}
+                            textAnchor={
+                              idx === 0
+                                ? 'start'
+                                : idx === rollingReliability.length - 1
+                                  ? 'end'
+                                  : 'middle'
+                            }
+                            fill="var(--color-crt-muted)"
+                            fontSize="9"
+                            fontFamily="var(--font-mono)"
+                          >
+                            {formatTimeShort(rollingReliability[idx].timestamp)}
+                          </text>
+                        ))}
+
+                      <path d={okAreaPath} fill="url(#crtHealthArea)" />
+                      <path
+                        d={okLinePath}
+                        fill="none"
+                        stroke="var(--color-crt-phosphor)"
+                        strokeWidth="2"
+                        className="crt-chart-trace-glow"
+                      />
+
+                      {rollingReliability.map((pt, idx) =>
+                        pt.throttled ? (
+                          <line
+                            key={`thr-${idx}`}
+                            x1={xScale(idx)}
+                            y1={PAD_T + PLOT_H}
+                            x2={xScale(idx)}
+                            y2={PAD_T + PLOT_H - 18}
+                            stroke="var(--color-crt-crimson)"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                          />
+                        ) : null,
+                      )}
+
+                      {hPt && hIdx !== null && (
+                        <g pointerEvents="none">
+                          <line
+                            x1={hX}
+                            y1={PAD_T}
+                            x2={hX}
+                            y2={PAD_T + PLOT_H}
+                            stroke="var(--color-crt-text)"
+                            strokeOpacity="0.45"
+                            strokeDasharray="2 2"
+                            strokeWidth="1"
+                          />
+                          <circle
+                            cx={hX}
+                            cy={yScale(hPt.okPct)}
+                            r="4.2"
+                            fill={hPt.throttled ? 'var(--color-crt-crimson)' : 'var(--color-crt-phosphor)'}
+                            stroke="var(--color-crt-bg)"
+                            strokeWidth="1.5"
+                          />
+                        </g>
+                      )}
+                    </svg>
+
+                    {hPt && (
+                      <div
+                        data-side={tooltipSide}
+                        className="crt-chart-tooltip pointer-events-none absolute top-2 z-20 border border-crt-border-strong bg-crt-bg/95 px-2.5 py-2 rounded text-[11px] font-mono tabular-nums shadow-lg space-y-1"
+                      >
+                        <div className="flex items-center justify-between text-crt-muted border-b border-crt-border pb-1">
+                          <span>{formatTimeShort(hPt.timestamp)}</span>
+                          <span className={hPt.throttled ? 'text-crt-crimson' : 'text-crt-phosphor'}>
+                            {hPt.throttled ? 'THROTTLED' : '200 OK'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-crt-phosphor">Window OK Rate</span>
+                          <span className="text-crt-text font-medium">{hPt.okPct}%</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-crt-muted">Throttle Hits (12r)</span>
+                          <span className={hPt.throttledInWindow > 0 ? 'text-crt-crimson' : 'text-crt-text'}>
+                            {hPt.throttledInWindow} / {hPt.windowLen}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-crt-amber">Active Pacing</span>
+                          <span className="text-crt-text">{hPt.delayMs} ms</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()
+            )}
+          </div>
         </div>
       </div>
 
@@ -2211,6 +2636,65 @@ export function TelemetryDeck({ status, runs }: TelemetryDeckProps) {
           <div className="flex flex-wrap items-center justify-between gap-2 text-crt-muted">
             <span>Rolling 12-request percentile window</span>
             <span>Tracked: {status.rateLimiter.totalRequests} reqs</span>
+          </div>
+        </div>
+
+        <div
+          data-slide-state={resolveSlideState('index')}
+          aria-hidden={activeSlide !== 'index'}
+          inert={activeSlide !== 'index' || undefined}
+          className="crt-deck-meta-item space-y-1"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-crt-muted">
+              Mirrored{' '}
+              <span className="text-crt-phosphor">
+                {(status.totals.downloadedItems + status.totals.skippedItems).toLocaleString()}
+              </span>{' '}
+              · Available{' '}
+              <span className="text-crt-text">{status.totals.availableItems.toLocaleString()}</span>{' '}
+              · Queued{' '}
+              <span className="text-sky-400">{status.totals.queuedItems.toLocaleString()}</span>
+            </span>
+            <span className="text-crt-muted">
+              Installed <span className="text-crt-text">{status.totals.installedItems.toLocaleString()}</span>
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-crt-muted">
+            <span>Consoles Indexed: {indexCoverageSystems.length}</span>
+            <span>
+              Unindexed Remaining: {status.indexer?.remainingUnindexedSystems ?? 0}
+            </span>
+          </div>
+        </div>
+
+        <div
+          data-slide-state={resolveSlideState('health')}
+          aria-hidden={activeSlide !== 'health'}
+          inert={activeSlide !== 'health' || undefined}
+          className="crt-deck-meta-item space-y-1"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-crt-muted">
+              HTTP Success{' '}
+              <span className="text-crt-phosphor">{reliabilityStats.recentOkPct.toFixed(1)}%</span> ·
+              429/503 Hits{' '}
+              <span className={status.rateLimiter.rateLimitHits > 0 ? 'text-crt-crimson' : 'text-crt-text'}>
+                {status.rateLimiter.rateLimitHits}
+              </span>
+            </span>
+            <span className="text-crt-muted">
+              Streak{' '}
+              <span className="text-crt-text">{status.rateLimiter.consecutiveSuccesses} ok</span>
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-crt-muted">
+            <span>Backoff: {status.rateLimiter.backoffMultiplier}x</span>
+            <span>
+              {status.rateLimiter.cooldownUntilMs && status.rateLimiter.cooldownUntilMs > Date.now()
+                ? 'Cooldown active'
+                : 'Upstream nominal'}
+            </span>
           </div>
         </div>
       </div>

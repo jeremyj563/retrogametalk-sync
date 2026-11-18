@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-11-18
+
+- Added an interactive D3-powered **Stats** panel inside **Catalog** (`Indexed Catalog` | `Stats` | `Local Disk Tree`) backed by `GET /api/catalog/stats`, visualizing cumulative **Repository Growth** (`14D` / `30D` / `90D` / `ALL`, Titles vs Storage), **Download Trends** (30-day velocity with 7-day moving average & run throughput), and **System-Specific Library Coverage** with one-click console filtering.
+- Added complementary Catalog telemetry panels: a **Release Composition** interactive D3 donut breakdown (`ROM Types`, `Regions`, `Languages`, `Sources`) and an **Archive Size Profile & Storage Forecast** D3 histogram comparing mirrored vs un-downloaded sizes against host disk headroom.
+- Expanded the Sync overview **Telemetry Deck** with two additional panels: **Index** (catalog coverage & active download queue proportions across consoles) and **Health** (rolling HTTP 200 success rate vs `429/503` throttle resilience).
+
 ## [1.4.0] - 2026-11-18
 
 - Decoupled catalog discovery from ROM archive downloading via a pauseable WordPress REST background **Catalog Indexer** (targeted consoles first upon authentication, with one-click expansion to all remaining consoles).

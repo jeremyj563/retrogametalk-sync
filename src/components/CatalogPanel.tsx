@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  BarChart3,
   CheckCircle2,
   ChevronRight,
   Cloud,
@@ -48,6 +49,7 @@ import type {
 } from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
 import { resolveItemTransferProgress } from '../utils/transferProgress';
+import { CatalogStatsPanel } from './CatalogStatsPanel';
 import { GameDetailDrawer, type GameDetailNavigation } from './GameDetailDrawer';
 import { MultiSelectFilterDropdown, type FilterDropdownOption } from './MultiSelectFilterDropdown';
 
@@ -196,7 +198,7 @@ const VALID_STATUS_VALUES = new Set([
   'queued',
   'downloading',
 ]);
-const VALID_VIEW_MODES = new Set(['catalog', 'filesystem']);
+const VALID_VIEW_MODES = new Set(['catalog', 'stats', 'filesystem']);
 
 const STATUS_LABELS: Record<string, string> = {
   available: 'Available',
@@ -209,7 +211,7 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 interface CatalogViewPrefs {
-  viewMode: 'catalog' | 'filesystem';
+  viewMode: 'catalog' | 'stats' | 'filesystem';
   catalogLayout: 'table' | 'grid';
   sort: CatalogSortOption;
   search: string;
@@ -422,7 +424,7 @@ export function CatalogPanel({
   const initialMatchedFs =
     memoryFsSnapshot?.fsPath === memoryCatalogViewPrefs.fsPath ? memoryFsSnapshot : null;
 
-  const [viewMode, setViewMode] = useState<'catalog' | 'filesystem'>(initialViewMode);
+  const [viewMode, setViewMode] = useState<CatalogViewPrefs['viewMode']>(initialViewMode);
   const [catalogLayout, setCatalogLayout] = useState<'table' | 'grid'>(() => memoryCatalogViewPrefs.catalogLayout);
   const [sort, setSort] = useState<CatalogSortOption>(() => memoryCatalogViewPrefs.sort);
   const [search, setSearch] = useState(() => memoryCatalogViewPrefs.search);
@@ -1587,7 +1589,7 @@ export function CatalogPanel({
               <button
                 type="button"
                 onClick={() => setViewMode('catalog')}
-                className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
+                className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   viewMode === 'catalog'
                     ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
                     : 'text-crt-muted hover:text-crt-text border border-transparent'
@@ -1597,8 +1599,20 @@ export function CatalogPanel({
               </button>
               <button
                 type="button"
+                onClick={() => setViewMode('stats')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  viewMode === 'stats'
+                    ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
+                    : 'text-crt-muted hover:text-crt-text border border-transparent'
+                }`}
+              >
+                <BarChart3 className="h-3.5 w-3.5 shrink-0" />
+                <span>Stats</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => setViewMode('filesystem')}
-                className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
+                className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   viewMode === 'filesystem'
                     ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
                     : 'text-crt-muted hover:text-crt-text border border-transparent'
@@ -1713,7 +1727,7 @@ export function CatalogPanel({
                 Refresh
               </button>
             </div>
-          ) : (
+          ) : viewMode === 'filesystem' ? (
             <div className="flex flex-wrap items-center gap-3">
               <div className="relative">
                 <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -1748,6 +1762,10 @@ export function CatalogPanel({
                 <RefreshCw className="h-3.5 w-3.5" />
                 Rescan
               </button>
+            </div>
+          ) : (
+            <div className="text-xs font-mono text-crt-muted">
+              D3 growth, velocity &amp; system coverage insights
             </div>
           )}
         </div>
@@ -3118,6 +3136,16 @@ export function CatalogPanel({
             </div>
           )}
         </div>
+      ) : viewMode === 'stats' ? (
+        <CatalogStatsPanel
+          status={status}
+          catalogRevision={catalogRevision}
+          onStartCatalogIndex={onStartCatalogIndex}
+          onInspectSystem={(slug) => {
+            setSystems([slug]);
+            setViewMode('catalog');
+          }}
+        />
       ) : (
         <div className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md overflow-hidden">
           <div aria-hidden="true" className="crt-edge-beam">

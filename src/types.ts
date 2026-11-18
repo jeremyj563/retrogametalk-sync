@@ -422,3 +422,102 @@ export interface ArchiveInspectResult {
   patchOnly: boolean;
   notes: string[];
 }
+
+export interface CatalogGrowthPoint {
+  date: string;
+  indexedAdded: number;
+  downloadedAdded: number;
+  bytesAdded: number;
+  cumulativeIndexed: number;
+  cumulativeDownloaded: number;
+  cumulativeBytes: number;
+}
+
+export interface DownloadTrendDailyPoint {
+  date: string;
+  filesDownloaded: number;
+  bytesDownloaded: number;
+  failedItems: number;
+}
+
+export interface DownloadTrendRunPoint {
+  id: number;
+  startedAt: string;
+  triggerType: RunTrigger;
+  mode: RunMode;
+  dryRun: boolean;
+  status: RunStatus;
+  downloadedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  bytesDownloaded: number;
+  durationSec: number;
+  avgBytesPerSec: number;
+  rateLimitHits: number;
+  avgDelayMs: number;
+}
+
+export interface SystemCoverageStat {
+  systemName: string;
+  totalItems: number;
+  downloadedItems: number;
+  availableItems: number;
+  queuedItems: number;
+  failedItems: number;
+  installedItems: number;
+  mirroredBytes: number;
+  estimatedAvailableBytes: number;
+  indexedPages: number;
+  totalPages: number;
+  fullyIndexed: boolean;
+}
+
+export interface SizeBucketStat {
+  bucketKey: string;
+  label: string;
+  minBytes: number;
+  maxBytes: number | null;
+  downloadedCount: number;
+  availableCount: number;
+  downloadedBytes: number;
+  availableBytes: number;
+}
+
+export interface CompositionStat {
+  label: string;
+  totalCount: number;
+  downloadedCount: number;
+  mirroredBytes: number;
+}
+
+export interface CatalogStatsSnapshot {
+  generatedAt: string;
+  summary: {
+    totalCatalogItems: number;
+    downloadedItems: number;
+    availableItems: number;
+    queuedItems: number;
+    failedItems: number;
+    installedItems: number;
+    mirroredBytes: number;
+    estimatedAvailableBytes: number;
+    avgMirroredFileBytes: number;
+    installedBytes: number;
+    systemsTracked: number;
+    fullyIndexedSystems: number;
+  };
+  growthTimeline: CatalogGrowthPoint[];
+  downloadTrends: {
+    daily: DownloadTrendDailyPoint[];
+    runs: DownloadTrendRunPoint[];
+  };
+  systemCoverage: SystemCoverageStat[];
+  sizeDistribution: SizeBucketStat[];
+  releaseComposition: {
+    tags: CompositionStat[];
+    regions: CompositionStat[];
+    languages: CompositionStat[];
+    sources: CompositionStat[];
+  };
+}
+
