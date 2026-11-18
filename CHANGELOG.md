@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.5.1] - 2026-11-18
+
+- Quieted the Sync Status header into a steady `Syncing` readout that consistently keeps the human-readable **Catalog Game Title** framed in the Living UI CRT highlight from release warm-up through download completion and inter-file handoffs (eliminating `Inspecting` / `Downloading` verb flipping and raw `.zip` filename swaps).
+- Propagated `itemTitle` on live `ActiveTransferState` snapshots and defaulted the active transfer bay to one jitter-free **Combined** progress bar (`%`, aggregate size/speed, and `Details` toggle).
+- Moved raw archive filenames (`system / filename.zip`), worker/chunk/file-index telemetry, `Resumed` flags, and per-file parallel worker progress bars into a smooth `.crt-accordion-grid` **Transfer Details** drawer that starts collapsed on every visit.
+
 ## [1.5.0] - 2026-11-18
 
 - Added an interactive D3-powered **Stats** panel inside **Catalog** (`Indexed Catalog` | `Stats` | `Local Disk Tree`) backed by `GET /api/catalog/stats`, visualizing cumulative **Repository Growth** (`14D` / `30D` / `90D` / `ALL`, Titles vs Storage), **Download Trends** (30-day velocity with 7-day moving average & run throughput), and **System-Specific Library Coverage** with one-click console filtering.

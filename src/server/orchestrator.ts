@@ -2505,10 +2505,7 @@ export class ScraperOrchestrator extends EventEmitter {
     const actionPrefix = isDryRun ? 'Dry Run (Retry)' : 'Retrying';
     this.activeRun = run;
     this.abortController = new AbortController();
-    this.currentPhase =
-      filesToRetry.length === 1
-        ? `${actionPrefix}: ${filesToRetry[0].filename}`
-        : `${actionPrefix}: ${item.title}${filesToRetry.length > 0 ? ` (${filesToRetry.length} files)` : ''}`;
+    this.currentPhase = `${actionPrefix}: ${item.title}`;
     this.emitStatus();
 
     void (async () => {
@@ -3861,10 +3858,18 @@ export class ScraperOrchestrator extends EventEmitter {
     ).length;
     const totalInItem = Math.max(fileSequence?.total ?? 0, initial.release.files.length, 1);
 
+    const resolvedItemTitle = (
+      parentContext?.title ||
+      initial.release.title ||
+      release.title ||
+      release.filename
+    ).trim();
+
     const workerKey = `${releaseId}:${initial.file.id}`;
     const transferEntry: ActiveTransferState = {
       workerKey,
       itemId: releaseId,
+      itemTitle: resolvedItemTitle,
       fileId: initial.file.id,
       fileIndex: fileSequence?.index ?? null,
       totalFiles: totalInItem,
@@ -3892,6 +3897,9 @@ export class ScraperOrchestrator extends EventEmitter {
           remaining.length > 1
             ? `Downloading ${remaining.length} files in parallel (primary: ${primary.systemName} / ${primary.filename})`
             : `Downloading ${primary.systemName} / ${primary.filename}`;
+        this.emitStatus();
+      } else if (this.activeRun && !signal.aborted) {
+        this.currentPhase = `Syncing · ${transferEntry.systemName}: ${resolvedItemTitle}`;
         this.emitStatus();
       }
     };

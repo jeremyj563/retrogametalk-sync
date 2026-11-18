@@ -50,50 +50,7 @@ export function parseSyncStatusHeader(params: {
   const phase = (currentPhase || '').trim();
   const runSyncType = deriveRunSyncTypeLabel(activeRun);
 
-  // 1. Active binary download (from live transfer snapshot or phase text fallback)
-  if (activeTransfer && phase.startsWith('Downloading ')) {
-    const workerCount = Math.max(parallelTransferCount, activeTransfer.activeWorkers ?? 1, 1);
-    return {
-      syncType: runSyncType ?? 'Sync',
-      systemName: activeTransfer.systemName || null,
-      progressLabel: null,
-      actionPrefix: workerCount > 1 ? `Downloading (${workerCount}x)` : 'Downloading',
-      subject: activeTransfer.filename,
-      subjectKind: 'download',
-      workerCount,
-    };
-  }
-
-  const parallelDlMatch = phase.match(
-    /^Downloading\s+(\d+)\s+files?\s+in\s+parallel\s*\(primary:\s*([^/]+?)\s*\/\s*(.+)\)$/i,
-  );
-  if (parallelDlMatch) {
-    const workerCount = Math.max(2, Number(parallelDlMatch[1]) || 2);
-    return {
-      syncType: runSyncType ?? 'Sync',
-      systemName: parallelDlMatch[2].trim() || null,
-      progressLabel: null,
-      actionPrefix: `Downloading (${workerCount}x)`,
-      subject: parallelDlMatch[3].trim(),
-      subjectKind: 'download',
-      workerCount,
-    };
-  }
-
-  const singleDlMatch = phase.match(/^Downloading\s+([^/]+?)\s*\/\s*(.+)$/i);
-  if (singleDlMatch) {
-    return {
-      syncType: runSyncType ?? 'Sync',
-      systemName: singleDlMatch[1].trim() || null,
-      progressLabel: null,
-      actionPrefix: 'Downloading',
-      subject: singleDlMatch[2].trim(),
-      subjectKind: 'download',
-      workerCount: 1,
-    };
-  }
-
-  // 2. Idle / Standby
+  // 1. Idle / Standby (always takes precedence over stale state)
   if (/^Idle\b/i.test(phase)) {
     const detail = phase.replace(/^Idle\s*(?:·|:|-)?\s*/i, '').trim();
     return {
@@ -107,7 +64,7 @@ export function parseSyncStatusHeader(params: {
     };
   }
 
-  // 3. Stopping / Initializing / Authenticating
+  // 2. Stopping
   const stoppingMatch = phase.match(/^Stopping\s+run\s+(#\d+)\.{0,3}$/i);
   if (stoppingMatch) {
     return {
@@ -121,6 +78,66 @@ export function parseSyncStatusHeader(params: {
     };
   }
 
+  // 3. Active transfer snapshot — always foreground the game/catalog-item title with steady "Syncing"
+  if (activeTransfer) {
+    const workerCount = Math.max(parallelTransferCount, activeTransfer.activeWorkers ?? 1, 1);
+    const resolvedTitle = (activeTransfer.itemTitle || '').trim();
+    const subject = resolvedTitle || activeTransfer.filename;
+    return {
+      syncType: runSyncType ?? 'Sync',
+      systemName: activeTransfer.systemName || null,
+      progressLabel: null,
+      actionPrefix: 'Syncing',
+      subject,
+      subjectKind: resolvedTitle ? 'title' : 'download',
+      workerCount,
+    };
+  }
+
+  // 3b. Inter-file or phase-text download fallbacks (when activeTransfer snapshot is momentarily null)
+  const syncingItemMatch = phase.match(/^Syncing\s+·\s+([^\s:]+):\s+(.+)$/i);
+  if (syncingItemMatch) {
+    return {
+      syncType: runSyncType ?? 'Sync',
+      systemName: syncingItemMatch[1].trim() || null,
+      progressLabel: null,
+      actionPrefix: 'Syncing',
+      subject: syncingItemMatch[2].trim(),
+      subjectKind: 'title',
+      workerCount: 0,
+    };
+  }
+
+  const parallelDlMatch = phase.match(
+    /^Downloading\s+(\d+)\s+files?\s+in\s+parallel\s*\(primary:\s*([^/]+?)\s*\/\s*(.+)\)$/i,
+  );
+  if (parallelDlMatch) {
+    const workerCount = Math.max(2, Number(parallelDlMatch[1]) || 2);
+    return {
+      syncType: runSyncType ?? 'Sync',
+      systemName: parallelDlMatch[2].trim() || null,
+      progressLabel: null,
+      actionPrefix: 'Syncing',
+      subject: parallelDlMatch[3].trim(),
+      subjectKind: 'download',
+      workerCount,
+    };
+  }
+
+  const singleDlMatch = phase.match(/^Downloading\s+([^/]+?)\s*\/\s*(.+)$/i);
+  if (singleDlMatch) {
+    return {
+      syncType: runSyncType ?? 'Sync',
+      systemName: singleDlMatch[1].trim() || null,
+      progressLabel: null,
+      actionPrefix: 'Syncing',
+      subject: singleDlMatch[2].trim(),
+      subjectKind: 'download',
+      workerCount: 1,
+    };
+  }
+
+  // 4. Initializing / Authenticating
   const initMatch = phase.match(/^Run\s+(#\d+)\s+initializing\s*\(([^)]+)\)$/i);
   if (initMatch) {
     return {
@@ -147,7 +164,7 @@ export function parseSyncStatusHeader(params: {
     };
   }
 
-  // 4. Per-release processing: "Full Sync · n64-roms (9/424): The Legend of Zelda..."
+  // 5. Per-release processing (warm-up -> seamless transition into transfer): steady "Syncing"
   const releaseMatch = phase.match(
     /^(Dry Run \((?:Full|Incremental)\)|Full Sync|Incremental)\s+·\s+([^\s(]+)\s+\((\d+\/\d+)\):\s+(.+)$/,
   );
@@ -156,14 +173,14 @@ export function parseSyncStatusHeader(params: {
       syncType: releaseMatch[1].trim(),
       systemName: releaseMatch[2].trim(),
       progressLabel: releaseMatch[3].trim(),
-      actionPrefix: 'Inspecting',
+      actionPrefix: 'Syncing',
       subject: releaseMatch[4].trim(),
       subjectKind: 'title',
       workerCount: 0,
     };
   }
 
-  // 5. WP REST enumeration & pagination
+  // 6. WP REST enumeration & pagination
   const wpPageFullMatch = phase.match(
     /^(Dry Run \(Full\)|Full Sync)\s+\((\d+\/\d+)\):\s+([^\s·]+)\s+·\s+WP page\s+(\d+\/\d+)$/i,
   );
@@ -226,7 +243,7 @@ export function parseSyncStatusHeader(params: {
     };
   }
 
-  // 6. Retry queues & single-item retries
+  // 7. Retry queues & single-item retries — steady "Syncing" + highlighted title
   const batchRetryItemMatch = phase.match(
     /^(Dry Run \(Retry\)|Retry Failed)\s+\((\d+\/\d+)\):\s+([^/]+?)\s*\/\s*(.+)$/i,
   );
@@ -235,7 +252,7 @@ export function parseSyncStatusHeader(params: {
       syncType: batchRetryItemMatch[1].trim(),
       systemName: batchRetryItemMatch[3].trim(),
       progressLabel: batchRetryItemMatch[2].trim(),
-      actionPrefix: 'Retrying',
+      actionPrefix: 'Syncing',
       subject: batchRetryItemMatch[4].trim(),
       subjectKind: 'title',
       workerCount: 0,
@@ -250,7 +267,7 @@ export function parseSyncStatusHeader(params: {
       syncType: batchRetryStartMatch[1].trim(),
       systemName: null,
       progressLabel: null,
-      actionPrefix: 'Retrying',
+      actionPrefix: 'Syncing',
       subject: batchRetryStartMatch[2].trim(),
       subjectKind: 'detail',
       workerCount: 0,
@@ -264,21 +281,21 @@ export function parseSyncStatusHeader(params: {
       syncType: runSyncType ?? (isDry ? 'Dry Run (Retry)' : 'Retry Failed'),
       systemName: null,
       progressLabel: null,
-      actionPrefix: 'Retrying',
+      actionPrefix: 'Syncing',
       subject: singleRetryMatch[2].trim(),
       subjectKind: 'title',
       workerCount: 0,
     };
   }
 
-  // 6b. On-demand Download Queue phases
+  // 7b. On-demand Download Queue phases — steady "Syncing" + highlighted title
   const queueItemMatch = phase.match(/^Queue\s+\((\d+\/\d+)\):\s+([^/]+?)\s*\/\s*(.+)$/i);
   if (queueItemMatch) {
     return {
       syncType: runSyncType ?? 'Download Queue',
       systemName: queueItemMatch[2].trim(),
       progressLabel: queueItemMatch[1].trim(),
-      actionPrefix: 'Downloading',
+      actionPrefix: 'Syncing',
       subject: queueItemMatch[3].trim(),
       subjectKind: 'title',
       workerCount: 0,
@@ -291,14 +308,14 @@ export function parseSyncStatusHeader(params: {
       syncType: runSyncType ?? 'Download Queue',
       systemName: null,
       progressLabel: null,
-      actionPrefix: 'Queueing',
+      actionPrefix: 'Syncing',
       subject: queueStartMatch[1].trim(),
       subjectKind: 'detail',
       workerCount: 0,
     };
   }
 
-  // 7. HTML crawling & fallback page inspection
+  // 8. HTML crawling & fallback page inspection
   const scanIndexMatch = phase.match(/^Scanning repository index:\s+(.+)$/i);
   if (scanIndexMatch) {
     return {
@@ -335,14 +352,14 @@ export function parseSyncStatusHeader(params: {
       syncType: runSyncType,
       systemName: inferSystemFromRelativePath(relPath),
       progressLabel: null,
-      actionPrefix: 'Inspecting',
+      actionPrefix: 'Syncing',
       subject: relPath,
       subjectKind: 'path',
       workerCount: 0,
     };
   }
 
-  // 8. Clean fallback
+  // 9. Clean fallback
   return {
     syncType: runSyncType,
     systemName: null,
