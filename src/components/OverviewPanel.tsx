@@ -130,25 +130,13 @@ const PROGRESS_WIDTH_CLASSES: readonly string[] = [
 interface CompletedTransferHold {
   runId: number | null;
   fileKey: string;
+  itemTitle: string;
   systemName: string;
   filename: string;
   fileIndex: number | null;
   totalFiles: number | null;
   bytes: number;
   downloadedCount: number;
-}
-
-const PARALLEL_PROGRESS_MODE_KEY = 'rgt.parallelProgressMode';
-type ParallelProgressMode = 'separate' | 'combined';
-
-function readInitialParallelProgressMode(): ParallelProgressMode {
-  if (typeof window === 'undefined') return 'separate';
-  try {
-    const stored = window.localStorage.getItem(PARALLEL_PROGRESS_MODE_KEY);
-    return stored === 'combined' ? 'combined' : 'separate';
-  } catch {
-    return 'separate';
-  }
 }
 
 function toLocalDateTimeInputValue(date: Date): string {
@@ -186,20 +174,9 @@ export function OverviewPanel({
   const [cutoffSaving, setCutoffSaving] = useState(false);
   const [cutoffError, setCutoffError] = useState<string | null>(null);
   const [cutoffSavedNotice, setCutoffSavedNotice] = useState<string | null>(null);
-  const [parallelProgressMode, setParallelProgressMode] = useState<ParallelProgressMode>(
-    readInitialParallelProgressMode,
-  );
+  const [transferDetailsOpen, setTransferDetailsOpen] = useState(false);
   const [, setTick] = useState(0);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
-
-  const handleChangeParallelProgressMode = (mode: ParallelProgressMode) => {
-    setParallelProgressMode(mode);
-    try {
-      window.localStorage.setItem(PARALLEL_PROGRESS_MODE_KEY, mode);
-    } catch {
-      // Ignore storage errors
-    }
-  };
 
   // Refresh countdown clock every second while idle/running
   useEffect(() => {
@@ -332,11 +309,40 @@ export function OverviewPanel({
     return null;
   }, [parsedSyncHeader.progressLabel, parsedSyncHeader.systemName, status.activeRun, heldSystemProgress]);
 
-  const transferPct = useMemo(() => {
-    const t = status.activeTransfer;
-    if (!t || !t.totalBytes || t.totalBytes <= 0) return null;
-    return Math.min(100, Math.round((t.bytesReceived / t.totalBytes) * 100));
-  }, [status.activeTransfer]);
+  const combinedTransfer = useMemo(() => {
+    if (parallelTransfers.length === 0) return null;
+    let bytesReceived = 0;
+    let bytesPerSec = 0;
+    let knownTotalBytes = 0;
+    let allHaveTotals = true;
+    let totalChunks = 0;
+
+    for (const entry of parallelTransfers) {
+      bytesReceived += Math.max(0, entry.bytesReceived || 0);
+      bytesPerSec += Math.max(0, entry.bytesPerSec || 0);
+      totalChunks += Math.max(1, entry.activeChunks ?? 1);
+      if (entry.totalBytes !== null && entry.totalBytes > 0) {
+        knownTotalBytes += entry.totalBytes;
+      } else {
+        allHaveTotals = false;
+      }
+    }
+
+    const totalBytes = allHaveTotals && knownTotalBytes > 0 ? knownTotalBytes : null;
+    const pct =
+      totalBytes !== null && totalBytes > 0
+        ? Math.min(100, Math.round((bytesReceived / totalBytes) * 100))
+        : null;
+
+    return {
+      workerCount: parallelTransfers.length,
+      bytesReceived,
+      totalBytes,
+      bytesPerSec,
+      pct,
+      totalChunks,
+    };
+  }, [parallelTransfers]);
 
   const isDryRunActive = Boolean(
     status.activeRun && (status.activeRun.dryRun || status.activeRun.mode === 'dry_run'),
@@ -374,6 +380,7 @@ export function OverviewPanel({
     hadTransferInCurrentRunRef.current = true;
     const fileKey = `${t.itemId ?? 'item'}:${t.fileId ?? t.filename}`;
     const bytes = Math.max(t.bytesReceived, t.totalBytes ?? 0);
+    const resolvedTitle = (t.itemTitle || '').trim() || t.filename;
     setLastCompletedTransfer((prev) => {
       const nextRunId = status.activeRun?.id ?? prev?.runId ?? null;
       const nextDownloadedCount = status.activeRun?.downloadedCount ?? prev?.downloadedCount ?? 0;
@@ -381,6 +388,7 @@ export function OverviewPanel({
         prev &&
         prev.runId === nextRunId &&
         prev.fileKey === fileKey &&
+        prev.itemTitle === resolvedTitle &&
         prev.bytes === bytes &&
         prev.downloadedCount === nextDownloadedCount
       ) {
@@ -389,6 +397,7 @@ export function OverviewPanel({
       return {
         runId: nextRunId,
         fileKey,
+        itemTitle: resolvedTitle,
         systemName: t.systemName,
         filename: t.filename,
         fileIndex: t.fileIndex ?? null,
@@ -427,7 +436,7 @@ export function OverviewPanel({
     ? `${status.activeTransfer.itemId ?? 'item'}:${status.activeTransfer.fileId ?? status.activeTransfer.filename}`
     : null;
   const activeTransferHasTotal = Boolean(
-    status.activeTransfer?.totalBytes && status.activeTransfer.totalBytes > 0,
+    combinedTransfer?.totalBytes && combinedTransfer.totalBytes > 0,
   );
 
   // Avoid flashing an indeterminate sweep bar during the brief 30–200ms pre-header handshake on small files
@@ -451,6 +460,13 @@ export function OverviewPanel({
       lastCompletedTransfer.runId === status.activeRun.id)
       ? lastCompletedTransfer
       : null;
+
+  const displayedSyncSubject =
+    parsedSyncHeader.subjectKind === 'download' && heldTransferForActiveRun?.itemTitle
+      ? heldTransferForActiveRun.itemTitle
+      : parsedSyncHeader.subject;
+  const isHighlightedGameTarget =
+    parsedSyncHeader.subjectKind === 'title' || parsedSyncHeader.subjectKind === 'download';
 
   const activeWatermakVal = status.lastWatermarkAt ?? config.lastWatermarkAt;
   const activeWatermark = activeWatermakVal;
@@ -647,7 +663,7 @@ export function OverviewPanel({
             ) : null}
           </div>
 
-          {/* Tier 2: Active Target / File Status (Uniform Prefix + Focused Title/Filename) */}
+          {/* Tier 2: Active Target / Game Title (Steady Prefix + Consistently Highlighted Title Frame) */}
           <h1
             title={status.currentPhase}
             className="mt-2.5 pt-2.5 border-t border-crt-border/70 min-w-0"
@@ -657,311 +673,139 @@ export function OverviewPanel({
                 {parsedSyncHeader.actionPrefix}
               </span>
 
-              {parsedSyncHeader.subjectKind === 'download' ? (
+              {isHighlightedGameTarget ? (
                 <span
-                  title={parsedSyncHeader.subject}
+                  title={displayedSyncSubject}
                   className="crt-active-filename font-display text-lg sm:text-xl font-bold tracking-tight leading-snug min-w-0"
                 >
                   <span aria-hidden="true" className="crt-active-filename-sheen" />
                   <span className="crt-active-filename-label truncate min-w-0">
-                    {parsedSyncHeader.subject}
+                    {displayedSyncSubject}
                   </span>
-                </span>
-              ) : parsedSyncHeader.subjectKind === 'title' ? (
-                <span
-                  title={parsedSyncHeader.subject}
-                  className="font-display text-lg sm:text-xl font-semibold tracking-tight leading-snug text-crt-text truncate min-w-0"
-                >
-                  {parsedSyncHeader.subject}
                 </span>
               ) : parsedSyncHeader.subjectKind === 'path' ? (
                 <span
-                  title={parsedSyncHeader.subject}
+                  title={displayedSyncSubject}
                   className="font-mono text-sm sm:text-[15px] font-medium leading-snug text-crt-text/90 truncate min-w-0"
                 >
-                  {parsedSyncHeader.subject}
+                  {displayedSyncSubject}
                 </span>
               ) : parsedSyncHeader.subjectKind === 'idle' ? (
                 <span
-                  title={parsedSyncHeader.subject}
+                  title={displayedSyncSubject}
                   className="font-display text-base sm:text-lg font-medium leading-snug text-crt-muted truncate min-w-0"
                 >
-                  {parsedSyncHeader.subject}
+                  {displayedSyncSubject}
                 </span>
               ) : (
                 <span
-                  title={parsedSyncHeader.subject}
+                  title={displayedSyncSubject}
                   className="font-display text-base sm:text-lg font-medium leading-snug text-crt-text/95 truncate min-w-0"
                 >
-                  {parsedSyncHeader.subject}
+                  {displayedSyncSubject}
                 </span>
               )}
             </span>
           </h1>
         </div>
 
-        {/* Zone 2: Run-Docked Active Transfer Telemetry Bay (Zero Inter-File Layout Shift) */}
+        {/* Zone 2: Run-Docked Combined Transfer Bar + Collapsed-by-Default Details Drawer */}
         <div
           aria-hidden={!isTransferBayOpen}
           inert={!isTransferBayOpen || undefined}
           data-open={isTransferBayOpen ? 'true' : 'false'}
-          className={`crt-accordion-grid transition-opacity duration-200 motion-reduce:transition-none ${
+          className={`crt-accordion-grid transition-opacity duration-300 motion-reduce:transition-none ${
             isTransferBayOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
           }`}
         >
           <div className="crt-accordion-inner">
             <div className="pt-4">
               <div className="pt-3.5 border-t border-crt-border space-y-2.5">
-                {status.activeTransfer ? (
+                {combinedTransfer ? (
                   <>
-                    {hasMultipleParallelTransfers && (
-                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono min-w-0">
-                        <div className="flex items-center gap-2 text-crt-text min-w-0">
-                          <Download className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
-                          <span className="font-medium whitespace-nowrap">
-                            {parallelTransfers.length} parallel downloads
+                    <div className="flex items-center justify-between gap-3 h-6 text-xs font-mono min-w-0">
+                      <div className="flex items-center gap-2 text-crt-text min-w-0">
+                        <Download className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
+                        <span className="text-crt-text/90 font-medium truncate">
+                          {hasMultipleParallelTransfers
+                            ? `Combined progress (${combinedTransfer.workerCount} active)`
+                            : 'Transfer progress'}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+                        <span>
+                          {combinedTransfer.bytesReceived > 0 || combinedTransfer.totalBytes
+                            ? `${formatBytes(combinedTransfer.bytesReceived)}${
+                                combinedTransfer.totalBytes
+                                  ? ` / ${formatBytes(combinedTransfer.totalBytes)}`
+                                  : ''
+                              }`
+                            : 'Connecting…'}
+                        </span>
+                        {combinedTransfer.bytesPerSec > 0 && (
+                          <span className="hidden sm:inline">
+                            {formatBytes(combinedTransfer.bytesPerSec)}/s
                           </span>
-                          {status.activeTransfer.activeChunks &&
-                            status.activeTransfer.activeChunks > 1 && (
-                              <span className="text-crt-muted whitespace-nowrap tabular-nums hidden sm:inline">
-                                · {status.activeTransfer.activeChunks} chunks total
-                              </span>
-                            )}
-                          {status.activeTransfer.bytesPerSec > 0 && (
-                            <span className="text-crt-phosphor/90 whitespace-nowrap tabular-nums">
-                              · {formatBytes(status.activeTransfer.bytesPerSec)}/s
-                            </span>
-                          )}
-                        </div>
-
-                        <div
-                          role="group"
-                          aria-label="Parallel progress display mode"
-                          className="inline-flex items-center rounded border border-crt-border bg-crt-bg p-0.5 gap-0.5 shrink-0"
+                        )}
+                        {combinedTransfer.pct !== null && (
+                          <span className="text-crt-phosphor font-semibold inline-block min-w-[3.5ch] text-right">
+                            {combinedTransfer.pct}%
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setTransferDetailsOpen((prev) => !prev)}
+                          aria-expanded={transferDetailsOpen}
+                          aria-controls="sync-transfer-details-drawer"
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded-sm border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                            transferDetailsOpen
+                              ? 'bg-crt-elevated border-crt-border-strong text-crt-phosphor'
+                              : 'bg-crt-bg/80 border-crt-border text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+                          }`}
                         >
-                          <button
-                            type="button"
-                            aria-pressed={parallelProgressMode === 'separate'}
-                            onClick={() => handleChangeParallelProgressMode('separate')}
-                            className={`px-2 py-0.5 text-[11px] font-mono rounded-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                              parallelProgressMode === 'separate'
-                                ? 'bg-crt-elevated border border-crt-border-strong text-crt-phosphor font-medium'
-                                : 'border border-transparent text-crt-muted hover:text-crt-text'
-                            }`}
-                          >
-                            Per File ({parallelTransfers.length})
-                          </button>
-                          <button
-                            type="button"
-                            aria-pressed={parallelProgressMode === 'combined'}
-                            onClick={() => handleChangeParallelProgressMode('combined')}
-                            className={`px-2 py-0.5 text-[11px] font-mono rounded-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                              parallelProgressMode === 'combined'
-                                ? 'bg-crt-elevated border border-crt-border-strong text-crt-phosphor font-medium'
-                                : 'border border-transparent text-crt-muted hover:text-crt-text'
-                            }`}
-                          >
-                            Combined
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {hasMultipleParallelTransfers && parallelProgressMode === 'separate' ? (
-                      <div className="space-y-2.5">
-                        {parallelTransfers.map((item, idx) => {
-                          const itemKey =
-                            item.workerKey ??
-                            `${item.itemId ?? 'item'}:${item.fileId ?? item.filename}:${idx}`;
-                          const itemPct =
-                            item.totalBytes && item.totalBytes > 0
-                              ? Math.min(100, Math.round((item.bytesReceived / item.totalBytes) * 100))
-                              : null;
-                          return (
-                            <div key={itemKey} className="space-y-1.5">
-                              <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <span
-                                    aria-hidden="true"
-                                    className="h-1.5 w-1.5 rounded-full bg-crt-phosphor shrink-0"
-                                  />
-                                  <span
-                                    title={`${item.systemName} / ${item.filename}`}
-                                    className="truncate min-w-0"
-                                  >
-                                    <span className="text-crt-muted">{item.systemName} /</span>{' '}
-                                    <span className="text-crt-text font-medium">
-                                      {item.filename}
-                                    </span>
-                                  </span>
-                                  {item.totalFiles && item.totalFiles > 1 && item.fileIndex && (
-                                    <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums hidden sm:inline">
-                                      · File {item.fileIndex}/{item.totalFiles}
-                                    </span>
-                                  )}
-                                  {item.activeChunks && item.activeChunks > 1 && (
-                                    <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums hidden sm:inline">
-                                      · {item.activeChunks} chunks
-                                    </span>
-                                  )}
-                                  {item.resumed && (
-                                    <span className="text-crt-phosphor/90 whitespace-nowrap shrink-0 hidden md:inline">
-                                      · Resumed
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
-                                  <span>
-                                    {item.bytesReceived > 0 || item.totalBytes
-                                      ? `${formatBytes(item.bytesReceived)}${
-                                          item.totalBytes ? ` / ${formatBytes(item.totalBytes)}` : ''
-                                        }`
-                                      : 'Connecting…'}
-                                  </span>
-                                  {item.bytesPerSec > 0 && (
-                                    <span className="hidden sm:inline">
-                                      {formatBytes(item.bytesPerSec)}/s
-                                    </span>
-                                  )}
-                                  {itemPct !== null && (
-                                    <span className="text-crt-phosphor font-semibold inline-block min-w-[3.5ch] text-right">
-                                      {itemPct}%
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-
-                              <div
-                                role="progressbar"
-                                aria-label={`Active download progress for ${item.filename}`}
-                                aria-valuemin={0}
-                                aria-valuemax={100}
-                                aria-valuenow={itemPct ?? undefined}
-                                className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
-                              >
-                                {itemPct !== null ? (
-                                  <div
-                                    className={`h-full bg-crt-phosphor crt-progress-beam transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none ${
-                                      PROGRESS_WIDTH_CLASSES[Math.max(3, Math.min(100, itemPct))]
-                                    }`}
-                                  />
-                                ) : unknownSizeGraceElapsed || item.bytesReceived > 0 ? (
-                                  <div className="h-full bg-crt-phosphor crt-progress-indeterminate" />
-                                ) : (
-                                  <div
-                                    className={`h-full bg-crt-phosphor/75 crt-progress-beam transition-opacity duration-150 motion-reduce:transition-none ${PROGRESS_WIDTH_CLASSES[4]}`}
-                                  />
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <>
-                        <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0">
-                          <div className="flex items-center gap-2 text-crt-text min-w-0">
-                            {!hasMultipleParallelTransfers && (
-                              <Download className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
-                            )}
-                            <span
-                              title={`${status.activeTransfer.systemName} / ${status.activeTransfer.filename}`}
-                              className="truncate"
-                            >
-                              <span className="text-crt-muted">
-                                {status.activeTransfer.systemName} /
-                              </span>{' '}
-                              <span className="text-crt-text font-medium">
-                                {status.activeTransfer.filename}
-                              </span>
-                            </span>
-                            {status.activeTransfer.totalFiles &&
-                              status.activeTransfer.totalFiles > 1 &&
-                              status.activeTransfer.fileIndex && (
-                                <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums hidden sm:inline">
-                                  · File {status.activeTransfer.fileIndex}/
-                                  {status.activeTransfer.totalFiles}
-                                </span>
-                              )}
-                            {status.activeTransfer.activeWorkers &&
-                              status.activeTransfer.activeWorkers > 1 && (
-                                <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums hidden md:inline">
-                                  · {status.activeTransfer.activeWorkers} workers
-                                </span>
-                              )}
-                            {status.activeTransfer.activeChunks &&
-                              status.activeTransfer.activeChunks > 1 && (
-                                <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums hidden sm:inline">
-                                  · {status.activeTransfer.activeChunks} chunks
-                                </span>
-                              )}
-                            {status.activeTransfer.resumed && (
-                              <span className="text-crt-phosphor/90 whitespace-nowrap shrink-0 hidden md:inline">
-                                · Resumed
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
-                            <span>
-                              {status.activeTransfer.bytesReceived > 0 ||
-                              status.activeTransfer.totalBytes
-                                ? `${formatBytes(status.activeTransfer.bytesReceived)}${
-                                    status.activeTransfer.totalBytes
-                                      ? ` / ${formatBytes(status.activeTransfer.totalBytes)}`
-                                      : ''
-                                  }`
-                                : 'Connecting…'}
-                            </span>
-                            {status.activeTransfer.bytesPerSec > 0 && (
-                              <span className="hidden sm:inline">
-                                {formatBytes(status.activeTransfer.bytesPerSec)}/s
-                              </span>
-                            )}
-                            {transferPct !== null && (
-                              <span className="text-crt-phosphor font-semibold inline-block min-w-[3.5ch] text-right">
-                                {transferPct}%
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        <div
-                          role="progressbar"
-                          aria-label={`Active download progress for ${status.activeTransfer.filename}`}
-                          aria-valuemin={0}
-                          aria-valuemax={100}
-                          aria-valuenow={transferPct ?? undefined}
-                          className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
-                        >
-                          {transferPct !== null ? (
-                            <div
-                              key={activeTransferFileKey ?? 'active'}
-                              className={`h-full bg-crt-phosphor crt-progress-beam transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none ${
-                                PROGRESS_WIDTH_CLASSES[Math.max(3, Math.min(100, transferPct))]
-                              }`}
-                            />
-                          ) : unknownSizeGraceElapsed ? (
-                            <div className="h-full bg-crt-phosphor crt-progress-indeterminate" />
+                          <span>Details</span>
+                          {transferDetailsOpen ? (
+                            <ChevronUp className="h-3 w-3 shrink-0" />
                           ) : (
-                            <div
-                              key={activeTransferFileKey ?? 'handshake'}
-                              className={`h-full bg-crt-phosphor/75 crt-progress-beam transition-opacity duration-150 motion-reduce:transition-none ${PROGRESS_WIDTH_CLASSES[4]}`}
-                            />
+                            <ChevronDown className="h-3 w-3 shrink-0" />
                           )}
-                        </div>
-                      </>
-                    )}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div
+                      role="progressbar"
+                      aria-label={`Combined download progress for ${displayedSyncSubject}`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={combinedTransfer.pct ?? undefined}
+                      className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+                    >
+                      {combinedTransfer.pct !== null ? (
+                        <div
+                          key={`combined-${status.activeRun?.id ?? 'active'}`}
+                          className={`h-full bg-crt-phosphor crt-progress-beam transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none ${
+                            PROGRESS_WIDTH_CLASSES[Math.max(3, Math.min(100, combinedTransfer.pct))]
+                          }`}
+                        />
+                      ) : unknownSizeGraceElapsed ? (
+                        <div className="h-full bg-crt-phosphor crt-progress-indeterminate" />
+                      ) : (
+                        <div
+                          key={`handshake-${status.activeRun?.id ?? 'active'}`}
+                          className={`h-full bg-crt-phosphor/75 crt-progress-beam transition-opacity duration-150 motion-reduce:transition-none ${PROGRESS_WIDTH_CLASSES[4]}`}
+                        />
+                      )}
+                    </div>
                   </>
                 ) : heldTransferForActiveRun ? (
                   <>
-                    <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0">
+                    <div className="flex items-center justify-between gap-3 h-6 text-xs font-mono min-w-0">
                       <div className="flex items-center gap-2 text-crt-text/90 min-w-0">
                         <CheckCircle2 className="h-3.5 w-3.5 text-crt-phosphor/80 shrink-0" />
                         <span className="truncate">
-                          {heldTransferForActiveRun.systemName} / {heldTransferForActiveRun.filename}
-                        </span>
-                        <span className="text-crt-muted whitespace-nowrap shrink-0 hidden sm:inline">
-                          · {isLiveSyncRun ? 'Saved — queuing next…' : 'Sync transfer complete'}
+                          {isLiveSyncRun ? 'Saved — queuing next…' : 'Sync transfer complete'}
                         </span>
                       </div>
                       <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
@@ -971,12 +815,30 @@ export function OverviewPanel({
                         <span className="text-crt-phosphor/80 font-semibold inline-block min-w-[3.5ch] text-right">
                           100%
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => setTransferDetailsOpen((prev) => !prev)}
+                          aria-expanded={transferDetailsOpen}
+                          aria-controls="sync-transfer-details-drawer"
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded-sm border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                            transferDetailsOpen
+                              ? 'bg-crt-elevated border-crt-border-strong text-crt-phosphor'
+                              : 'bg-crt-bg/80 border-crt-border text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+                          }`}
+                        >
+                          <span>Details</span>
+                          {transferDetailsOpen ? (
+                            <ChevronUp className="h-3 w-3 shrink-0" />
+                          ) : (
+                            <ChevronDown className="h-3 w-3 shrink-0" />
+                          )}
+                        </button>
                       </div>
                     </div>
 
                     <div
                       role="progressbar"
-                      aria-label={`Completed download for ${heldTransferForActiveRun.filename}`}
+                      aria-label={`Completed download for ${heldTransferForActiveRun.itemTitle}`}
                       aria-valuemin={0}
                       aria-valuemax={100}
                       aria-valuenow={100}
@@ -992,12 +854,12 @@ export function OverviewPanel({
                   </>
                 ) : (
                   <>
-                    <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0">
+                    <div className="flex items-center justify-between gap-3 h-6 text-xs font-mono min-w-0">
                       <div className="flex items-center gap-2 text-crt-muted min-w-0">
                         <Activity className="h-3.5 w-3.5 text-crt-phosphor/80 shrink-0" />
                         <span className="truncate">
                           {isLiveSyncRun
-                            ? 'Scanning repository pages — awaiting next downloadable archive…'
+                            ? 'Preparing next downloadable archive…'
                             : 'Sync scan complete'}
                         </span>
                       </div>
@@ -1014,7 +876,7 @@ export function OverviewPanel({
 
                     <div
                       role="progressbar"
-                      aria-label="Scanning repository for downloadable files"
+                      aria-label="Preparing repository transfer"
                       aria-valuemin={0}
                       aria-valuemax={100}
                       className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
@@ -1026,6 +888,168 @@ export function OverviewPanel({
                       )}
                     </div>
                   </>
+                )}
+
+                {/* Collapsible Transfer Details Drawer (starts collapsed every visit) */}
+                {(combinedTransfer || heldTransferForActiveRun) && (
+                  <div
+                    id="sync-transfer-details-drawer"
+                    aria-hidden={!transferDetailsOpen}
+                    inert={!transferDetailsOpen || undefined}
+                    data-open={transferDetailsOpen ? 'true' : 'false'}
+                    className={`crt-accordion-grid transition-opacity duration-300 motion-reduce:transition-none ${
+                      transferDetailsOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                    }`}
+                  >
+                    <div className="crt-accordion-inner">
+                      <div className="pt-2.5 mt-1 border-t border-crt-border/70 space-y-2.5">
+                        {combinedTransfer ? (
+                          <>
+                            {hasMultipleParallelTransfers && (
+                              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-crt-muted tabular-nums">
+                                <span>
+                                  {combinedTransfer.workerCount} parallel workers
+                                  {combinedTransfer.totalChunks > 1
+                                    ? ` · ${combinedTransfer.totalChunks} chunks total`
+                                    : ''}
+                                </span>
+                                {combinedTransfer.bytesPerSec > 0 && (
+                                  <span className="text-crt-phosphor/90">
+                                    {formatBytes(combinedTransfer.bytesPerSec)}/s combined
+                                  </span>
+                                )}
+                              </div>
+                            )}
+
+                            <div className="space-y-2.5">
+                              {parallelTransfers.map((item, idx) => {
+                                const itemKey =
+                                  item.workerKey ??
+                                  `${item.itemId ?? 'item'}:${item.fileId ?? item.filename}:${idx}`;
+                                const itemPct =
+                                  item.totalBytes && item.totalBytes > 0
+                                    ? Math.min(
+                                        100,
+                                        Math.round((item.bytesReceived / item.totalBytes) * 100),
+                                      )
+                                    : null;
+                                return (
+                                  <div key={itemKey} className="space-y-1.5">
+                                    <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0">
+                                      <div className="flex items-center gap-2 min-w-0">
+                                        <span
+                                          aria-hidden="true"
+                                          className="h-1.5 w-1.5 rounded-full bg-crt-phosphor shrink-0"
+                                        />
+                                        <span
+                                          title={`${item.systemName} / ${item.filename}`}
+                                          className="truncate min-w-0"
+                                        >
+                                          <span className="text-crt-muted">{item.systemName} /</span>{' '}
+                                          <span className="text-crt-text font-medium">
+                                            {item.filename}
+                                          </span>
+                                        </span>
+                                        {item.activeWorkers && item.activeWorkers > 1 && (
+                                          <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums hidden md:inline">
+                                            · {item.activeWorkers} workers
+                                          </span>
+                                        )}
+                                        {item.activeChunks && item.activeChunks > 1 && (
+                                          <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums hidden sm:inline">
+                                            · {item.activeChunks} chunks
+                                          </span>
+                                        )}
+                                        {item.totalFiles && item.totalFiles > 1 && item.fileIndex && (
+                                          <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums hidden sm:inline">
+                                            · File {item.fileIndex}/{item.totalFiles}
+                                          </span>
+                                        )}
+                                        {item.resumed && (
+                                          <span className="text-crt-phosphor/90 whitespace-nowrap shrink-0 hidden md:inline">
+                                            · Resumed
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+                                        <span>
+                                          {item.bytesReceived > 0 || item.totalBytes
+                                            ? `${formatBytes(item.bytesReceived)}${
+                                                item.totalBytes ? ` / ${formatBytes(item.totalBytes)}` : ''
+                                              }`
+                                            : 'Connecting…'}
+                                        </span>
+                                        {item.bytesPerSec > 0 && (
+                                          <span className="hidden sm:inline">
+                                            {formatBytes(item.bytesPerSec)}/s
+                                          </span>
+                                        )}
+                                        {itemPct !== null && (
+                                          <span className="text-crt-phosphor font-semibold inline-block min-w-[3.5ch] text-right">
+                                            {itemPct}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {hasMultipleParallelTransfers && (
+                                      <div
+                                        role="progressbar"
+                                        aria-label={`Active download progress for ${item.filename}`}
+                                        aria-valuemin={0}
+                                        aria-valuemax={100}
+                                        aria-valuenow={itemPct ?? undefined}
+                                        className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+                                      >
+                                        {itemPct !== null ? (
+                                          <div
+                                            className={`h-full bg-crt-phosphor crt-progress-beam transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none ${
+                                              PROGRESS_WIDTH_CLASSES[
+                                                Math.max(3, Math.min(100, itemPct))
+                                              ]
+                                            }`}
+                                          />
+                                        ) : unknownSizeGraceElapsed || item.bytesReceived > 0 ? (
+                                          <div className="h-full bg-crt-phosphor crt-progress-indeterminate" />
+                                        ) : (
+                                          <div
+                                            className={`h-full bg-crt-phosphor/75 crt-progress-beam transition-opacity duration-150 motion-reduce:transition-none ${PROGRESS_WIDTH_CLASSES[4]}`}
+                                          />
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </>
+                        ) : heldTransferForActiveRun ? (
+                          <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0 text-crt-muted">
+                            <span
+                              title={`${heldTransferForActiveRun.systemName} / ${heldTransferForActiveRun.filename}`}
+                              className="truncate min-w-0"
+                            >
+                              Last file: {heldTransferForActiveRun.systemName} /{' '}
+                              <span className="text-crt-text/90">
+                                {heldTransferForActiveRun.filename}
+                              </span>
+                              {heldTransferForActiveRun.totalFiles &&
+                              heldTransferForActiveRun.totalFiles > 1 &&
+                              heldTransferForActiveRun.fileIndex
+                                ? ` · File ${heldTransferForActiveRun.fileIndex}/${heldTransferForActiveRun.totalFiles}`
+                                : ''}
+                            </span>
+                            <span className="tabular-nums whitespace-nowrap shrink-0">
+                              {heldTransferForActiveRun.bytes > 0
+                                ? `${formatBytes(heldTransferForActiveRun.bytes)} · `
+                                : ''}
+                              100%
+                            </span>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
             </div>

@@ -266,6 +266,7 @@ export interface RateLimiterTelemetry {
 export interface ActiveTransferState {
   workerKey?: string;
   itemId: number | null;
+  itemTitle?: string;
   fileId?: number | null;
   fileIndex?: number | null;
   totalFiles?: number | null;
