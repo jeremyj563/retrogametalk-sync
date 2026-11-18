@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.5.3] - 2026-11-18
+
+- Fixed Catalog box-art thumbnails and icons disappearing to empty placeholders after clicking the UI **Refresh** button in both Table and Box-Art Grid views (eliminated the mount-time `useEffect` race that reset `loaded` to `false` after browser-cached `<img>` `onLoad` fired, added synchronous `img.complete` detection via `useLayoutEffect`, and dropped conflicting `loading="lazy"` on `IntersectionObserver`-gated covers).
+- Upgraded manual Catalog **Refresh** to refresh items, facets, and failed cover retries in place (`softRefresh`) with a smooth spinning button icon instead of blanking the visible catalog into skeleton rows.
+
 ## [1.5.2] - 2026-11-18
 
 - Added symmetric **`Downloaded (N)`** and **`Not Downloaded (N)`** quick-filter toggle buttons to the Catalog toolbar alongside **`Installed (N)`** and **`Not Installed (N)`** (`Downloaded` in phosphor green, `Not Downloaded` in amber).
