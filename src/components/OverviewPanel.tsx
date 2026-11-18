@@ -31,6 +31,7 @@ import {
   formatRunDuration,
   formatTimeShort,
 } from '../utils/format';
+import { parseSyncStatusHeader } from '../utils/syncStatusPhase';
 import { FailedQueueDrawer } from './FailedQueueDrawer';
 import { LivingNavIcon, LivingTerminalIcon } from './LivingNavIcon';
 import { TelemetryDeck } from './TelemetryDeck';
@@ -275,36 +276,61 @@ export function OverviewPanel({
 
   const hasMultipleParallelTransfers = parallelTransfers.length > 1;
 
-  const activeDownloadHeader = useMemo(() => {
-    const t = status.activeTransfer;
-    if (t && status.currentPhase.startsWith('Downloading ')) {
-      const workerCount = Math.max(parallelTransfers.length, t.activeWorkers ?? 1);
-      return {
-        prefix:
-          workerCount > 1
-            ? `Downloading ${workerCount} in parallel · ${t.systemName} /`
-            : `Downloading · ${t.systemName} /`,
-        filename: t.filename,
-      };
+  const parsedSyncHeader = useMemo(
+    () =>
+      parseSyncStatusHeader({
+        currentPhase: status.currentPhase,
+        activeRun: status.activeRun,
+        activeTransfer: status.activeTransfer,
+        parallelTransferCount: parallelTransfers.length,
+      }),
+    [status.currentPhase, status.activeRun, status.activeTransfer, parallelTransfers.length],
+  );
+
+  // Preserve the system item counter (e.g. "9/424") seamlessly when phase hands off to "Downloading..."
+  const [heldSystemProgress, setHeldSystemProgress] = useState<{
+    runId: number;
+    systemName: string;
+    progressLabel: string;
+  } | null>(null);
+
+  useEffect(() => {
+    const runId = status.activeRun?.id ?? null;
+    if (runId === null) {
+      setHeldSystemProgress(null);
+      return;
     }
-    const parallelMatch = status.currentPhase.match(
-      /^Downloading\s+(\d+)\s+files?\s+in\s+parallel\s*\(primary:\s*([^/]+?)\s*\/\s*(.+)\)$/i,
-    );
-    if (parallelMatch) {
-      return {
-        prefix: `Downloading ${parallelMatch[1]} in parallel · ${parallelMatch[2].trim()} /`,
-        filename: parallelMatch[3].trim(),
-      };
+    if (parsedSyncHeader.systemName && parsedSyncHeader.progressLabel) {
+      setHeldSystemProgress((prev) => {
+        if (
+          prev &&
+          prev.runId === runId &&
+          prev.systemName === parsedSyncHeader.systemName &&
+          prev.progressLabel === parsedSyncHeader.progressLabel
+        ) {
+          return prev;
+        }
+        return {
+          runId,
+          systemName: parsedSyncHeader.systemName!,
+          progressLabel: parsedSyncHeader.progressLabel!,
+        };
+      });
     }
-    const singleMatch = status.currentPhase.match(/^Downloading\s+([^/]+?)\s*\/\s*(.+)$/i);
-    if (singleMatch) {
-      return {
-        prefix: `Downloading · ${singleMatch[1].trim()} /`,
-        filename: singleMatch[2].trim(),
-      };
+  }, [status.activeRun?.id, parsedSyncHeader.systemName, parsedSyncHeader.progressLabel]);
+
+  const effectiveSystemProgress = useMemo(() => {
+    if (parsedSyncHeader.progressLabel) return parsedSyncHeader.progressLabel;
+    if (
+      status.activeRun &&
+      heldSystemProgress &&
+      heldSystemProgress.runId === status.activeRun.id &&
+      heldSystemProgress.systemName === parsedSyncHeader.systemName
+    ) {
+      return heldSystemProgress.progressLabel;
     }
     return null;
-  }, [status.activeTransfer, status.currentPhase, parallelTransfers.length]);
+  }, [parsedSyncHeader.progressLabel, parsedSyncHeader.systemName, status.activeRun, heldSystemProgress]);
 
   const transferPct = useMemo(() => {
     const t = status.activeTransfer;
@@ -550,23 +576,64 @@ export function OverviewPanel({
         <div aria-hidden="true" className="crt-edge-beam">
           <span />
         </div>
-        {/* Zone 1: Full-Width Phase Header (Locked Single-Line Geometry) */}
-        <div className="space-y-1.5 min-w-0">
-          <div className="flex items-center justify-between gap-3 text-xs font-mono min-w-0">
-            <span
-              className={`inline-flex items-center gap-1.5 font-medium whitespace-nowrap shrink-0 ${
-                status.activeRun
-                  ? `${isDryRunActive ? 'text-crt-amber' : 'text-crt-phosphor'} crt-phase-sync-active`
-                  : 'text-crt-muted'
-              }`}
-            >
-              <LivingNavIcon section="monitor" className="h-3.5 w-3.5 shrink-0" />
-              <span>
-                {status.activeRun
-                  ? `${isDryRunActive ? 'Dry Run Active' : 'Sync Active'} · Run #${status.activeRun.id}`
-                  : 'Standby'}
+        {/* Zone 1: Tiered Sync Status Header (Tier 1 Global Context / Tier 2 Active Target) */}
+        <div className="min-w-0">
+          {/* Tier 1: Global Sync Run, Sync Type & High-Contrast System / Progress Context */}
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 text-xs font-mono min-w-0">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
+              <span
+                className={`inline-flex items-center gap-1.5 font-medium whitespace-nowrap shrink-0 ${
+                  status.activeRun
+                    ? `${isDryRunActive ? 'text-crt-amber' : 'text-crt-phosphor'} crt-phase-sync-active`
+                    : 'text-crt-muted'
+                }`}
+              >
+                <LivingNavIcon section="monitor" className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  {status.activeRun
+                    ? `${isDryRunActive ? 'Dry Run Active' : 'Sync Active'} · Run #${status.activeRun.id}`
+                    : 'Standby'}
+                </span>
               </span>
-            </span>
+
+              {(parsedSyncHeader.syncType ||
+                parsedSyncHeader.systemName ||
+                effectiveSystemProgress) && (
+                <>
+                  <span aria-hidden="true" className="text-crt-border-strong select-none">
+                    ·
+                  </span>
+                  {parsedSyncHeader.syncType && (
+                    <span className="text-crt-text/90 font-medium whitespace-nowrap shrink-0">
+                      {parsedSyncHeader.syncType}
+                    </span>
+                  )}
+                  {(parsedSyncHeader.systemName || effectiveSystemProgress) && (
+                    <span className="crt-status-context-block inline-flex items-center gap-1.5 text-[11px] font-mono tabular-nums min-w-0 max-w-full">
+                      {parsedSyncHeader.systemName && (
+                        <span className="text-crt-text font-semibold truncate">
+                          {parsedSyncHeader.systemName}
+                        </span>
+                      )}
+                      {parsedSyncHeader.systemName && effectiveSystemProgress && (
+                        <span aria-hidden="true" className="text-crt-muted">
+                          ·
+                        </span>
+                      )}
+                      {effectiveSystemProgress && (
+                        <span
+                          className={`whitespace-nowrap shrink-0 ${
+                            isDryRunActive ? 'text-crt-amber' : 'text-crt-phosphor'
+                          }`}
+                        >
+                          {effectiveSystemProgress}
+                        </span>
+                      )}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
 
             {status.activeRun ? (
               <span className="text-crt-muted tabular-nums truncate">
@@ -580,28 +647,56 @@ export function OverviewPanel({
             ) : null}
           </div>
 
+          {/* Tier 2: Active Target / File Status (Uniform Prefix + Focused Title/Filename) */}
           <h1
             title={status.currentPhase}
-            className="font-display text-lg sm:text-xl font-semibold tracking-tight text-crt-text leading-snug min-w-0"
+            className="mt-2.5 pt-2.5 border-t border-crt-border/70 min-w-0"
           >
-            {activeDownloadHeader ? (
-              <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 min-w-0">
-                <span className="text-crt-muted font-medium text-sm sm:text-base whitespace-nowrap shrink-0">
-                  {activeDownloadHeader.prefix}
-                </span>
+            <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 min-w-0">
+              <span className="font-display text-sm sm:text-[15px] font-medium tracking-tight text-crt-muted whitespace-nowrap shrink-0">
+                {parsedSyncHeader.actionPrefix}
+              </span>
+
+              {parsedSyncHeader.subjectKind === 'download' ? (
                 <span
-                  title={activeDownloadHeader.filename}
-                  className="crt-active-filename min-w-0 font-bold tracking-tight"
+                  title={parsedSyncHeader.subject}
+                  className="crt-active-filename font-display text-lg sm:text-xl font-bold tracking-tight leading-snug min-w-0"
                 >
                   <span aria-hidden="true" className="crt-active-filename-sheen" />
                   <span className="crt-active-filename-label truncate min-w-0">
-                    {activeDownloadHeader.filename}
+                    {parsedSyncHeader.subject}
                   </span>
                 </span>
-              </span>
-            ) : (
-              <span className="block truncate">{status.currentPhase}</span>
-            )}
+              ) : parsedSyncHeader.subjectKind === 'title' ? (
+                <span
+                  title={parsedSyncHeader.subject}
+                  className="font-display text-lg sm:text-xl font-semibold tracking-tight leading-snug text-crt-text truncate min-w-0"
+                >
+                  {parsedSyncHeader.subject}
+                </span>
+              ) : parsedSyncHeader.subjectKind === 'path' ? (
+                <span
+                  title={parsedSyncHeader.subject}
+                  className="font-mono text-sm sm:text-[15px] font-medium leading-snug text-crt-text/90 truncate min-w-0"
+                >
+                  {parsedSyncHeader.subject}
+                </span>
+              ) : parsedSyncHeader.subjectKind === 'idle' ? (
+                <span
+                  title={parsedSyncHeader.subject}
+                  className="font-display text-base sm:text-lg font-medium leading-snug text-crt-muted truncate min-w-0"
+                >
+                  {parsedSyncHeader.subject}
+                </span>
+              ) : (
+                <span
+                  title={parsedSyncHeader.subject}
+                  className="font-display text-base sm:text-lg font-medium leading-snug text-crt-text/95 truncate min-w-0"
+                >
+                  {parsedSyncHeader.subject}
+                </span>
+              )}
+            </span>
           </h1>
         </div>
 
