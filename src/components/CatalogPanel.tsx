@@ -1972,152 +1972,162 @@ export function CatalogPanel({
                 showTotalOptionCount={false}
                 searchPlaceholder="Filter statuses..."
               />
+            </div>
 
-              <div
-                role="group"
-                aria-label="Filter by local download state"
-                className="inline-flex items-center gap-1.5 shrink-0"
-              >
-                <button
-                  type="button"
-                  aria-pressed={downloadedFilter === 'only'}
-                  onClick={() => {
-                    const next = toggleCatalogDownloadedFilter(downloadedFilter, 'only');
-                    setDownloadedFilter(next);
-                    if (next === 'only') {
-                      setStatuses([]);
+            {/* Quick-Filter Action Buttons & Sort Row */}
+            <div className="pt-2 border-t border-crt-border/60 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <div
+                  role="group"
+                  aria-label="Filter by local download state"
+                  className="inline-flex items-center gap-1.5 shrink-0"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={downloadedFilter === 'only'}
+                    onClick={() => {
+                      const next = toggleCatalogDownloadedFilter(downloadedFilter, 'only');
+                      setDownloadedFilter(next);
+                      if (next === 'only') {
+                        setStatuses([]);
+                      }
+                    }}
+                    title={
+                      downloadedFilter === 'only'
+                        ? 'Click to clear Downloaded filter and show all matching games'
+                        : 'Show only matching games already downloaded locally'
                     }
-                  }}
-                  title={
-                    downloadedFilter === 'only'
-                      ? 'Click to clear Downloaded filter and show all matching games'
-                      : 'Show only matching games already downloaded locally'
-                  }
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    downloadedFilter === 'only'
-                      ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
-                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
-                  }`}
-                >
-                  <Download
-                    className={`h-3.5 w-3.5 shrink-0 ${
-                      downloadedFilter === 'only' ? 'text-crt-phosphor' : 'text-crt-muted'
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      downloadedFilter === 'only'
+                        ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
+                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
                     }`}
-                  />
-                  <span>Downloaded</span>
-                  {facets.counts?.downloaded && (
-                    <span
-                      className={`font-mono text-[11px] tabular-nums ${
-                        downloadedFilter === 'only' ? 'text-crt-phosphor/90' : 'text-crt-muted'
+                  >
+                    <Download
+                      className={`h-3.5 w-3.5 shrink-0 ${
+                        downloadedFilter === 'only' ? 'text-crt-phosphor' : 'text-crt-muted'
                       }`}
-                    >
-                      ({facets.counts.downloaded.downloaded.toLocaleString()})
-                    </span>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={downloadedFilter === 'exclude'}
-                  onClick={() =>
-                    setDownloadedFilter((prev) => toggleCatalogDownloadedFilter(prev, 'exclude'))
-                  }
-                  title={
-                    downloadedFilter === 'exclude'
-                      ? 'Click to clear Not Downloaded filter and show all matching games'
-                      : 'Show all matching un-downloaded games (Available, Queued, Failed)'
-                  }
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    downloadedFilter === 'exclude'
-                      ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
-                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
-                  }`}
-                >
-                  <span>Not Downloaded</span>
-                  {facets.counts?.downloaded && (
-                    <span
-                      className={`font-mono text-[11px] tabular-nums ${
-                        downloadedFilter === 'exclude' ? 'text-crt-amber/90' : 'text-crt-muted'
-                      }`}
-                    >
-                      ({facets.counts.downloaded.notDownloaded.toLocaleString()})
-                    </span>
-                  )}
-                </button>
-              </div>
+                    />
+                    <span>Downloaded</span>
+                    {facets.counts?.downloaded && (
+                      <span
+                        className={`font-mono text-[11px] tabular-nums ${
+                          downloadedFilter === 'only' ? 'text-crt-phosphor/90' : 'text-crt-muted'
+                        }`}
+                      >
+                        ({facets.counts.downloaded.downloaded.toLocaleString()})
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={downloadedFilter === 'exclude'}
+                    onClick={() =>
+                      setDownloadedFilter((prev) => toggleCatalogDownloadedFilter(prev, 'exclude'))
+                    }
+                    title={
+                      downloadedFilter === 'exclude'
+                        ? 'Click to clear Not Downloaded filter and show all matching games'
+                        : 'Show all matching un-downloaded games (Available, Queued, Failed)'
+                    }
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      downloadedFilter === 'exclude'
+                        ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
+                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                    }`}
+                  >
+                    <span>Not Downloaded</span>
+                    {facets.counts?.downloaded && (
+                      <span
+                        className={`font-mono text-[11px] tabular-nums ${
+                          downloadedFilter === 'exclude' ? 'text-crt-amber/90' : 'text-crt-muted'
+                        }`}
+                      >
+                        ({facets.counts.downloaded.notDownloaded.toLocaleString()})
+                      </span>
+                    )}
+                  </button>
+                </div>
 
-              <div
-                role="group"
-                aria-label="Filter by storage device installation"
-                className="inline-flex items-center gap-1.5 shrink-0"
-              >
-                <button
-                  type="button"
-                  aria-pressed={installedFilter === 'only'}
-                  onClick={() =>
-                    setInstalledFilter((prev) => (prev === 'only' ? 'all' : 'only'))
-                  }
-                  title={
-                    installedFilter === 'only'
-                      ? 'Click to clear Installed filter and show all matching games'
-                      : 'Show only matching games installed to a storage device'
-                  }
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    installedFilter === 'only'
-                      ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
-                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
-                  }`}
+                <span
+                  aria-hidden="true"
+                  className="hidden sm:inline-block h-4 w-px bg-crt-border mx-0.5 shrink-0"
+                />
+
+                <div
+                  role="group"
+                  aria-label="Filter by storage device installation"
+                  className="inline-flex items-center gap-1.5 shrink-0"
                 >
-                  <HardDrive
-                    className={`h-3.5 w-3.5 shrink-0 ${
-                      installedFilter === 'only' ? 'text-crt-phosphor' : 'text-crt-muted'
+                  <button
+                    type="button"
+                    aria-pressed={installedFilter === 'only'}
+                    onClick={() =>
+                      setInstalledFilter((prev) => (prev === 'only' ? 'all' : 'only'))
+                    }
+                    title={
+                      installedFilter === 'only'
+                        ? 'Click to clear Installed filter and show all matching games'
+                        : 'Show only matching games installed to a storage device'
+                    }
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      installedFilter === 'only'
+                        ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
+                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
                     }`}
-                  />
-                  <span>Installed</span>
-                  {facets.counts?.installed && (
-                    <span
-                      className={`font-mono text-[11px] tabular-nums ${
-                        installedFilter === 'only' ? 'text-crt-phosphor/90' : 'text-crt-muted'
+                  >
+                    <HardDrive
+                      className={`h-3.5 w-3.5 shrink-0 ${
+                        installedFilter === 'only' ? 'text-crt-phosphor' : 'text-crt-muted'
                       }`}
-                    >
-                      ({facets.counts.installed.installed.toLocaleString()})
-                    </span>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={installedFilter === 'exclude'}
-                  onClick={() =>
-                    setInstalledFilter((prev) => (prev === 'exclude' ? 'all' : 'exclude'))
-                  }
-                  title={
-                    installedFilter === 'exclude'
-                      ? 'Click to clear Not Installed filter and show all matching games'
-                      : 'Show only matching games not yet installed to a storage device'
-                  }
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    installedFilter === 'exclude'
-                      ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
-                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
-                  }`}
-                >
-                  <span>Not Installed</span>
-                  {facets.counts?.installed && (
-                    <span
-                      className={`font-mono text-[11px] tabular-nums ${
-                        installedFilter === 'exclude' ? 'text-crt-amber/90' : 'text-crt-muted'
-                      }`}
-                    >
-                      ({facets.counts.installed.notInstalled.toLocaleString()})
-                    </span>
-                  )}
-                </button>
+                    />
+                    <span>Installed</span>
+                    {facets.counts?.installed && (
+                      <span
+                        className={`font-mono text-[11px] tabular-nums ${
+                          installedFilter === 'only' ? 'text-crt-phosphor/90' : 'text-crt-muted'
+                        }`}
+                      >
+                        ({facets.counts.installed.installed.toLocaleString()})
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={installedFilter === 'exclude'}
+                    onClick={() =>
+                      setInstalledFilter((prev) => (prev === 'exclude' ? 'all' : 'exclude'))
+                    }
+                    title={
+                      installedFilter === 'exclude'
+                        ? 'Click to clear Not Installed filter and show all matching games'
+                        : 'Show only matching games not yet installed to a storage device'
+                    }
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      installedFilter === 'exclude'
+                        ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
+                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                    }`}
+                  >
+                    <span>Not Installed</span>
+                    {facets.counts?.installed && (
+                      <span
+                        className={`font-mono text-[11px] tabular-nums ${
+                          installedFilter === 'exclude' ? 'text-crt-amber/90' : 'text-crt-muted'
+                        }`}
+                      >
+                        ({facets.counts.installed.notInstalled.toLocaleString()})
+                      </span>
+                    )}
+                  </button>
+                </div>
               </div>
 
               <select
                 value={sort}
                 onChange={(e) => setSort(normalizeCatalogSort(e.target.value))}
                 aria-label="Sort catalog releases"
-                className={`xl:ml-auto px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor ${
+                className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor shrink-0 ${
                   sort !== DEFAULT_CATALOG_SORT
                     ? 'border-crt-phosphor/60 text-crt-phosphor'
                     : 'border-crt-border text-crt-text'

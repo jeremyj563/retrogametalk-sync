@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.5.5] - 2026-11-18
+
+- Separated the Catalog quick-filter toggle groups (**`Downloaded` / `Not Downloaded`** and **`Installed` / `Not Installed`**) and the **Sort** dropdown onto their own dedicated toolbar row below the Search box and metadata filter dropdowns so quick actions remain cleanly separated across all viewport widths and zoom levels.
+
 ## [1.5.4] - 2026-11-18
 
 - Simplified the Catalog **`Status`** dropdown by removing the redundant `Available (Not Downloaded)` and `Downloaded` options now handled directly by the **`Downloaded (N)`** and **`Not Downloaded (N)`** toolbar toggle buttons, leaving `Status` focused cleanly on granular troubleshooting and in-flight states (`Needs Attention`, `Partial`, `Failed`, plus active `Queued`/`Downloading`).
