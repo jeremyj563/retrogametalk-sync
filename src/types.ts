@@ -165,6 +165,10 @@ export interface CatalogFacetCounts {
   languages: Record<string, number>;
   sources: Record<string, number>;
   statuses: Record<string, number>;
+  downloaded?: {
+    downloaded: number;
+    notDownloaded: number;
+  };
   installed?: {
     installed: number;
     notInstalled: number;

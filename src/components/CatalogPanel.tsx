@@ -36,6 +36,13 @@ import {
   DEFAULT_CATALOG_SORT,
   normalizeCatalogSort,
 } from '../shared/catalogSort';
+import {
+  isDownloadedQuickFilterActive,
+  isNotDownloadedQuickFilterActive,
+  reconcileManualStatusChange,
+  toggleDownloadedQuickFilter,
+  toggleNotDownloadedQuickFilter,
+} from '../shared/catalogDownloadFilter';
 import type { SmartRomFilterContext } from '../shared/smartRomPicker';
 import type {
   CatalogFacets,
@@ -1389,6 +1396,22 @@ export function CatalogPanel({
     [facets.sources, facets.counts],
   );
 
+  const downloadedQuickActive = useMemo(
+    () => isDownloadedQuickFilterActive(statuses),
+    [statuses],
+  );
+  const notDownloadedQuickActive = useMemo(
+    () => isNotDownloadedQuickFilterActive(statuses),
+    [statuses],
+  );
+
+  const handleStatusesChange = useCallback(
+    (next: string[]) => {
+      setStatuses(reconcileManualStatusChange(statuses, next, facets.counts?.statuses));
+    },
+    [statuses, facets.counts?.statuses],
+  );
+
   const statusOptions = useMemo<FilterDropdownOption[]>(() => {
     const counts = facets.counts?.statuses;
     const base: FilterDropdownOption[] = [
@@ -1418,14 +1441,17 @@ export function CatalogPanel({
         count: counts?.failed,
       },
     ];
-    if ((counts?.queued ?? 0) > 0 || statuses.includes('queued')) {
+    if ((counts?.queued ?? 0) > 0 || (statuses.includes('queued') && !notDownloadedQuickActive)) {
       base.push({ value: 'queued', label: 'Queued', count: counts?.queued });
     }
-    if ((counts?.downloading ?? 0) > 0 || statuses.includes('downloading')) {
+    if (
+      (counts?.downloading ?? 0) > 0 ||
+      (statuses.includes('downloading') && !notDownloadedQuickActive)
+    ) {
       base.push({ value: 'downloading', label: 'Downloading', count: counts?.downloading });
     }
     return base;
-  }, [facets.counts, status.totals, statuses]);
+  }, [facets.counts, status.totals, statuses, notDownloadedQuickActive]);
 
   const activeFilterTokens = useMemo(() => {
     const tokens: {
@@ -1507,14 +1533,32 @@ export function CatalogPanel({
       });
     }
 
-    for (const val of statuses) {
+    if (downloadedQuickActive) {
       tokens.push({
-        key: `status:${val}`,
-        groupLabel: 'Status',
-        valueLabel: STATUS_LABELS[val] || val,
+        key: 'download:downloaded',
+        groupLabel: 'Download',
+        valueLabel: 'Downloaded',
         matchAll: false,
-        onRemove: () => setStatuses((prev) => prev.filter((v) => v !== val)),
+        onRemove: () => setStatuses([]),
       });
+    } else if (notDownloadedQuickActive) {
+      tokens.push({
+        key: 'download:not_downloaded',
+        groupLabel: 'Download',
+        valueLabel: 'Not Downloaded',
+        matchAll: false,
+        onRemove: () => setStatuses([]),
+      });
+    } else {
+      for (const val of statuses) {
+        tokens.push({
+          key: `status:${val}`,
+          groupLabel: 'Status',
+          valueLabel: STATUS_LABELS[val] || val,
+          matchAll: false,
+          onRemove: () => setStatuses((prev) => prev.filter((v) => v !== val)),
+        });
+      }
     }
 
     if (installedFilter === 'only') {
@@ -1550,6 +1594,8 @@ export function CatalogPanel({
     sources,
     sourcesMode,
     statuses,
+    downloadedQuickActive,
+    notDownloadedQuickActive,
     installedFilter,
   ]);
 
@@ -1885,12 +1931,76 @@ export function CatalogPanel({
                 allLabel="All Statuses"
                 options={statusOptions}
                 selected={statuses}
-                onChange={setStatuses}
+                onChange={handleStatusesChange}
                 open={openFilterId === 'statuses'}
                 onOpenChange={(open) => setOpenFilterId(open ? 'statuses' : null)}
                 showTotalOptionCount={false}
                 searchPlaceholder="Filter statuses..."
               />
+
+              <div
+                role="group"
+                aria-label="Filter by local download state"
+                className="inline-flex items-center gap-1.5 shrink-0"
+              >
+                <button
+                  type="button"
+                  aria-pressed={downloadedQuickActive}
+                  onClick={() => setStatuses((prev) => toggleDownloadedQuickFilter(prev))}
+                  title={
+                    downloadedQuickActive
+                      ? 'Click to clear Downloaded filter and show all matching games'
+                      : 'Show only matching games already downloaded locally'
+                  }
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    downloadedQuickActive
+                      ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
+                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                  }`}
+                >
+                  <Download
+                    className={`h-3.5 w-3.5 shrink-0 ${
+                      downloadedQuickActive ? 'text-crt-phosphor' : 'text-crt-muted'
+                    }`}
+                  />
+                  <span>Downloaded</span>
+                  {facets.counts?.downloaded && (
+                    <span
+                      className={`font-mono text-[11px] tabular-nums ${
+                        downloadedQuickActive ? 'text-crt-phosphor/90' : 'text-crt-muted'
+                      }`}
+                    >
+                      ({facets.counts.downloaded.downloaded.toLocaleString()})
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={notDownloadedQuickActive}
+                  onClick={() => setStatuses((prev) => toggleNotDownloadedQuickFilter(prev))}
+                  title={
+                    notDownloadedQuickActive
+                      ? 'Click to clear Not Downloaded filter and show all matching games'
+                      : 'Show all matching un-downloaded games (Available, Queued, Failed)'
+                  }
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    notDownloadedQuickActive
+                      ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
+                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                  }`}
+                >
+                  <span>Not Downloaded</span>
+                  {facets.counts?.downloaded && (
+                    <span
+                      className={`font-mono text-[11px] tabular-nums ${
+                        notDownloadedQuickActive ? 'text-crt-amber/90' : 'text-crt-muted'
+                      }`}
+                    >
+                      ({facets.counts.downloaded.notDownloaded.toLocaleString()})
+                    </span>
+                  )}
+                </button>
+              </div>
 
               <div
                 role="group"
