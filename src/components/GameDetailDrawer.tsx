@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -67,6 +67,159 @@ interface LightboxState {
   index: number;
 }
 
+interface LazyDetailCoverProps {
+  src: string;
+  alt: string;
+  onError: () => void;
+  onClick: () => void;
+}
+
+function LazyDetailCover({ src, alt, onError, onClick }: LazyDetailCoverProps) {
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const prevSrcRef = useRef(src);
+
+  useLayoutEffect(() => {
+    const srcChanged = prevSrcRef.current !== src;
+    if (srcChanged) {
+      prevSrcRef.current = src;
+    }
+    const img = imgRef.current;
+    if (img && img.complete && img.naturalWidth > 0) {
+      setLoaded(true);
+    } else if (srcChanged) {
+      setLoaded(false);
+    }
+  }, [src]);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group relative w-full aspect-[3/4] border border-crt-border bg-crt-bg rounded-md overflow-hidden block focus:outline-none focus:border-crt-phosphor"
+      title="Click to inspect full-resolution cover art"
+    >
+      {!loaded && (
+        <div
+          aria-hidden="true"
+          className="crt-skeleton absolute inset-0 flex flex-col items-center justify-center p-5 text-center space-y-2.5"
+        >
+          <Gamepad2 className="h-9 w-9 text-crt-border-strong" />
+          <span className="font-mono text-[11px] text-crt-muted/80">Loading cover art...</span>
+        </div>
+      )}
+      <div aria-hidden="true" className="crt-card-holo" />
+      <img
+        ref={imgRef}
+        src={src}
+        alt={alt}
+        decoding="async"
+        referrerPolicy="no-referrer"
+        data-loaded={loaded ? 'true' : 'false'}
+        onLoad={() => setLoaded(true)}
+        onError={onError}
+        className="crt-cover-lazy relative z-[1] w-full h-full object-contain bg-crt-bg"
+      />
+      {loaded && (
+        <span className="absolute bottom-2.5 right-2.5 z-[2] inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono bg-crt-bg/90 border border-crt-border text-crt-text rounded opacity-0 group-hover:opacity-100 transition-opacity">
+          <ZoomIn className="h-3 w-3 text-crt-phosphor" />
+          Inspect
+        </span>
+      )}
+    </button>
+  );
+}
+
+interface LazyScreenshotTileProps {
+  title: string;
+  index: number;
+  src: string;
+  failed: boolean;
+  onLoaded: (index: number) => void;
+  onError: (index: number) => void;
+  onClick: (index: number) => void;
+}
+
+function LazyScreenshotTile({
+  title,
+  index,
+  src,
+  failed,
+  onLoaded,
+  onError,
+  onClick,
+}: LazyScreenshotTileProps) {
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const prevSrcRef = useRef(src);
+
+  useLayoutEffect(() => {
+    const srcChanged = prevSrcRef.current !== src;
+    if (srcChanged) {
+      prevSrcRef.current = src;
+    }
+    if (failed) {
+      setLoaded(false);
+      return;
+    }
+    const img = imgRef.current;
+    if (img && img.complete && img.naturalWidth > 0) {
+      setLoaded(true);
+      onLoaded(index);
+    } else if (srcChanged) {
+      setLoaded(false);
+    }
+  }, [src, failed, index, onLoaded]);
+
+  if (failed) {
+    return (
+      <div className="aspect-video border border-crt-border bg-crt-bg rounded flex items-center justify-center text-[11px] font-mono text-crt-muted">
+        Missing #{index + 1}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => onClick(index)}
+      className="group relative aspect-video border border-crt-border hover:border-crt-phosphor bg-crt-bg rounded overflow-hidden focus:outline-none focus:border-crt-phosphor"
+      title={`View screenshot ${index + 1}`}
+    >
+      {!loaded && (
+        <div
+          aria-hidden="true"
+          className="crt-skeleton absolute inset-0 flex flex-col items-center justify-center gap-1"
+        >
+          <ImageIcon className="h-5 w-5 text-crt-border-strong" />
+          <span className="font-mono text-[10px] text-crt-muted/70 tabular-nums">
+            #{String(index + 1).padStart(2, '0')}
+          </span>
+        </div>
+      )}
+      <img
+        ref={imgRef}
+        src={src}
+        alt={`${title} screenshot ${index + 1}`}
+        decoding="async"
+        referrerPolicy="no-referrer"
+        data-loaded={loaded ? 'true' : 'false'}
+        onLoad={() => {
+          setLoaded(true);
+          onLoaded(index);
+        }}
+        onError={() => onError(index)}
+        className="crt-cover-lazy relative z-[1] w-full h-full object-cover"
+      />
+      {loaded && (
+        <span className="absolute inset-0 z-[2] bg-black/0 group-hover:bg-black/25 transition-colors flex items-center justify-center">
+          <ZoomIn className="h-4 w-4 text-crt-phosphor opacity-0 group-hover:opacity-100 transition-opacity" />
+        </span>
+      )}
+    </button>
+  );
+}
+
 export function GameDetailDrawer({
   item,
   activeRun,
@@ -83,6 +236,8 @@ export function GameDetailDrawer({
 }: GameDetailDrawerProps) {
   const [fetchingMeta, setFetchingMeta] = useState(false);
   const [upgradingAssets, setUpgradingAssets] = useState(false);
+  const [hydratingItemId, setHydratingItemId] = useState<number | null>(null);
+  const [hydrationErrors, setHydrationErrors] = useState<Record<number, string>>({});
   const [metaError, setMetaError] = useState<string | null>(null);
   const [retryingKey, setRetryingKey] = useState<string | null>(null);
   const [queueingDownload, setQueueingDownload] = useState(false);
@@ -90,6 +245,7 @@ export function GameDetailDrawer({
   const [deleting, setDeleting] = useState(false);
   const [coverFailed, setCoverFailed] = useState(false);
   const [failedScreenshots, setFailedScreenshots] = useState<Set<number>>(new Set());
+  const [loadedScreenshots, setLoadedScreenshots] = useState<Set<number>>(new Set());
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
   const [lightboxScaleMode, setLightboxScaleMode] = useState<'fit' | 'native'>('fit');
   const [lightboxLoading, setLightboxLoading] = useState(false);
@@ -100,11 +256,51 @@ export function GameDetailDrawer({
   const [preparedNames, setPreparedNames] = useState<Record<string, string>>({});
   const [togglingInstalled, setTogglingInstalled] = useState(false);
   const autoUpgradedIdsRef = useRef<Set<number>>(new Set());
+  const autoHydratedIdsRef = useRef<Set<number>>(new Set());
   const bodyScrollRef = useRef<HTMLDivElement | null>(null);
 
   const assetVersion = item?.metadata?.fetchedAt ? `&v=${encodeURIComponent(item.metadata.fetchedAt)}` : '';
-  const screenshotCount = item?.metadata?.screenshotLocalRelPaths?.length ?? item?.screenshotsCount ?? 0;
+  const localScreenshotCount = item?.metadata?.screenshotLocalRelPaths?.length ?? item?.screenshotsCount ?? 0;
+  const remoteScreenshotCount = item?.metadata?.screenshotUrls?.length ?? 0;
+  const screenshotCount = Math.max(localScreenshotCount, remoteScreenshotCount);
   const isFullResVerified = (item?.metadata?.screenshotsFullResVersion ?? 0) >= 1;
+
+  const hasPreExistingHtmlDetails = Boolean(
+    item?.hasMetadata &&
+      item.metadata &&
+      ((item.metadata.specs?.length ?? 0) > 0 ||
+        Boolean(item.metadata.downloadsCount) ||
+        Boolean(item.metadata.updatedDate) ||
+        (item.metadata.screenshotsFullResVersion ?? 0) >= 1),
+  );
+  const needsDetailHydration = Boolean(
+    item && !item.metadata?.detailHydrated && !hasPreExistingHtmlDetails,
+  );
+  const hydrationErrorForItem = item ? hydrationErrors[item.id] ?? null : null;
+  const isHydratingDetails = Boolean(
+    item &&
+      needsDetailHydration &&
+      (hydratingItemId === item.id ||
+        (!autoHydratedIdsRef.current.has(item.id) && !hydrationErrorForItem)),
+  );
+
+  const handleScreenshotLoaded = useCallback((idx: number) => {
+    setLoadedScreenshots((prev) => {
+      if (prev.has(idx)) return prev;
+      const next = new Set(prev);
+      next.add(idx);
+      return next;
+    });
+  }, []);
+
+  const handleScreenshotError = useCallback((idx: number) => {
+    setFailedScreenshots((prev) => {
+      if (prev.has(idx)) return prev;
+      const next = new Set(prev);
+      next.add(idx);
+      return next;
+    });
+  }, []);
 
   // Reset drawer-scoped UI state only when switching to a different catalog item
   useEffect(() => {
@@ -112,6 +308,7 @@ export function GameDetailDrawer({
     setConfirmDelete(false);
     setCoverFailed(false);
     setFailedScreenshots(new Set());
+    setLoadedScreenshots(new Set());
     setLightbox(null);
     setLightboxDimensions(null);
     setLightboxLoading(false);
@@ -136,12 +333,14 @@ export function GameDetailDrawer({
         if (slide.kind === 'cover') {
           return {
             ...slide,
-            src: `/api/items/${item.id}/asset?kind=cover&full=1${assetVersion}`,
+            src: `/api/items/${item.id}/asset?kind=cover${item.status !== 'available' ? '&full=1' : '&lazy=1'}${assetVersion}`,
           };
         }
+        const idx = slide.screenshotIndex ?? 0;
+        const useLazy = idx >= localScreenshotCount || item.status === 'available';
         return {
           ...slide,
-          src: `/api/items/${item.id}/asset?kind=screenshot&index=${slide.screenshotIndex ?? 0}&full=1${assetVersion}`,
+          src: `/api/items/${item.id}/asset?kind=screenshot&index=${idx}${useLazy ? '&lazy=1' : '&full=1'}${assetVersion}`,
         };
       });
       if (updatedSlides.every((s, idx) => s.src === prev.slides[idx]?.src)) {
@@ -152,13 +351,67 @@ export function GameDetailDrawer({
         slides: updatedSlides,
       };
     });
-  }, [item, assetVersion]);
+  }, [item, assetVersion, localScreenshotCount]);
+
+  // Lazy-hydrate release-page specs, screenshot URLs, and description when opening an unhydrated catalog item
+  useEffect(() => {
+    if (!item || !needsDetailHydration) return;
+    const targetId = item.id;
+    if (autoHydratedIdsRef.current.has(targetId)) return;
+
+    const controller = new AbortController();
+    let cancelled = false;
+    setHydratingItemId(targetId);
+
+    void (async () => {
+      try {
+        const res = await fetch(`/api/items/${targetId}/metadata?lazy=1`, {
+          method: 'POST',
+          signal: controller.signal,
+        });
+        const parsed = await readJsonSafely<{ item?: RepositoryItemRecord; error?: string }>(res);
+        if (cancelled || controller.signal.aborted) return;
+
+        autoHydratedIdsRef.current.add(targetId);
+        if (parsed.ok && parsed.data?.item) {
+          setHydrationErrors((prev) => {
+            if (!(targetId in prev)) return prev;
+            const next = { ...prev };
+            delete next[targetId];
+            return next;
+          });
+          onItemUpdated(parsed.data.item);
+        } else {
+          setHydrationErrors((prev) => ({
+            ...prev,
+            [targetId]: parsed.errorMessage || `Failed to load remote details (HTTP ${res.status})`,
+          }));
+        }
+      } catch (err) {
+        if (cancelled || controller.signal.aborted) return;
+        autoHydratedIdsRef.current.add(targetId);
+        setHydrationErrors((prev) => ({
+          ...prev,
+          [targetId]: err instanceof Error ? err.message : String(err),
+        }));
+      } finally {
+        if (!cancelled) {
+          setHydratingItemId((cur) => (cur === targetId ? null : cur));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [item?.id, needsDetailHydration, onItemUpdated]);
 
   // Automatically upgrade legacy small-thumbnail items to full-resolution artwork in the background
   useEffect(() => {
-    if (!item) return;
-    const hasLocalArtwork = screenshotCount > 0 || Boolean(item.coverLocalPath);
-    if (!item.hasMetadata || !hasLocalArtwork || isFullResVerified) return;
+    if (!item || isHydratingDetails) return;
+    const hasLocalArtwork = localScreenshotCount > 0 || Boolean(item.coverLocalPath);
+    if (!item.hasMetadata || !hasLocalArtwork || isFullResVerified || item.status === 'available') return;
     if (autoUpgradedIdsRef.current.has(item.id)) return;
 
     autoUpgradedIdsRef.current.add(item.id);
@@ -184,7 +437,7 @@ export function GameDetailDrawer({
     return () => {
       cancelled = true;
     };
-  }, [item, screenshotCount, isFullResVerified, onItemUpdated]);
+  }, [item, isHydratingDetails, localScreenshotCount, isFullResVerified, onItemUpdated]);
 
   const activeLightboxSrc = lightbox?.slides[lightbox.index]?.src ?? null;
   useEffect(() => {
@@ -268,7 +521,13 @@ export function GameDetailDrawer({
             : '—',
         mono: true,
       },
-      { label: 'Included Files', value: `${item.filesCount} archive${item.filesCount === 1 ? '' : 's'}`, mono: true },
+      {
+        label: 'Included Files',
+        value: `${
+          item.filesCount > 0 ? item.filesCount : (meta?.downloadHints?.length ?? 0)
+        } archive${(item.filesCount > 0 ? item.filesCount : (meta?.downloadHints?.length ?? 0)) === 1 ? '' : 's'}`,
+        mono: true,
+      },
     ];
 
     if (meta?.formats?.length) {
@@ -335,6 +594,13 @@ export function GameDetailDrawer({
   const handleFetchMetadata = async () => {
     setFetchingMeta(true);
     setMetaError(null);
+    autoHydratedIdsRef.current.delete(item.id);
+    setHydrationErrors((prev) => {
+      if (!(item.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[item.id];
+      return next;
+    });
     try {
       const res = await fetch(`/api/items/${item.id}/metadata`, { method: 'POST' });
       const parsed = await readJsonSafely<{ item?: RepositoryItemRecord; error?: string }>(res);
@@ -343,8 +609,10 @@ export function GameDetailDrawer({
         return;
       }
       if (parsed.data?.item) {
+        autoHydratedIdsRef.current.add(item.id);
         setCoverFailed(false);
         setFailedScreenshots(new Set());
+        setLoadedScreenshots(new Set());
         onItemUpdated(parsed.data.item);
       }
     } catch (err) {
@@ -442,7 +710,7 @@ export function GameDetailDrawer({
     setLightbox({
       slides: [
         {
-          src: `/api/items/${item.id}/asset?kind=cover&full=1${assetVersion}`,
+          src: `/api/items/${item.id}/asset?kind=cover${item.status !== 'available' ? '&full=1' : '&lazy=1'}${assetVersion}`,
           label: `${item.title} — Cover Art`,
           kind: 'cover',
         },
@@ -457,8 +725,9 @@ export function GameDetailDrawer({
     for (let i = 0; i < screenshotCount; i += 1) {
       if (failedScreenshots.has(i)) continue;
       if (i === startIndex) mappedIndex = slides.length;
+      const useLazy = i >= localScreenshotCount || item.status === 'available';
       slides.push({
-        src: `/api/items/${item.id}/asset?kind=screenshot&index=${i}&full=1${assetVersion}`,
+        src: `/api/items/${item.id}/asset?kind=screenshot&index=${i}${useLazy ? '&lazy=1' : '&full=1'}${assetVersion}`,
         label: `${item.title} — Screenshot ${i + 1} of ${screenshotCount}`,
         kind: 'screenshot',
         screenshotIndex: i,
@@ -707,15 +976,19 @@ export function GameDetailDrawer({
 
         {/* Scrollable Body */}
         <div ref={bodyScrollRef} className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
-          {/* Missing Metadata Prompt */}
-          {!item.hasMetadata && (
+          {/* Missing Metadata / Fallback Prompt (shown only after auto-hydration fails or when manually retrying) */}
+          {!isHydratingDetails && (!item.hasMetadata || (hydrationErrorForItem && !item.metadata?.detailHydrated)) && (
             <div className="border border-crt-amber/40 bg-crt-amber/5 rounded-md p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div className="space-y-1">
                 <p className="text-xs font-medium text-crt-amber">
-                  Local artwork &amp; release specs have not been mirrored yet
+                  {hydrationErrorForItem
+                    ? 'Could not lazy-load full release details from RetroGameTalk'
+                    : 'Local artwork & release specs have not been mirrored yet'}
                 </p>
                 <p className="text-xs text-crt-muted">
-                  Fetch cover art, full-resolution screenshots, WP taxonomies, and description directly into the local release folder.
+                  {hydrationErrorForItem
+                    ? hydrationErrorForItem
+                    : 'Fetch cover art, full-resolution screenshots, WP taxonomies, and description directly into the local release folder.'}
                 </p>
               </div>
               <button
@@ -725,7 +998,7 @@ export function GameDetailDrawer({
                 className="crt-cta-beam inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-medium bg-crt-amber text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 shrink-0"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${fetchingMeta ? 'animate-spin' : ''}`} />
-                {fetchingMeta ? 'Mirroring...' : 'Fetch Metadata & Artwork'}
+                {fetchingMeta ? 'Mirroring...' : hydrationErrorForItem ? 'Retry Fetch' : 'Fetch Metadata & Artwork'}
               </button>
             </div>
           )}
@@ -747,25 +1020,20 @@ export function GameDetailDrawer({
             {/* Cover Art */}
             <div className="sm:col-span-5">
               {hasCover ? (
-                <button
-                  type="button"
+                <LazyDetailCover
+                  src={coverSrc}
+                  alt={`${item.title} cover art`}
+                  onError={() => setCoverFailed(true)}
                   onClick={openCoverLightbox}
-                  className="group relative w-full aspect-[3/4] border border-crt-border bg-crt-bg rounded-md overflow-hidden block focus:outline-none focus:border-crt-phosphor"
-                  title="Click to inspect full-resolution cover art"
-                >
-                  <div aria-hidden="true" className="crt-card-holo" />
-                  <img
-                    src={coverSrc}
-                    alt={`${item.title} cover art`}
-                    referrerPolicy="no-referrer"
-                    onError={() => setCoverFailed(true)}
-                    className="w-full h-full object-contain bg-crt-bg"
-                  />
-                  <span className="absolute bottom-2.5 right-2.5 inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono bg-crt-bg/90 border border-crt-border text-crt-text rounded opacity-0 group-hover:opacity-100 transition-opacity">
-                    <ZoomIn className="h-3 w-3 text-crt-phosphor" />
-                    Inspect
-                  </span>
-                </button>
+                />
+              ) : isHydratingDetails ? (
+                <div className="w-full aspect-[3/4] border border-crt-border rounded-md crt-skeleton flex flex-col items-center justify-center p-5 text-center space-y-2.5">
+                  <Gamepad2 className="h-9 w-9 text-crt-border-strong" />
+                  <div className="space-y-1">
+                    <p className="font-mono text-xs text-crt-muted">{item.systemName}</p>
+                    <p className="text-xs text-crt-muted/70">Checking cover art...</p>
+                  </div>
+                </div>
               ) : (
                 <div className="w-full aspect-[3/4] border border-crt-border bg-crt-bg rounded-md flex flex-col items-center justify-center p-5 text-center space-y-2.5">
                   <Gamepad2 className="h-9 w-9 text-crt-border-strong" />
@@ -779,10 +1047,18 @@ export function GameDetailDrawer({
 
             {/* Structured Specs Table */}
             <div className="sm:col-span-7 border border-crt-border bg-crt-bg rounded-md overflow-hidden">
-              <div className="px-4 py-2.5 border-b border-crt-border bg-crt-surface flex items-center justify-between">
-                <h3 className="font-display text-xs font-semibold uppercase tracking-wider text-crt-text">
-                  Game Information
-                </h3>
+              <div className="px-4 py-2.5 border-b border-crt-border bg-crt-surface flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <h3 className="font-display text-xs font-semibold uppercase tracking-wider text-crt-text">
+                    Game Information
+                  </h3>
+                  {isHydratingDetails && (
+                    <span className="inline-flex items-center gap-1 font-mono text-[10px] text-crt-phosphor/85">
+                      <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                      Syncing
+                    </span>
+                  )}
+                </div>
                 {sourceUrl.startsWith('http') && (
                   <a
                     href={sourceUrl}
@@ -796,18 +1072,55 @@ export function GameDetailDrawer({
                 )}
               </div>
               <dl className="divide-y divide-crt-border text-xs">
-                {infoRows.map((row) => (
-                  <div key={row.label} className="px-4 py-2 grid grid-cols-12 gap-3 items-baseline">
-                    <dt className="col-span-4 text-crt-muted font-medium truncate">{row.label}</dt>
-                    <dd
-                      className={`col-span-8 text-crt-text break-words ${
-                        row.mono ? 'font-mono text-[11px] tabular-nums' : ''
-                      }`}
-                    >
-                      {row.value}
-                    </dd>
-                  </div>
-                ))}
+                {infoRows.map((row) => {
+                  const showRowSkeleton =
+                    isHydratingDetails &&
+                    !item.hasMetadata &&
+                    row.value === '—' &&
+                    !['Included Files', 'Total Size', 'Est. Size'].includes(row.label);
+                  return (
+                    <div key={row.label} className="px-4 py-2 grid grid-cols-12 gap-3 items-baseline">
+                      <dt className="col-span-4 text-crt-muted font-medium truncate">{row.label}</dt>
+                      <dd
+                        className={`col-span-8 text-crt-text break-words ${
+                          row.mono ? 'font-mono text-[11px] tabular-nums' : ''
+                        }`}
+                      >
+                        {showRowSkeleton ? (
+                          <span
+                            aria-label={`Loading ${row.label}`}
+                            className="crt-skeleton-bar inline-block h-3 w-28 align-middle"
+                          />
+                        ) : (
+                          row.value
+                        )}
+                      </dd>
+                    </div>
+                  );
+                })}
+                {isHydratingDetails &&
+                  !item.metadata?.downloadsCount &&
+                  !item.metadata?.updatedDate &&
+                  !(item.metadata?.specs?.length) && (
+                    <>
+                      <div className="px-4 py-2 grid grid-cols-12 gap-3 items-baseline">
+                        <dt className="col-span-4">
+                          <span className="crt-skeleton-bar inline-block h-3 w-20 align-middle" />
+                        </dt>
+                        <dd className="col-span-8">
+                          <span className="crt-skeleton-bar inline-block h-3 w-24 align-middle" />
+                        </dd>
+                      </div>
+                      <div className="px-4 py-2 grid grid-cols-12 gap-3 items-baseline">
+                        <dt className="col-span-4">
+                          <span className="crt-skeleton-bar inline-block h-3 w-16 align-middle" />
+                        </dt>
+                        <dd className="col-span-8">
+                          <span className="crt-skeleton-bar inline-block h-3 w-32 align-middle" />
+                        </dd>
+                      </div>
+                    </>
+                  )}
                 <div className="px-4 py-2 grid grid-cols-12 gap-3 items-baseline">
                   <dt className="col-span-4 text-crt-muted font-medium">Local Folder</dt>
                   <dd className="col-span-8 font-mono text-[11px] text-crt-muted break-all">
@@ -855,11 +1168,15 @@ export function GameDetailDrawer({
           </div>
 
           {/* Included Downloads List */}
+          {(() => {
+            const downloadHints = item.metadata?.downloadHints ?? [];
+            const displayFilesCount = item.files.length > 0 ? item.filesCount : downloadHints.length;
+            return (
           <section className="crt-panel-living space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-display text-sm font-semibold text-crt-text flex items-center gap-2">
                 <FileArchive className="h-4 w-4 text-crt-phosphor crt-section-icon" />
-                Included Downloads ({item.filesCount})
+                Included Downloads ({displayFilesCount})
               </h3>
               <span className="font-mono text-[11px] text-crt-muted">
                 Individual mirrored ROMs &amp; patches
@@ -867,9 +1184,66 @@ export function GameDetailDrawer({
             </div>
 
             {item.files.length === 0 ? (
-              <div className="border border-crt-border bg-crt-bg rounded-md p-4 text-xs font-mono text-crt-muted">
-                No downloadable archive files indexed for this release yet.
-              </div>
+              downloadHints.length > 0 ? (
+                <div className="border border-crt-border bg-crt-bg rounded-md divide-y divide-crt-border">
+                  {downloadHints.map((hint, hintIdx) => (
+                    <div
+                      key={`${hint.filename}-${hintIdx}`}
+                      className="px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                    >
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="text-xs font-medium text-crt-text break-words">
+                          {hint.filename}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-crt-muted tabular-nums">
+                          <span>{hint.fileSize ? `~${hint.fileSize}` : 'Size pending'}</span>
+                          <span>·</span>
+                          <span className="inline-flex items-center gap-1 text-crt-phosphor/80">
+                            <Cloud className="h-3 w-3" />
+                            available
+                          </span>
+                        </div>
+                      </div>
+                      {onQueueDownload && (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            disabled={queueingDownload || !canSync}
+                            title={!canSync ? 'Verify login in System Settings before downloading' : 'Queue this release for download'}
+                            onClick={() => void handleQueueReleaseDownload()}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            {queueingDownload ? 'Queueing...' : 'Download'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : isHydratingDetails ? (
+                <div
+                  aria-label="Loading release archive list"
+                  className="border border-crt-border bg-crt-bg rounded-md divide-y divide-crt-border"
+                >
+                  {[0, 1].map((rowIdx) => (
+                    <div
+                      key={rowIdx}
+                      className="px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                    >
+                      <div className="min-w-0 flex-1 space-y-2">
+                        <div className={`crt-skeleton-bar h-3.5 ${rowIdx === 0 ? 'w-64' : 'w-48'} max-w-full`} />
+                        <div className="crt-skeleton-bar h-2.5 w-36" />
+                      </div>
+                      <div className="crt-skeleton-bar h-7 w-24 shrink-0" />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="border border-crt-border bg-crt-bg rounded-md p-4 text-xs font-mono text-crt-muted">
+                  No downloadable archive files indexed for this release yet.
+                </div>
+              )
             ) : (
               <div className="border border-crt-border bg-crt-bg rounded-md divide-y divide-crt-border">
                 {item.files.map((file) => {
@@ -1160,75 +1534,91 @@ export function GameDetailDrawer({
               </div>
             )}
           </section>
+            );
+          })()}
 
           {/* Screenshots Gallery */}
-          {screenshotCount > 0 && (
+          {(screenshotCount > 0 || isHydratingDetails) && (
             <section className="space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <h3 className="font-display text-sm font-semibold text-crt-text flex items-center gap-2">
                   <ImageIcon className="h-4 w-4 text-crt-phosphor" />
-                  Screenshots ({screenshotCount})
+                  Screenshots{screenshotCount > 0 ? ` (${screenshotCount})` : ''}
                 </h3>
                 <span className="font-mono text-[11px] text-crt-muted inline-flex items-center gap-1.5">
-                  {upgradingAssets ? (
+                  {isHydratingDetails && screenshotCount === 0 ? (
+                    <>
+                      <RefreshCw className="h-3 w-3 animate-spin text-crt-phosphor" />
+                      <span className="text-crt-phosphor">Discovering screenshots...</span>
+                    </>
+                  ) : upgradingAssets ? (
                     <>
                       <RefreshCw className="h-3 w-3 animate-spin text-crt-phosphor" />
                       <span className="text-crt-phosphor">Upgrading to full-res...</span>
                     </>
+                  ) : screenshotCount > 0 && loadedScreenshots.size + failedScreenshots.size < screenshotCount ? (
+                    <>
+                      <RefreshCw className="h-3 w-3 animate-spin text-crt-phosphor" />
+                      <span className="text-crt-phosphor">Lazy-loading screenshots...</span>
+                    </>
                   ) : isFullResVerified ? (
                     'Full-res stored locally · Click to zoom'
+                  ) : item.status === 'available' ? (
+                    'Cached locally · Click to zoom'
                   ) : (
                     'Stored locally · Click for full-res'
                   )}
                 </span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                {Array.from({ length: screenshotCount }, (_, idx) => {
-                  const failed = failedScreenshots.has(idx);
-                  const src = `/api/items/${item.id}/asset?kind=screenshot&index=${idx}${assetVersion}`;
-                  return failed ? (
-                    <div
-                      key={idx}
-                      className="aspect-video border border-crt-border bg-crt-bg rounded flex items-center justify-center text-[11px] font-mono text-crt-muted"
-                    >
-                      Missing #{idx + 1}
-                    </div>
-                  ) : (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => openScreenshotLightbox(idx)}
-                      className="group relative aspect-video border border-crt-border hover:border-crt-phosphor bg-crt-bg rounded overflow-hidden focus:outline-none focus:border-crt-phosphor"
-                      title={`View screenshot ${idx + 1}`}
-                    >
-                      <img
-                        src={src}
-                        alt={`${item.title} screenshot ${idx + 1}`}
-                        loading="lazy"
-                        onError={() =>
-                          setFailedScreenshots((prev) => {
-                            const next = new Set(prev);
-                            next.add(idx);
-                            return next;
-                          })
-                        }
-                        className="w-full h-full object-cover"
-                      />
-                      <span className="absolute inset-0 bg-black/0 group-hover:bg-black/25 transition-colors flex items-center justify-center">
-                        <ZoomIn className="h-4 w-4 text-crt-phosphor opacity-0 group-hover:opacity-100 transition-opacity" />
-                      </span>
-                    </button>
-                  );
-                })}
+                {screenshotCount === 0 && isHydratingDetails
+                  ? Array.from({ length: 4 }, (_, idx) => (
+                      <div
+                        key={`shot-skeleton-${idx}`}
+                        aria-label={`Loading screenshot placeholder ${idx + 1}`}
+                        className="aspect-video border border-crt-border rounded crt-skeleton flex flex-col items-center justify-center gap-1"
+                      >
+                        <ImageIcon className="h-5 w-5 text-crt-border-strong" />
+                        <span className="font-mono text-[10px] text-crt-muted/65 tabular-nums">
+                          #{String(idx + 1).padStart(2, '0')}
+                        </span>
+                      </div>
+                    ))
+                  : Array.from({ length: screenshotCount }, (_, idx) => {
+                      const useLazy = idx >= localScreenshotCount || item.status === 'available';
+                      const src = `/api/items/${item.id}/asset?kind=screenshot&index=${idx}${
+                        useLazy ? '&lazy=1' : ''
+                      }${assetVersion}`;
+                      return (
+                        <LazyScreenshotTile
+                          key={`${item.id}-shot-${idx}`}
+                          title={item.title}
+                          index={idx}
+                          src={src}
+                          failed={failedScreenshots.has(idx)}
+                          onLoaded={handleScreenshotLoaded}
+                          onError={handleScreenshotError}
+                          onClick={openScreenshotLightbox}
+                        />
+                      );
+                    })}
               </div>
             </section>
           )}
 
           {/* Description & Release Notes */}
           <section className="space-y-2.5">
-            <h3 className="font-display text-sm font-semibold text-crt-text">
-              Release Notes &amp; Description
-            </h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="font-display text-sm font-semibold text-crt-text">
+                Release Notes &amp; Description
+              </h3>
+              {isHydratingDetails && !item.metadata?.descriptionHtml && !item.metadata?.descriptionText && (
+                <span className="font-mono text-[10px] text-crt-phosphor/85 inline-flex items-center gap-1">
+                  <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                  Fetching notes
+                </span>
+              )}
+            </div>
             <div className="border border-crt-border bg-crt-bg rounded-md p-4">
               {item.metadata?.descriptionHtml ? (
                 <div
@@ -1239,9 +1629,19 @@ export function GameDetailDrawer({
                 <p className="text-xs leading-relaxed text-crt-text/90 whitespace-pre-wrap">
                   {item.metadata.descriptionText}
                 </p>
+              ) : isHydratingDetails ? (
+                <div aria-label="Loading release description" className="space-y-2.5">
+                  <div className="crt-skeleton-bar h-3 w-full" />
+                  <div className="crt-skeleton-bar h-3 w-11/12" />
+                  <div className="crt-skeleton-bar h-3 w-4/5" />
+                  <div className="crt-skeleton-bar h-3 w-5/6" />
+                  <div className="crt-skeleton-bar h-3 w-2/3" />
+                </div>
               ) : (
                 <p className="text-xs text-crt-muted">
-                  No description available locally yet. Use &ldquo;Fetch Metadata &amp; Artwork&rdquo; to mirror release notes from RetroGameTalk.
+                  {item.metadata?.detailHydrated
+                    ? 'No release description listed on RetroGameTalk.'
+                    : 'No description available locally yet. Use "Fetch Metadata & Artwork" to mirror release notes from RetroGameTalk.'}
                 </p>
               )}
             </div>

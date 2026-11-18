@@ -146,6 +146,7 @@ export interface ReleaseMetadata {
   screenshotUrls: string[];
   screenshotLocalRelPaths: string[];
   screenshotsFullResVersion?: number;
+  detailHydrated?: boolean;
   coverCandidates?: string[];
   screenshotCandidates?: string[][];
   downloadHints?: { filename: string; fileSize: string }[];

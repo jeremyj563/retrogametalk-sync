@@ -150,6 +150,7 @@ export interface ReleaseMetadata {
   screenshotUrls: string[];
   screenshotLocalRelPaths: string[];
   screenshotsFullResVersion?: number;
+  detailHydrated?: boolean;
   downloadHints?: { filename: string; fileSize: string }[];
   sourcePageUrl: string;
   fetchedAt: string;

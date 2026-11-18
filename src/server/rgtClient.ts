@@ -4926,6 +4926,7 @@ export class RetroGameTalkClient {
       { genres, languages, sources, systemName: consoleName },
       fileRoles,
     );
+    const detailHydrated = html.trim().length > 0;
 
     return {
       wpPostId,
@@ -4954,8 +4955,10 @@ export class RetroGameTalkClient {
       coverLocalRelPath: null,
       screenshotUrls,
       screenshotLocalRelPaths: [],
+      detailHydrated,
       coverCandidates,
       screenshotCandidates,
+      ...(wpData?.downloadHints?.length ? { downloadHints: wpData.downloadHints } : {}),
       sourcePageUrl: pageUrl,
       fetchedAt: new Date().toISOString(),
     };

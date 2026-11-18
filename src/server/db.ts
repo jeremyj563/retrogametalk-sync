@@ -1206,14 +1206,28 @@ export function upsertIndexedWpRelease(input: {
       ...prev,
       ...input.metadata,
       title: input.title || prev.title,
+      subtitle: prev.subtitle ?? input.metadata.subtitle ?? null,
+      consoleName: prev.consoleName ?? input.metadata.consoleName ?? null,
+      formats: prev.formats?.length ? prev.formats : input.metadata.formats,
       coverUrl: input.metadata.coverUrl || prev.coverUrl,
       coverLocalRelPath: prev.coverLocalRelPath ?? input.metadata.coverLocalRelPath ?? null,
+      coverCandidates: prev.coverCandidates?.length ? prev.coverCandidates : input.metadata.coverCandidates,
       screenshotUrls:
-        input.metadata.screenshotUrls.length > 0 ? input.metadata.screenshotUrls : prev.screenshotUrls,
+        prev.detailHydrated && prev.screenshotUrls.length > 0
+          ? prev.screenshotUrls
+          : input.metadata.screenshotUrls.length > 0
+            ? input.metadata.screenshotUrls
+            : prev.screenshotUrls,
+      screenshotCandidates: prev.screenshotCandidates?.length
+        ? prev.screenshotCandidates
+        : input.metadata.screenshotCandidates,
       screenshotLocalRelPaths: prev.screenshotLocalRelPaths ?? [],
       screenshotsFullResVersion: prev.screenshotsFullResVersion,
+      detailHydrated: Boolean(prev.detailHydrated || input.metadata.detailHydrated),
       specs: prev.specs?.length ? prev.specs : input.metadata.specs,
       downloadsCount: prev.downloadsCount ?? input.metadata.downloadsCount,
+      releasedAgo: prev.releasedAgo ?? input.metadata.releasedAgo ?? null,
+      updatedDate: prev.updatedDate ?? input.metadata.updatedDate ?? null,
       descriptionHtml:
         prev.descriptionHtml && prev.descriptionHtml.length >= (input.metadata.descriptionHtml?.length || 0)
           ? prev.descriptionHtml
@@ -1559,6 +1573,68 @@ export function updateCatalogReleaseMetadata(
     );
 
     // Reclassify child file roles using the refreshed RGT taxonomy context
+    for (const file of existing.files) {
+      const nextRole = classifyFileRole(file.filename, file.displayLabel, {
+        genres,
+        languages,
+        sources,
+        title: metadata.title,
+        systemName: existing.systemName,
+      });
+      getDb().prepare('UPDATE catalog_release_files SET file_role = ? WHERE id = ?').run(nextRole, file.id);
+    }
+  });
+
+  tx();
+  return recomputeReleaseRollup(id);
+}
+
+export function mergeCatalogReleaseDetailMetadata(
+  id: number,
+  metadata: ReleaseMetadata,
+): RepositoryItemRecord | null {
+  const existing = getCatalogReleaseById(id);
+  if (!existing) return null;
+
+  const genres = metadata.genres || [];
+  const regions = metadata.regions || [];
+  const languages = metadata.languages || [];
+  const sources = metadata.sources || [];
+
+  const tx = getDb().transaction(() => {
+    getDb().prepare(`
+      UPDATE catalog_releases SET
+        wp_post_id = COALESCE(?, wp_post_id),
+        wp_post_type = COALESCE(?, wp_post_type),
+        title = COALESCE(NULLIF(?, ''), title),
+        published_at = COALESCE(?, published_at),
+        remote_updated_at = COALESCE(?, remote_updated_at),
+        publisher = COALESCE(?, publisher),
+        developer = COALESCE(?, developer),
+        release_year = COALESCE(?, release_year),
+        genres_json = ?,
+        regions_json = ?,
+        languages_json = ?,
+        sources_json = ?,
+        metadata_json = ?
+      WHERE id = ?
+    `).run(
+      metadata.wpPostId ?? null,
+      metadata.wpPostType ?? null,
+      metadata.title,
+      metadata.publishedAt ?? null,
+      metadata.remoteUpdatedAt ?? null,
+      metadata.publisher ?? null,
+      metadata.developer ?? null,
+      metadata.releaseYear ?? null,
+      JSON.stringify(genres),
+      JSON.stringify(regions),
+      JSON.stringify(languages),
+      JSON.stringify(sources),
+      JSON.stringify(metadata),
+      id,
+    );
+
     for (const file of existing.files) {
       const nextRole = classifyFileRole(file.filename, file.displayLabel, {
         genres,
