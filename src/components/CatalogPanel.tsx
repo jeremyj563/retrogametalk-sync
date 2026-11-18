@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowDown,
@@ -102,6 +102,7 @@ function LazyCoverImage({
   onError,
 }: LazyCoverImageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const [shouldLoad, setShouldLoad] = useState(() => hasLocalCover);
   const [loaded, setLoaded] = useState(false);
 
@@ -110,9 +111,29 @@ function LazyCoverImage({
     ? `/api/items/${itemId}/asset?kind=cover${assetVersion}`
     : `/api/items/${itemId}/asset?kind=cover&lazy=1${assetVersion}`;
 
-  useEffect(() => {
-    setLoaded(false);
-  }, [itemId, src]);
+  // Track previous identity/URL so `loaded` only resets when `src` changes on an
+  // already-mounted instance, and detect browser-cached images synchronously via `img.complete`
+  // before paint so remounts never leave cached artwork stuck at opacity 0.
+  const prevIdentityRef = useRef(`${itemId}:${src}`);
+  useLayoutEffect(() => {
+    const nextIdentity = `${itemId}:${src}`;
+    const identityChanged = prevIdentityRef.current !== nextIdentity;
+    if (identityChanged) {
+      prevIdentityRef.current = nextIdentity;
+    }
+
+    if (!canShowImage || !shouldLoad) {
+      setLoaded(false);
+      return;
+    }
+
+    const img = imgRef.current;
+    if (img && img.complete && img.naturalWidth > 0) {
+      setLoaded(true);
+    } else if (identityChanged) {
+      setLoaded(false);
+    }
+  }, [itemId, src, shouldLoad, canShowImage]);
 
   useEffect(() => {
     if (hasLocalCover) {
@@ -155,9 +176,10 @@ function LazyCoverImage({
         <Gamepad2 className="h-3.5 w-3.5 text-crt-border-strong" />
         {canShowImage && shouldLoad && (
           <img
+            ref={imgRef}
             src={src}
             alt={`${title} cover`}
-            loading="lazy"
+            decoding="async"
             referrerPolicy="no-referrer"
             data-loaded={loaded ? 'true' : 'false'}
             onLoad={() => setLoaded(true)}
@@ -181,9 +203,10 @@ function LazyCoverImage({
       </div>
       {canShowImage && shouldLoad && (
         <img
+          ref={imgRef}
           src={src}
           alt={`${title} cover art`}
-          loading="lazy"
+          decoding="async"
           referrerPolicy="no-referrer"
           data-loaded={loaded ? 'true' : 'false'}
           onLoad={() => setLoaded(true)}
@@ -455,6 +478,9 @@ export function CatalogPanel({
   const [facets, setFacets] = useState<CatalogFacets>(() => memoryCatalogFacets);
   const [totalItems, setTotalItems] = useState(() => initialMatchedCatalog?.totalItems ?? 0);
   const [loading, setLoading] = useState(() => !initialMatchedCatalog);
+  const [refreshing, setRefreshing] = useState(false);
+  const hasItemsRef = useRef(items.length > 0);
+  hasItemsRef.current = items.length > 0;
   const [retryingId, setRetryingId] = useState<number | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [markingInstalled, setMarkingInstalled] = useState(false);
@@ -665,9 +691,16 @@ export function CatalogPanel({
   );
 
   const loadCatalog = useCallback(
-    async (silent = false) => {
+    async (silent = false, options?: { softRefresh?: boolean }) => {
       const reqId = ++catalogReqSeqRef.current;
-      if (!silent) setLoading(true);
+      const useSoftRefresh = Boolean(options?.softRefresh && hasItemsRef.current);
+      if (!silent) {
+        if (useSoftRefresh) {
+          setRefreshing(true);
+        } else {
+          setLoading(true);
+        }
+      }
       try {
         const qs = buildCatalogSearchParams(150, 0);
 
@@ -759,6 +792,7 @@ export function CatalogPanel({
       } finally {
         if (reqId === catalogReqSeqRef.current) {
           setLoading(false);
+          setRefreshing(false);
         }
       }
     },
@@ -1270,7 +1304,7 @@ export function CatalogPanel({
         if (activeDetailItem && ids.includes(activeDetailItem.id)) {
           closeDetailDrawer();
         }
-        await Promise.all([loadCatalog(), onRefreshStatus()]);
+        await Promise.all([loadCatalog(false, { softRefresh: true }), onRefreshStatus()]);
       }
     } finally {
       setDeletingKey(null);
@@ -1766,10 +1800,11 @@ export function CatalogPanel({
               </button>
               <button
                 type="button"
-                onClick={() => void loadCatalog()}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                disabled={refreshing}
+                onClick={() => void loadCatalog(false, { softRefresh: true })}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60"
               >
-                <RefreshCw className="h-3.5 w-3.5 shrink-0" />
+                <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${refreshing ? 'animate-spin' : ''}`} />
                 Refresh
               </button>
             </div>
