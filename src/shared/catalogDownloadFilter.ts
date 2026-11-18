@@ -1,48 +1,65 @@
-export const NOT_DOWNLOADED_STATUS_KEYS = [
-  'available',
+import type { CatalogDownloadedFilter } from '../types';
+
+export const GRANULAR_STATUS_VALUES = new Set([
+  'needs_retry',
   'partial',
   'failed',
   'queued',
   'downloading',
-] as const;
+]);
 
-export function isDownloadedQuickFilterActive(statuses: readonly string[]): boolean {
-  return statuses.length === 1 && statuses[0] === 'downloaded';
+export function sanitizeStoredDownloadedFilter(raw: unknown): CatalogDownloadedFilter {
+  if (raw === 'only' || raw === 'exclude') return raw;
+  return 'all';
 }
 
-export function isNotDownloadedQuickFilterActive(statuses: readonly string[]): boolean {
-  if (statuses.includes('downloaded')) return false;
-  return (
-    statuses.includes('available') &&
-    (statuses.includes('needs_retry') ||
-      (statuses.includes('partial') && statuses.includes('failed'))) &&
-    statuses.includes('queued') &&
-    statuses.includes('downloading')
-  );
+export function toggleCatalogDownloadedFilter(
+  current: CatalogDownloadedFilter,
+  target: 'only' | 'exclude',
+): CatalogDownloadedFilter {
+  return current === target ? 'all' : target;
 }
 
-export function toggleDownloadedQuickFilter(statuses: readonly string[]): string[] {
-  return isDownloadedQuickFilterActive(statuses) ? [] : ['downloaded'];
-}
-
-export function toggleNotDownloadedQuickFilter(statuses: readonly string[]): string[] {
-  return isNotDownloadedQuickFilterActive(statuses) ? [] : [...NOT_DOWNLOADED_STATUS_KEYS];
-}
-
-export function reconcileManualStatusChange(
-  previousStatuses: readonly string[],
-  nextStatuses: readonly string[],
-  statusCounts?: Record<string, number>,
-): string[] {
-  if (
-    isNotDownloadedQuickFilterActive(previousStatuses) &&
-    !isNotDownloadedQuickFilterActive(nextStatuses)
-  ) {
-    return nextStatuses.filter((st) => {
-      if (st === 'queued' && (statusCounts?.queued ?? 0) === 0) return false;
-      if (st === 'downloading' && (statusCounts?.downloading ?? 0) === 0) return false;
-      return true;
-    });
+export function migrateLegacyCatalogDownloadPrefs(
+  rawStatuses: readonly string[],
+  rawDownloadedFilter: unknown,
+): {
+  downloadedFilter: CatalogDownloadedFilter;
+  statuses: string[];
+} {
+  if (rawDownloadedFilter === 'only' || rawDownloadedFilter === 'exclude' || rawDownloadedFilter === 'all') {
+    return {
+      downloadedFilter: rawDownloadedFilter,
+      statuses: rawStatuses.filter((st) => GRANULAR_STATUS_VALUES.has(st)),
+    };
   }
-  return [...nextStatuses];
+
+  // Migrate 1.5.2/1.5.3 status-array presets stored in localStorage
+  if (rawStatuses.length === 1 && rawStatuses[0] === 'downloaded') {
+    return { downloadedFilter: 'only', statuses: [] };
+  }
+
+  const hasNotDownloadedPreset =
+    !rawStatuses.includes('downloaded') &&
+    rawStatuses.includes('available') &&
+    (rawStatuses.includes('needs_retry') ||
+      (rawStatuses.includes('partial') && rawStatuses.includes('failed'))) &&
+    rawStatuses.includes('queued') &&
+    rawStatuses.includes('downloading');
+
+  if (hasNotDownloadedPreset) {
+    return { downloadedFilter: 'exclude', statuses: [] };
+  }
+
+  if (rawStatuses.includes('available') && !rawStatuses.includes('downloaded')) {
+    return {
+      downloadedFilter: 'exclude',
+      statuses: rawStatuses.filter((st) => GRANULAR_STATUS_VALUES.has(st)),
+    };
+  }
+
+  return {
+    downloadedFilter: 'all',
+    statuses: rawStatuses.filter((st) => GRANULAR_STATUS_VALUES.has(st)),
+  };
 }

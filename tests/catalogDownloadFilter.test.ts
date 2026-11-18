@@ -4,12 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
 import {
-  isDownloadedQuickFilterActive,
-  isNotDownloadedQuickFilterActive,
-  NOT_DOWNLOADED_STATUS_KEYS,
-  reconcileManualStatusChange,
-  toggleDownloadedQuickFilter,
-  toggleNotDownloadedQuickFilter,
+  migrateLegacyCatalogDownloadPrefs,
+  sanitizeStoredDownloadedFilter,
+  toggleCatalogDownloadedFilter,
 } from '../src/shared/catalogDownloadFilter.ts';
 import type { ReleaseMetadata } from '../src/server/types.ts';
 
@@ -176,75 +173,47 @@ after(() => {
   fs.rmSync(tempRoot, { recursive: true, force: true });
 });
 
-test('catalogDownloadFilter toggles Downloaded and Not Downloaded states cleanly', () => {
-  assert.equal(isDownloadedQuickFilterActive([]), false);
-  assert.equal(isNotDownloadedQuickFilterActive([]), false);
+test('toggleCatalogDownloadedFilter and sanitizeStoredDownloadedFilter toggle cleanly', () => {
+  assert.equal(sanitizeStoredDownloadedFilter('only'), 'only');
+  assert.equal(sanitizeStoredDownloadedFilter('exclude'), 'exclude');
+  assert.equal(sanitizeStoredDownloadedFilter('other'), 'all');
 
-  const downloadedOnly = toggleDownloadedQuickFilter([]);
-  assert.deepEqual(downloadedOnly, ['downloaded']);
-  assert.equal(isDownloadedQuickFilterActive(downloadedOnly), true);
-  assert.equal(isNotDownloadedQuickFilterActive(downloadedOnly), false);
-  assert.deepEqual(toggleDownloadedQuickFilter(downloadedOnly), []);
-
-  const notDownloaded = toggleNotDownloadedQuickFilter(downloadedOnly);
-  assert.deepEqual(notDownloaded, [...NOT_DOWNLOADED_STATUS_KEYS]);
-  assert.equal(isNotDownloadedQuickFilterActive(notDownloaded), true);
-  assert.equal(isDownloadedQuickFilterActive(notDownloaded), false);
-  assert.deepEqual(toggleNotDownloadedQuickFilter(notDownloaded), []);
-
-  // Switching directly from Not Downloaded to Downloaded replaces cleanly
-  assert.deepEqual(toggleDownloadedQuickFilter(notDownloaded), ['downloaded']);
-  // Legacy aggregated `needs_retry` selection also satisfies Not Downloaded quick state
-  assert.equal(
-    isNotDownloadedQuickFilterActive(['available', 'needs_retry', 'queued', 'downloading']),
-    true,
-  );
-  // Including `downloaded` disables Not Downloaded quick active highlight
-  assert.equal(
-    isNotDownloadedQuickFilterActive([...NOT_DOWNLOADED_STATUS_KEYS, 'downloaded']),
-    false,
-  );
+  assert.equal(toggleCatalogDownloadedFilter('all', 'only'), 'only');
+  assert.equal(toggleCatalogDownloadedFilter('only', 'only'), 'all');
+  assert.equal(toggleCatalogDownloadedFilter('only', 'exclude'), 'exclude');
+  assert.equal(toggleCatalogDownloadedFilter('exclude', 'exclude'), 'all');
+  assert.equal(toggleCatalogDownloadedFilter('exclude', 'only'), 'only');
 });
 
-test('reconcileManualStatusChange strips zero-count transient statuses when leaving Not Downloaded preset', () => {
-  const fullPreset = [...NOT_DOWNLOADED_STATUS_KEYS];
-  // User unchecks `available` while queued=0 and downloading=0 -> strip zero-count queued/downloading
-  const withoutAvailable = fullPreset.filter((s) => s !== 'available');
+test('migrateLegacyCatalogDownloadPrefs upgrades legacy status-array presets and strips retired status values', () => {
+  assert.deepEqual(migrateLegacyCatalogDownloadPrefs(['downloaded'], undefined), {
+    downloadedFilter: 'only',
+    statuses: [],
+  });
+
   assert.deepEqual(
-    reconcileManualStatusChange(fullPreset, withoutAvailable, {
-      available: 10,
-      partial: 1,
-      failed: 2,
-      queued: 0,
-      downloading: 0,
-    }),
-    ['partial', 'failed'],
+    migrateLegacyCatalogDownloadPrefs(
+      ['available', 'partial', 'failed', 'queued', 'downloading'],
+      undefined,
+    ),
+    {
+      downloadedFilter: 'exclude',
+      statuses: [],
+    },
   );
 
-  // If queued or downloading actually has items (> 0), retain those active states
-  assert.deepEqual(
-    reconcileManualStatusChange(fullPreset, withoutAvailable, {
-      available: 10,
-      partial: 1,
-      failed: 2,
-      queued: 3,
-      downloading: 0,
-    }),
-    ['partial', 'failed', 'queued'],
-  );
+  assert.deepEqual(migrateLegacyCatalogDownloadPrefs(['available', 'failed'], undefined), {
+    downloadedFilter: 'exclude',
+    statuses: ['failed'],
+  });
 
-  // If user adds `downloaded` manually, keep explicit user selection untouched
-  assert.deepEqual(
-    reconcileManualStatusChange(['partial'], ['partial', 'downloaded'], {
-      queued: 0,
-      downloading: 0,
-    }),
-    ['partial', 'downloaded'],
-  );
+  assert.deepEqual(migrateLegacyCatalogDownloadPrefs(['downloaded', 'needs_retry'], 'exclude'), {
+    downloadedFilter: 'exclude',
+    statuses: ['needs_retry'],
+  });
 });
 
-test('queryRepositoryItems returns context-aware downloaded facet counts scoped to non-status filters', () => {
-  // Unfiltered: 2 downloaded (downloaded + skipped), 5 notDownloaded (available + failed + partial + queued + downloading)
+test('queryRepositoryItems filters by downloaded=only/exclude and computes context-aware downloaded facets', () => {
   const allRes = dbMod.queryRepositoryItems({ limit: 50, offset: 0 });
   assert.equal(allRes.total, 7);
   assert.deepEqual(allRes.facets.counts?.downloaded, {
@@ -252,15 +221,38 @@ test('queryRepositoryItems returns context-aware downloaded facet counts scoped 
     notDownloaded: 5,
   });
 
-  // Filtering by status=NOT_DOWNLOADED_STATUS_KEYS returns the 5 un-downloaded items,
-  // while facets.counts.downloaded still reports both sides (2 downloaded / 5 notDownloaded)
-  const notDlFiltered = dbMod.queryRepositoryItems({
-    status: [...NOT_DOWNLOADED_STATUS_KEYS],
+  const onlyDownloaded = dbMod.queryRepositoryItems({
+    downloaded: 'only',
     limit: 50,
     offset: 0,
   });
-  assert.equal(notDlFiltered.total, 5);
-  assert.deepEqual(notDlFiltered.facets.counts?.downloaded, {
+  assert.equal(onlyDownloaded.total, 2);
+  assert.deepEqual(onlyDownloaded.facets.counts?.downloaded, {
+    downloaded: 2,
+    notDownloaded: 5,
+  });
+
+  const notDownloaded = dbMod.queryRepositoryItems({
+    downloaded: 'exclude',
+    limit: 50,
+    offset: 0,
+  });
+  assert.equal(notDownloaded.total, 5);
+  assert.deepEqual(notDownloaded.facets.counts?.downloaded, {
+    downloaded: 2,
+    notDownloaded: 5,
+  });
+
+  // Combining Not Downloaded with granular Status (e.g. failed) narrows items while preserving full downloaded facets
+  const notDlFailed = dbMod.queryRepositoryItems({
+    downloaded: 'exclude',
+    status: ['failed'],
+    limit: 50,
+    offset: 0,
+  });
+  assert.equal(notDlFailed.total, 1);
+  assert.equal(notDlFailed.items[0]?.title, 'Star Fox');
+  assert.deepEqual(notDlFailed.facets.counts?.downloaded, {
     downloaded: 2,
     notDownloaded: 5,
   });
@@ -268,7 +260,7 @@ test('queryRepositoryItems returns context-aware downloaded facet counts scoped 
   // Filtering by system=snes scopes downloaded facet counts to SNES only (2 downloaded, 2 notDownloaded)
   const snesFiltered = dbMod.queryRepositoryItems({
     system: ['snes'],
-    status: ['downloaded'],
+    downloaded: 'only',
     limit: 50,
     offset: 0,
   });

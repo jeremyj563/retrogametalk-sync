@@ -154,6 +154,7 @@ export interface ReleaseMetadata {
 }
 
 export type FilterMatchMode = 'any' | 'all';
+export type CatalogDownloadedFilter = 'all' | 'only' | 'exclude';
 export type CatalogInstalledFilter = 'all' | 'only' | 'exclude';
 
 export interface CatalogFacetCounts {
