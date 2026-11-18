@@ -644,6 +644,84 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 17,
+    name: 'safe_rgt_traffic_shaping_defaults',
+    description:
+      'Reset aggressive 1.1.0 multi-chunk defaults (3x / 8 MiB) to single-stream safe defaults (1x / 32 MiB) and tune existing preset profiles for RGT edge limits',
+    up: (db) => {
+      const row = db
+        .prepare(
+          `SELECT base_delay_ms, min_delay_ms, max_delay_ms, backoff_multiplier, max_retries, max_concurrency, download_chunk_concurrency, download_chunk_min_size_mb
+           FROM scraper_config WHERE id = 1`,
+        )
+        .get() as
+        | {
+            base_delay_ms: number;
+            min_delay_ms: number;
+            max_delay_ms: number;
+            backoff_multiplier: number;
+            max_retries: number;
+            max_concurrency: number;
+            download_chunk_concurrency?: number;
+            download_chunk_min_size_mb?: number;
+          }
+        | undefined;
+      if (!row) return;
+
+      // Upgrade previous v16 defaults (3x chunks / 8 MiB threshold) that trigger mirror 503 cascades
+      const chunkConc = Number(row.download_chunk_concurrency ?? 3);
+      const chunkMinMb = Number(row.download_chunk_min_size_mb ?? 8);
+      if (chunkConc > 1 || chunkMinMb <= 8) {
+        db.prepare(
+          `UPDATE scraper_config
+           SET download_chunk_concurrency = 1,
+               download_chunk_min_size_mb = CASE WHEN download_chunk_min_size_mb <= 8 THEN 32 ELSE download_chunk_min_size_mb END
+           WHERE id = 1`,
+        ).run();
+      }
+
+      // Upgrade untouched preset profiles cleanly so users stay on their chosen preset with safer bounds
+      const isOldBrisk =
+        row.base_delay_ms === 900 &&
+        row.min_delay_ms === 450 &&
+        row.max_delay_ms === 45000 &&
+        Math.abs(row.backoff_multiplier - 1.8) < 0.001 &&
+        row.max_concurrency === 2;
+      const isOldBalanced =
+        row.base_delay_ms === 1500 &&
+        row.min_delay_ms === 750 &&
+        row.max_delay_ms === 60000 &&
+        Math.abs(row.backoff_multiplier - 2.0) < 0.001 &&
+        row.max_concurrency === 1;
+      const isOldGentle =
+        row.base_delay_ms === 2500 &&
+        row.min_delay_ms === 1500 &&
+        row.max_delay_ms === 90000 &&
+        Math.abs(row.backoff_multiplier - 2.2) < 0.001 &&
+        row.max_concurrency === 1;
+
+      if (isOldBrisk) {
+        db.prepare(
+          `UPDATE scraper_config
+           SET base_delay_ms = 1100, min_delay_ms = 650, max_delay_ms = 30000, backoff_multiplier = 1.6
+           WHERE id = 1`,
+        ).run();
+      } else if (isOldBalanced) {
+        db.prepare(
+          `UPDATE scraper_config
+           SET max_delay_ms = 45000, backoff_multiplier = 1.8, max_retries = 4
+           WHERE id = 1`,
+        ).run();
+      } else if (isOldGentle) {
+        db.prepare(
+          `UPDATE scraper_config
+           SET max_delay_ms = 60000, backoff_multiplier = 2.0
+           WHERE id = 1`,
+        ).run();
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
