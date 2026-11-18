@@ -20,9 +20,14 @@ import type {
   ActivityLogRecord,
   CatalogFacetCounts,
   CatalogFacets,
+  CatalogGrowthPoint,
   CatalogSortOption,
+  CatalogStatsSnapshot,
+  CompositionStat,
   ConfigUpdateInput,
   DatabaseMigrationReport,
+  DownloadTrendDailyPoint,
+  DownloadTrendRunPoint,
   FileItemStatus,
   FilterMatchMode,
   ItemStatus,
@@ -36,8 +41,10 @@ import type {
   RunTrigger,
   ScraperConfigInternal,
   ScraperConfigPublic,
+  SizeBucketStat,
   SyncRunRecord,
   SystemBreakdown,
+  SystemCoverageStat,
   SystemIndexCursor,
 } from './types.ts';
 
@@ -2171,6 +2178,356 @@ export function getCatalogTotalsAndSystems(): {
       totalItems: Number(r.total_items || 0),
       totalBytes: Number(r.total_bytes || 0),
     })),
+  };
+}
+
+const SIZE_HISTOGRAM_BUCKETS: ReadonlyArray<{
+  bucketKey: string;
+  label: string;
+  minBytes: number;
+  maxBytes: number | null;
+}> = [
+  { bucketKey: 'lt_1mb', label: '< 1 MB', minBytes: 0, maxBytes: 1024 * 1024 },
+  { bucketKey: '1_16mb', label: '1–16 MB', minBytes: 1024 * 1024, maxBytes: 16 * 1024 * 1024 },
+  { bucketKey: '16_128mb', label: '16–128 MB', minBytes: 16 * 1024 * 1024, maxBytes: 128 * 1024 * 1024 },
+  { bucketKey: '128_512mb', label: '128–512 MB', minBytes: 128 * 1024 * 1024, maxBytes: 512 * 1024 * 1024 },
+  { bucketKey: '512mb_2gb', label: '512 MB–2 GB', minBytes: 512 * 1024 * 1024, maxBytes: 2 * 1024 * 1024 * 1024 },
+  { bucketKey: 'gt_2gb', label: '> 2 GB', minBytes: 2 * 1024 * 1024 * 1024, maxBytes: null },
+];
+
+function extractIsoDay(raw: unknown): string | null {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(s);
+  return match ? match[1] : null;
+}
+
+function queryCompositionStats(columnName: JsonFacetColumn): CompositionStat[] {
+  const expr = jsonFacetColumnExpr(columnName);
+  const rows = getDb()
+    .prepare(
+      `SELECT
+        TRIM(CAST(je.value AS TEXT)) AS label,
+        COUNT(DISTINCT catalog_releases.id) AS total_count,
+        COUNT(DISTINCT CASE WHEN catalog_releases.status IN ('downloaded', 'skipped') THEN catalog_releases.id END) AS downloaded_count,
+        COALESCE(SUM(CASE WHEN catalog_releases.status IN ('downloaded', 'skipped', 'partial') THEN catalog_releases.file_size_bytes ELSE 0 END), 0) AS mirrored_bytes
+      FROM catalog_releases, json_each(${expr}) AS je
+      WHERE je.value IS NOT NULL AND TRIM(CAST(je.value AS TEXT)) != ''
+      GROUP BY label
+      ORDER BY total_count DESC, downloaded_count DESC, label COLLATE NOCASE ASC`,
+    )
+    .all() as {
+    label: string;
+    total_count: number;
+    downloaded_count: number;
+    mirrored_bytes: number;
+  }[];
+
+  return rows.map((r) => ({
+    label: String(r.label),
+    totalCount: Number(r.total_count || 0),
+    downloadedCount: Number(r.downloaded_count || 0),
+    mirroredBytes: Number(r.mirrored_bytes || 0),
+  }));
+}
+
+export function getCatalogStatsSnapshot(): CatalogStatsSnapshot {
+  const database = getDb();
+  const cfg = getPublicConfig();
+  const indexState = cfg.systemIndexState || {};
+
+  const releaseRows = database
+    .prepare(
+      `SELECT
+        id,
+        system_name,
+        status,
+        file_size_bytes,
+        discovered_at,
+        downloaded_at,
+        installed_at
+      FROM catalog_releases`,
+    )
+    .all() as {
+    id: number;
+    system_name: string;
+    status: string;
+    file_size_bytes: number;
+    discovered_at: string;
+    downloaded_at: string | null;
+    installed_at: string | null;
+  }[];
+
+  const growthMap = new Map<
+    string,
+    { indexedAdded: number; downloadedAdded: number; bytesAdded: number }
+  >();
+  const ensureGrowthDay = (day: string) => {
+    let entry = growthMap.get(day);
+    if (!entry) {
+      entry = { indexedAdded: 0, downloadedAdded: 0, bytesAdded: 0 };
+      growthMap.set(day, entry);
+    }
+    return entry;
+  };
+
+  const dailyFailuresMap = new Map<string, number>();
+
+  const sizeBuckets: SizeBucketStat[] = SIZE_HISTOGRAM_BUCKETS.map((b) => ({
+    ...b,
+    downloadedCount: 0,
+    availableCount: 0,
+    downloadedBytes: 0,
+    availableBytes: 0,
+  }));
+
+  const systemMap = new Map<string, SystemCoverageStat>();
+  const ensureSystem = (rawName: string): SystemCoverageStat => {
+    const canonical = (canonicalizeSystemSlug(rawName) || rawName).toLowerCase();
+    let entry = systemMap.get(canonical);
+    if (!entry) {
+      const idx = indexState[canonical];
+      entry = {
+        systemName: canonical,
+        totalItems: 0,
+        downloadedItems: 0,
+        availableItems: 0,
+        queuedItems: 0,
+        failedItems: 0,
+        installedItems: 0,
+        mirroredBytes: 0,
+        estimatedAvailableBytes: 0,
+        indexedPages: idx?.pagesIndexed ?? 0,
+        totalPages: idx?.totalPages ?? 0,
+        fullyIndexed: Boolean(idx?.fullyIndexed),
+      };
+      systemMap.set(canonical, entry);
+    }
+    return entry;
+  };
+
+  let totalCatalogItems = 0;
+  let downloadedItems = 0;
+  let availableItems = 0;
+  let queuedItems = 0;
+  let failedItems = 0;
+  let installedItems = 0;
+  let mirroredBytes = 0;
+  let estimatedAvailableBytes = 0;
+  let installedBytes = 0;
+
+  for (const row of releaseRows) {
+    totalCatalogItems += 1;
+    const size = Math.max(0, Number(row.file_size_bytes || 0));
+    const status = String(row.status || 'available');
+    const isDownloaded = status === 'downloaded' || status === 'skipped';
+    const isMirroredSize = isDownloaded || status === 'partial';
+    const isQueued = status === 'queued' || status === 'downloading';
+    const isFailed = status === 'failed' || status === 'partial';
+    const isInstalled = Boolean(row.installed_at);
+
+    if (isDownloaded) downloadedItems += 1;
+    if (status === 'available') availableItems += 1;
+    if (isQueued) queuedItems += 1;
+    if (isFailed) failedItems += 1;
+    if (isInstalled) {
+      installedItems += 1;
+      installedBytes += size;
+    }
+
+    if (isMirroredSize) {
+      mirroredBytes += size;
+    } else {
+      estimatedAvailableBytes += size;
+    }
+
+    const discDay = extractIsoDay(row.discovered_at);
+    if (discDay) {
+      ensureGrowthDay(discDay).indexedAdded += 1;
+    }
+
+    if (isDownloaded || status === 'partial') {
+      const dlDay = extractIsoDay(row.downloaded_at) || discDay;
+      if (dlDay) {
+        const g = ensureGrowthDay(dlDay);
+        if (isDownloaded) {
+          g.downloadedAdded += 1;
+        }
+        g.bytesAdded += size;
+      }
+    }
+
+    if (isFailed && discDay) {
+      dailyFailuresMap.set(discDay, (dailyFailuresMap.get(discDay) || 0) + 1);
+    }
+
+    const sys = ensureSystem(row.system_name);
+    sys.totalItems += 1;
+    if (isDownloaded) sys.downloadedItems += 1;
+    if (status === 'available') sys.availableItems += 1;
+    if (isQueued) sys.queuedItems += 1;
+    if (isFailed) sys.failedItems += 1;
+    if (isInstalled) sys.installedItems += 1;
+    if (isMirroredSize) {
+      sys.mirroredBytes += size;
+    } else {
+      sys.estimatedAvailableBytes += size;
+    }
+
+    if (size > 0) {
+      const bucket = sizeBuckets.find(
+        (b) => size >= b.minBytes && (b.maxBytes === null || size < b.maxBytes),
+      );
+      if (bucket) {
+        if (isMirroredSize) {
+          bucket.downloadedCount += 1;
+          bucket.downloadedBytes += size;
+        } else {
+          bucket.availableCount += 1;
+          bucket.availableBytes += size;
+        }
+      }
+    }
+  }
+
+  for (const [slug, idx] of Object.entries(indexState)) {
+    const canonical = (canonicalizeSystemSlug(slug) || slug).toLowerCase();
+    const existing = ensureSystem(canonical);
+    existing.indexedPages = Math.max(existing.indexedPages, idx?.pagesIndexed ?? 0);
+    existing.totalPages = Math.max(existing.totalPages, idx?.totalPages ?? 0);
+    existing.fullyIndexed = existing.fullyIndexed || Boolean(idx?.fullyIndexed);
+  }
+
+  const growthDates = Array.from(growthMap.keys()).sort((a, b) => a.localeCompare(b));
+  let cumIndexed = 0;
+  let cumDownloaded = 0;
+  let cumBytes = 0;
+  const growthTimeline: CatalogGrowthPoint[] = growthDates.map((date) => {
+    const g = growthMap.get(date)!;
+    cumIndexed += g.indexedAdded;
+    cumDownloaded += g.downloadedAdded;
+    cumBytes += g.bytesAdded;
+    return {
+      date,
+      indexedAdded: g.indexedAdded,
+      downloadedAdded: g.downloadedAdded,
+      bytesAdded: g.bytesAdded,
+      cumulativeIndexed: cumIndexed,
+      cumulativeDownloaded: cumDownloaded,
+      cumulativeBytes: cumBytes,
+    };
+  });
+
+  // Daily file acquisition trends (from catalog_release_files + failed counts)
+  const fileRows = database
+    .prepare(
+      `SELECT status, file_size_bytes, downloaded_at, discovered_at
+       FROM catalog_release_files
+       WHERE status IN ('downloaded', 'skipped')`,
+    )
+    .all() as {
+    status: string;
+    file_size_bytes: number;
+    downloaded_at: string | null;
+    discovered_at: string;
+  }[];
+
+  const dailyFileMap = new Map<string, { filesDownloaded: number; bytesDownloaded: number }>();
+  for (const fr of fileRows) {
+    const day = extractIsoDay(fr.downloaded_at) || extractIsoDay(fr.discovered_at);
+    if (!day) continue;
+    const cur = dailyFileMap.get(day) || { filesDownloaded: 0, bytesDownloaded: 0 };
+    cur.filesDownloaded += 1;
+    cur.bytesDownloaded += Math.max(0, Number(fr.file_size_bytes || 0));
+    dailyFileMap.set(day, cur);
+  }
+
+  const allTrendDates = Array.from(
+    new Set<string>([...dailyFileMap.keys(), ...dailyFailuresMap.keys()]),
+  ).sort((a, b) => a.localeCompare(b));
+
+  const daily: DownloadTrendDailyPoint[] = allTrendDates.map((date) => {
+    const df = dailyFileMap.get(date);
+    return {
+      date,
+      filesDownloaded: df?.filesDownloaded ?? 0,
+      bytesDownloaded: df?.bytesDownloaded ?? 0,
+      failedItems: dailyFailuresMap.get(date) ?? 0,
+    };
+  });
+
+  const runRows = database
+    .prepare(
+      `SELECT id, trigger_type, mode, dry_run, status, started_at, finished_at,
+              downloaded_count, skipped_count, failed_count, bytes_downloaded,
+              rate_limit_hits, avg_delay_ms
+       FROM sync_runs
+       ORDER BY id DESC
+       LIMIT 40`,
+    )
+    .all() as Record<string, unknown>[];
+
+  const runs: DownloadTrendRunPoint[] = runRows.reverse().map((r) => {
+    const startedAt = String(r.started_at);
+    const finishedAt = r.finished_at ? String(r.finished_at) : null;
+    const startMs = Date.parse(startedAt);
+    const endMs = finishedAt ? Date.parse(finishedAt) : Date.now();
+    const durationSec = Number.isFinite(startMs) && Number.isFinite(endMs)
+      ? Math.max(1, (endMs - startMs) / 1000)
+      : 1;
+    const bytesDownloaded = Number(r.bytes_downloaded || 0);
+    return {
+      id: Number(r.id),
+      startedAt,
+      triggerType: String(r.trigger_type) as RunTrigger,
+      mode: String(r.mode) as RunMode,
+      dryRun: Boolean(r.dry_run),
+      status: String(r.status) as RunStatus,
+      downloadedCount: Number(r.downloaded_count || 0),
+      skippedCount: Number(r.skipped_count || 0),
+      failedCount: Number(r.failed_count || 0),
+      bytesDownloaded,
+      durationSec,
+      avgBytesPerSec: bytesDownloaded > 0 ? bytesDownloaded / durationSec : 0,
+      rateLimitHits: Number(r.rate_limit_hits || 0),
+      avgDelayMs: Number(r.avg_delay_ms || 0),
+    };
+  });
+
+  const mirroredFileCount = Math.max(fileRows.length, downloadedItems);
+  const systemCoverage = Array.from(systemMap.values()).sort(
+    (a, b) => b.totalItems - a.totalItems || a.systemName.localeCompare(b.systemName),
+  );
+
+  return {
+    generatedAt: new Date().toISOString(),
+    summary: {
+      totalCatalogItems,
+      downloadedItems,
+      availableItems,
+      queuedItems,
+      failedItems,
+      installedItems,
+      mirroredBytes,
+      estimatedAvailableBytes,
+      avgMirroredFileBytes: mirroredFileCount > 0 ? Math.round(mirroredBytes / mirroredFileCount) : 0,
+      installedBytes,
+      systemsTracked: systemCoverage.filter((s) => s.totalItems > 0).length,
+      fullyIndexedSystems: systemCoverage.filter((s) => s.fullyIndexed).length,
+    },
+    growthTimeline,
+    downloadTrends: {
+      daily,
+      runs,
+    },
+    systemCoverage,
+    sizeDistribution: sizeBuckets,
+    releaseComposition: {
+      tags: queryCompositionStats('release_tags_json'),
+      regions: queryCompositionStats('regions_json'),
+      languages: queryCompositionStats('languages_json'),
+      sources: queryCompositionStats('sources_json'),
+    },
   };
 }
 

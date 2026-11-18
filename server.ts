@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import {
+  getCatalogStatsSnapshot,
   getPublicConfig,
   getRepositoryItemById,
   getSchemaMigrationReport,
@@ -196,6 +197,10 @@ async function bootstrap() {
       sort: typeof req.query.sort === 'string' ? req.query.sort : undefined,
     });
     res.json(result);
+  });
+
+  app.get('/api/catalog/stats', (_req, res) => {
+    res.json(getCatalogStatsSnapshot());
   });
 
   app.post('/api/catalog/index', async (req, res) => {
