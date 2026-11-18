@@ -1692,6 +1692,30 @@ function listStatusFacetCounts(): Record<string, number> {
   };
 }
 
+function listDownloadedFacetCounts(params: CatalogQueryFilterParams): {
+  downloaded: number;
+  notDownloaded: number;
+} {
+  const { where, args } = buildCatalogWhereAndOrder({
+    ...params,
+    status: undefined,
+  });
+
+  const row = getDb()
+    .prepare(
+      `SELECT
+        SUM(CASE WHEN status IN ('downloaded', 'skipped') THEN 1 ELSE 0 END) AS downloaded_cnt,
+        SUM(CASE WHEN status NOT IN ('downloaded', 'skipped') THEN 1 ELSE 0 END) AS not_downloaded_cnt
+      FROM catalog_releases ${where}`,
+    )
+    .get(...args) as { downloaded_cnt: number | null; not_downloaded_cnt: number | null } | undefined;
+
+  return {
+    downloaded: Number(row?.downloaded_cnt || 0),
+    notDownloaded: Number(row?.not_downloaded_cnt || 0),
+  };
+}
+
 function listInstalledFacetCounts(params: CatalogQueryFilterParams): {
   installed: number;
   notInstalled: number;
@@ -1939,6 +1963,7 @@ export function queryRepositoryItems(
   const languagesFacet = listDistinctJsonFacetWithCounts('languages_json');
   const sourcesFacet = listDistinctJsonFacetWithCounts('sources_json');
   const statusCounts = listStatusFacetCounts();
+  const downloadedCounts = listDownloadedFacetCounts(params);
   const installedCounts = listInstalledFacetCounts(params);
 
   const counts: CatalogFacetCounts = {
@@ -1948,6 +1973,7 @@ export function queryRepositoryItems(
     languages: languagesFacet.counts,
     sources: sourcesFacet.counts,
     statuses: statusCounts,
+    downloaded: downloadedCounts,
     installed: installedCounts,
   };
 

@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.5.2] - 2026-11-18
+
+- Added symmetric **`Downloaded (N)`** and **`Not Downloaded (N)`** quick-filter toggle buttons to the Catalog toolbar alongside **`Installed (N)`** and **`Not Installed (N)`** (`Downloaded` in phosphor green, `Not Downloaded` in amber).
+- Added context-aware server facet aggregation (`facets.counts.downloaded`) in `queryRepositoryItems` so both Download quick-filter counters live-update against active Search, Systems, metadata facets, and Install filters while ignoring `status`.
+- Kept the **`Status`** multi-select dropdown and active filter strip bidirectionally synchronized with the Download quick-toggles (covering all un-downloaded states—`Available`, `Partial`, `Failed`, `Queued`, `Downloading`—and suppressing zero-count transient rows when stepping out to granular selections).
+
 ## [1.5.1] - 2026-11-18
 
 - Quieted the Sync Status header into a steady `Syncing` readout that consistently keeps the human-readable **Catalog Game Title** framed in the Living UI CRT highlight from release warm-up through download completion and inter-file handoffs (eliminating `Inspecting` / `Downloading` verb flipping and raw `.zip` filename swaps).
