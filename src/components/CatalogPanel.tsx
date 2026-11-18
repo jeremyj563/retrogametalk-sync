@@ -37,14 +37,13 @@ import {
   normalizeCatalogSort,
 } from '../shared/catalogSort';
 import {
-  isDownloadedQuickFilterActive,
-  isNotDownloadedQuickFilterActive,
-  reconcileManualStatusChange,
-  toggleDownloadedQuickFilter,
-  toggleNotDownloadedQuickFilter,
+  GRANULAR_STATUS_VALUES,
+  migrateLegacyCatalogDownloadPrefs,
+  toggleCatalogDownloadedFilter,
 } from '../shared/catalogDownloadFilter';
 import type { SmartRomFilterContext } from '../shared/smartRomPicker';
 import type {
+  CatalogDownloadedFilter,
   CatalogFacets,
   CatalogInstalledFilter,
   CatalogSortOption,
@@ -219,20 +218,10 @@ function LazyCoverImage({
 }
 
 const CATALOG_VIEW_STORAGE_KEY = 'rgt_sync_catalog_view_v1';
-const VALID_STATUS_VALUES = new Set([
-  'available',
-  'downloaded',
-  'partial',
-  'failed',
-  'needs_retry',
-  'queued',
-  'downloading',
-]);
+const VALID_STATUS_VALUES = GRANULAR_STATUS_VALUES;
 const VALID_VIEW_MODES = new Set(['catalog', 'stats', 'filesystem']);
 
 const STATUS_LABELS: Record<string, string> = {
-  available: 'Available',
-  downloaded: 'Downloaded',
   needs_retry: 'Needs Attention',
   partial: 'Partial',
   failed: 'Failed',
@@ -247,6 +236,7 @@ interface CatalogViewPrefs {
   search: string;
   systems: string[];
   statuses: string[];
+  downloadedFilter: CatalogDownloadedFilter;
   installedFilter: CatalogInstalledFilter;
   tags: string[];
   tagsMode: FilterMatchMode;
@@ -278,6 +268,7 @@ const DEFAULT_CATALOG_VIEW_PREFS: CatalogViewPrefs = {
   search: '',
   systems: [],
   statuses: [],
+  downloadedFilter: 'all',
   installedFilter: 'all',
   tags: [],
   tagsMode: 'any',
@@ -317,7 +308,12 @@ function sanitizeStoredStatuses(arr: unknown, legacySingle?: unknown): string[] 
   const out: string[] = [];
   for (const st of raw) {
     const mapped = st === 'skipped' ? 'downloaded' : st;
-    if (!VALID_STATUS_VALUES.has(mapped) || seen.has(mapped)) continue;
+    if (
+      (!VALID_STATUS_VALUES.has(mapped) && mapped !== 'downloaded' && mapped !== 'available') ||
+      seen.has(mapped)
+    ) {
+      continue;
+    }
     seen.add(mapped);
     out.push(mapped);
   }
@@ -341,6 +337,11 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
     const raw = window.localStorage.getItem(CATALOG_VIEW_STORAGE_KEY);
     if (!raw) return { ...DEFAULT_CATALOG_VIEW_PREFS };
     const parsed = JSON.parse(raw) as LegacyCatalogViewPrefs;
+    const rawStatuses = sanitizeStoredStatuses(parsed.statuses, parsed.statusFilter);
+    const { downloadedFilter, statuses } = migrateLegacyCatalogDownloadPrefs(
+      rawStatuses,
+      parsed.downloadedFilter,
+    );
     return {
       viewMode:
         typeof parsed.viewMode === 'string' && VALID_VIEW_MODES.has(parsed.viewMode)
@@ -350,7 +351,8 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
       sort: normalizeCatalogSort(parsed.sort),
       search: typeof parsed.search === 'string' ? parsed.search : '',
       systems: sanitizeStoredList(parsed.systems, parsed.systemFilter),
-      statuses: sanitizeStoredStatuses(parsed.statuses, parsed.statusFilter),
+      statuses,
+      downloadedFilter,
       installedFilter: sanitizeStoredInstalledFilter(parsed.installedFilter),
       tags: sanitizeStoredList(parsed.tags, parsed.tagFilter),
       tagsMode: sanitizeStoredMatchMode(parsed.tagsMode),
@@ -378,6 +380,7 @@ function buildCatalogQueryKey(
     | 'search'
     | 'systems'
     | 'statuses'
+    | 'downloadedFilter'
     | 'installedFilter'
     | 'tags'
     | 'tagsMode'
@@ -397,6 +400,7 @@ function buildCatalogQueryKey(
     prefs.search,
     prefs.systems,
     prefs.statuses,
+    prefs.downloadedFilter,
     prefs.installedFilter,
     prefs.tags,
     prefs.tags.length > 1 ? prefs.tagsMode : 'any',
@@ -460,6 +464,9 @@ export function CatalogPanel({
   const [search, setSearch] = useState(() => memoryCatalogViewPrefs.search);
   const [systems, setSystems] = useState<string[]>(() => memoryCatalogViewPrefs.systems);
   const [statuses, setStatuses] = useState<string[]>(() => memoryCatalogViewPrefs.statuses);
+  const [downloadedFilter, setDownloadedFilter] = useState<CatalogDownloadedFilter>(
+    () => memoryCatalogViewPrefs.downloadedFilter,
+  );
   const [installedFilter, setInstalledFilter] = useState<CatalogInstalledFilter>(
     () => memoryCatalogViewPrefs.installedFilter,
   );
@@ -537,6 +544,7 @@ export function CatalogPanel({
         search.trim(),
         systems,
         statuses,
+        downloadedFilter,
         installedFilter,
         tags,
         tags.length > 1 ? tagsMode : 'any',
@@ -553,6 +561,7 @@ export function CatalogPanel({
       search,
       systems,
       statuses,
+      downloadedFilter,
       installedFilter,
       tags,
       tagsMode,
@@ -590,6 +599,7 @@ export function CatalogPanel({
       search,
       systems,
       statuses,
+      downloadedFilter,
       installedFilter,
       tags,
       tagsMode,
@@ -617,6 +627,7 @@ export function CatalogPanel({
     search,
     systems,
     statuses,
+    downloadedFilter,
     installedFilter,
     tags,
     tagsMode,
@@ -658,6 +669,7 @@ export function CatalogPanel({
       });
       for (const sys of systems) qs.append('system', sys);
       for (const st of statuses) qs.append('status', st);
+      if (downloadedFilter !== 'all') qs.set('downloaded', downloadedFilter);
       if (installedFilter !== 'all') qs.set('installed', installedFilter);
       for (const t of tags) qs.append('tag', t);
       if (tags.length > 1) qs.set('tagMode', tagsMode);
@@ -676,6 +688,7 @@ export function CatalogPanel({
       sort,
       systems,
       statuses,
+      downloadedFilter,
       installedFilter,
       tags,
       tagsMode,
@@ -718,6 +731,7 @@ export function CatalogPanel({
             search,
             systems,
             statuses,
+            downloadedFilter,
             installedFilter,
             tags,
             tagsMode,
@@ -803,6 +817,7 @@ export function CatalogPanel({
       search,
       systems,
       statuses,
+      downloadedFilter,
       installedFilter,
       tags,
       tagsMode,
@@ -857,6 +872,7 @@ export function CatalogPanel({
           search,
           systems,
           statuses,
+          downloadedFilter,
           installedFilter,
           tags,
           tagsMode,
@@ -883,6 +899,7 @@ export function CatalogPanel({
     search,
     systems,
     statuses,
+    downloadedFilter,
     installedFilter,
     tags,
     tagsMode,
@@ -1156,6 +1173,7 @@ export function CatalogPanel({
       sort,
       system: systems,
       status: statuses,
+      downloaded: downloadedFilter !== 'all' ? downloadedFilter : undefined,
       installed: installedFilter !== 'all' ? installedFilter : undefined,
       tag: tags,
       tagMode: tags.length > 1 ? tagsMode : undefined,
@@ -1173,6 +1191,7 @@ export function CatalogPanel({
     sort,
     systems,
     statuses,
+    downloadedFilter,
     installedFilter,
     tags,
     tagsMode,
@@ -1430,35 +1449,19 @@ export function CatalogPanel({
     [facets.sources, facets.counts],
   );
 
-  const downloadedQuickActive = useMemo(
-    () => isDownloadedQuickFilterActive(statuses),
-    [statuses],
-  );
-  const notDownloadedQuickActive = useMemo(
-    () => isNotDownloadedQuickFilterActive(statuses),
-    [statuses],
-  );
-
   const handleStatusesChange = useCallback(
     (next: string[]) => {
-      setStatuses(reconcileManualStatusChange(statuses, next, facets.counts?.statuses));
+      setStatuses(next);
+      if (next.length > 0 && downloadedFilter === 'only') {
+        setDownloadedFilter('all');
+      }
     },
-    [statuses, facets.counts?.statuses],
+    [downloadedFilter],
   );
 
   const statusOptions = useMemo<FilterDropdownOption[]>(() => {
     const counts = facets.counts?.statuses;
     const base: FilterDropdownOption[] = [
-      {
-        value: 'available',
-        label: 'Available (Not Downloaded)',
-        count: counts?.available ?? status.totals.availableItems,
-      },
-      {
-        value: 'downloaded',
-        label: 'Downloaded',
-        count: counts?.downloaded ?? status.totals.downloadedItems + status.totals.skippedItems,
-      },
       {
         value: 'needs_retry',
         label: 'Needs Attention (Failed & Partial)',
@@ -1475,17 +1478,14 @@ export function CatalogPanel({
         count: counts?.failed,
       },
     ];
-    if ((counts?.queued ?? 0) > 0 || (statuses.includes('queued') && !notDownloadedQuickActive)) {
+    if ((counts?.queued ?? 0) > 0 || statuses.includes('queued')) {
       base.push({ value: 'queued', label: 'Queued', count: counts?.queued });
     }
-    if (
-      (counts?.downloading ?? 0) > 0 ||
-      (statuses.includes('downloading') && !notDownloadedQuickActive)
-    ) {
+    if ((counts?.downloading ?? 0) > 0 || statuses.includes('downloading')) {
       base.push({ value: 'downloading', label: 'Downloading', count: counts?.downloading });
     }
     return base;
-  }, [facets.counts, status.totals, statuses, notDownloadedQuickActive]);
+  }, [facets.counts, status.totals.failedItems, statuses]);
 
   const activeFilterTokens = useMemo(() => {
     const tokens: {
@@ -1567,32 +1567,32 @@ export function CatalogPanel({
       });
     }
 
-    if (downloadedQuickActive) {
+    if (downloadedFilter === 'only') {
       tokens.push({
-        key: 'download:downloaded',
+        key: 'downloaded',
         groupLabel: 'Download',
         valueLabel: 'Downloaded',
         matchAll: false,
-        onRemove: () => setStatuses([]),
+        onRemove: () => setDownloadedFilter('all'),
       });
-    } else if (notDownloadedQuickActive) {
+    } else if (downloadedFilter === 'exclude') {
       tokens.push({
-        key: 'download:not_downloaded',
+        key: 'downloaded',
         groupLabel: 'Download',
         valueLabel: 'Not Downloaded',
         matchAll: false,
-        onRemove: () => setStatuses([]),
+        onRemove: () => setDownloadedFilter('all'),
       });
-    } else {
-      for (const val of statuses) {
-        tokens.push({
-          key: `status:${val}`,
-          groupLabel: 'Status',
-          valueLabel: STATUS_LABELS[val] || val,
-          matchAll: false,
-          onRemove: () => setStatuses((prev) => prev.filter((v) => v !== val)),
-        });
-      }
+    }
+
+    for (const val of statuses) {
+      tokens.push({
+        key: `status:${val}`,
+        groupLabel: 'Status',
+        valueLabel: STATUS_LABELS[val] || val,
+        matchAll: false,
+        onRemove: () => setStatuses((prev) => prev.filter((v) => v !== val)),
+      });
     }
 
     if (installedFilter === 'only') {
@@ -1627,9 +1627,8 @@ export function CatalogPanel({
     languagesMode,
     sources,
     sourcesMode,
+    downloadedFilter,
     statuses,
-    downloadedQuickActive,
-    notDownloadedQuickActive,
     installedFilter,
   ]);
 
@@ -1640,6 +1639,7 @@ export function CatalogPanel({
     setSearch('');
     setSystems([]);
     setStatuses([]);
+    setDownloadedFilter('all');
     setInstalledFilter('all');
     setTags([]);
     setTagsMode('any');
@@ -1980,29 +1980,35 @@ export function CatalogPanel({
               >
                 <button
                   type="button"
-                  aria-pressed={downloadedQuickActive}
-                  onClick={() => setStatuses((prev) => toggleDownloadedQuickFilter(prev))}
+                  aria-pressed={downloadedFilter === 'only'}
+                  onClick={() => {
+                    const next = toggleCatalogDownloadedFilter(downloadedFilter, 'only');
+                    setDownloadedFilter(next);
+                    if (next === 'only') {
+                      setStatuses([]);
+                    }
+                  }}
                   title={
-                    downloadedQuickActive
+                    downloadedFilter === 'only'
                       ? 'Click to clear Downloaded filter and show all matching games'
                       : 'Show only matching games already downloaded locally'
                   }
                   className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    downloadedQuickActive
+                    downloadedFilter === 'only'
                       ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
                       : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
                   }`}
                 >
                   <Download
                     className={`h-3.5 w-3.5 shrink-0 ${
-                      downloadedQuickActive ? 'text-crt-phosphor' : 'text-crt-muted'
+                      downloadedFilter === 'only' ? 'text-crt-phosphor' : 'text-crt-muted'
                     }`}
                   />
                   <span>Downloaded</span>
                   {facets.counts?.downloaded && (
                     <span
                       className={`font-mono text-[11px] tabular-nums ${
-                        downloadedQuickActive ? 'text-crt-phosphor/90' : 'text-crt-muted'
+                        downloadedFilter === 'only' ? 'text-crt-phosphor/90' : 'text-crt-muted'
                       }`}
                     >
                       ({facets.counts.downloaded.downloaded.toLocaleString()})
@@ -2011,15 +2017,17 @@ export function CatalogPanel({
                 </button>
                 <button
                   type="button"
-                  aria-pressed={notDownloadedQuickActive}
-                  onClick={() => setStatuses((prev) => toggleNotDownloadedQuickFilter(prev))}
+                  aria-pressed={downloadedFilter === 'exclude'}
+                  onClick={() =>
+                    setDownloadedFilter((prev) => toggleCatalogDownloadedFilter(prev, 'exclude'))
+                  }
                   title={
-                    notDownloadedQuickActive
+                    downloadedFilter === 'exclude'
                       ? 'Click to clear Not Downloaded filter and show all matching games'
                       : 'Show all matching un-downloaded games (Available, Queued, Failed)'
                   }
                   className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    notDownloadedQuickActive
+                    downloadedFilter === 'exclude'
                       ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
                       : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
                   }`}
@@ -2028,7 +2036,7 @@ export function CatalogPanel({
                   {facets.counts?.downloaded && (
                     <span
                       className={`font-mono text-[11px] tabular-nums ${
-                        notDownloadedQuickActive ? 'text-crt-amber/90' : 'text-crt-muted'
+                        downloadedFilter === 'exclude' ? 'text-crt-amber/90' : 'text-crt-muted'
                       }`}
                     >
                       ({facets.counts.downloaded.notDownloaded.toLocaleString()})

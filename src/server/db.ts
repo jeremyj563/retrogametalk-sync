@@ -1698,6 +1698,7 @@ function listDownloadedFacetCounts(params: CatalogQueryFilterParams): {
 } {
   const { where, args } = buildCatalogWhereAndOrder({
     ...params,
+    downloaded: undefined,
     status: undefined,
   });
 
@@ -1803,6 +1804,7 @@ export interface CatalogQueryFilterParams {
   search?: string;
   system?: string | string[];
   status?: string | string[];
+  downloaded?: string;
   installed?: string;
   tag?: string | string[];
   tagMode?: string;
@@ -1879,6 +1881,12 @@ function buildCatalogWhereAndOrder(params: CatalogQueryFilterParams): {
   appendJsonFacetCondition(conditions, args, 'regions_json', params.region, params.regionMode);
   appendJsonFacetCondition(conditions, args, 'languages_json', params.language, params.languageMode);
   appendJsonFacetCondition(conditions, args, 'sources_json', params.source, params.sourceMode);
+
+  if (params.downloaded === 'only') {
+    conditions.push("status IN ('downloaded', 'skipped')");
+  } else if (params.downloaded === 'exclude') {
+    conditions.push("status NOT IN ('downloaded', 'skipped')");
+  }
 
   if (params.installed === 'only') {
     conditions.push('installed_at IS NOT NULL');
