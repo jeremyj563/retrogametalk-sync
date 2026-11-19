@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="RetroGameTalk Sync Icon">
+  <defs>
+    <linearGradient id="icon-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070e0a" />
+      <stop offset="100%" stop-color="#0e1f15" />
+    </linearGradient>
+    <clipPath id="icon-screen-clip">
+      <rect x="64" y="88" width="128" height="86" rx="10" />
+    </clipPath>
+  </defs>
+
+  <!-- Rounded App Tile Backdrop -->
+  <rect x="8" y="8" width="240" height="240" rx="44" fill="url(#icon-bg)" stroke="#1f3d2b" stroke-width="4" />
+
+  <!-- Sculpted 16-Bit ROM Cartridge Shell -->
+  <path
+    d="M66 28H196A20 20 0 0 1 216 48V172L206 182V196A14 14 0 0 1 192 210H64A14 14 0 0 1 50 196V182L40 172V54L66 28Z"
+    fill="#101f17"
+    stroke="#2f573d"
+    stroke-width="6"
+    stroke-linejoin="round"
+  />
+
+  <!-- Top Bevel Specular -->
+  <path d="M68 35H194A14 14 0 0 1 208 49" fill="none" stroke="#38e56b" stroke-opacity="0.36" stroke-width="3" stroke-linecap="round" />
+
+  <!-- Top Grip Ribs + Insertion Arrow -->
+  <rect x="76" y="44" width="84" height="6" rx="3" fill="#284733" />
+  <rect x="76" y="55" width="84" height="6" rx="3" fill="#284733" />
+  <rect x="76" y="66" width="84" height="4.5" rx="2.25" fill="#203829" />
+  <path d="M180 45 190 61H170L180 45Z" fill="#38e56b" fill-opacity="0.75" />
+
+  <!-- Molded Side Grips -->
+  <g fill="#070e0a">
+    <rect x="44" y="92" width="7" height="9" rx="2" />
+    <rect x="44" y="108" width="7" height="9" rx="2" />
+    <rect x="44" y="124" width="7" height="9" rx="2" />
+    <rect x="205" y="92" width="7" height="9" rx="2" />
+    <rect x="205" y="108" width="7" height="9" rx="2" />
+    <rect x="205" y="124" width="7" height="9" rx="2" />
+  </g>
+
+  <!-- Inner CRT Screen Bezel -->
+  <rect x="60" y="84" width="136" height="94" rx="13" fill="#050a07" stroke="#248f47" stroke-width="4.5" />
+
+  <g clip-path="url(#icon-screen-clip)">
+    <g stroke="#38e56b" stroke-opacity="0.16" stroke-width="1.5">
+      <line x1="64" y1="110" x2="192" y2="110" />
+      <line x1="64" y1="131" x2="192" y2="131" />
+      <line x1="64" y1="152" x2="192" y2="152" />
+      <line x1="96" y1="88" x2="96" y2="174" />
+      <line x1="128" y1="88" x2="128" y2="174" />
+      <line x1="160" y1="88" x2="160" y2="174" />
+    </g>
+
+    <g fill="none" stroke="#38e56b" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="75,110 96,131 75,152" opacity="0.45" />
+      <polyline points="110,110 131,131 110,152" opacity="0.82" />
+      <polyline points="145,110 166,131 145,152" opacity="1" />
+    </g>
+
+    <path d="M73 97H97M73 97V112" fill="none" stroke="#ffffff" stroke-opacity="0.28" stroke-width="3.2" stroke-linecap="round" />
+  </g>
+
+  <!-- PCB Contact Bus & LED -->
+  <rect x="61" y="185" width="110" height="22" rx="4.5" fill="#060c09" stroke="#213d2c" stroke-width="2.5" />
+  <rect x="68" y="190" width="9.5" height="12" rx="1.8" fill="#23422e" />
+  <rect x="83" y="190" width="9.5" height="12" rx="1.8" fill="#23422e" />
+  <rect x="98" y="190" width="9.5" height="12" rx="1.8" fill="#38e56b" fill-opacity="0.5" />
+  <rect x="113" y="190" width="9.5" height="12" rx="1.8" fill="#38e56b" />
+  <rect x="128" y="190" width="9.5" height="12" rx="1.8" fill="#23422e" />
+  <rect x="143" y="190" width="9.5" height="12" rx="1.8" fill="#23422e" />
+  <rect x="158" y="190" width="9.5" height="12" rx="1.8" fill="#23422e" />
+
+  <circle cx="190" cy="196" r="12" fill="#060c09" stroke="#2f573d" stroke-width="2.5" />
+  <circle cx="190" cy="196" r="7.2" fill="#38e56b" />
+  <circle cx="187.8" cy="193.8" r="2.1" fill="#ffffff" fill-opacity="0.7" />
+</svg>

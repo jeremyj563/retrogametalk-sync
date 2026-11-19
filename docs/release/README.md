@@ -42,24 +42,23 @@ Because AI Studio commits externally to GitHub without a local git CLI inside th
 
 ### Pipeline Flow on Push to `main`
 
-1. **Job 1 — `release` (`contents: write`)**
+1. **Job 1 — `validate` (All Pushes & PRs)**
+   - Validates `deploy/unraid/retrogametalk-sync.xml` & `ca_profile.xml` (`xmllint --noout`), checks `docker-compose.yml` & `deploy/truenas/docker-compose.yaml` (`docker compose config -q`), and runs `helm lint k8s/charts/retrogametalk-sync`.
+2. **Job 2 — `release` (`contents: write`)**
    - Reads `version` from `package.json` and verifies strict `X.Y.Z` SemVer formatting.
    - Verifies **`MAJOR == 1`** (unless explicitly overridden for an authorized `2.0.0+` release) and confirms `Chart.yaml` `version` and `appVersion` both match `package.json`.
    - Checks whether tag `X.Y.Z` already exists in the repository:
      - **New version**: Creates an annotated git tag (`X.Y.Z`), pushes `refs/tags/X.Y.Z`, and creates a corresponding **GitHub Release** (`gh release create X.Y.Z --notes-file ...`) populated from the matching `## [X.Y.Z]` section in `CHANGELOG.md` (automatically falling back to commit subjects since the previous tag if missing), along with the `ghcr.io` image reference and full compare link.
      - **Already-tagged version**: Logs a notice and skips duplicate tag/release creation safely so rolling `main` builds still succeed.
-2. **Job 2 — `build-and-push` (`needs: [release]`, `packages: write`)**
-   - Chained directly behind `release` so newly minted tags immediately trigger the container build without needing a custom Personal Access Token (GitHub Actions suppresses downstream `on: push: tags:` triggers from `GITHUB_TOKEN` pushes).
-   - Builds the Docker image with `APP_VERSION=X.Y.Z`, `GIT_SHA`, `GIT_URL`, `GIT_REF` (`refs/tags/X.Y.Z`, `refs/heads/<branch>`, or `refs/pull/<n>/merge`), and `BUILT_AT`, and pushes to `ghcr.io/<owner>/retrogametalk-sync` with the following tags:
-     - `X.Y.Z` *(exact SemVer release tag when minted or pushed)*
-     - `X.Y` *(floating minor tag when minted or pushed)*
-     - `latest` *(on `main`)*
-     - `main` *(on `main`)*
-     - `sha-<short-commit>`
+3. **Job 3 — `build-and-push` (`needs: [validate, release]`, `packages: write`)**
+   - Chained directly behind `validate` and `release` so newly minted tags immediately trigger the multi-arch build without needing a custom Personal Access Token (GitHub Actions suppresses downstream `on: push: tags:` triggers from `GITHUB_TOKEN` pushes).
+   - Builds **`linux/amd64,linux/arm64`** Docker images via QEMU + Buildx with `APP_VERSION=X.Y.Z`, `GIT_SHA`, `GIT_URL`, `GIT_REF`, `BUILT_AT`, plus SBOM and `provenance: mode=max` attestations.
+   - Pushes to **`ghcr.io/<owner>/retrogametalk-sync`** (`X.Y.Z`, `X.Y`, `latest`, `main`, `sha-<short>`), and packages/pushes the Helm chart to **`oci://ghcr.io/<owner>/charts/retrogametalk-sync`** on tagged releases.
+   - **Gated Docker Hub Mirroring:** Pushes matching SemVer tags to **Docker Hub** **only** when a SemVer tag is active *and* maintainer secrets (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) are configured (defaulting target repo to `<DOCKERHUB_USERNAME>/retrogametalk-sync` or optional `vars.DOCKERHUB_REPOSITORY`).
 
 ### Pull Requests & Manual Tag Pushes
-- **Pull Requests to `main`**: Skip the `release` job and run `build-and-push` with `push: false` as a build verification check.
-- **Manual `[0-9]*.*.*` Tag Push**: Skips the `release` job and runs `build-and-push` directly against the pushed SemVer tag (`X.Y.Z`, `X.Y`, `sha-<short>`).
+- **Pull Requests to `main`**: Run `validate` and `build-and-push` (`push: false`) across `linux/amd64,linux/arm64` as a non-publishing build check.
+- **Manual `[0-9]*.*.*` Tag Push**: Skips the `release` job and runs `validate` + `build-and-push` directly against the pushed bare SemVer tag (`X.Y.Z`, `X.Y`, `sha-<short>`).
 
 ---
 

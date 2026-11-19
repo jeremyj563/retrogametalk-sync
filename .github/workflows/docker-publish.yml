@@ -22,6 +22,22 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  validate:
+    name: Validate Deployment Templates & Helm Chart
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Validate Compose, TrueNAS YAML, Unraid XML & Helm Chart
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils >/dev/null
+          xmllint --noout deploy/unraid/retrogametalk-sync.xml deploy/unraid/ca_profile.xml
+          docker compose -f docker-compose.yml config -q
+          docker compose -f deploy/truenas/docker-compose.yaml config -q
+          helm lint k8s/charts/retrogametalk-sync
+
   release:
     name: Validate SemVer, Tag & Create GitHub Release
     runs-on: ubuntu-24.04
@@ -158,9 +174,9 @@ jobs:
           fi
 
   build-and-push:
-    name: Build & Publish GHCR Container Image
-    needs: [release]
-    if: always() && (needs.release.result == 'success' || needs.release.result == 'skipped')
+    name: Build & Publish Multi-Arch Container + OCI Helm Chart
+    needs: [validate, release]
+    if: always() && needs.validate.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -173,13 +189,16 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Resolve version and git tag
+      - name: Resolve version, git tag & Docker Hub gate
         id: version
         env:
           MINTED_TAG: ${{ needs.release.outputs.release_tag }}
           MINTED_SEMVER_FULL: ${{ needs.release.outputs.semver_full }}
           MINTED_SEMVER_MINOR: ${{ needs.release.outputs.semver_minor }}
           MINTED_RELEASE_DATE: ${{ needs.release.outputs.release_date }}
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DH_REPO_VAR: ${{ vars.DOCKERHUB_REPOSITORY }}
         run: |
           set -euo pipefail
 
@@ -215,12 +234,30 @@ jobs:
             BUILT_AT="$(git show -s --format=%cI HEAD 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")"
           fi
 
+          DOCKERHUB_ENABLED="false"
+          IMAGES_LIST="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          if [ "${{ github.event_name }}" != "pull_request" ] && [ -n "$SEMVER_FULL" ] && [ -n "$DH_USER" ] && [ -n "$DH_TOKEN" ]; then
+            DOCKERHUB_ENABLED="true"
+            DH_REPO="${DH_REPO_VAR:-${DH_USER}/retrogametalk-sync}"
+            IMAGES_LIST="${IMAGES_LIST}
+docker.io/${DH_REPO}"
+          fi
+
           echo "git_tag=${GIT_TAG}" >> "$GITHUB_OUTPUT"
           echo "semver_full=${SEMVER_FULL}" >> "$GITHUB_OUTPUT"
           echo "semver_minor=${SEMVER_MINOR}" >> "$GITHUB_OUTPUT"
           echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
           echo "git_ref=${GIT_REF}" >> "$GITHUB_OUTPUT"
           echo "built_at=${BUILT_AT}" >> "$GITHUB_OUTPUT"
+          echo "dockerhub_enabled=${DOCKERHUB_ENABLED}" >> "$GITHUB_OUTPUT"
+          {
+            echo "images<<EOF"
+            echo "$IMAGES_LIST"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -233,11 +270,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub (Release Tags Only, When Configured)
+        if: steps.version.outputs.dockerhub_enabled == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.version.outputs.images }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -246,12 +291,14 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build and push Docker image
+      - name: Build and push multi-arch Docker image
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
+          provenance: ${{ github.event_name != 'pull_request' && 'mode=max' || 'false' }}
+          sbom: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
@@ -263,3 +310,14 @@ jobs:
             BUILT_AT=${{ steps.version.outputs.built_at }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Publish Helm Chart to GHCR OCI Registry
+        if: github.event_name != 'pull_request' && steps.version.outputs.semver_full != ''
+        env:
+          HELM_EXPERIMENTAL_OCI: "1"
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          mkdir -p /tmp/helm-dist
+          helm package k8s/charts/retrogametalk-sync -d /tmp/helm-dist
+          helm push "/tmp/helm-dist/retrogametalk-sync-${{ steps.version.outputs.semver_full }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"

@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>retrogametalk-sync</Name>
+  <Repository>ghcr.io/jeremyj563/retrogametalk-sync:1.7.0</Repository>
+  <Registry>https://ghcr.io/jeremyj563/retrogametalk-sync</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <!-- TODO: Replace with live Unraid Forums [Support] thread URL prior to ca.unraid.net submission -->
+  <Support>https://github.com/jeremyj563/retrogametalk-sync/issues</Support>
+  <Project>https://github.com/jeremyj563/retrogametalk-sync</Project>
+  <Overview>Always-on archival mirror, offline game catalog browser, and direct browser-to-SD-card ROM installer for RetroGameTalk with adaptive AIMD rate limiting and a retro CRT phosphor web console.</Overview>
+  <Category>MediaApp:Other Tools: Downloaders:</Category>
+  <WebUI>http://[IP]:[PORT:3000]</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/jeremyj563/retrogametalk-sync/main/deploy/unraid/retrogametalk-sync.xml</TemplateURL>
+  <!-- TODO: Verify 256x256 PNG icon URL compatibility with ca.unraid.net scanner before public submission -->
+  <Icon>https://raw.githubusercontent.com/jeremyj563/retrogametalk-sync/main/docs/assets/icon.svg</Icon>
+  <ExtraParams>--stop-timeout=30</ExtraParams>
+  <PostArgs/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Requires an account at retrogametalk.com. Keep Appdata (/run/repo/.rgt-data) on fast SSD/NVMe cache so SQLite WAL writes stay responsive.</Requires>
+  <Config Name="Web Console Port" Target="3000" Default="3000" Mode="tcp" Description="HTTP port for the RetroGameTalk Sync CRT web console, health probes, and Prometheus metrics." Type="Port" Display="always" Required="true" Mask="false">3000</Config>
+  <Config Name="Mirrored ROMs Directory" Target="/run/repo" Default="/mnt/user/roms" Mode="rw" Description="Host share where mirrored console/release ROM directories are written (DOWNLOAD_DIR)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/roms</Config>
+  <Config Name="Appdata &amp; SQLite State" Target="/run/repo/.rgt-data" Default="/mnt/user/appdata/rgt-sync" Mode="rw" Description="Fast SSD/NVMe cache folder for scraper.db (SQLite WAL), cookies, encryption keyfile, and lazy cover/screenshot cache (DATA_DIR)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/rgt-sync</Config>
+  <Config Name="DATA_DIR" Target="DATA_DIR" Default="/run/repo/.rgt-data" Mode="" Description="Internal container path for SQLite database and metadata caches." Type="Variable" Display="advanced" Required="true" Mask="false">/run/repo/.rgt-data</Config>
+  <Config Name="DOWNLOAD_DIR" Target="DOWNLOAD_DIR" Default="/run/repo" Mode="" Description="Internal container path for mirrored ROM archives." Type="Variable" Display="advanced" Required="true" Mask="false">/run/repo</Config>
+  <Config Name="RetroGameTalk Username" Target="RGT_USERNAME" Default="" Mode="" Description="Optional RetroGameTalk username. Leave blank to configure interactively in the Web UI." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="RetroGameTalk Password" Target="RGT_PASSWORD" Default="" Mode="" Description="Optional RetroGameTalk password. Leave blank to configure interactively in the Web UI." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="Cron Schedule" Target="CRON_SCHEDULE" Default="0 */6 * * *" Mode="" Description="5-field cron expression for scheduled background syncs." Type="Variable" Display="always" Required="false" Mask="false">0 */6 * * *</Config>
+  <Config Name="System Filter" Target="SCRAPER_SYSTEM_FILTER" Default="" Mode="" Description="Optional comma-separated console slugs (e.g. nes,snes,gba). Leave empty to manage in UI." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Release Type Filter" Target="SCRAPER_RELEASE_TYPE_FILTER" Default="" Mode="" Description="Optional comma-separated release types (e.g. Retail ROM,Translation,Hack). Leave empty to manage in UI." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Debug Logging" Target="SCRAPER_DEBUG" Default="false" Mode="" Description="Set true for verbose scrape, download, archive, and SD-install logs." Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+</Container>

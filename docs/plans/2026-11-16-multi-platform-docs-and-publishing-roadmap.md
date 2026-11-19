@@ -1,8 +1,8 @@
 ---
 title: Multi-Platform Installation Docs & Publishing Roadmap
-status: planned
+status: implemented
 created_at: 2026-11-16T15:00:36Z
-implemented_at: null
+implemented_at: 2026-11-19T03:50:00Z
 ---
 
 # Multi-Platform Installation Docs & Publishing Roadmap
