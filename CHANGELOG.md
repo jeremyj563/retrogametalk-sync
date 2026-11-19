@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.7.3] - 2026-11-18
+
+- Replaced the overstated `80+ CONSOLES` spec in `docs/assets/logo-banner.svg` with `OFFLINE CATALOG`, and corrected `80+` console count copy across `README.md` and feature documentation to an accurate `30+ classic consoles and handhelds`.
+
 ## [1.7.2] - 2026-11-18
 
 - Trimmed trailing `• AMD64 + ARM64` text from the `docs/assets/logo-banner.svg` footer spec line so the banner typography fits comfortably within the hardware frame without overhanging the right edge.

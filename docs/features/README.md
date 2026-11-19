@@ -34,7 +34,7 @@ Plus, from the left sidebar on any page, you can monitor your **live connection 
 ## Explore the Feature Guides
 
 1. **[Automated Mirroring, Polite Archival & Scheduling](./mirroring-and-preservation.md)**
-   How `rgt-sync` authenticates once, discovers new and updated releases across 80+ classic platforms, filters by console and release type (Retail, Hacks, Translations, Homebrew, Ports, Prototypes), mirrors original-resolution box art and screenshots offline, and runs safely on an unattended schedule.
+   How `rgt-sync` authenticates once, discovers new and updated releases across 30+ classic platforms, filters by console and release type (Retail, Hacks, Translations, Homebrew, Ports, Prototypes), mirrors original-resolution box art and screenshots offline, and runs safely on an unattended schedule.
 2. **[Offline Library Catalog, Rich Metadata & Archive Inspection](./catalog-and-collection-curation.md)**
    How to explore your preserved collection offline with multi-faceted `ANY`/`ALL` filters, full-resolution screenshot lightboxes, multi-file release rollups, inside-the-archive inspection, clutter detection, and **Installed / Not Installed** device tracking.
 3. **[Direct Handheld / SD Card Installer, Smart ROM Picker & Folder Mappings](./handheld-and-sd-card-installer.md)**
