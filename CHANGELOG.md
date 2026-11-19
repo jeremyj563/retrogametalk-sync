@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.9.1] - 2026-11-18
+
+- Added a **release-level fast-skip** before fetching release HTML pages during Full Sync and Incremental Sync: releases already marked `Downloaded` in SQLite whose files are verified on disk (`size > 0`), whose upstream WordPress `modified_gmt` has not advanced, and whose policy-eligible `downloadHints` are already mirrored are skipped immediately without hitting RetroGameTalk or spamming per-file verification logs (reporting one concise per-console summary count instead).
+- Added a **file-level pre-check** inside release page processing so when an updated or partially downloaded release *is* inspected, individual files already marked `Downloaded` and verified on disk are skipped before calling `downloadReleaseFile()`—eliminating unnecessary `downloading` status flicker, dummy transfer workers, and repetitive `[info]` logs while still catching deleted files, upstream updates, and widened Release Type filters.
+
 ## [1.9.0] - 2026-11-18
 
 - Added a console-inspired **Trophy & Achievements System** featuring **60 trophies** across Bronze (`15 pts`), Silver (`30 pts`), Gold (`90 pts`), and Platinum (`180 pts`) tiers spanning preservation milestones, console & era collecting, catalog curation, handheld SD card exporting, CRT Display Studio tuning, homelab resilience, and a handful of hidden secrets waiting to be discovered.

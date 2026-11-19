@@ -20,6 +20,7 @@ import {
   getLastAuthenticatedAt,
   getReleaseFileById,
   getRepositoryItemById,
+  getRepositoryItemByRemoteUrl,
   getSchemaMigrationReport,
   getSystemIndexState,
   listReleasesNeedingRetry,
@@ -53,6 +54,10 @@ import {
 } from './achievements.ts';
 import type { ClientAchievementEventPayload } from '../shared/achievements.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
+import {
+  evaluateReleaseFastSkip,
+  partitionAlreadyDownloadedFiles,
+} from './syncFastSkip.ts';
 import { estimateDownloadHintsBytes } from '../shared/fileSize.ts';
 import {
   classifyFileRoleToTypeKeys,
@@ -3455,6 +3460,59 @@ export class ScraperOrchestrator extends EventEmitter {
           return;
         }
 
+        // Level 2 file-level pre-check: skip files already marked Downloaded in SQLite and verified on disk
+        const preExistingParent = getRepositoryItemByRemoteUrl(canonicalPageUrl);
+        const { alreadyDownloaded, toDownload } = partitionAlreadyDownloadedFiles(
+          preExistingParent?.files || [],
+          eligibleReleases,
+          (rel) => {
+            const m = resolveMirroredPaths(
+              cfg.baseUrl,
+              rel.pageUrl || canonicalPageUrl,
+              cfg.downloadDir,
+              rel.filename,
+            );
+            return path.resolve(cfg.downloadDir, rel.remotePath || m.remotePath);
+          },
+        );
+
+        for (const skippedEntry of alreadyDownloaded) {
+          processedFileUrls.add(skippedEntry.release.remoteUrl);
+          newFound += 1;
+          skippedCount += 1;
+          runLogger(
+            'debug',
+            `[Fast Skip] File already downloaded & verified on disk: ${skippedEntry.existingFile.remotePath || skippedEntry.release.filename}`,
+          );
+        }
+
+        if (toDownload.length === 0) {
+          // Every eligible file is already downloaded & verified on disk — avoid flipping status to 'downloading'
+          if (preExistingParent && effectiveMeta && !preExistingParent.metadata?.detailHydrated) {
+            try {
+              const mirroredAssets = await this.client.mirrorReleaseAssets(
+                effectiveMeta,
+                releaseLocalDir,
+                cfg,
+                signal,
+                runLogger,
+              );
+              updateCatalogReleaseMetadata(
+                preExistingParent.id,
+                mirroredAssets.metadata,
+                mirroredAssets.coverAbsPath,
+                mirroredAssets.screenshotAbsPaths,
+              );
+              this.emitCatalogUpdated('metadata_mirrored', preExistingParent.id);
+            } catch (err) {
+              if (signal.aborted) throw err;
+              runLogger('warn', `Metadata/artwork sync incomplete for ${preExistingParent.title}`, String(err));
+            }
+          }
+          persistCounters();
+          return;
+        }
+
         let parent = upsertCatalogRelease({
           remoteUrl: canonicalPageUrl,
           remotePath: releaseRemoteDir,
@@ -3493,14 +3551,14 @@ export class ScraperOrchestrator extends EventEmitter {
           }
         }
 
-        // Stream or deduplicate all allowed archive files belonging to this release page
+        // Stream only the files that are not already verified on disk
         const knownParentFiles = (getRepositoryItemById(parent.id) || parent).files;
         const releaseTotalFiles = new Set<string>([
           ...knownParentFiles.map((f) => f.remoteUrl),
           ...eligibleReleases.map((r) => r.remoteUrl),
         ]).size;
 
-        await runWithConcurrency(eligibleReleases, cfg.maxConcurrency, signal, async (rel, fileIdx) => {
+        await runWithConcurrency(toDownload, cfg.maxConcurrency, signal, async (rel, fileIdx) => {
           if (signal.aborted) return;
           processedFileUrls.add(rel.remoteUrl);
           newFound += 1;
@@ -3515,7 +3573,10 @@ export class ScraperOrchestrator extends EventEmitter {
             runLogger,
             currentParent,
             undefined,
-            { index: fileIdx + 1, total: Math.max(releaseTotalFiles, eligibleReleases.length) },
+            {
+              index: alreadyDownloaded.length + fileIdx + 1,
+              total: Math.max(releaseTotalFiles, eligibleReleases.length),
+            },
           );
           if (outcome.downloaded) downloadedCount += 1;
           if (outcome.skipped) skippedCount += 1;
@@ -3991,7 +4052,23 @@ export class ScraperOrchestrator extends EventEmitter {
             return false;
           };
 
+          let fastSkippedReleasesCount = 0;
+          let fastSkippedFilesCount = 0;
+
           if (wpRes.supported) {
+            // Capture pre-upsert catalog state BEFORE WP indexing updates remote_updated_at
+            const preUpsertExistingByUrl = new Map<string, RepositoryItemRecord | null>();
+            for (const post of wpRes.posts) {
+              if (!post.link) continue;
+              const canonicalLink = post.link.split('#')[0];
+              if (!preUpsertExistingByUrl.has(canonicalLink)) {
+                preUpsertExistingByUrl.set(
+                  canonicalLink,
+                  getRepositoryItemByRemoteUrl(canonicalLink),
+                );
+              }
+            }
+
             if (!isDryRun && wpRes.posts.length > 0) {
               for (const post of wpRes.posts) {
                 if (!post.link) continue;
@@ -3999,6 +4076,38 @@ export class ScraperOrchestrator extends EventEmitter {
               }
               this.emitCatalogUpdated('sync_indexed');
             }
+
+            const tryFastSkipWpPost = (post: WpPostMetadata): boolean => {
+              if (!post.link) return false;
+              const canonicalLink = post.link.split('#')[0];
+              const existing = preUpsertExistingByUrl.get(canonicalLink) ?? null;
+              const check = evaluateReleaseFastSkip({
+                existing,
+                post,
+                systemSlug,
+                allowedReleaseTypes,
+              });
+              if (!check.skip) {
+                if (existing && existing.status === 'downloaded') {
+                  runLogger(
+                    'debug',
+                    `[Fast Skip] Re-inspecting downloaded release "${post.title || canonicalLink}" (${check.reason})`,
+                  );
+                }
+                return false;
+              }
+              visitedReleasePages.add(canonicalLink);
+              newFound += check.verifiedFilesCount;
+              skippedCount += check.verifiedFilesCount;
+              fastSkippedReleasesCount += 1;
+              fastSkippedFilesCount += check.verifiedFilesCount;
+              runLogger(
+                'debug',
+                `[Fast Skip] Already downloaded & verified on disk: ${post.title || canonicalLink} (${check.verifiedFilesCount} file(s))`,
+              );
+              persistCounters();
+              return true;
+            };
 
             const isIndexOnlyScheduled =
               isDeltaMode && run.triggerType === 'scheduled' && !cfg.autoDownloadNewReleases;
@@ -4033,6 +4142,9 @@ export class ScraperOrchestrator extends EventEmitter {
                   persistCounters();
                   continue;
                 }
+                if (tryFastSkipWpPost(post)) {
+                  continue;
+                }
                 this.currentPhase = `${isDryRun ? 'Dry Run (Incremental)' : 'Incremental'} · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
                 this.emitStatus();
                 await inspectAndProcessReleasePage(post.link, post, cutoffMs);
@@ -4054,6 +4166,9 @@ export class ScraperOrchestrator extends EventEmitter {
                   persistCounters();
                   continue;
                 }
+                if (tryFastSkipWpPost(post)) {
+                  continue;
+                }
                 this.currentPhase = `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
                 this.emitStatus();
                 await inspectAndProcessReleasePage(post.link, post, null);
@@ -4068,6 +4183,13 @@ export class ScraperOrchestrator extends EventEmitter {
             const consoleHtmlUrl = new URL(`${encodeURIComponent(systemSlug)}/`, baseWithSlash).toString();
             runLogger('debug', `[Crawl] "${systemSlug}" has no WP REST CPT; falling back to HTML crawl`, consoleHtmlUrl);
             await crawlHtmlScope([consoleHtmlUrl], systemSlug);
+          }
+
+          if (!isDryRun && !signal.aborted && fastSkippedReleasesCount > 0) {
+            runLogger(
+              'info',
+              `${isDeltaMode ? 'Incremental Sync' : 'Full Sync'} (${systemSlug}): fast-skipped ${fastSkippedReleasesCount} already-downloaded release(s) (${fastSkippedFilesCount} verified file(s) on disk)`,
+            );
           }
 
           if (isDryRun && !signal.aborted && newFound > prevNewFound) {
