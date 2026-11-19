@@ -3041,7 +3041,8 @@ export class RetroGameTalkClient {
     config: ScraperConfigInternal,
     signal: AbortSignal,
     timeoutMs: number,
-    isMultiChunkWave: boolean,
+    treatAsLocalMirrorLimit: boolean,
+    localSettleMs: number,
     log?: LoggerFn,
   ): Promise<{ response: ImpitResponse; finalUrl: string; latencyMs: number }> {
     // Respect any active global 429/503 cooldown before issuing sibling range traffic
@@ -3119,10 +3120,10 @@ export class RetroGameTalkClient {
     if (res.status === 429 || res.status === 503) {
       await res.body?.cancel().catch(() => undefined);
       const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
-      const shouldEscalateGlobal = !isMultiChunkWave || res.status === 429 || retryAfterSec !== undefined;
+      const shouldEscalateGlobal = !treatAsLocalMirrorLimit || res.status === 429 || retryAfterSec !== undefined;
       const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency, {
         escalateGlobalDelay: shouldEscalateGlobal,
-        localSettleMs: 2500,
+        localSettleMs,
       });
       throw new RangeThrottleError(
         res.status,
@@ -3139,10 +3140,10 @@ export class RetroGameTalkClient {
       if (isThrottleErrorPageUrl(redirectLocation)) {
         const inferredStatus = inferThrottleStatusFromUrl(redirectLocation);
         const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
-        const shouldEscalateGlobal = !isMultiChunkWave || inferredStatus === 429 || retryAfterSec !== undefined;
+        const shouldEscalateGlobal = !treatAsLocalMirrorLimit || inferredStatus === 429 || retryAfterSec !== undefined;
         const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency, {
           escalateGlobalDelay: shouldEscalateGlobal,
-          localSettleMs: 2500,
+          localSettleMs,
         });
         throw new RangeThrottleError(
           inferredStatus,
@@ -3168,15 +3169,15 @@ export class RetroGameTalkClient {
         log,
         6,
         timeoutMs,
-        !isMultiChunkWave,
+        !treatAsLocalMirrorLimit,
       );
       if (isThrottleErrorPageUrl(redirected.finalUrl)) {
         await redirected.response.body?.cancel().catch(() => undefined);
         const inferredStatus = inferThrottleStatusFromUrl(redirected.finalUrl);
-        const shouldEscalateGlobal = !isMultiChunkWave || inferredStatus === 429;
+        const shouldEscalateGlobal = !treatAsLocalMirrorLimit || inferredStatus === 429;
         const cooldownMs = this.rateLimiter.recordThrottle(undefined, redirected.latencyMs, {
           escalateGlobalDelay: shouldEscalateGlobal,
-          localSettleMs: 2500,
+          localSettleMs,
         });
         throw new RangeThrottleError(
           inferredStatus,
@@ -3229,6 +3230,7 @@ export class RetroGameTalkClient {
     const chunkThresholdBytes = Math.max(4, Math.min(128, Math.round(config.downloadChunkMinSizeMb ?? 32))) * 1024 * 1024;
     let effectiveChunks = this.getEffectiveHostChunkConcurrency(release.downloadUrl, configuredChunkConcurrency);
     let disableResumeForFreshRestart = false;
+    let mirrorBurstTriggeredInTransfer = false;
 
     for (let streamAttempt = 1; streamAttempt <= maxStreamAttempts; streamAttempt += 1) {
       if (signal.aborted) {
@@ -3357,14 +3359,17 @@ export class RetroGameTalkClient {
           if (isThrottleErrorPageUrl(finalUrl) || isHtmlThrottleBody(htmlSnippet)) {
             const inferredStatus = inferThrottleStatusFromUrl(finalUrl);
             const retryAfterSec = parseRetryAfter(response.headers.get('retry-after'));
-            const wasMultiChunkProbe = effectiveChunks > 1;
+            const wasMultiChunkProbe = effectiveChunks > 1 || mirrorBurstTriggeredInTransfer;
             const shouldEscalateGlobal =
               !wasMultiChunkProbe || inferredStatus === 429 || retryAfterSec !== undefined;
             const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, 0, {
               escalateGlobalDelay: shouldEscalateGlobal,
-              localSettleMs: 2500,
+              localSettleMs: mirrorBurstTriggeredInTransfer ? 7000 : 3500,
             });
             effectiveChunks = 1;
+            if (wasMultiChunkProbe) {
+              mirrorBurstTriggeredInTransfer = true;
+            }
             this.recordHostChunkCap(finalUrl, 1);
             this.recordHostChunkCap(release.downloadUrl, 1);
             if (fs.existsSync(expectedPartPath)) {
@@ -3595,13 +3600,18 @@ export class RetroGameTalkClient {
                 break;
               }
 
+              const waveStartCommittedBytes = sumByteRanges(committedRanges);
+              const waveConfiguredChunks = effectiveChunks;
               const { controller: waveController, dispose: disposeWave } = createLinkedAbortController(signal);
+              const { controller: siblingController, dispose: disposeSiblings } = createLinkedAbortController(waveController.signal);
               let waveThrottleError: RangeThrottleError | null = null;
               let firstWaveError: unknown = null;
+              let siblingThrottlePreservedPrimary = false;
 
               const initialSlice: ByteRange | null = !firstResponseConsumed
                 ? [contentRange.start, contentRange.end]
                 : null;
+              let isPrimaryPreloadedActive = initialSlice !== null;
 
               // Exclude the initial in-flight 206 probe slice from sibling work queue
               const remainingRangesForQueue = initialSlice
@@ -3632,11 +3642,17 @@ export class RetroGameTalkClient {
                 ? Math.min(effectiveChunks, sliceQueue.length + (initialSlice ? 1 : 0))
                 : 1;
 
+              const treatAsLocalMirrorLimit = activeWorkersCount > 1 || mirrorBurstTriggeredInTransfer;
+              const waveLocalSettleMs = Math.min(
+                18_000,
+                Math.round(3500 * Math.pow(2, currentWaveThrottleRetries)),
+              );
+
               if (isResuming || activeWorkersCount > 1) {
                 log?.(
                   'debug',
                   `[Download] Transfer "${finalFilename}" wave active`,
-                  `totalBytes=${totalBytes}, resumedBytes=${sumByteRanges(committedRanges)}, workers=${activeWorkersCount}, queuedSlices=${sliceQueue.length}`,
+                  `totalBytes=${totalBytes}, resumedBytes=${waveStartCommittedBytes}, workers=${activeWorkersCount}, queuedSlices=${sliceQueue.length}`,
                 );
               }
               emitProgressThrottled(true);
@@ -3668,10 +3684,13 @@ export class RetroGameTalkClient {
                   } catch (err) {
                     finalizeSlice(workerId, slice[0], sliceWritten);
                     throw err;
+                  } finally {
+                    isPrimaryPreloadedActive = false;
                   }
                   return;
                 }
 
+                const sliceSignal = workerId > 0 ? siblingController.signal : waveController.signal;
                 const ifRangeVal = pickIfRangeValidator(metaState);
                 const { response: sliceRes, finalUrl: sliceFinalUrl, latencyMs: sliceLatency } = await this.fetchRangeSlice(
                   finalUrl,
@@ -3679,9 +3698,10 @@ export class RetroGameTalkClient {
                   slice,
                   ifRangeVal,
                   config,
-                  waveController.signal,
+                  sliceSignal,
                   streamTimeoutMs,
-                  activeWorkersCount > 1,
+                  treatAsLocalMirrorLimit,
+                  waveLocalSettleMs,
                   log,
                 );
 
@@ -3697,10 +3717,10 @@ export class RetroGameTalkClient {
                     const inferredStatus = inferThrottleStatusFromUrl(sliceFinalUrl);
                     const retryAfterSec = parseRetryAfter(sliceRes.headers.get('retry-after'));
                     const shouldEscalateGlobal =
-                      activeWorkersCount <= 1 || inferredStatus === 429 || retryAfterSec !== undefined;
+                      !treatAsLocalMirrorLimit || inferredStatus === 429 || retryAfterSec !== undefined;
                     const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, sliceLatency, {
                       escalateGlobalDelay: shouldEscalateGlobal,
-                      localSettleMs: 2500,
+                      localSettleMs: waveLocalSettleMs,
                     });
                     throw new RangeThrottleError(
                       inferredStatus,
@@ -3737,7 +3757,7 @@ export class RetroGameTalkClient {
                     fileHandle,
                     slice[0],
                     effectiveExpectedLen,
-                    waveController.signal,
+                    sliceSignal,
                     (delta, totalWritten) => {
                       commitSliceProgress(workerId, slice[0], totalWritten, delta);
                     },
@@ -3758,7 +3778,7 @@ export class RetroGameTalkClient {
                     firstResponseConsumed = true;
                     await runRangeSlice(workerId, initialSlice, response.body!);
                   }
-                  while (!waveController.signal.aborted) {
+                  while (!waveController.signal.aborted && !siblingController.signal.aborted) {
                     const nextSlice = sliceQueue.shift();
                     if (!nextSlice) break;
                     await runRangeSlice(workerId, nextSlice);
@@ -3767,23 +3787,41 @@ export class RetroGameTalkClient {
                   if (err instanceof RangeThrottleError) {
                     if (!waveThrottleError) {
                       waveThrottleError = err;
-                      waveController.abort(err);
+                      // If a sibling worker hits a mirror-only 503 while Worker 0 is already
+                      // streaming its initial 206 response, abort ONLY sibling connections so
+                      // Worker 0 finishes its active slice cleanly before stepping down to 1x.
+                      if (err.isLocalMirrorLimit && workerId > 0 && isPrimaryPreloadedActive) {
+                        siblingThrottlePreservedPrimary = true;
+                        effectiveChunks = 1;
+                        mirrorBurstTriggeredInTransfer = true;
+                        this.recordHostChunkCap(finalUrl, 1);
+                        this.recordHostChunkCap(release.downloadUrl, 1);
+                        siblingController.abort(err);
+                      } else {
+                        waveController.abort(err);
+                      }
                     }
                     return;
                   }
-                  if (!waveController.signal.aborted && !firstWaveError) {
+                  const isExpectedSiblingAbort =
+                    workerId > 0 && siblingController.signal.aborted && !waveController.signal.aborted;
+                  if (!isExpectedSiblingAbort && !waveController.signal.aborted && !firstWaveError) {
                     firstWaveError = err;
                     waveController.abort(err);
                   }
                 }
               };
 
-              const workers: Promise<void>[] = [];
-              for (let w = 0; w < activeWorkersCount; w += 1) {
-                workers.push(spawnWorker(w, w === 0 && initialSlice !== null && !firstResponseConsumed));
+              try {
+                const workers: Promise<void>[] = [];
+                for (let w = 0; w < activeWorkersCount; w += 1) {
+                  workers.push(spawnWorker(w, w === 0 && initialSlice !== null && !firstResponseConsumed));
+                }
+                await Promise.all(workers);
+              } finally {
+                disposeSiblings();
+                disposeWave();
               }
-              await Promise.all(workers);
-              disposeWave();
 
               // Flush all partial progress before deciding next step
               await flushMeta(false);
@@ -3792,20 +3830,58 @@ export class RetroGameTalkClient {
                 throw new DOMException('Aborted', 'AbortError');
               }
 
+              const waveCommittedDelta = Math.max(0, sumByteRanges(committedRanges) - waveStartCommittedBytes);
+
               if (waveThrottleError) {
                 const throttleErr = waveThrottleError as RangeThrottleError;
-                currentWaveThrottleRetries += 1;
+                const steppedDownFromMultiChunk = waveConfiguredChunks > 1 || activeWorkersCount > 1;
                 effectiveChunks = 1;
                 this.recordHostChunkCap(finalUrl, 1);
                 this.recordHostChunkCap(release.downloadUrl, 1);
-                log?.(
-                  'throttle',
-                  `HTTP ${throttleErr.status} limit on chunk transfer for ${finalFilename}; settling ${(throttleErr.cooldownMs / 1000).toFixed(1)}s and stepping directly down to 1x stream`,
-                  `Wave throttle ${currentWaveThrottleRetries}/${maxWaveThrottleRetries}${throttleErr.isLocalMirrorLimit ? ' · local mirror limit' : ''}${throttleErr.retryAfterSec ? ` · Retry-After: ${throttleErr.retryAfterSec}s` : ''}`,
-                );
-                if (currentWaveThrottleRetries > maxWaveThrottleRetries) {
+                if (steppedDownFromMultiChunk || throttleErr.isLocalMirrorLimit) {
+                  mirrorBurstTriggeredInTransfer = true;
+                }
+
+                // If Worker 0 already completed the remaining bytes of the file, finish immediately
+                if (findMissingByteRanges(totalBytes, committedRanges).length === 0) {
+                  break;
+                }
+
+                // If Worker 0 preserved and completed its active primary slice while sibling workers
+                // were stepped down, settle briefly and continue at 1x without burning a wave retry slot.
+                if (siblingThrottlePreservedPrimary && waveCommittedDelta > 0) {
+                  const savedLabel =
+                    waveCommittedDelta >= 1024 * 1024
+                      ? `${(waveCommittedDelta / (1024 * 1024)).toFixed(1)} MB`
+                      : `${Math.round(waveCommittedDelta / 1024)} KB`;
+                  const settleMs = Math.min(throttleErr.cooldownMs, 3500);
+                  log?.(
+                    'throttle',
+                    `HTTP ${throttleErr.status} sibling chunk limit for ${finalFilename}; preserved primary slice (${savedLabel}), stepping down to 1x stream and settling ${(settleMs / 1000).toFixed(1)}s`,
+                    `Mirror capped to 1x${throttleErr.isLocalMirrorLimit ? ' · local mirror limit' : ''}${throttleErr.retryAfterSec ? ` · Retry-After: ${throttleErr.retryAfterSec}s` : ''}`,
+                  );
+                  await sleepWithAbort(settleMs, signal);
+                  continue;
+                }
+
+                if (currentWaveThrottleRetries >= maxWaveThrottleRetries) {
+                  log?.(
+                    'throttle',
+                    `HTTP ${throttleErr.status} limit on ${steppedDownFromMultiChunk ? 'chunk' : '1x'} transfer for ${finalFilename}; exhausted wave retries (${currentWaveThrottleRetries}/${maxWaveThrottleRetries}), handing off to stream resume`,
+                    `${throttleErr.isLocalMirrorLimit ? 'Local mirror limit' : 'Upstream rate limit'}${throttleErr.retryAfterSec ? ` · Retry-After: ${throttleErr.retryAfterSec}s` : ''}`,
+                  );
                   throw throttleErr;
                 }
+
+                currentWaveThrottleRetries += 1;
+                const actionText = steppedDownFromMultiChunk
+                  ? `settling ${(throttleErr.cooldownMs / 1000).toFixed(1)}s and stepping directly down to 1x stream`
+                  : `settling ${(throttleErr.cooldownMs / 1000).toFixed(1)}s before 1x retry`;
+                log?.(
+                  'throttle',
+                  `HTTP ${throttleErr.status} limit on ${steppedDownFromMultiChunk ? 'chunk' : '1x'} transfer for ${finalFilename}; ${actionText}`,
+                  `Wave throttle ${currentWaveThrottleRetries}/${maxWaveThrottleRetries}${throttleErr.isLocalMirrorLimit ? ' · local mirror limit' : ''}${throttleErr.retryAfterSec ? ` · Retry-After: ${throttleErr.retryAfterSec}s` : ''}`,
+                );
                 if (throttleErr.isLocalMirrorLimit) {
                   await sleepWithAbort(throttleErr.cooldownMs, signal);
                 } else {
@@ -3816,6 +3892,10 @@ export class RetroGameTalkClient {
 
               if (firstWaveError) {
                 throw firstWaveError;
+              }
+
+              if (waveCommittedDelta > 0) {
+                currentWaveThrottleRetries = 0;
               }
             }
 

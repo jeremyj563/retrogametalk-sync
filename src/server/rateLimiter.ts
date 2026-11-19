@@ -173,11 +173,11 @@ export class AdaptiveRateLimiter {
     const now = Date.now();
     const retryMs = retryAfterSeconds ? Math.round(retryAfterSeconds * 1000) : 0;
 
-    // Mirror multi-connection 503 rejections (e.g. parallel HTTP Range slices) should step down
-    // the mirror connection count locally without poisoning global WordPress API pacing.
+    // Mirror multi-connection 503 rejections (e.g. parallel HTTP Range slices) and post-burst
+    // mirror cooldown windows should step down/settle locally without poisoning global WordPress API pacing.
     if (options.escalateGlobalDelay === false) {
       const localCooldownMs = Math.min(
-        8000,
+        20_000,
         Math.max(2000, retryMs || options.localSettleMs || 2500),
       );
       logServer(
