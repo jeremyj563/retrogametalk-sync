@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.14.1] - 2026-11-19
+
+- Fixed the **Update README Visual Previews** GitHub Actions workflow (`.github/workflows/update-screenshots.yml`) to work cleanly without a committed `package-lock.json` by removing `cache: 'npm'` from `actions/setup-node` and falling back to `npm install --no-package-lock` (plus `--no-package-lock` for ephemeral Playwright installation).
+
 ## [1.14.0] - 2026-11-19
 
 - Added an **Automated Playwright Visual Preview Pipeline** (`npm run capture:screenshots`) powered by headless Chromium and **FFmpeg** that generates a looping 1200px animated WebP hero walkthrough (`console-walkthrough.webp`) plus four crisp `1440×900` WebP screenshots (`sync-overview.webp`, `catalog-grid.webp`, `game-detail-drawer.webp`, and an **Amber**-highlighted `sd-card-exporter.webp`) under `docs/assets/screenshots/`.

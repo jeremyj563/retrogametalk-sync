@@ -62,7 +62,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
 
       - name: Ensure FFmpeg is installed
         run: |
@@ -74,12 +73,16 @@ jobs:
 
       - name: Install dependencies & build production frontend
         run: |
-          npm ci
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-package-lock
+          fi
           npm run build
 
       - name: Install Playwright Chromium (ephemeral, outside package.json)
         run: |
-          npm install --no-save playwright
+          npm install --no-save --no-package-lock playwright
           npx playwright install --with-deps chromium
 
       - name: Capture animated walkthrough & static screenshots
