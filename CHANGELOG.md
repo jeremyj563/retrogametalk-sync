@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.14.3] - 2026-11-19
+
+- Upgraded the automated screenshot demo library with **10 bespoke, title-matched retro illustrated WebP box-art covers** (covering the entire top-10 Catalog Grid across SNES, N64, GBA, PS1, Genesis, Saturn, Dreamcast, PSP, NDS, and NES) plus **3 bespoke 16-bit SNES pixel-art gameplay screenshots** for the featured **Game Detail Drawer** & **Lightbox** walkthrough (`Chrono Vanguard DX`), keeping the production Docker runtime image untouched.
+- Made demo release timestamps strictly monotonic so all 10 bespoke covers consistently lead the default Catalog Box-Art Grid sort.
+
 ## [1.14.2] - 2026-11-19
 
 - Updated `.github/workflows/update-screenshots.yml` to pass `--legacy-peer-deps` on npm installs (matching `Dockerfile` to avoid the `vite@8` / `esbuild@0.25` optional peer conflict) and fixed the `gh pr list` `jq` query (`// empty`) so first-time PR creation handles an empty PR list cleanly.
