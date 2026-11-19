@@ -292,14 +292,13 @@ async function bootstrap() {
           sourceMode: typeof rawFilters.sourceMode === 'string' ? rawFilters.sourceMode : undefined,
           sort: typeof rawFilters.sort === 'string' ? rawFilters.sort : undefined,
         };
-        const preview = queryRepositoryItemIds(filters);
         const result = await orchestrator.queueCatalogDownloads({ filters });
         if (result.queuedCount > 0) {
           orchestrator.recordServerAchievementCounter('on_demand_queued', result.queuedCount, 'increment');
         }
         res.status(202).json({
           ...result,
-          skippedCount: preview.alreadyDownloadedCount,
+          skippedCount: result.alreadyQueuedCount + result.alreadyDownloadedCount,
         });
         return;
       }
@@ -319,11 +318,11 @@ async function bootstrap() {
       }
       res.status(202).json({
         ...result,
-        skippedCount: Math.max(0, cleanIds.length - result.queuedCount),
+        skippedCount: result.alreadyQueuedCount + result.alreadyDownloadedCount,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const statusCode = /No downloadable|already downloaded|Provide/i.test(msg) ? 400 : 409;
+      const statusCode = /No downloadable|already downloaded|already queued|Provide/i.test(msg) ? 400 : 409;
       res.status(statusCode).json({ error: msg });
     }
   });

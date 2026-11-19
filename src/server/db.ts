@@ -1325,22 +1325,49 @@ export function updateCatalogCoverPath(releaseId: number, coverLocalPath: string
     .run(coverLocalPath, releaseId);
 }
 
-export function markCatalogItemsQueued(
+export interface MarkCatalogItemsQueuedResult {
+  queuedIds: number[];
+  alreadyQueuedIds: number[];
+  alreadyDownloadedIds: number[];
+}
+
+export function markCatalogItemsQueuedDetailed(
   ids: number[],
   runId?: number | null,
-): number[] {
+  options?: {
+    activeOrPendingIds?: ReadonlySet<number>;
+  },
+): MarkCatalogItemsQueuedResult {
   const cleanIds = Array.from(
     new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
   );
-  if (cleanIds.length === 0) return [];
+  if (cleanIds.length === 0) {
+    return { queuedIds: [], alreadyQueuedIds: [], alreadyDownloadedIds: [] };
+  }
+
+  const activeOrPendingIds = options?.activeOrPendingIds;
 
   const tx = getDb().transaction(() => {
     const queuedIds: number[] = [];
+    const alreadyQueuedIds: number[] = [];
+    const alreadyDownloadedIds: number[] = [];
+
     for (const releaseId of cleanIds) {
       const row = getDb()
         .prepare('SELECT id, status FROM catalog_releases WHERE id = ?')
         .get(releaseId) as { id: number; status: string } | undefined;
       if (!row) continue;
+
+      if (activeOrPendingIds?.has(releaseId) || row.status === 'downloading') {
+        alreadyQueuedIds.push(releaseId);
+        continue;
+      }
+
+      if (row.status === 'downloaded' || row.status === 'skipped') {
+        alreadyDownloadedIds.push(releaseId);
+        continue;
+      }
+
       if (!['available', 'failed', 'partial', 'queued'].includes(row.status)) {
         continue;
       }
@@ -1370,10 +1397,17 @@ export function markCatalogItemsQueued(
       recomputeReleaseRollup(releaseId);
       queuedIds.push(releaseId);
     }
-    return queuedIds;
+    return { queuedIds, alreadyQueuedIds, alreadyDownloadedIds };
   });
 
   return tx();
+}
+
+export function markCatalogItemsQueued(
+  ids: number[],
+  runId?: number | null,
+): number[] {
+  return markCatalogItemsQueuedDetailed(ids, runId).queuedIds;
 }
 
 export function markCatalogReleaseFailed(
@@ -1986,6 +2020,7 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   queueableIds: number[];
   estimatedQueueBytes: number;
   alreadyDownloadedCount: number;
+  alreadyQueuedCount: number;
   total: number;
 } {
   const { where, args, orderBy } = buildCatalogWhereAndOrder(params);
@@ -1998,6 +2033,7 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   const queueableIds: number[] = [];
   let estimatedQueueBytes = 0;
   let alreadyDownloadedCount = 0;
+  let alreadyQueuedCount = 0;
 
   for (const row of rows) {
     const numId = Number(row.id);
@@ -2005,6 +2041,8 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
     if (row.status === 'downloaded' || row.status === 'skipped') {
       downloadableIds.push(numId);
       alreadyDownloadedCount += 1;
+    } else if (row.status === 'queued' || row.status === 'downloading') {
+      alreadyQueuedCount += 1;
     } else if (row.status === 'partial') {
       downloadableIds.push(numId);
       queueableIds.push(numId);
@@ -2021,6 +2059,7 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
     queueableIds,
     estimatedQueueBytes,
     alreadyDownloadedCount,
+    alreadyQueuedCount,
     total: ids.length,
   };
 }
