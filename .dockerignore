@@ -1,9 +1,37 @@
+# Dependencies & build outputs
 node_modules
 dist
+build
+coverage
+
+# Runtime / local data directories
 data
 mirror-data
+
+# VCS, CI & editor artifacts
 .git
 .github
+.aistudio
+.DS_Store
+
+# Documentation, screenshots & visual preview assets
+docs
+README.md
+CHANGELOG.md
+AGENTS.md
+
+# Local tooling, capture scripts & test suites (not needed in container build)
+scripts
+tests
+
+# Deployment manifests & non-runtime repo metadata
+k8s
+deploy
+docker-compose.yml
+metadata.json
+bun.lock
+
+# Secrets & logs
 .env
 .env.*
 !.env.example
