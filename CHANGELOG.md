@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.7.6] - 2026-11-18
+
+- Updated default `image.tag` in `k8s/charts/retrogametalk-sync/values.yaml` to empty so Helm chart deployments automatically resolve to `Chart.AppVersion` instead of `main`.
+- Expanded `.github/workflows/docker-publish.yml` GitHub Release notes with a `Published Artifacts` section listing the multi-arch GHCR container image, optional Docker Hub mirror, GHCR OCI Helm chart reference, and `.tgz` chart archive, and automatically attach `retrogametalk-sync-<version>.tgz` as a downloadable GitHub Release asset.
+- Documented GitHub Release artifact manifest and Helm `values.yaml` version-bump rules in `AGENTS.md` for future packages and artifacts.
+
 ## [1.7.5] - 2026-11-18
 
 - Added smooth, mellow slide-over open and close transitions to `GameDetailDrawer` (`cubic-bezier(0.22, 1, 0.36, 1)` compositor-only glide from the right paired with a soft backdrop fade), retaining the last rendered item snapshot during close and supporting interruptible mid-close re-opening.
