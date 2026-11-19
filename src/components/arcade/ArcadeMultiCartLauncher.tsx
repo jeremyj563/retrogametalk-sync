@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Gamepad2, Play, Trophy, Volume2, VolumeX, X } from 'lucide-react';
+import { Gamepad2, Lock, Play, Trophy, Volume2, VolumeX, X } from 'lucide-react';
+import {
+  ARCADE_CABINET_STYLE_META,
+  type ArcadeCabinetStyleId,
+  isArcadeCabinetStyleUnlocked,
+} from '../../shared/achievementRewards';
 import { ARCADE_CARTRIDGES } from '../../utils/arcadeGames';
 import type { ArcadeCartridgeId } from '../../utils/easterEggs';
 import { retroSynth } from '../../utils/retroSynth';
@@ -8,6 +13,9 @@ export interface ArcadeMultiCartLauncherProps {
   konamiBonus: boolean;
   muted: boolean;
   highScores: Record<ArcadeCartridgeId, number>;
+  earnedPoints?: number;
+  cabinetStyle?: ArcadeCabinetStyleId;
+  onSelectCabinetStyle?: (style: ArcadeCabinetStyleId) => void;
   onToggleMute: () => void;
   onSelectCartridge: (cartId: ArcadeCartridgeId) => void;
   onClose: () => void;
@@ -102,6 +110,9 @@ export function ArcadeMultiCartLauncher({
   konamiBonus,
   muted,
   highScores,
+  earnedPoints = 0,
+  cabinetStyle = 'standard',
+  onSelectCabinetStyle,
   onToggleMute,
   onSelectCartridge,
   onClose,
@@ -242,7 +253,7 @@ export function ArcadeMultiCartLauncher({
 
       {/* Multi-Cart Shelf Viewport */}
       <div className="relative bg-crt-bg p-3.5 sm:p-5 space-y-4">
-        <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-crt-border/80 pb-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-crt-border/80 pb-2.5">
           <div>
             <p className="text-[11px] font-mono uppercase tracking-[0.14em] text-crt-amber">
               Select Cartridge Bank
@@ -251,9 +262,50 @@ export function ArcadeMultiCartLauncher({
               Pick a classic ROM cartridge below—each stores its own personal best score.
             </p>
           </div>
-          <span className="text-[11px] font-mono text-crt-muted tabular-nums">
-            KEYS 1–4 · ARROWS + ENTER
-          </span>
+          <div className="flex flex-wrap items-center gap-3 ml-auto">
+            {onSelectCabinetStyle && (
+              <div className="flex items-center gap-1" role="group" aria-label="Cabinet trim style">
+                <span className="text-[10px] font-mono text-crt-muted mr-0.5">Trim</span>
+                {(['standard', 'cabinet_gold', 'cabinet_overdrive'] as const).map((styleId) => {
+                  const meta = ARCADE_CABINET_STYLE_META[styleId];
+                  const unlocked = isArcadeCabinetStyleUnlocked(styleId, earnedPoints);
+                  const active = cabinetStyle === styleId;
+                  return (
+                    <button
+                      key={styleId}
+                      type="button"
+                      disabled={!unlocked}
+                      onClick={() => {
+                        if (!unlocked) return;
+                        retroSynth.menuSelect();
+                        onSelectCabinetStyle(styleId);
+                      }}
+                      title={
+                        unlocked
+                          ? `${meta.label} cabinet bezel`
+                          : `${meta.label} · Unlock at ${meta.requiredPoints.toLocaleString()} trophy pts`
+                      }
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono rounded border transition-colors whitespace-nowrap ${
+                        !unlocked
+                          ? 'border-crt-border/60 bg-crt-surface/40 text-crt-muted/45 cursor-not-allowed'
+                          : active
+                            ? styleId === 'cabinet_gold'
+                              ? 'border-crt-amber/75 bg-crt-amber/15 text-crt-amber font-semibold cursor-pointer'
+                              : 'border-crt-phosphor/75 bg-crt-phosphor/15 text-crt-phosphor font-semibold cursor-pointer'
+                            : 'border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text cursor-pointer'
+                      }`}
+                    >
+                      {!unlocked && <Lock className="h-2.5 w-2.5" />}
+                      <span>{meta.shortLabel}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <span className="text-[11px] font-mono text-crt-muted tabular-nums">
+              KEYS 1–4 · ARROWS + ENTER
+            </span>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.12.0] - 2026-11-19
+
+- Added a **10-Level Operator Rank Ladder** (`Lv. 1 Cartridge Cadet` at `0 pts` through `Lv. 10 Master Preservationist` at `2,100 pts`) driven by earned Trophy Points, displayed in the Trophy Case Drawer header, progress summary, top header Trophy button tooltip, and full Rank Ladder view.
+- Added a **Rewards** tab inside the Trophy Case Drawer where earned Trophy Points unlock purely cosmetic and audio milestones (with zero sync, catalog, or export functionality gated), complete with live progress bars, one-click equip/apply controls, and audio previews.
+- Added **4 unlockable Collector CRT Phosphor Palettes** in CRT Display Studio (`DMG Olive` at `100 pts`, `Synthwave` at `350 pts`, `Crimson Tube` at `700 pts`, and `Trinitron White` at `1,200 pts`) alongside the always-free Green, Amber, and Cyan phosphors, plus the flagship **Broadcast BVM** studio calibration preset (`1,500 pts`).
+- Added **3 unlockable Trophy Chime Sound Packs** (`16-Bit FM Synth` at `200 pts`, `Coin-Op Arcade` at `550 pts`, and `Hi-Fi Studio` at `1,000 pts`) with live synthesized preview buttons in the Rewards tab, plus **Gold Collector's Bezel** (`900 pts`) and **Platinum Prism Crest** (`1,800 pts`) trims for the Trophy medallion (honoring `prefers-reduced-motion`)—plus a couple of extra collector trims waiting for operators who uncover the console's deeper secrets.
+
 ## [1.11.1] - 2026-11-18
 
 - Hardened on-demand Catalog download queueing against duplicate and overlapping submissions by tracking `inFlightDownloadIds` alongside `pendingDownloadQueueSet`, eliminating the race window while a release is fetching HTML/metadata before its status flips to `downloading`, and avoiding empty `sync_runs` rows when all selected items are already downloaded.

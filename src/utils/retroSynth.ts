@@ -1,3 +1,7 @@
+import {
+  loadRewardCosmeticPrefs,
+  type TrophyChimePackId,
+} from '../shared/achievementRewards';
 import { loadEasterEggMuted, saveEasterEggMuted } from './easterEggs';
 
 // C major pentatonic scale spanning two octaves for musical brick-combo chimes
@@ -18,6 +22,7 @@ class RetroChiptuneSynth {
   private ctx: AudioContext | null = null;
   private noiseBuffer: AudioBuffer | null = null;
   private muted: boolean = loadEasterEggMuted();
+  private chimePack: TrophyChimePackId = loadRewardCosmeticPrefs().chimePack;
 
   isMuted(): boolean {
     return this.muted;
@@ -26,6 +31,14 @@ class RetroChiptuneSynth {
   setMuted(next: boolean): void {
     this.muted = next;
     saveEasterEggMuted(next);
+  }
+
+  getChimePack(): TrophyChimePackId {
+    return this.chimePack;
+  }
+
+  setChimePack(pack: TrophyChimePackId): void {
+    this.chimePack = pack;
   }
 
   private getContext(): AudioContext | null {
@@ -223,7 +236,71 @@ class RetroChiptuneSynth {
     this.playTone(1318.51, 0.16, { type: 'square', delaySec: 0.72, volume: 0.1 });
   }
 
-  trophyUnlock(tier: 'bronze' | 'silver' | 'gold' | 'platinum'): void {
+  trophyUnlock(
+    tier: 'bronze' | 'silver' | 'gold' | 'platinum',
+    packOverride?: TrophyChimePackId,
+  ): void {
+    const pack = packOverride ?? this.chimePack;
+
+    if (pack === 'fm_16bit') {
+      // Warm 16-bit FM synth bells (dual slightly-detuned sine + triangle harmonics)
+      const seq =
+        tier === 'bronze'
+          ? [523.25, 783.99]
+          : tier === 'silver'
+            ? [523.25, 659.25, 1046.5]
+            : tier === 'gold'
+              ? [440, 554.37, 659.25, 880, 1108.73]
+              : [440, 554.37, 659.25, 880, 1108.73, 1318.51, 1760];
+      seq.forEach((hz, idx) => {
+        const delay = idx * 0.068;
+        const dur = idx === seq.length - 1 ? 0.42 : 0.14;
+        this.playTone(hz, dur, { type: 'sine', delaySec: delay, volume: 0.11 });
+        this.playTone(hz * 1.006, dur * 0.9, { type: 'triangle', delaySec: delay, volume: 0.08 });
+        this.playTone(hz * 2, dur * 0.6, { type: 'sine', delaySec: delay + 0.012, volume: 0.045 });
+      });
+      return;
+    }
+
+    if (pack === 'coinop_arcade') {
+      // Snappy 1990s coin-op arcade credit + fanfare arpeggios
+      const seq =
+        tier === 'bronze'
+          ? [987.77, 1318.51]
+          : tier === 'silver'
+            ? [783.99, 987.77, 1174.66, 1567.98]
+            : tier === 'gold'
+              ? [659.25, 783.99, 1046.5, 1318.51, 1567.98]
+              : [523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98, 2093.0];
+      seq.forEach((hz, idx) => {
+        const delay = idx * 0.046;
+        const dur = idx === seq.length - 1 ? 0.34 : 0.075;
+        this.playTone(hz, dur, { type: 'square', delaySec: delay, volume: 0.085 });
+        this.playTone(hz * 0.5, dur * 0.8, { type: 'sawtooth', delaySec: delay, volume: 0.045 });
+      });
+      return;
+    }
+
+    if (pack === 'symphonic_crt') {
+      // Lush multi-voice crystalline console chord bloom
+      const rootNotes =
+        tier === 'bronze'
+          ? [587.33, 880]
+          : tier === 'silver'
+            ? [523.25, 659.25, 987.77]
+            : tier === 'gold'
+              ? [440, 659.25, 880, 1108.73, 1318.51]
+              : [392.0, 523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98];
+      rootNotes.forEach((hz, idx) => {
+        const delay = idx * 0.075;
+        const dur = idx >= rootNotes.length - 2 ? 0.52 : 0.24;
+        this.playTone(hz, dur, { type: 'sine', delaySec: delay, volume: 0.1 });
+        this.playTone(hz * 1.5, dur * 0.85, { type: 'triangle', delaySec: delay + 0.015, volume: 0.05 });
+      });
+      return;
+    }
+
+    // Default: 'classic_8bit'
     if (tier === 'bronze') {
       // Crisp, warm 2-note retro console ping (E5 -> B5)
       this.playTone(659.25, 0.09, { type: 'triangle', volume: 0.11 });
