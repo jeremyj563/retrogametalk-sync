@@ -1,7 +1,7 @@
 {
   "name": "react-example",
   "private": true,
-  "version": "1.13.1",
+  "version": "1.14.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "capture:screenshots": "tsx scripts/capture-screenshots/capture.ts"
   },
   "dependencies": {
     "7zip-bin": "^5.2.0",

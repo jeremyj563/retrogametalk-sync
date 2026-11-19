@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.14.0] - 2026-11-19
+
+- Added an **Automated Playwright Visual Preview Pipeline** (`npm run capture:screenshots`) powered by headless Chromium and **FFmpeg** that generates a looping 1200px animated WebP hero walkthrough (`console-walkthrough.webp`) plus four crisp `1440×900` WebP screenshots (`sync-overview.webp`, `catalog-grid.webp`, `game-detail-drawer.webp`, and an **Amber**-highlighted `sd-card-exporter.webp`) under `docs/assets/screenshots/`.
+- Built an isolated **ephemeral demo SQLite seeder** (running the real `v1`–`v19` schema migrations with locally rendered retro PNG box art & widescreen gameplay screenshots, telemetry history, and browser-intercepted active multi-chunk transfer streams—zero mock endpoints in production server code), plus optional `--url <base-url>` / `CAPTURE_BASE_URL`, `--preset`, `--motion`, and `--skip-video` overrides for capturing live local instances.
+- Added a dedicated GitHub Actions workflow (`.github/workflows/update-screenshots.yml`) triggered manually (`workflow_dispatch`) and on UI source pushes to `main` that installs Playwright ephemerally (keeping the production Docker image completely lean), uploads preview artifacts, and opens or updates a single review PR (`chore/update-readme-screenshots`) with inline visual previews.
+- Replaced the `README.md` Visual Preview placeholder with the centered Hero Walkthrough + 2×2 Screenshot Gallery showcase.
+
 ## [1.13.1] - 2026-11-19
 
 - Added smooth GPU-composited open and close transitions to the Catalog Item Details full-resolution box-art & screenshot lightbox (fade + gentle scale-settle with exit snapshot retention so artwork and controls ease out cleanly on Escape, backdrop click, or Close).
