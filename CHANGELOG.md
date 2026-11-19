@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.15.0] - 2026-11-19
+
+- Added an **Unlockable Retro Synth Soundtrack** powered by a zero-dependency Web Audio API lookahead sequencer with **7 seamlessly looping multi-channel compositions**: 1 free starter track (*Phosphor Idle* — CRT Ambient, `0 pts`) plus 6 milestone tracks unlocked via Trophy Points (*Bitplane Bounce* 8-Bit Chiptune at `150 pts`, *Outrun CRT* 80s Synthwave at `400 pts`, *FM Cartridge Drive* 16-Bit FM at `650 pts`, *Subcarrier Pulse* Acid Techno at `950 pts`, *Cyberdeck Horizon* Dark Synth at `1,300 pts`, and *Broadcast Finale* Euro-Synth at `1,650 pts`).
+- Added a compact **Header Sound Deck** beside the Trophy Case button featuring 1-click Play/Pause, a live **Mini Spectrum Visualizer** synced to the active CRT phosphor palette (respecting Living UI Motion `Off` and `prefers-reduced-motion`), and an anchored deck popover with transport controls, **Loop / Cycle / Shuffle** playback modes, independent volume/mute controls, and the full 7-track unlock selector.
+- Integrated unlockable soundtrack tracks into the **Trophy Case → Rewards** tab with a **Background Soundtrack** quick-control bar, live point progress bars for locked tracks, and one-click **Play / Pause** actions on unlocked tracks.
+- Added smart background audio etiquette: playback stays strictly **off by default** until Play is clicked, **auto-pauses** when the browser tab is hidden (and resumes when visible again), and **automatically ducks volume** during Trophy unlock chimes, easter-egg fanfares, and while the hidden 4-in-1 CRT Arcade Cabinet is open.
+
 ## [1.14.4] - 2026-11-19
 
 - Expanded `.dockerignore` to exclude `docs/` (including README visual preview screenshots & animated walkthroughs), `scripts/` (including demo box-art fixtures), `tests/`, `k8s/`, `deploy/`, `docker-compose.yml`, and non-runtime repository metadata from the Docker build context—keeping container builds fast and preserving Docker layer caching across docs/screenshot updates.

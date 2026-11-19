@@ -23,6 +23,25 @@ class RetroChiptuneSynth {
   private noiseBuffer: AudioBuffer | null = null;
   private muted: boolean = loadEasterEggMuted();
   private chimePack: TrophyChimePackId = loadRewardCosmeticPrefs().chimePack;
+  private duckListeners = new Set<(durationMs: number) => void>();
+
+  subscribeDuckRequests(listener: (durationMs: number) => void): () => void {
+    this.duckListeners.add(listener);
+    return () => {
+      this.duckListeners.delete(listener);
+    };
+  }
+
+  private notifyDuck(durationMs: number): void {
+    if (this.muted) return;
+    for (const listener of this.duckListeners) {
+      try {
+        listener(durationMs);
+      } catch {
+        // Ignore subscriber errors
+      }
+    }
+  }
 
   isMuted(): boolean {
     return this.muted;
@@ -185,6 +204,7 @@ class RetroChiptuneSynth {
   }
 
   konamiUnlock(): void {
+    this.notifyDuck(1050);
     const notes = [523.25, 659.25, 783.99, 1046.5, 987.77, 1318.51];
     notes.forEach((hz, index) => {
       this.playTone(hz, index === notes.length - 1 ? 0.22 : 0.075, {
@@ -196,6 +216,7 @@ class RetroChiptuneSynth {
   }
 
   barrelRoll(): void {
+    this.notifyDuck(1100);
     this.playTone(261.63, 0.42, { type: 'triangle', freqEnd: 659.25, volume: 0.09 });
     this.playTone(659.25, 0.48, {
       type: 'triangle',
@@ -208,6 +229,7 @@ class RetroChiptuneSynth {
   cartridgeBlow(): void {
     const ctx = this.getContext();
     if (!ctx) return;
+    this.notifyDuck(1150);
 
     const now = ctx.currentTime;
     const source = ctx.createBufferSource();
@@ -240,6 +262,9 @@ class RetroChiptuneSynth {
     tier: 'bronze' | 'silver' | 'gold' | 'platinum',
     packOverride?: TrophyChimePackId,
   ): void {
+    const duckMs =
+      tier === 'platinum' ? 1650 : tier === 'gold' ? 1400 : tier === 'silver' ? 1200 : 1000;
+    this.notifyDuck(duckMs);
     const pack = packOverride ?? this.chimePack;
 
     if (pack === 'fm_16bit') {
@@ -459,6 +484,7 @@ class RetroChiptuneSynth {
   }
 
   vsyncGlitch(): void {
+    this.notifyDuck(1250);
     // Rapid 60Hz-inspired vertical-hold flutter bursts followed by a clean sync lock-on ping
     const pulses = [
       { f1: 118, f2: 58, delay: 0, dur: 0.14 },

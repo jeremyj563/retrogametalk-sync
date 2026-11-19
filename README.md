@@ -9,7 +9,7 @@
 <h3>Always-On Retro ROM Preservation Mirror, Offline Game Catalog &amp; Direct Handheld SD Installer</h3>
 
 <p>
-  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.14.4-38e56b?style=flat-square&labelColor=0b1510" alt="Version 1.14.4" /></a>
+  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.15.0-38e56b?style=flat-square&labelColor=0b1510" alt="Version 1.15.0" /></a>
   <a href="./.github/workflows/docker-publish.yml"><img src="https://img.shields.io/badge/platforms-linux%2Famd64%20%7C%20linux%2Farm64-1f6feb?style=flat-square&labelColor=0b1510" alt="Architectures: linux/amd64 | linux/arm64" /></a>
   <a href="https://ghcr.io/jeremyj563/retrogametalk-sync"><img src="https://img.shields.io/badge/registry-GHCR-238636?style=flat-square&labelColor=0b1510&logo=github" alt="GHCR Container Registry" /></a>
   <!-- TODO: Replace with live Docker Hub badge once DOCKERHUB_USERNAME/DOCKERHUB_TOKEN are configured and first release image is pushed -->

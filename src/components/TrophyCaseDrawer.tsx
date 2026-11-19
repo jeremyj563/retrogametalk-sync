@@ -4,6 +4,7 @@ import {
   Bell,
   BellOff,
   Check,
+  Disc3,
   Eye,
   EyeOff,
   Gamepad2,
@@ -11,14 +12,17 @@ import {
   Monitor,
   Music,
   Palette,
+  Pause,
   Play,
   Search,
+  SkipForward,
   Sparkles,
   Trophy,
   Volume2,
   VolumeX,
   X,
 } from 'lucide-react';
+import type { SoundtrackController } from '../hooks/useSoundtrackPlayer';
 import {
   type AchievementRewardDefinition,
   type ArcadeCabinetStyleId,
@@ -43,12 +47,14 @@ import {
   type CrtPalette,
   detectActiveCrtPreset,
 } from '../shared/crtDisplay';
+import type { MusicTrackId } from '../shared/soundtrack';
 import { formatDateTime } from '../utils/format';
 import { retroSynth } from '../utils/retroSynth';
 import { getTierVisuals, TrophyTierMedallion } from './TrophyToastStack';
 
 interface TrophyCaseDrawerProps {
   open: boolean;
+  initialTab?: DrawerTab;
   snapshot: AchievementsSnapshot | null;
   loading: boolean;
   focusedTrophyId: string | null;
@@ -56,6 +62,7 @@ interface TrophyCaseDrawerProps {
   crtSettings: CrtDisplaySettings;
   rewardCosmetics: RewardCosmeticPrefs;
   effectiveCrestStyle: TrophyCrestStyleId;
+  soundtrack: SoundtrackController;
   onSelectPalette: (palette: CrtPalette) => void;
   onApplyBvmPreset: () => void;
   onUpdateRewardCosmetics: (patch: Partial<RewardCosmeticPrefs>) => void;
@@ -86,6 +93,7 @@ function prefersReducedMotion(): boolean {
 
 export function TrophyCaseDrawer({
   open,
+  initialTab = 'trophies',
   snapshot,
   loading,
   focusedTrophyId,
@@ -93,6 +101,7 @@ export function TrophyCaseDrawer({
   crtSettings,
   rewardCosmetics,
   effectiveCrestStyle,
+  soundtrack,
   onSelectPalette,
   onApplyBvmPreset,
   onUpdateRewardCosmetics,
@@ -101,7 +110,7 @@ export function TrophyCaseDrawer({
 }: TrophyCaseDrawerProps) {
   const [rendered, setRendered] = useState(open);
   const [phase, setPhase] = useState<DrawerPhase>(open ? 'entering' : 'closing');
-  const [activeTab, setActiveTab] = useState<DrawerTab>('trophies');
+  const [activeTab, setActiveTab] = useState<DrawerTab>(initialTab);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [categoryFilter, setCategoryFilter] = useState<'all' | AchievementCategory>('all');
   const [search, setSearch] = useState('');
@@ -179,6 +188,16 @@ export function TrophyCaseDrawer({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [open, onClose]);
+
+  // Sync requested tab when drawer opens (e.g., jumping straight to Rewards from Sound Deck)
+  useEffect(() => {
+    if (!open) return;
+    if (focusedTrophyId) {
+      setActiveTab('trophies');
+    } else if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [open, initialTab, focusedTrophyId]);
 
   // Reset filters & scroll to focused trophy when opened from a toast click
   useEffect(() => {
@@ -287,6 +306,8 @@ export function TrophyCaseDrawer({
         return rewardCosmetics.crestStyle === reward.targetKey;
       case 'arcade_cabinet':
         return rewardCosmetics.arcadeCabinetStyle === reward.targetKey;
+      case 'music_track':
+        return soundtrack.activeTrackId === reward.targetKey;
       default:
         return false;
     }
@@ -327,6 +348,15 @@ export function TrophyCaseDrawer({
         retroSynth.menuSelect();
         break;
       }
+      case 'music_track': {
+        const trackId = reward.targetKey as MusicTrackId;
+        if (soundtrack.activeTrackId === trackId && soundtrack.isPlaying) {
+          soundtrack.pause();
+        } else {
+          soundtrack.playTrack(trackId);
+        }
+        break;
+      }
     }
   };
 
@@ -352,13 +382,15 @@ export function TrophyCaseDrawer({
     const IconComp =
       reward.kind === 'chime_pack'
         ? Music
-        : reward.kind === 'crt_preset'
-          ? Monitor
-          : reward.kind === 'crest_style'
-            ? Sparkles
-            : reward.kind === 'arcade_cabinet'
-              ? Gamepad2
-              : Palette;
+        : reward.kind === 'music_track'
+          ? Disc3
+          : reward.kind === 'crt_preset'
+            ? Monitor
+            : reward.kind === 'crest_style'
+              ? Sparkles
+              : reward.kind === 'arcade_cabinet'
+                ? Gamepad2
+                : Palette;
     return (
       <div className="h-9 w-9 rounded-[5px] border border-crt-phosphor/50 bg-crt-phosphor/10 text-crt-phosphor flex items-center justify-center shrink-0">
         <IconComp className="h-4 w-4" />
@@ -643,6 +675,53 @@ export function TrophyCaseDrawer({
 
               <div className="px-3.5 py-2.5 border border-crt-border rounded-[5px] bg-crt-bg/50 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
                 <div className="flex items-center gap-2 min-w-0">
+                  <Disc3 className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
+                  <span className="text-crt-muted">Soundtrack:</span>
+                  <span className="text-crt-text font-semibold truncate">
+                    {soundtrack.activeTrack.title}
+                  </span>
+                  <span className="text-crt-muted/80 hidden sm:inline">
+                    · {soundtrack.unlockedTracks.length}/{soundtrack.allTracks.length} unlocked
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={soundtrack.togglePlay}
+                    className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] border rounded transition-colors cursor-pointer ${
+                      soundtrack.isPlaying
+                        ? 'border-crt-phosphor/70 bg-crt-phosphor/15 text-crt-phosphor font-semibold'
+                        : 'border-crt-border bg-crt-surface text-crt-text hover:border-crt-phosphor'
+                    }`}
+                  >
+                    {soundtrack.isPlaying ? (
+                      <>
+                        <Pause className="h-2.5 w-2.5 fill-current" />
+                        Pause
+                      </>
+                    ) : (
+                      <>
+                        <Play className="h-2.5 w-2.5 fill-current" />
+                        Play
+                      </>
+                    )}
+                  </button>
+                  {soundtrack.unlockedTracks.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={soundtrack.nextTrack}
+                      title="Skip to next unlocked track"
+                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors cursor-pointer"
+                    >
+                      <SkipForward className="h-2.5 w-2.5" />
+                      Next
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="px-3.5 py-2.5 border border-crt-border rounded-[5px] bg-crt-bg/50 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+                <div className="flex items-center gap-2 min-w-0">
                   <Music className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
                   <span className="text-crt-muted">Active Chime Pack:</span>
                   <span className="text-crt-text font-semibold">
@@ -679,6 +758,8 @@ export function TrophyCaseDrawer({
                 {visibleRewards.map((reward) => {
                   const unlocked = isRewardUnlocked(reward, earnedPoints);
                   const equipped = isRewardEquipped(reward);
+                  const trackIsPlaying =
+                    reward.kind === 'music_track' && equipped && soundtrack.isPlaying;
                   const pct =
                     reward.requiredPoints > 0
                       ? Math.min(100, Math.round((earnedPoints / reward.requiredPoints) * 100))
@@ -690,9 +771,11 @@ export function TrophyCaseDrawer({
                         ? 'CRT Preset'
                         : reward.kind === 'chime_pack'
                           ? 'Chime Pack'
-                          : reward.kind === 'crest_style'
-                            ? 'Prestige Trim'
-                            : 'Arcade Bezel';
+                          : reward.kind === 'music_track'
+                            ? 'Soundtrack'
+                            : reward.kind === 'crest_style'
+                              ? 'Prestige Trim'
+                              : 'Arcade Bezel';
 
                   return (
                     <li
@@ -751,12 +834,24 @@ export function TrophyCaseDrawer({
                               type="button"
                               onClick={() => handleEquipReward(reward)}
                               className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-mono rounded border transition-colors cursor-pointer ${
-                                equipped
+                                trackIsPlaying || (equipped && reward.kind !== 'music_track')
                                   ? 'border-crt-phosphor/70 bg-crt-phosphor/15 text-crt-phosphor font-semibold'
                                   : 'border-crt-border-strong bg-crt-surface text-crt-text hover:border-crt-phosphor hover:text-crt-phosphor'
                               }`}
                             >
-                              {equipped ? (
+                              {reward.kind === 'music_track' ? (
+                                trackIsPlaying ? (
+                                  <>
+                                    <Pause className="h-3 w-3 fill-current" />
+                                    Playing (Pause)
+                                  </>
+                                ) : (
+                                  <>
+                                    <Play className="h-3 w-3 fill-current" />
+                                    {equipped ? 'Play Selected' : 'Play Track'}
+                                  </>
+                                )
+                              ) : equipped ? (
                                 <>
                                   <Check className="h-3 w-3" />
                                   {reward.kind === 'crest_style' || reward.kind === 'arcade_cabinet'

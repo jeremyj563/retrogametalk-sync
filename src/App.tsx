@@ -11,6 +11,7 @@ import { CrtArcadeModal } from './components/CrtArcadeModal';
 import { CatalogPanel } from './components/CatalogPanel';
 import { CrtDisplayControl } from './components/CrtDisplayControl';
 import { DeviceExportPanel } from './components/DeviceExportPanel';
+import { HeaderSoundDeck } from './components/HeaderSoundDeck';
 import { LivingNavIcon } from './components/LivingNavIcon';
 import { MirroredSystemsSidebar } from './components/MirroredSystemsSidebar';
 import { OverviewPanel } from './components/OverviewPanel';
@@ -22,6 +23,7 @@ import { SystemSettingsPanel } from './components/SystemSettingsPanel';
 import { TrophyCaseDrawer } from './components/TrophyCaseDrawer';
 import { TrophyToastStack } from './components/TrophyToastStack';
 import { useBulkStorageInstaller } from './hooks/useBulkStorageInstaller';
+import { useSoundtrackPlayer } from './hooks/useSoundtrackPlayer';
 import {
   computeOperatorRank,
   isArcadeCabinetStyleUnlocked,
@@ -508,9 +510,14 @@ export default function App() {
     return snap;
   }, []);
 
+  const [trophyDrawerInitialTab, setTrophyDrawerInitialTab] = useState<'trophies' | 'rewards'>(
+    'trophies',
+  );
+
   const handleOpenTrophyDrawer = useCallback(
-    (focusId?: string) => {
+    (focusId?: string, initialTab: 'trophies' | 'rewards' = 'trophies') => {
       setFocusedTrophyId(focusId ?? null);
+      setTrophyDrawerInitialTab(focusId ? 'trophies' : initialTab);
       setTrophyDrawerOpen(true);
       setAchievementsLoading(true);
       void refreshAchievements().finally(() => {
@@ -633,6 +640,11 @@ export default function App() {
 
   // Hidden Retro Gaming Easter Egg Suite state
   const [arcadeOpen, setArcadeOpen] = useState(false);
+  const soundtrack = useSoundtrackPlayer({
+    earnedPoints,
+    achievementsLoaded,
+    arcadeOpen,
+  });
   const [arcadeInitialTarget, setArcadeInitialTarget] = useState<ArcadeLaunchTarget>('launcher');
   const [arcadeKonamiBonus, setArcadeKonamiBonus] = useState(false);
   const [barrelRollActive, setBarrelRollActive] = useState(false);
@@ -1714,8 +1726,15 @@ export default function App() {
           />
         </a>
 
-        {/* Trophy Case Trigger + Sync Scope + Independent Dry Run Toggle + Reserved-Width Run/Stop Action */}
+        {/* Sound Deck + Trophy Case Trigger + Sync Scope + Independent Dry Run Toggle + Reserved-Width Run/Stop Action */}
         <div className="flex flex-wrap sm:flex-nowrap items-center gap-2.5 shrink-0 ml-auto">
+          {/* Compact Header CRT Sound Deck */}
+          <HeaderSoundDeck
+            controller={soundtrack}
+            uiMotion={effectiveCrtSettings.uiMotion}
+            onOpenRewards={() => handleOpenTrophyDrawer(undefined, 'rewards')}
+          />
+
           {/* Compact Trophy Case Drawer Button */}
           <button
             type="button"
@@ -2157,6 +2176,7 @@ export default function App() {
       {/* Console Achievements Trophy Case Slide-Over Drawer */}
       <TrophyCaseDrawer
         open={trophyDrawerOpen}
+        initialTab={trophyDrawerInitialTab}
         snapshot={achievementsSnapshot}
         loading={achievementsLoading}
         focusedTrophyId={focusedTrophyId}
@@ -2164,6 +2184,7 @@ export default function App() {
         crtSettings={effectiveCrtSettings}
         rewardCosmetics={rewardCosmetics}
         effectiveCrestStyle={effectiveCrestStyle}
+        soundtrack={soundtrack}
         onSelectPalette={handleSelectRewardPalette}
         onApplyBvmPreset={handleApplyBvmPreset}
         onUpdateRewardCosmetics={handleUpdateRewardCosmetics}
