@@ -69,6 +69,12 @@ test('advanceKonamiProgress resets on mismatched key', () => {
 
 test('matchSecretSearch detects classic Google-style tricks and protects casual typing', () => {
   assert.equal(matchSecretSearch('Atari Breakout'), 'breakout');
+  assert.equal(matchSecretSearch('Space Invaders'), 'invaders');
+  assert.equal(matchSecretSearch('Retro Invaders'), 'invaders');
+  assert.equal(matchSecretSearch('Phosphor Snake'), 'snake');
+  assert.equal(matchSecretSearch('Tetromino Drop'), 'tetromino');
+  assert.equal(matchSecretSearch('Insert Coin'), 'arcade_launcher');
+  assert.equal(matchSecretSearch('Multi Cart'), 'arcade_launcher');
   assert.equal(matchSecretSearch('  do a barrel roll! '), 'barrel_roll');
   assert.equal(matchSecretSearch('Z or R twice'), 'barrel_roll');
   assert.equal(matchSecretSearch('askew'), 'askew');
@@ -79,13 +85,24 @@ test('matchSecretSearch detects classic Google-style tricks and protects casual 
 
   // Single-word ambiguous terms only trigger on explicit Enter submit
   assert.equal(matchSecretSearch('breakout', { submitted: false }), null);
+  assert.equal(matchSecretSearch('invaders', { submitted: false }), null);
+  assert.equal(matchSecretSearch('snake', { submitted: false }), null);
+  assert.equal(matchSecretSearch('tetris', { submitted: false }), null);
+  assert.equal(matchSecretSearch('arcade', { submitted: false }), null);
   assert.equal(matchSecretSearch('konami', { submitted: false }), null);
+
   assert.equal(matchSecretSearch('breakout', { submitted: true }), 'breakout');
+  assert.equal(matchSecretSearch('invaders', { submitted: true }), 'invaders');
+  assert.equal(matchSecretSearch('snake', { submitted: true }), 'snake');
+  assert.equal(matchSecretSearch('tetris', { submitted: true }), 'tetromino');
+  assert.equal(matchSecretSearch('tetromino', { submitted: true }), 'tetromino');
+  assert.equal(matchSecretSearch('arcade', { submitted: true }), 'arcade_launcher');
   assert.equal(matchSecretSearch('konami', { submitted: true }), 'konami_breakout');
 
   // Normal catalog searches never trigger
   assert.equal(matchSecretSearch('Super Metroid', { submitted: true }), null);
   assert.equal(matchSecretSearch('Castlevania', { submitted: true }), null);
+  assert.equal(matchSecretSearch('Metal Gear Solid Snake', { submitted: true }), null);
 });
 
 test('recordHeaderTap triggers on 5 clicks within window and expires stale clicks', () => {

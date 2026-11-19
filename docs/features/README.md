@@ -43,5 +43,6 @@ Plus, from the left sidebar on any page, you can monitor your **live connection 
 ---
 
 > [!TIP]
-> **Back of the Cartridge Manual:** Just like classic 8-bit hardware manuals and old-school search engines, `rgt-sync` hides a few retro-gaming secrets beneath its CRT bezel. Curious operators might try channeling a famous 1980s cheat code, tapping the console's cartridge emblem in rapid succession, or experimenting with classic browser tricks and vintage cartridge maintenance inside the Catalog search bar.
+> **Back of the Cartridge Manual:** Just like classic 8-bit hardware manuals, multi-cart bootlegs, and old-school search engines, `rgt-sync` hides a few retro-gaming secrets beneath its CRT bezel—and rumor has it more than one ROM bank is wired inside. Curious operators might try channeling a famous 1980s cheat code, tapping the console's cartridge emblem in rapid succession, or experimenting with classic arcade phrases, browser stunts, and vintage cartridge maintenance inside the Catalog search bar.
+
 

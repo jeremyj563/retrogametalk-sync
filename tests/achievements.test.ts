@@ -37,8 +37,8 @@ function createMigratedMemoryDb(): Database.Database {
   return db;
 }
 
-test('ACHIEVEMENT_CATALOG defines exactly 60 unique trophies with 30/21/8/1 tier split and 1,980 max pts', () => {
-  assert.equal(ACHIEVEMENT_CATALOG.length, 60);
+test('ACHIEVEMENT_CATALOG defines exactly 64 unique trophies with 31/23/9/1 tier split and 2,145 max pts', () => {
+  assert.equal(ACHIEVEMENT_CATALOG.length, 64);
 
   const ids = new Set<string>();
   const tierCounts = { bronze: 0, silver: 0, gold: 0, platinum: 0 };
@@ -52,13 +52,13 @@ test('ACHIEVEMENT_CATALOG defines exactly 60 unique trophies with 30/21/8/1 tier
     totalPoints += def.points;
   }
 
-  assert.deepEqual(tierCounts, { bronze: 30, silver: 21, gold: 8, platinum: 1 });
-  assert.equal(totalPoints, 1980);
+  assert.deepEqual(tierCounts, { bronze: 31, silver: 23, gold: 9, platinum: 1 });
+  assert.equal(totalPoints, 2145);
 
   const platinum = ACHIEVEMENT_CATALOG.find((item) => item.id === PLATINUM_ACHIEVEMENT_ID);
   assert.ok(platinum);
   assert.equal(platinum.tier, 'platinum');
-  assert.equal(platinum.target, 59);
+  assert.equal(platinum.target, 63);
   assert.equal(platinum.hidden, false);
 });
 
@@ -122,11 +122,11 @@ test('fresh install baseline catch-up unlocks zero trophies so first launch is q
     assert.equal(baseline.length, 0);
 
     const snap = getAchievementsSnapshot(db);
-    assert.equal(snap.summary.totalCount, 60);
+    assert.equal(snap.summary.totalCount, 64);
     assert.equal(snap.summary.unlockedCount, 0);
     assert.equal(snap.summary.unseenCount, 0);
     assert.equal(snap.summary.earnedPoints, 0);
-    assert.equal(snap.summary.maxPoints, 1980);
+    assert.equal(snap.summary.maxPoints, 2145);
   } finally {
     db.close();
   }
@@ -230,7 +230,7 @@ test('live client achievement events unlock once, increment unseen count, and cl
   }
 });
 
-test('unlocking all 59 non-Platinum trophies automatically awards Platinum Master Preservationist', () => {
+test('unlocking all 63 non-Platinum trophies automatically awards Platinum Master Preservationist', () => {
   const db = createMigratedMemoryDb();
   try {
     runSilentBaselineCatchUp(db);
@@ -258,12 +258,50 @@ test('unlocking all 59 non-Platinum trophies automatically awards Platinum Maste
     assert.equal(newlyUnlocked[0].tier, 'platinum');
 
     const snapshot = getAchievementsSnapshot(db);
-    assert.equal(snapshot.summary.unlockedCount, 60);
+    assert.equal(snapshot.summary.unlockedCount, 64);
     assert.equal(snapshot.summary.completionPercent, 100);
-    assert.equal(snapshot.summary.earnedPoints, 1980);
+    assert.equal(snapshot.summary.earnedPoints, 2145);
 
     const recomputed = computeAchievementsSummary(snapshot.items);
     assert.deepEqual(recomputed, snapshot.summary);
+  } finally {
+    db.close();
+  }
+});
+
+test('Multi-Cart Arcade hidden trophies unlock per-game milestones and 4/4 Multi-Cart Champion', () => {
+  const db = createMigratedMemoryDb();
+  try {
+    runSilentBaselineCatchUp(db);
+
+    const inv = recordClientAchievementEvent({ type: 'arcade_invaders_milestone' }, db);
+    assert.deepEqual(
+      inv.newlyUnlocked.map((u) => u.id),
+      ['wave_defender'],
+    );
+
+    const snk = recordClientAchievementEvent({ type: 'arcade_snake_milestone' }, db);
+    assert.deepEqual(
+      snk.newlyUnlocked.map((u) => u.id),
+      ['data_bus_serpent'],
+    );
+
+    const tet = recordClientAchievementEvent({ type: 'arcade_tetromino_quad' }, db);
+    assert.deepEqual(
+      tet.newlyUnlocked.map((u) => u.id),
+      ['quad_stacker'],
+    );
+
+    // 3 of 4 carts played so far; playing Cart 1 (Breakout) completes 4/4 Multi-Cart Champion
+    const champBefore = tet.snapshot.items.find((i) => i.id === 'multi_cart_champion');
+    assert.equal(champBefore?.unlocked, false);
+    assert.equal(champBefore?.progressCurrent, 3);
+
+    const brk = recordClientAchievementEvent({ type: 'arcade_cart_played', value: 1 }, db);
+    assert.deepEqual(
+      brk.newlyUnlocked.map((u) => u.id),
+      ['multi_cart_champion'],
+    );
   } finally {
     db.close();
   }

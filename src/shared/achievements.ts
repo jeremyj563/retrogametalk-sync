@@ -76,6 +76,10 @@ export type ClientAchievementEventType =
   | 'arcade_konami'
   | 'arcade_stage_clear'
   | 'arcade_score'
+  | 'arcade_cart_played'
+  | 'arcade_invaders_milestone'
+  | 'arcade_snake_milestone'
+  | 'arcade_tetromino_quad'
   | 'easter_barrel_roll'
   | 'easter_blow_cartridge';
 
@@ -614,11 +618,11 @@ export const ACHIEVEMENT_CATALOG: readonly AchievementDefinition[] = [
     { target: 5, progressUnit: 'cron runs' },
   ),
 
-  // G. Secret / Hidden Trophies (7)
+  // G. Secret / Hidden Trophies (11)
   def(
     'quarter_inserted',
     'Quarter Inserted',
-    'Discover and launch the hidden CRT Cartridge Breakout cabinet.',
+    'Discover and launch the hidden CRT Multi-Cart Arcade cabinet.',
     'secret',
     'bronze',
     {
@@ -662,6 +666,52 @@ export const ACHIEVEMENT_CATALOG: readonly AchievementDefinition[] = [
     },
   ),
   def(
+    'wave_defender',
+    'Wave Defender',
+    'Clear Wave 1 or shoot down a Mystery UFO in Retro Invaders.',
+    'secret',
+    'bronze',
+    {
+      hidden: true,
+      hint: 'Defend the CRT bunkers from an entire wave—or snipe the saucer overhead.',
+    },
+  ),
+  def(
+    'data_bus_serpent',
+    'Data Bus Serpent',
+    'Reach length 25 or score 1,500+ points in a single run of Phosphor Snake.',
+    'secret',
+    'silver',
+    {
+      hidden: true,
+      hint: 'Guide the phosphor serpent across the CRT data bus and grab Golden Cartridges.',
+    },
+  ),
+  def(
+    'quad_stacker',
+    'Quad Stacker',
+    'Clear 4 lines at once with a single drop in Tetromino Drop.',
+    'secret',
+    'silver',
+    {
+      hidden: true,
+      hint: 'Leave a clean vertical channel in the falling-block well and wait for the long bar.',
+    },
+  ),
+  def(
+    'multi_cart_champion',
+    'Multi-Cart Champion',
+    'Play and post a score in all 4 cartridges inside the hidden CRT Arcade.',
+    'secret',
+    'gold',
+    {
+      target: 4,
+      progressUnit: 'carts',
+      hidden: true,
+      hint: 'Boot every slot on the hidden 4-in-1 Multi-Cart shelf and put points on the board.',
+    },
+  ),
+  def(
     'barrel_roll_pilot',
     'Barrel Roll Pilot',
     'Trigger a classic 360-degree viewport stunt inside the Catalog search bar.',
@@ -690,7 +740,7 @@ export const ACHIEVEMENT_CATALOG: readonly AchievementDefinition[] = [
     'secret',
     'platinum',
     {
-      target: 59,
+      target: 63,
       progressUnit: 'trophies',
       hidden: false,
     },

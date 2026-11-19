@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { BrandMark } from './components/BrandMark';
 import { BulkInstallDock } from './components/BulkInstallDock';
-import { CartridgeBreakoutModal } from './components/CartridgeBreakoutModal';
+import { CrtArcadeModal } from './components/CrtArcadeModal';
 import { CatalogPanel } from './components/CatalogPanel';
 import { CrtDisplayControl } from './components/CrtDisplayControl';
 import { DeviceExportPanel } from './components/DeviceExportPanel';
@@ -64,6 +64,7 @@ import {
 } from './utils/achievementsClient';
 import {
   advanceKonamiProgress,
+  type ArcadeLaunchTarget,
   isTextInputTarget,
   recordHeaderTap,
   type SecretSearchEffect,
@@ -560,6 +561,7 @@ export default function App() {
 
   // Hidden Retro Gaming Easter Egg Suite state
   const [arcadeOpen, setArcadeOpen] = useState(false);
+  const [arcadeInitialTarget, setArcadeInitialTarget] = useState<ArcadeLaunchTarget>('launcher');
   const [arcadeKonamiBonus, setArcadeKonamiBonus] = useState(false);
   const [barrelRollActive, setBarrelRollActive] = useState(false);
   const [askewActive, setAskewActive] = useState(false);
@@ -582,17 +584,21 @@ export default function App() {
     }, durationMs);
   }, []);
 
-  const openArcadeCabinet = useCallback((konamiBonus: boolean) => {
-    setArcadeKonamiBonus(konamiBonus);
-    setArcadeOpen(true);
-    if (konamiBonus) {
-      retroSynth.konamiUnlock();
-      reportAchievementEvent('arcade_konami');
-    } else {
-      retroSynth.powerupCatch();
-      reportAchievementEvent('arcade_opened');
-    }
-  }, []);
+  const openArcadeCabinet = useCallback(
+    (konamiBonus: boolean, target: ArcadeLaunchTarget = 'launcher') => {
+      setArcadeKonamiBonus(konamiBonus);
+      setArcadeInitialTarget(target);
+      setArcadeOpen(true);
+      if (konamiBonus) {
+        retroSynth.konamiUnlock();
+        reportAchievementEvent('arcade_konami');
+      } else {
+        retroSynth.powerupCatch();
+        reportAchievementEvent('arcade_opened');
+      }
+    },
+    [],
+  );
 
   const triggerBarrelRoll = useCallback(() => {
     retroSynth.barrelRoll();
@@ -638,11 +644,23 @@ export default function App() {
   const handleEasterEggEffect = useCallback(
     (effect: SecretSearchEffect | 'clear_askew') => {
       switch (effect) {
+        case 'arcade_launcher':
+          openArcadeCabinet(false, 'launcher');
+          break;
         case 'breakout':
-          openArcadeCabinet(false);
+          openArcadeCabinet(false, 'breakout');
+          break;
+        case 'invaders':
+          openArcadeCabinet(false, 'invaders');
+          break;
+        case 'snake':
+          openArcadeCabinet(false, 'snake');
+          break;
+        case 'tetromino':
+          openArcadeCabinet(false, 'tetromino');
           break;
         case 'konami_breakout':
-          openArcadeCabinet(true);
+          openArcadeCabinet(true, 'launcher');
           break;
         case 'barrel_roll':
           triggerBarrelRoll();
@@ -673,7 +691,7 @@ export default function App() {
       konamiProgressRef.current = nextProgress;
       if (unlocked) {
         e.preventDefault();
-        openArcadeCabinet(true);
+        openArcadeCabinet(true, 'launcher');
       }
     };
     window.addEventListener('keydown', handleGlobalKeyDown);
@@ -1942,9 +1960,10 @@ export default function App() {
       </div>
       </div>
 
-      {/* Hidden Playable CRT Cartridge Breakout Cabinet */}
-      <CartridgeBreakoutModal
+      {/* Hidden Playable 4-in-1 CRT Multi-Cart Arcade Cabinet */}
+      <CrtArcadeModal
         open={arcadeOpen}
+        initialTarget={arcadeInitialTarget}
         konamiBonus={arcadeKonamiBonus}
         consoleLabels={(status?.systems ?? []).map((sys) => sys.systemName)}
         onClose={() => setArcadeOpen(false)}

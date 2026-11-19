@@ -438,6 +438,19 @@ function computeProgressForId(id: string, m: EvaluationMetrics): number {
       return c('arcade_stage_clear') >= 1 ? 1 : 0;
     case 'arcade_ace':
       return c('arcade_best_score');
+    case 'wave_defender':
+      return c('arcade_invaders_milestone') >= 1 ? 1 : 0;
+    case 'data_bus_serpent':
+      return c('arcade_snake_milestone') >= 1 ? 1 : 0;
+    case 'quad_stacker':
+      return c('arcade_tetromino_quad') >= 1 ? 1 : 0;
+    case 'multi_cart_champion':
+      return (
+        (c('arcade_cart_1') >= 1 ? 1 : 0) +
+        (c('arcade_cart_2') >= 1 ? 1 : 0) +
+        (c('arcade_cart_3') >= 1 ? 1 : 0) +
+        (c('arcade_cart_4') >= 1 ? 1 : 0)
+      );
     case 'barrel_roll_pilot':
       return c('easter_barrel_roll') >= 1 ? 1 : 0;
     case 'clean_contacts':
@@ -719,6 +732,26 @@ export function recordClientAchievementEvent(
       break;
     case 'arcade_score':
       recordAchievementCounter('arcade_best_score', value, 'max', db);
+      if (value > 0) {
+        recordAchievementCounter('arcade_cart_1', 1, 'set', db);
+      }
+      break;
+    case 'arcade_cart_played':
+      if (value >= 1 && value <= 4) {
+        recordAchievementCounter(`arcade_cart_${value}`, 1, 'set', db);
+      }
+      break;
+    case 'arcade_invaders_milestone':
+      recordAchievementCounter('arcade_invaders_milestone', 1, 'set', db);
+      recordAchievementCounter('arcade_cart_2', 1, 'set', db);
+      break;
+    case 'arcade_snake_milestone':
+      recordAchievementCounter('arcade_snake_milestone', 1, 'set', db);
+      recordAchievementCounter('arcade_cart_3', 1, 'set', db);
+      break;
+    case 'arcade_tetromino_quad':
+      recordAchievementCounter('arcade_tetromino_quad', 1, 'set', db);
+      recordAchievementCounter('arcade_cart_4', 1, 'set', db);
       break;
     case 'easter_barrel_roll':
       recordAchievementCounter('easter_barrel_roll', 1, 'set', db);
