@@ -18,6 +18,7 @@ export interface CrtDisplaySettings extends CrtFxValues {
   enabled: boolean;
   palette: CrtPalette;
   uiMotion: CrtUiMotionLevel;
+  syncSpeedWave: boolean;
   customValues?: CrtFxValues;
 }
 
@@ -176,6 +177,7 @@ export const DEFAULT_CRT_DISPLAY_SETTINGS: CrtDisplaySettings = {
   enabled: true,
   palette: 'green',
   uiMotion: 'low',
+  syncSpeedWave: true,
   ...CRT_PRESETS.subtle.values,
 };
 
@@ -268,6 +270,10 @@ export function loadInitialCrtDisplaySettings(): CrtDisplaySettings {
         uiMotion: isValidUiMotionLevel(parsed.uiMotion)
           ? parsed.uiMotion
           : DEFAULT_CRT_DISPLAY_SETTINGS.uiMotion,
+        syncSpeedWave:
+          typeof parsed.syncSpeedWave === 'boolean'
+            ? parsed.syncSpeedWave
+            : DEFAULT_CRT_DISPLAY_SETTINGS.syncSpeedWave,
         ...activeFx,
         ...(customValues ? { customValues } : {}),
       };
@@ -325,6 +331,159 @@ export function isRetroVisionaryCrtConfig(
   settings: Pick<CrtDisplaySettings, 'enabled' | 'uiMotion' | 'scanlines'>,
 ): boolean {
   return settings.uiMotion === 'ultra' || (settings.enabled && settings.scanlines >= 100);
+}
+
+export function isSyncSpeedWaveActive(
+  settings: Pick<CrtDisplaySettings, 'uiMotion' | 'syncSpeedWave'>,
+): boolean {
+  return settings.uiMotion !== 'off' && settings.syncSpeedWave;
+}
+
+export interface SyncSpeedWaveParams {
+  active: boolean;
+  /** Normalized throughput intensity in [0, 1] via logarithmic MB/s mapping */
+  speedRatio: number;
+  /** Wave horizontal travel frequency in cycles per second (Hz) */
+  frequencyHz: number;
+  /** Number of visible wave cycles spanning the Sync Status container width */
+  spatialCycles: number;
+  /** Vertical amplitude as a ratio of half-canvas height (0..0.9) */
+  amplitudeRatio: number;
+  /** Primary oscilloscope stroke opacity */
+  primaryOpacity: number;
+  /** Secondary phase-offset harmonic opacity (0 on Low) */
+  harmonicOpacity: number;
+  /** Subtle fill gradient alpha beneath the primary trace */
+  fillOpacity: number;
+  /** Phosphor bloom blur radius in CSS px */
+  glowPx: number;
+  /** Primary stroke thickness in CSS px */
+  lineWidth: number;
+  /** Progress bar traveling wave sweep duration in seconds */
+  progressWaveDurationSec: number;
+}
+
+const SYNC_WAVE_MAX_REFERENCE_MBPS = 45;
+const SYNC_WAVE_LOG_SCALE = 1.4;
+const SYNC_WAVE_LOG_DENOM = Math.log10(1 + SYNC_WAVE_MAX_REFERENCE_MBPS * SYNC_WAVE_LOG_SCALE);
+
+/**
+ * Logarithmically maps live download throughput (bytes/sec) into a smooth [0, 1]
+ * range so low-speed scrapes (200 KB/s - 2 MB/s) and high-speed bursts (25+ MB/s)
+ * both produce clear, granular visual differentiation.
+ */
+export function normalizeDownloadSpeedRatio(bytesPerSec: number): number {
+  if (!Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return 0;
+  const mbps = bytesPerSec / (1024 * 1024);
+  const raw = Math.log10(1 + mbps * SYNC_WAVE_LOG_SCALE) / SYNC_WAVE_LOG_DENOM;
+  return Math.max(0, Math.min(1, raw));
+}
+
+export function computeSyncSpeedWaveParams(
+  bytesPerSec: number,
+  uiMotion: CrtUiMotionLevel,
+  syncSpeedWave: boolean,
+): SyncSpeedWaveParams {
+  if (uiMotion === 'off' || !syncSpeedWave) {
+    return {
+      active: false,
+      speedRatio: 0,
+      frequencyHz: 0,
+      spatialCycles: 2,
+      amplitudeRatio: 0,
+      primaryOpacity: 0,
+      harmonicOpacity: 0,
+      fillOpacity: 0,
+      glowPx: 0,
+      lineWidth: 1,
+      progressWaveDurationSec: 2.2,
+    };
+  }
+
+  const speedRatio = normalizeDownloadSpeedRatio(bytesPerSec);
+  const tierConfig: Record<
+    Exclude<CrtUiMotionLevel, 'off'>,
+    {
+      freqMul: number;
+      ampBase: number;
+      ampSpan: number;
+      primaryOpacity: number;
+      harmonicOpacity: number;
+      fillOpacity: number;
+      glowPx: number;
+      lineWidth: number;
+      barSpeedMul: number;
+    }
+  > = {
+    low: {
+      freqMul: 0.85,
+      ampBase: 0.2,
+      ampSpan: 0.34,
+      primaryOpacity: 0.24,
+      harmonicOpacity: 0,
+      fillOpacity: 0.05,
+      glowPx: 3,
+      lineWidth: 1.25,
+      barSpeedMul: 1.15,
+    },
+    medium: {
+      freqMul: 1.0,
+      ampBase: 0.26,
+      ampSpan: 0.44,
+      primaryOpacity: 0.36,
+      harmonicOpacity: 0.13,
+      fillOpacity: 0.085,
+      glowPx: 6,
+      lineWidth: 1.5,
+      barSpeedMul: 1.0,
+    },
+    high: {
+      freqMul: 1.14,
+      ampBase: 0.32,
+      ampSpan: 0.48,
+      primaryOpacity: 0.48,
+      harmonicOpacity: 0.24,
+      fillOpacity: 0.12,
+      glowPx: 10,
+      lineWidth: 1.75,
+      barSpeedMul: 0.88,
+    },
+    ultra: {
+      freqMul: 1.28,
+      ampBase: 0.38,
+      ampSpan: 0.5,
+      primaryOpacity: 0.62,
+      harmonicOpacity: 0.34,
+      fillOpacity: 0.16,
+      glowPx: 14,
+      lineWidth: 2,
+      barSpeedMul: 0.76,
+    },
+  };
+
+  const tier = tierConfig[uiMotion];
+  const frequencyHz = Number(((0.65 + speedRatio * 4.85) * tier.freqMul).toFixed(3));
+  const spatialCycles = Number((2.2 + speedRatio * 6.3).toFixed(3));
+  const amplitudeRatio = Number((tier.ampBase + speedRatio * tier.ampSpan).toFixed(3));
+  const progressWaveDurationSec = Number(
+    Math.max(0.32, (2.1 - speedRatio * 1.58) * tier.barSpeedMul).toFixed(2),
+  );
+
+  return {
+    active: true,
+    speedRatio,
+    frequencyHz,
+    spatialCycles,
+    amplitudeRatio,
+    primaryOpacity: Number((tier.primaryOpacity + speedRatio * 0.14).toFixed(3)),
+    harmonicOpacity: tier.harmonicOpacity > 0
+      ? Number((tier.harmonicOpacity + speedRatio * 0.1).toFixed(3))
+      : 0,
+    fillOpacity: Number((tier.fillOpacity + speedRatio * 0.05).toFixed(3)),
+    glowPx: Math.round(tier.glowPx + speedRatio * 4),
+    lineWidth: tier.lineWidth,
+    progressWaveDurationSec,
+  };
 }
 
 export function computeCrtCssVariables(settings: CrtDisplaySettings): CSSProperties {

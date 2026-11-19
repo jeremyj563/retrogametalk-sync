@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.13.0] - 2026-11-19
+
+- Added a **Speed-Reactive Sync Status Wave** effect that renders a phase-continuous CRT oscilloscope sine trace across the Sync Status card and a synchronized traveling wave shimmer inside active combined and parallel transfer progress bars—smoothly accelerating in frequency and wave density via a logarithmic throughput curve as live download speed climbs.
+- Integrated the wave effect with **Living UI Motion** (`Low` through `Ultra`, scaling from a subtle single carrier trace at `Low` to dual-harmonic phosphor glow at `Ultra`, automatically inheriting all 7 CRT Phosphor Palettes and Dry Run amber, and pausing automatically when idle, backgrounded, or under `prefers-reduced-motion: reduce`).
+- Added an independent **Sync Speed Wave (`ON` / `OFF`)** toggle directly inside the Living UI Motion section of CRT Display Studio (persisted in browser storage) so operators can disable the wave effect without turning off other Living UI Motion animations.
+
 ## [1.12.0] - 2026-11-19
 
 - Added a **10-Level Operator Rank Ladder** (`Lv. 1 Cartridge Cadet` at `0 pts` through `Lv. 10 Master Preservationist` at `2,100 pts`) driven by earned Trophy Points, displayed in the Trophy Case Drawer header, progress summary, top header Trophy button tooltip, and full Rank Ladder view.

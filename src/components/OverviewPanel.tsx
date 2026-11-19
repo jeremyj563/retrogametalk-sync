@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -11,6 +11,11 @@ import {
   Trash2,
   XCircle,
 } from 'lucide-react';
+import {
+  computeSyncSpeedWaveParams,
+  type CrtPalette,
+  type CrtUiMotionLevel,
+} from '../shared/crtDisplay';
 import {
   formatAllowedReleaseTypesSummary,
   normalizeAllowedReleaseTypes,
@@ -34,6 +39,7 @@ import {
 import { parseSyncStatusHeader } from '../utils/syncStatusPhase';
 import { FailedQueueDrawer } from './FailedQueueDrawer';
 import { LivingNavIcon, LivingTerminalIcon } from './LivingNavIcon';
+import { SyncSpeedWaveCanvas } from './SyncSpeedWaveCanvas';
 import { TelemetryDeck } from './TelemetryDeck';
 
 interface OverviewPanelProps {
@@ -44,6 +50,9 @@ interface OverviewPanelProps {
   logsClearedRevision?: number;
   catalogRevision: number;
   activeRetryItemId?: number | null;
+  uiMotion?: CrtUiMotionLevel;
+  syncSpeedWave?: boolean;
+  crtPalette?: CrtPalette;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
   onClearLogs: (level: 'all' | LogLevel) => Promise<void>;
   onClearRuns: () => Promise<void>;
@@ -153,6 +162,9 @@ export function OverviewPanel({
   logsClearedRevision = 0,
   catalogRevision,
   activeRetryItemId = null,
+  uiMotion = 'low',
+  syncSpeedWave = true,
+  crtPalette = 'green',
   onSaveConfig,
   onClearLogs,
   onClearRuns,
@@ -343,6 +355,16 @@ export function OverviewPanel({
       totalChunks,
     };
   }, [parallelTransfers]);
+
+  const combinedWaveParams = useMemo(
+    () =>
+      computeSyncSpeedWaveParams(
+        combinedTransfer?.bytesPerSec ?? 0,
+        uiMotion,
+        syncSpeedWave,
+      ),
+    [combinedTransfer?.bytesPerSec, uiMotion, syncSpeedWave],
+  );
 
   const isDryRunActive = Boolean(
     status.activeRun && (status.activeRun.dryRun || status.activeRun.mode === 'dry_run'),
@@ -592,8 +614,21 @@ export function OverviewPanel({
         <div aria-hidden="true" className="crt-edge-beam">
           <span />
         </div>
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 overflow-hidden rounded-md z-0"
+        >
+          <SyncSpeedWaveCanvas
+            bytesPerSec={combinedTransfer?.bytesPerSec ?? 0}
+            uiMotion={uiMotion}
+            syncSpeedWave={syncSpeedWave}
+            active={Boolean(combinedTransfer)}
+            palette={crtPalette}
+            isDryRun={isDryRunActive}
+          />
+        </div>
         {/* Zone 1: Tiered Sync Status Header (Tier 1 Global Context / Tier 2 Active Target) */}
-        <div className="min-w-0">
+        <div className="relative z-10 min-w-0">
           {/* Tier 1: Global Sync Run, Sync Type & High-Contrast System / Progress Context */}
           <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 text-xs font-mono min-w-0">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
@@ -714,7 +749,7 @@ export function OverviewPanel({
           aria-hidden={!isTransferBayOpen}
           inert={!isTransferBayOpen || undefined}
           data-open={isTransferBayOpen ? 'true' : 'false'}
-          className={`crt-accordion-grid transition-opacity duration-300 motion-reduce:transition-none ${
+          className={`relative z-10 crt-accordion-grid transition-opacity duration-300 motion-reduce:transition-none ${
             isTransferBayOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
           }`}
         >
@@ -785,7 +820,16 @@ export function OverviewPanel({
                       {combinedTransfer.pct !== null ? (
                         <div
                           key={`combined-${status.activeRun?.id ?? 'active'}`}
-                          className={`h-full bg-crt-phosphor crt-progress-beam transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none ${
+                          style={
+                            combinedWaveParams.active
+                              ? ({
+                                  '--crt-wave-duration': `${combinedWaveParams.progressWaveDurationSec}s`,
+                                } as CSSProperties)
+                              : undefined
+                          }
+                          className={`h-full bg-crt-phosphor crt-progress-beam ${
+                            combinedWaveParams.active ? 'crt-progress-beam-wave' : ''
+                          } transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none ${
                             PROGRESS_WIDTH_CLASSES[Math.max(3, Math.min(100, combinedTransfer.pct))]
                           }`}
                         />
@@ -794,7 +838,16 @@ export function OverviewPanel({
                       ) : (
                         <div
                           key={`handshake-${status.activeRun?.id ?? 'active'}`}
-                          className={`h-full bg-crt-phosphor/75 crt-progress-beam transition-opacity duration-150 motion-reduce:transition-none ${PROGRESS_WIDTH_CLASSES[4]}`}
+                          style={
+                            combinedWaveParams.active
+                              ? ({
+                                  '--crt-wave-duration': `${combinedWaveParams.progressWaveDurationSec}s`,
+                                } as CSSProperties)
+                              : undefined
+                          }
+                          className={`h-full bg-crt-phosphor/75 crt-progress-beam ${
+                            combinedWaveParams.active ? 'crt-progress-beam-wave' : ''
+                          } transition-opacity duration-150 motion-reduce:transition-none ${PROGRESS_WIDTH_CLASSES[4]}`}
                         />
                       )}
                     </div>
@@ -992,32 +1045,54 @@ export function OverviewPanel({
                                       </div>
                                     </div>
 
-                                    {hasMultipleParallelTransfers && (
-                                      <div
-                                        role="progressbar"
-                                        aria-label={`Active download progress for ${item.filename}`}
-                                        aria-valuemin={0}
-                                        aria-valuemax={100}
-                                        aria-valuenow={itemPct ?? undefined}
-                                        className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
-                                      >
-                                        {itemPct !== null ? (
-                                          <div
-                                            className={`h-full bg-crt-phosphor crt-progress-beam transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none ${
-                                              PROGRESS_WIDTH_CLASSES[
-                                                Math.max(3, Math.min(100, itemPct))
-                                              ]
-                                            }`}
-                                          />
-                                        ) : unknownSizeGraceElapsed || item.bytesReceived > 0 ? (
-                                          <div className="h-full bg-crt-phosphor crt-progress-indeterminate" />
-                                        ) : (
-                                          <div
-                                            className={`h-full bg-crt-phosphor/75 crt-progress-beam transition-opacity duration-150 motion-reduce:transition-none ${PROGRESS_WIDTH_CLASSES[4]}`}
-                                          />
-                                        )}
-                                      </div>
-                                    )}
+                                    {hasMultipleParallelTransfers && (() => {
+                                      const workerWaveParams = computeSyncSpeedWaveParams(
+                                        item.bytesPerSec,
+                                        uiMotion,
+                                        syncSpeedWave,
+                                      );
+                                      const workerWaveStyle = workerWaveParams.active
+                                        ? ({
+                                            '--crt-wave-duration': `${workerWaveParams.progressWaveDurationSec}s`,
+                                          } as CSSProperties)
+                                        : undefined;
+                                      return (
+                                        <div
+                                          role="progressbar"
+                                          aria-label={`Active download progress for ${item.filename}`}
+                                          aria-valuemin={0}
+                                          aria-valuemax={100}
+                                          aria-valuenow={itemPct ?? undefined}
+                                          className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+                                        >
+                                          {itemPct !== null ? (
+                                            <div
+                                              style={workerWaveStyle}
+                                              className={`h-full bg-crt-phosphor crt-progress-beam ${
+                                                workerWaveParams.active
+                                                  ? 'crt-progress-beam-wave'
+                                                  : ''
+                                              } transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none ${
+                                                PROGRESS_WIDTH_CLASSES[
+                                                  Math.max(3, Math.min(100, itemPct))
+                                                ]
+                                              }`}
+                                            />
+                                          ) : unknownSizeGraceElapsed || item.bytesReceived > 0 ? (
+                                            <div className="h-full bg-crt-phosphor crt-progress-indeterminate" />
+                                          ) : (
+                                            <div
+                                              style={workerWaveStyle}
+                                              className={`h-full bg-crt-phosphor/75 crt-progress-beam ${
+                                                workerWaveParams.active
+                                                  ? 'crt-progress-beam-wave'
+                                                  : ''
+                                              } transition-opacity duration-150 motion-reduce:transition-none ${PROGRESS_WIDTH_CLASSES[4]}`}
+                                            />
+                                          )}
+                                        </div>
+                                      );
+                                    })()}
                                   </div>
                                 );
                               })}
