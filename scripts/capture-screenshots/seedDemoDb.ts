@@ -898,6 +898,13 @@ export function seedDemoEnvironment(options: SeedDemoOptions = {}): SeedDemoResu
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
     `);
 
+    const demoAssetsDir = path.resolve(
+      path.dirname(new URL(import.meta.url).pathname),
+      'demo-assets',
+    );
+    const demoCoversDir = path.join(demoAssetsDir, 'covers');
+    const demoShotsDir = path.join(demoAssetsDir, 'screenshots');
+
     let featuredItemId = 1;
     let featuredItemTitle = DEMO_RELEASES[0].title;
 
@@ -906,53 +913,73 @@ export function seedDemoEnvironment(options: SeedDemoOptions = {}): SeedDemoResu
       const releaseDir = path.join(downloadDir, bp.system, bp.slug);
       fs.mkdirSync(releaseDir, { recursive: true });
 
-      // Write crisp local cover PNG inside releaseDir/cover.png
-      const coverAbsPath = path.join(releaseDir, 'cover.png');
-      const coverBytes = renderDemoCoverPng({
-        title: bp.title,
-        consoleLabel: theme.shortLabel,
-        eraTag: theme.eraTag,
-        genreTag: bp.genres[0] || 'CLASSIC',
-        regionTag: bp.regions[0]?.slice(0, 3).toUpperCase() || 'USA',
-        palette: theme.palette,
-        motif: bp.motif,
-        seed: 1000 + idx * 73,
-      });
-      writePngFile(coverAbsPath, coverBytes);
+      // Prefer bespoke title-matched WebP box art when available, falling back to procedural PNG
+      const prebuiltCoverPath = path.join(demoCoversDir, `${bp.slug}.webp`);
+      let coverRelPath = 'cover.png';
+      let coverAbsPath = path.join(releaseDir, coverRelPath);
+      if (fs.existsSync(prebuiltCoverPath)) {
+        coverRelPath = 'cover.webp';
+        coverAbsPath = path.join(releaseDir, coverRelPath);
+        fs.copyFileSync(prebuiltCoverPath, coverAbsPath);
+      } else {
+        const coverBytes = renderDemoCoverPng({
+          title: bp.title,
+          consoleLabel: theme.shortLabel,
+          eraTag: theme.eraTag,
+          genreTag: bp.genres[0] || 'CLASSIC',
+          regionTag: bp.regions[0]?.slice(0, 3).toUpperCase() || 'USA',
+          palette: theme.palette,
+          motif: bp.motif,
+          seed: 1000 + idx * 73,
+        });
+        writePngFile(coverAbsPath, coverBytes);
+      }
 
-      // Generate 3 distinct widescreen gameplay screenshots for the first 8 releases (always for featured)
+      // Attach 3 widescreen gameplay screenshots (bespoke 16-bit WebP when available, procedural PNG fallback)
       const screenshotRelPaths: string[] = [];
       const screenshotAbsPaths: string[] = [];
       if (idx < 8 || bp.featured) {
         const shotsDir = path.join(releaseDir, 'screenshots');
         fs.mkdirSync(shotsDir, { recursive: true });
         for (let sIdx = 0; sIdx < 3; sIdx += 1) {
-          const filename = `${String(sIdx + 1).padStart(2, '0')}.png`;
-          const shotAbs = path.join(shotsDir, filename);
-          const shotBytes = renderDemoScreenshotPng({
-            title: bp.title,
-            consoleLabel: theme.displayLabel,
-            sceneIndex: sIdx,
-            motif: bp.motif,
-            palette: theme.palette,
-            seed: 2000 + idx * 97,
-          });
-          writePngFile(shotAbs, shotBytes);
-          screenshotRelPaths.push(`screenshots/${filename}`);
-          screenshotAbsPaths.push(shotAbs);
+          const num = String(sIdx + 1).padStart(2, '0');
+          const prebuiltShotPath = path.join(demoShotsDir, `${bp.slug}-${num}.webp`);
+          if (fs.existsSync(prebuiltShotPath)) {
+            const filename = `${num}.webp`;
+            const shotAbs = path.join(shotsDir, filename);
+            fs.copyFileSync(prebuiltShotPath, shotAbs);
+            screenshotRelPaths.push(`screenshots/${filename}`);
+            screenshotAbsPaths.push(shotAbs);
+          } else {
+            const filename = `${num}.png`;
+            const shotAbs = path.join(shotsDir, filename);
+            const shotBytes = renderDemoScreenshotPng({
+              title: bp.title,
+              consoleLabel: theme.displayLabel,
+              sceneIndex: sIdx,
+              motif: bp.motif,
+              palette: theme.palette,
+              seed: 2000 + idx * 97,
+            });
+            writePngFile(shotAbs, shotBytes);
+            screenshotRelPaths.push(`screenshots/${filename}`);
+            screenshotAbsPaths.push(shotAbs);
+          }
         }
       }
 
-      const daysAgo = idx % 14;
-      const publishedAt = new Date(now.getTime() - (daysAgo + 1) * 24 * 60 * 60 * 1000).toISOString();
-      const discoveredAt = new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000).toISOString();
+      // Monotonically descending timestamps keep DEMO_RELEASES[0..9] (all bespoke covers) at the top of default Catalog sort
+      const hoursAgo = (idx + 1) * 16;
+      const daysAgo = Math.max(1, Math.round(hoursAgo / 24));
+      const publishedAt = new Date(now.getTime() - hoursAgo * 60 * 60 * 1000).toISOString();
+      const discoveredAt = new Date(now.getTime() - Math.max(1, hoursAgo - 2) * 60 * 60 * 1000).toISOString();
       const downloadedAt =
         bp.status === 'downloaded'
-          ? new Date(now.getTime() - Math.max(0, daysAgo - 0.2) * 24 * 60 * 60 * 1000).toISOString()
+          ? new Date(now.getTime() - Math.max(0.5, hoursAgo - 4) * 60 * 60 * 1000).toISOString()
           : null;
       const installedAt =
         bp.status === 'downloaded' && bp.installedDevice
-          ? new Date(now.getTime() - Math.max(0, daysAgo - 0.1) * 24 * 60 * 60 * 1000).toISOString()
+          ? new Date(now.getTime() - Math.max(0.25, hoursAgo - 5) * 60 * 60 * 1000).toISOString()
           : null;
 
       const totalBytes = Math.round(bp.sizeMb * 1024 * 1024);
@@ -975,7 +1002,7 @@ export function seedDemoEnvironment(options: SeedDemoOptions = {}): SeedDemoResu
         formats: [theme.extension.replace('.', '').toUpperCase(), 'ZIP'],
         releaseTags: bp.releaseTags,
         downloadsCount: String(1280 + idx * 340),
-        releasedAgo: `${daysAgo + 1}d ago`,
+        releasedAgo: `${daysAgo}d ago`,
         updatedDate: publishedAt.slice(0, 10),
         publishedAt,
         remoteUpdatedAt: publishedAt,
@@ -988,7 +1015,7 @@ export function seedDemoEnvironment(options: SeedDemoOptions = {}): SeedDemoResu
         descriptionHtml: `<p>${bp.description}</p><ul><li>Verified local archival checksum and clean folder layout</li><li>Ready for direct browser export to SD cards and handheld devices</li></ul>`,
         descriptionText: bp.description,
         coverUrl: null,
-        coverLocalRelPath: 'cover.png',
+        coverLocalRelPath: coverRelPath,
         screenshotUrls: [],
         screenshotLocalRelPaths: screenshotRelPaths,
         screenshotsFullResVersion: 2,

@@ -160,13 +160,29 @@ test('seedDemoEnvironment creates an isolated migrated SQLite DB with artwork, t
         .get(seeded.featuredItemId) as Record<string, unknown>;
       assert.equal(featured.title, seeded.featuredItemTitle);
       assert.ok(
-        typeof featured.cover_local_path === 'string' && fs.existsSync(featured.cover_local_path),
-        'Featured release cover PNG must exist on disk',
+        typeof featured.cover_local_path === 'string' &&
+          featured.cover_local_path.endsWith('cover.webp') &&
+          fs.existsSync(featured.cover_local_path),
+        'Featured release bespoke WebP cover must exist on disk',
       );
       const shots = JSON.parse(String(featured.screenshots_json || '[]')) as string[];
       assert.equal(shots.length, 3, 'Featured release must include 3 local screenshots');
       for (const shotPath of shots) {
+        assert.ok(shotPath.endsWith('.webp'), `Expected bespoke WebP screenshot at ${shotPath}`);
         assert.ok(fs.existsSync(shotPath), `Expected screenshot file at ${shotPath}`);
+      }
+
+      const topTen = db
+        .prepare(
+          'SELECT title, cover_local_path FROM catalog_releases ORDER BY published_at DESC LIMIT 10',
+        )
+        .all() as { title: string; cover_local_path: string }[];
+      assert.equal(topTen.length, 10);
+      for (const row of topTen) {
+        assert.ok(
+          row.cover_local_path.endsWith('cover.webp') && fs.existsSync(row.cover_local_path),
+          `Expected bespoke WebP box art for top-10 catalog title "${row.title}"`,
+        );
       }
 
       const meta = JSON.parse(String(featured.metadata_json || '{}')) as {
