@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Check,
   FlaskConical,
+  Trophy,
 } from 'lucide-react';
 import { BrandMark } from './components/BrandMark';
 import { BulkInstallDock } from './components/BulkInstallDock';
@@ -18,7 +19,16 @@ import { ServiceTelemetrySidebar } from './components/ServiceTelemetrySidebar';
 import { SyncCommandButton } from './components/SyncCommandButton';
 import { SyncRulesPanel } from './components/SyncRulesPanel';
 import { SystemSettingsPanel } from './components/SystemSettingsPanel';
+import { TrophyCaseDrawer } from './components/TrophyCaseDrawer';
+import { TrophyToastStack } from './components/TrophyToastStack';
 import { useBulkStorageInstaller } from './hooks/useBulkStorageInstaller';
+import {
+  type AchievementRecord,
+  type AchievementsSnapshot,
+  type AchievementUnlockEvent,
+  coalesceToastBatch,
+  type TrophyToastItem,
+} from './shared/achievements';
 import {
   computeCrtCssVariables,
   type CrtDisplaySettings,
@@ -44,6 +54,14 @@ import type {
   SyncRunRecord,
   SyncScope,
 } from './types';
+import {
+  fetchAchievementsSnapshot,
+  loadAchievementsQuietMode,
+  markAchievementsSeenApi,
+  reportAchievementEvent,
+  saveAchievementsQuietMode,
+  subscribeAchievementClientUpdates,
+} from './utils/achievementsClient';
 import {
   advanceKonamiProgress,
   isTextInputTarget,
@@ -437,6 +455,109 @@ export default function App() {
   );
   const [sseConnected, setSseConnected] = useState(false);
 
+  // Console Achievements & Trophy Case state
+  const [achievementsSnapshot, setAchievementsSnapshot] = useState<AchievementsSnapshot | null>(
+    null,
+  );
+  const [achievementsLoading, setAchievementsLoading] = useState(false);
+  const [trophyDrawerOpen, setTrophyDrawerOpen] = useState(false);
+  const [focusedTrophyId, setFocusedTrophyId] = useState<string | null>(null);
+  const [trophyToastQueue, setTrophyToastQueue] = useState<TrophyToastItem[]>([]);
+  const [quietMode, setQuietMode] = useState<boolean>(() => loadAchievementsQuietMode());
+  const quietModeRef = useRef<boolean>(quietMode);
+  quietModeRef.current = quietMode;
+  const toastedIdsRef = useRef<Set<string>>(new Set());
+
+  const enqueueUnlockedTrophies = useCallback((unlocks: AchievementRecord[]) => {
+    if (!unlocks || unlocks.length === 0) return;
+    const fresh: AchievementRecord[] = [];
+    for (const item of unlocks) {
+      if (item.silent) continue;
+      if (toastedIdsRef.current.has(item.id)) continue;
+      toastedIdsRef.current.add(item.id);
+      fresh.push(item);
+    }
+    if (fresh.length === 0 || quietModeRef.current) return;
+    const batch = coalesceToastBatch(fresh);
+    if (batch.length > 0) {
+      setTrophyToastQueue((prev) => [...prev, ...batch]);
+    }
+  }, []);
+
+  const refreshAchievements = useCallback(async () => {
+    const snap = await fetchAchievementsSnapshot();
+    if (snap) {
+      setAchievementsSnapshot(snap);
+    }
+    return snap;
+  }, []);
+
+  const handleOpenTrophyDrawer = useCallback(
+    (focusId?: string) => {
+      setFocusedTrophyId(focusId ?? null);
+      setTrophyDrawerOpen(true);
+      setAchievementsLoading(true);
+      void refreshAchievements().finally(() => {
+        setAchievementsLoading(false);
+      });
+      void markAchievementsSeenApi().then((updatedSummary) => {
+        if (updatedSummary) {
+          setAchievementsSnapshot((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  summary: updatedSummary,
+                  items: prev.items.map((item) => (item.unlocked ? { ...item, seen: true } : item)),
+                }
+              : prev,
+          );
+        }
+      });
+    },
+    [refreshAchievements],
+  );
+
+  const handleToggleQuietMode = useCallback((next: boolean) => {
+    setQuietMode(next);
+    quietModeRef.current = next;
+    saveAchievementsQuietMode(next);
+    if (next) {
+      setTrophyToastQueue([]);
+    }
+  }, []);
+
+  const handleConsumeCurrentTrophyToast = useCallback(() => {
+    setTrophyToastQueue((prev) => prev.slice(1));
+  }, []);
+
+  const crtSettingsRef = useRef<CrtDisplaySettings>(crtSettings);
+  crtSettingsRef.current = crtSettings;
+
+  const handleCrtSettingsChange = useCallback((next: CrtDisplaySettings) => {
+    const prev = crtSettingsRef.current;
+    if (next.palette !== prev.palette) {
+      if (next.palette === 'amber') {
+        reportAchievementEvent('crt_palette_amber');
+      } else if (next.palette === 'cyan') {
+        reportAchievementEvent('crt_palette_cyan');
+      }
+    }
+    if (next.uiMotion !== prev.uiMotion && next.uiMotion === 'ultra') {
+      reportAchievementEvent('crt_motion_ultra');
+    }
+    if (
+      next.scanlines !== prev.scanlines ||
+      next.apertureGrille !== prev.apertureGrille ||
+      next.vignette !== prev.vignette ||
+      next.gaussGlow !== prev.gaussGlow ||
+      next.chromaticAberration !== prev.chromaticAberration
+    ) {
+      reportAchievementEvent('crt_slider_tuned');
+    }
+    crtSettingsRef.current = next;
+    setCrtSettings(next);
+  }, []);
+
   // Hidden Retro Gaming Easter Egg Suite state
   const [arcadeOpen, setArcadeOpen] = useState(false);
   const [arcadeKonamiBonus, setArcadeKonamiBonus] = useState(false);
@@ -466,13 +587,16 @@ export default function App() {
     setArcadeOpen(true);
     if (konamiBonus) {
       retroSynth.konamiUnlock();
+      reportAchievementEvent('arcade_konami');
     } else {
       retroSynth.powerupCatch();
+      reportAchievementEvent('arcade_opened');
     }
   }, []);
 
   const triggerBarrelRoll = useCallback(() => {
     retroSynth.barrelRoll();
+    reportAchievementEvent('easter_barrel_roll');
     const reduced =
       typeof window !== 'undefined' &&
       typeof window.matchMedia === 'function' &&
@@ -496,6 +620,7 @@ export default function App() {
 
   const triggerCartridgeBlow = useCallback(() => {
     retroSynth.cartridgeBlow();
+    reportAchievementEvent('easter_blow_cartridge');
     setCartridgeBlowActive(false);
     if (cartridgeBlowTimerRef.current !== null) {
       window.clearTimeout(cartridgeBlowTimerRef.current);
@@ -793,11 +918,37 @@ export default function App() {
       setRuns((prev) => prev.filter((r) => r.status === 'running'));
     });
 
+    source.addEventListener('achievement_unlocked', (ev) => {
+      try {
+        const payload = JSON.parse((ev as MessageEvent).data) as AchievementUnlockEvent;
+        if (payload?.unlocks?.length) {
+          enqueueUnlockedTrophies(payload.unlocks);
+        }
+        void refreshAchievements();
+      } catch {
+        // Ignore malformed achievement event
+      }
+    });
+
     return () => {
       if (catalogBumpTimer) clearTimeout(catalogBumpTimer);
       source.close();
     };
-  }, [loadInitialData]);
+  }, [loadInitialData, enqueueUnlockedTrophies, refreshAchievements]);
+
+  // Quietly load trophy progress on initial mount (never triggers toasts on startup)
+  // and listen for client-reported achievement unlocks
+  useEffect(() => {
+    void refreshAchievements();
+    return subscribeAchievementClientUpdates((result) => {
+      if (result.snapshot) {
+        setAchievementsSnapshot(result.snapshot);
+      }
+      if (result.newlyUnlocked.length > 0) {
+        enqueueUnlockedTrophies(result.newlyUnlocked);
+      }
+    });
+  }, [refreshAchievements, enqueueUnlockedTrophies]);
 
   const handleStartRun = async (scope: SyncScope, dryRun = dryRunEnabled) => {
     setConfirmingFullSync(false);
@@ -1379,8 +1530,42 @@ export default function App() {
           />
         </a>
 
-        {/* Sync Scope + Independent Dry Run Toggle + Reserved-Width Run/Stop Action */}
+        {/* Trophy Case Trigger + Sync Scope + Independent Dry Run Toggle + Reserved-Width Run/Stop Action */}
         <div className="flex flex-wrap sm:flex-nowrap items-center gap-2.5 shrink-0 ml-auto">
+          {/* Compact Trophy Case Drawer Button */}
+          <button
+            type="button"
+            onClick={() => handleOpenTrophyDrawer()}
+            aria-label={
+              achievementsSnapshot
+                ? `Open Trophy Case (${achievementsSnapshot.summary.unlockedCount} of ${achievementsSnapshot.summary.totalCount} unlocked)`
+                : 'Open Trophy Case'
+            }
+            title={
+              achievementsSnapshot
+                ? `Trophy Case · ${achievementsSnapshot.summary.unlockedCount}/${achievementsSnapshot.summary.totalCount} unlocked (${achievementsSnapshot.summary.earnedPoints.toLocaleString()} pts)`
+                : 'Open Trophy Case'
+            }
+            className={`relative inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-[5px] border font-mono text-xs tabular-nums transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              (achievementsSnapshot?.summary.unseenCount ?? 0) > 0
+                ? 'border-crt-phosphor/70 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/18'
+                : 'border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+            }`}
+          >
+            <Trophy
+              className={`h-3.5 w-3.5 shrink-0 ${
+                (achievementsSnapshot?.summary.unseenCount ?? 0) > 0
+                  ? 'text-crt-phosphor'
+                  : 'text-crt-amber'
+              }`}
+            />
+            <span>
+              {achievementsSnapshot
+                ? `${achievementsSnapshot.summary.unlockedCount}/${achievementsSnapshot.summary.totalCount}`
+                : '—/60'}
+            </span>
+          </button>
+
           {/* 2-Way Sync Scope Selector */}
           <div
             role="group"
@@ -1640,7 +1825,7 @@ export default function App() {
             )}
 
             {/* Permanent CRT Display & Living UI Motion Controls */}
-            <CrtDisplayControl settings={crtSettings} onChange={setCrtSettings} />
+            <CrtDisplayControl settings={crtSettings} onChange={handleCrtSettingsChange} />
           </div>
 
           {/* Inconspicuous Build Footer */}
@@ -1763,6 +1948,27 @@ export default function App() {
         konamiBonus={arcadeKonamiBonus}
         consoleLabels={(status?.systems ?? []).map((sys) => sys.systemName)}
         onClose={() => setArcadeOpen(false)}
+      />
+
+      {/* Console Achievements Trophy Case Slide-Over Drawer */}
+      <TrophyCaseDrawer
+        open={trophyDrawerOpen}
+        snapshot={achievementsSnapshot}
+        loading={achievementsLoading}
+        focusedTrophyId={focusedTrophyId}
+        quietMode={quietMode}
+        onToggleQuietMode={handleToggleQuietMode}
+        onClose={() => {
+          setTrophyDrawerOpen(false);
+          setFocusedTrophyId(null);
+        }}
+      />
+
+      {/* Console-Style Serialized Trophy Unlock Toast Stack */}
+      <TrophyToastStack
+        queue={trophyToastQueue}
+        onConsumeCurrent={handleConsumeCurrentTrophyToast}
+        onSelectTrophy={(trophyId) => handleOpenTrophyDrawer(trophyId)}
       />
 
       {/* Mellow Phosphor Easter Egg Toast */}

@@ -222,6 +222,50 @@ class RetroChiptuneSynth {
     this.playTone(659.25, 0.08, { type: 'square', delaySec: 0.64, volume: 0.095 });
     this.playTone(1318.51, 0.16, { type: 'square', delaySec: 0.72, volume: 0.1 });
   }
+
+  trophyUnlock(tier: 'bronze' | 'silver' | 'gold' | 'platinum'): void {
+    if (tier === 'bronze') {
+      // Crisp, warm 2-note retro console ping (E5 -> B5)
+      this.playTone(659.25, 0.09, { type: 'triangle', volume: 0.11 });
+      this.playTone(987.77, 0.22, { type: 'square', delaySec: 0.075, volume: 0.085 });
+      this.playTone(987.77, 0.28, { type: 'triangle', delaySec: 0.075, volume: 0.1 });
+      return;
+    }
+
+    if (tier === 'silver') {
+      // Bright 3-note ascending console triad (C5 -> G5 -> C6)
+      const notes = [523.25, 783.99, 1046.5];
+      notes.forEach((hz, idx) => {
+        const delay = idx * 0.075;
+        const dur = idx === notes.length - 1 ? 0.32 : 0.11;
+        this.playTone(hz, dur, { type: 'triangle', delaySec: delay, volume: 0.11 });
+        this.playTone(hz, dur * 0.85, { type: 'square', delaySec: delay, volume: 0.06 });
+      });
+      return;
+    }
+
+    if (tier === 'gold') {
+      // Triumphant 4-note fanfare with sparkling fifth (D5 -> F#5 -> A5 -> D6)
+      const notes = [587.33, 739.99, 880.0, 1174.66];
+      notes.forEach((hz, idx) => {
+        const delay = idx * 0.07;
+        const dur = idx === notes.length - 1 ? 0.38 : 0.11;
+        this.playTone(hz, dur, { type: 'square', delaySec: delay, volume: 0.08 });
+        this.playTone(hz * 0.5, dur, { type: 'triangle', delaySec: delay, volume: 0.09 });
+      });
+      this.playTone(1760.0, 0.34, { type: 'triangle', delaySec: 0.24, volume: 0.075 });
+      return;
+    }
+
+    // Platinum: Majestic 6-note harmonic arpeggio with glowing sustain
+    const notes = [523.25, 659.25, 783.99, 987.77, 1046.5, 1567.98];
+    notes.forEach((hz, idx) => {
+      const delay = idx * 0.068;
+      const dur = idx >= notes.length - 2 ? 0.45 : 0.14;
+      this.playTone(hz, dur, { type: 'triangle', delaySec: delay, volume: 0.11 });
+      this.playTone(hz, dur * 0.8, { type: 'square', delaySec: delay, volume: 0.065 });
+    });
+  }
 }
 
 export const retroSynth = new RetroChiptuneSynth();

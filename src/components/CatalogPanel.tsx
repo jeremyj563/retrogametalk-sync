@@ -54,6 +54,7 @@ import type {
   ServiceStatusSnapshot,
 } from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
+import { reportAchievementEvent } from '../utils/achievementsClient';
 import {
   matchSecretSearch,
   normalizeSecretQuery,
@@ -1682,6 +1683,17 @@ export function CatalogPanel({
 
   const activeFilterCount = activeFilterTokens.length;
   const hasActiveFilters = activeFilterCount > 0;
+  const hasMountedFiltersRef = useRef(false);
+
+  useEffect(() => {
+    if (!hasMountedFiltersRef.current) {
+      hasMountedFiltersRef.current = true;
+      return;
+    }
+    if (activeFilterCount >= 3) {
+      reportAchievementEvent('filter_combo', activeFilterCount);
+    }
+  }, [activeFilterCount]);
 
   const clearCatalogFilters = () => {
     setSearch('');
@@ -1727,7 +1739,10 @@ export function CatalogPanel({
               </button>
               <button
                 type="button"
-                onClick={() => setViewMode('stats')}
+                onClick={() => {
+                  setViewMode('stats');
+                  reportAchievementEvent('catalog_stats_view');
+                }}
                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   viewMode === 'stats'
                     ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
@@ -1754,7 +1769,13 @@ export function CatalogPanel({
               <div className="flex items-center gap-1 p-1 bg-crt-bg border border-crt-border rounded-md self-start">
                 <button
                   type="button"
-                  onClick={() => setCatalogLayout('table')}
+                  onClick={() => {
+                    if (catalogLayout !== 'table') {
+                      reportAchievementEvent('view_mode_grid');
+                      reportAchievementEvent('view_mode_table');
+                    }
+                    setCatalogLayout('table');
+                  }}
                   aria-label="Table view"
                   className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
                     catalogLayout === 'table'
@@ -1767,7 +1788,13 @@ export function CatalogPanel({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setCatalogLayout('grid')}
+                  onClick={() => {
+                    if (catalogLayout !== 'grid') {
+                      reportAchievementEvent('view_mode_table');
+                      reportAchievementEvent('view_mode_grid');
+                    }
+                    setCatalogLayout('grid');
+                  }}
                   aria-label="Box-Art Grid view"
                   className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
                     catalogLayout === 'grid'

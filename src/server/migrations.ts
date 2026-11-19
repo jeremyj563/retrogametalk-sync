@@ -746,6 +746,38 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       db.exec(`CREATE INDEX IF NOT EXISTS idx_catalog_releases_status ON catalog_releases(status);`);
     },
   },
+  {
+    version: 19,
+    name: 'achievements_system',
+    description:
+      'Add SQLite persistence tables for console-style trophies, cumulative milestone counters, and baseline seeding metadata',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS achievements_state (
+          id TEXT PRIMARY KEY,
+          unlocked_at TEXT,
+          progress_current INTEGER NOT NULL DEFAULT 0,
+          progress_target INTEGER NOT NULL DEFAULT 1,
+          silent INTEGER NOT NULL DEFAULT 0,
+          seen INTEGER NOT NULL DEFAULT 0,
+          meta_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS achievement_counters (
+          key TEXT PRIMARY KEY,
+          value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS achievements_meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_achievements_state_unlocked ON achievements_state(unlocked_at DESC);
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
