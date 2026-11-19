@@ -23,7 +23,8 @@ export type SecretSearchEffect =
   | 'konami_breakout'
   | 'barrel_roll'
   | 'askew'
-  | 'blow_cartridge';
+  | 'blow_cartridge'
+  | 'vsync_glitch';
 
 export type BrickTier = 'armored' | 'high' | 'mid' | 'base';
 
@@ -241,6 +242,9 @@ export function matchSecretSearch(
     q === 'blow on the cartridge'
   ) {
     return 'blow_cartridge';
+  }
+  if (q === 'v-sync' || q === 'vsync' || q === 'v sync') {
+    return 'vsync_glitch';
   }
 
   if (options?.submitted) {

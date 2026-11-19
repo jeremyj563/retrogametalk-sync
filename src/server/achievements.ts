@@ -410,6 +410,8 @@ function computeProgressForId(id: string, m: EvaluationMetrics): number {
       return c('crt_motion_ultra') >= 1 ? 1 : 0;
     case 'tube_calibration':
       return c('crt_slider_tuned') >= 1 ? 1 : 0;
+    case 'retro_visionary':
+      return Math.floor(c('crt_visionary_seconds') / 60);
     case 'autopilot':
       return m.scheduleEnabled ? 1 : 0;
     case 'curators_rules':
@@ -498,7 +500,7 @@ function buildRecordsFromState(
 }
 
 /**
- * Evaluates all 60 achievements against live SQLite metrics & persistent counters.
+ * Evaluates all catalog achievements against live SQLite metrics & persistent counters.
  * Returns only newly unlocked trophies (never re-unlocks an already-earned trophy).
  */
 export function evaluateAchievements(options?: {
@@ -720,6 +722,13 @@ export function recordClientAchievementEvent(
     case 'crt_slider_tuned':
       recordAchievementCounter('crt_slider_tuned', 1, 'set', db);
       break;
+    case 'crt_visionary_seconds': {
+      const clampedSeconds = Math.min(120, Math.max(0, value));
+      if (clampedSeconds > 0) {
+        recordAchievementCounter('crt_visionary_seconds', clampedSeconds, 'increment', db);
+      }
+      break;
+    }
     case 'arcade_opened':
       recordAchievementCounter('arcade_opened', 1, 'increment', db);
       break;

@@ -81,6 +81,10 @@ test('matchSecretSearch detects classic Google-style tricks and protects casual 
   assert.equal(matchSecretSearch('tilt'), 'askew');
   assert.equal(matchSecretSearch('blow cartridge'), 'blow_cartridge');
   assert.equal(matchSecretSearch('blow the cartridge'), 'blow_cartridge');
+  assert.equal(matchSecretSearch('V-SYNC'), 'vsync_glitch');
+  assert.equal(matchSecretSearch('v-sync'), 'vsync_glitch');
+  assert.equal(matchSecretSearch('vsync'), 'vsync_glitch');
+  assert.equal(matchSecretSearch('v sync'), 'vsync_glitch');
   assert.equal(matchSecretSearch('up up down down'), 'konami_breakout');
 
   // Single-word ambiguous terms only trigger on explicit Enter submit

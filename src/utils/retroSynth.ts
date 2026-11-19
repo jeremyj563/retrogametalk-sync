@@ -380,6 +380,27 @@ class RetroChiptuneSynth {
       });
     });
   }
+
+  vsyncGlitch(): void {
+    // Rapid 60Hz-inspired vertical-hold flutter bursts followed by a clean sync lock-on ping
+    const pulses = [
+      { f1: 118, f2: 58, delay: 0, dur: 0.14 },
+      { f1: 185, f2: 64, delay: 0.12, dur: 0.12 },
+      { f1: 96, f2: 144, delay: 0.24, dur: 0.14 },
+      { f1: 132, f2: 60, delay: 0.4, dur: 0.15 },
+      { f1: 164, f2: 72, delay: 0.58, dur: 0.13 },
+    ];
+    for (const p of pulses) {
+      this.playTone(p.f1, p.dur, {
+        type: 'sawtooth',
+        freqEnd: p.f2,
+        delaySec: p.delay,
+        volume: 0.065,
+      });
+    }
+    this.playTone(880, 0.06, { type: 'square', delaySec: 0.82, volume: 0.075 });
+    this.playTone(1174.66, 0.12, { type: 'triangle', delaySec: 0.89, volume: 0.08 });
+  }
 }
 
 export const retroSynth = new RetroChiptuneSynth();

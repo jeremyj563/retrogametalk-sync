@@ -72,6 +72,7 @@ export type ClientAchievementEventType =
   | 'crt_palette_cyan'
   | 'crt_motion_ultra'
   | 'crt_slider_tuned'
+  | 'crt_visionary_seconds'
   | 'arcade_opened'
   | 'arcade_konami'
   | 'arcade_stage_clear'
@@ -529,7 +530,7 @@ export const ACHIEVEMENT_CATALOG: readonly AchievementDefinition[] = [
     { target: 3, progressUnit: 'consoles' },
   ),
 
-  // E. CRT Display Studio & Homelab Ops (7)
+  // E. CRT Display Studio & Homelab Ops (8)
   def(
     'amber_nostalgia',
     'Amber Nostalgia',
@@ -557,6 +558,14 @@ export const ACHIEVEMENT_CATALOG: readonly AchievementDefinition[] = [
     'Manually dial CRT scanlines, aperture grille, vignette, or bloom sliders.',
     'crt_ops',
     'bronze',
+  ),
+  def(
+    'retro_visionary',
+    'Retro Visionary',
+    'Spend a cumulative 30 minutes with CRT Display Studio set to Ultra motion or maxed (100%) scanlines.',
+    'crt_ops',
+    'gold',
+    { target: 30, progressUnit: 'min' },
   ),
   def(
     'autopilot',
@@ -740,7 +749,7 @@ export const ACHIEVEMENT_CATALOG: readonly AchievementDefinition[] = [
     'secret',
     'platinum',
     {
-      target: 63,
+      target: 64,
       progressUnit: 'trophies',
       hidden: false,
     },

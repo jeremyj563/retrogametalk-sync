@@ -19,6 +19,7 @@ import {
   recordClientAchievementEvent,
   runSilentBaselineCatchUp,
 } from '../src/server/achievements.ts';
+import { isRetroVisionaryCrtConfig } from '../src/shared/crtDisplay.ts';
 import { runDatabaseMigrations } from '../src/server/migrations.ts';
 
 function createMigratedMemoryDb(): Database.Database {
@@ -37,8 +38,8 @@ function createMigratedMemoryDb(): Database.Database {
   return db;
 }
 
-test('ACHIEVEMENT_CATALOG defines exactly 64 unique trophies with 31/23/9/1 tier split and 2,145 max pts', () => {
-  assert.equal(ACHIEVEMENT_CATALOG.length, 64);
+test('ACHIEVEMENT_CATALOG defines exactly 65 unique trophies with 31/23/10/1 tier split and 2,235 max pts', () => {
+  assert.equal(ACHIEVEMENT_CATALOG.length, 65);
 
   const ids = new Set<string>();
   const tierCounts = { bronze: 0, silver: 0, gold: 0, platinum: 0 };
@@ -52,13 +53,13 @@ test('ACHIEVEMENT_CATALOG defines exactly 64 unique trophies with 31/23/9/1 tier
     totalPoints += def.points;
   }
 
-  assert.deepEqual(tierCounts, { bronze: 31, silver: 23, gold: 9, platinum: 1 });
-  assert.equal(totalPoints, 2145);
+  assert.deepEqual(tierCounts, { bronze: 31, silver: 23, gold: 10, platinum: 1 });
+  assert.equal(totalPoints, 2235);
 
   const platinum = ACHIEVEMENT_CATALOG.find((item) => item.id === PLATINUM_ACHIEVEMENT_ID);
   assert.ok(platinum);
   assert.equal(platinum.tier, 'platinum');
-  assert.equal(platinum.target, 63);
+  assert.equal(platinum.target, 64);
   assert.equal(platinum.hidden, false);
 });
 
@@ -122,11 +123,11 @@ test('fresh install baseline catch-up unlocks zero trophies so first launch is q
     assert.equal(baseline.length, 0);
 
     const snap = getAchievementsSnapshot(db);
-    assert.equal(snap.summary.totalCount, 64);
+    assert.equal(snap.summary.totalCount, 65);
     assert.equal(snap.summary.unlockedCount, 0);
     assert.equal(snap.summary.unseenCount, 0);
     assert.equal(snap.summary.earnedPoints, 0);
-    assert.equal(snap.summary.maxPoints, 2145);
+    assert.equal(snap.summary.maxPoints, 2235);
   } finally {
     db.close();
   }
@@ -230,7 +231,7 @@ test('live client achievement events unlock once, increment unseen count, and cl
   }
 });
 
-test('unlocking all 63 non-Platinum trophies automatically awards Platinum Master Preservationist', () => {
+test('unlocking all 64 non-Platinum trophies automatically awards Platinum Master Preservationist', () => {
   const db = createMigratedMemoryDb();
   try {
     runSilentBaselineCatchUp(db);
@@ -258,9 +259,9 @@ test('unlocking all 63 non-Platinum trophies automatically awards Platinum Maste
     assert.equal(newlyUnlocked[0].tier, 'platinum');
 
     const snapshot = getAchievementsSnapshot(db);
-    assert.equal(snapshot.summary.unlockedCount, 64);
+    assert.equal(snapshot.summary.unlockedCount, 65);
     assert.equal(snapshot.summary.completionPercent, 100);
-    assert.equal(snapshot.summary.earnedPoints, 2145);
+    assert.equal(snapshot.summary.earnedPoints, 2235);
 
     const recomputed = computeAchievementsSummary(snapshot.items);
     assert.deepEqual(recomputed, snapshot.summary);
@@ -302,6 +303,44 @@ test('Multi-Cart Arcade hidden trophies unlock per-game milestones and 4/4 Multi
       brk.newlyUnlocked.map((u) => u.id),
       ['multi_cart_champion'],
     );
+  } finally {
+    db.close();
+  }
+});
+
+test('Retro Visionary helper & cumulative crt_visionary_seconds unlock Gold trophy at 30 minutes', () => {
+  assert.equal(isRetroVisionaryCrtConfig({ enabled: false, uiMotion: 'ultra', scanlines: 0 }), true);
+  assert.equal(isRetroVisionaryCrtConfig({ enabled: true, uiMotion: 'low', scanlines: 100 }), true);
+  assert.equal(isRetroVisionaryCrtConfig({ enabled: false, uiMotion: 'high', scanlines: 100 }), false);
+  assert.equal(isRetroVisionaryCrtConfig({ enabled: true, uiMotion: 'high', scanlines: 99 }), false);
+
+  const db = createMigratedMemoryDb();
+  try {
+    runSilentBaselineCatchUp(db);
+
+    // Oversized single report is clamped to 120s (2 min)
+    const oversized = recordClientAchievementEvent({ type: 'crt_visionary_seconds', value: 9999 }, db);
+    assert.equal(oversized.newlyUnlocked.length, 0);
+    const afterOversized = oversized.snapshot.items.find((i) => i.id === 'retro_visionary');
+    assert.equal(afterOversized?.unlocked, false);
+    assert.equal(afterOversized?.progressCurrent, 2);
+
+    // Accumulate 14 more 120s chunks -> 15 * 120 = 1,800s (30 min)
+    let latest = oversized;
+    for (let i = 0; i < 13; i += 1) {
+      latest = recordClientAchievementEvent({ type: 'crt_visionary_seconds', value: 120 }, db);
+      assert.equal(latest.newlyUnlocked.length, 0);
+    }
+    const midRecord = latest.snapshot.items.find((i) => i.id === 'retro_visionary');
+    assert.equal(midRecord?.progressCurrent, 28);
+
+    const finalRes = recordClientAchievementEvent({ type: 'crt_visionary_seconds', value: 120 }, db);
+    assert.deepEqual(
+      finalRes.newlyUnlocked.map((u) => u.id),
+      ['retro_visionary'],
+    );
+    assert.equal(finalRes.newlyUnlocked[0].tier, 'gold');
+    assert.equal(finalRes.newlyUnlocked[0].points, 90);
   } finally {
     db.close();
   }

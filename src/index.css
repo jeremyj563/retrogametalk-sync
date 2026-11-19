@@ -3973,9 +3973,155 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   will-change: transform;
 }
 
+@keyframes crt-easter-vsync-shell-jitter {
+  0% {
+    transform: translate3d(0, 0, 0);
+    filter: none;
+  }
+  5% {
+    transform: translate3d(0, -4px, 0) scaleY(1.004);
+    filter: contrast(1.24) brightness(1.12);
+  }
+  10% {
+    transform: translate3d(1.5px, 5px, 0) scaleY(0.996);
+    filter: contrast(1.1) brightness(0.86);
+  }
+  15% {
+    transform: translate3d(-1px, -6px, 0);
+    filter: contrast(1.32) brightness(1.18) saturate(1.18);
+  }
+  20% {
+    transform: translate3d(0, 3px, 0);
+    filter: contrast(1.06) brightness(0.9);
+  }
+  26% {
+    transform: translate3d(2px, -5px, 0) skewX(-0.6deg);
+    filter: contrast(1.35) brightness(1.15);
+  }
+  32% {
+    transform: translate3d(-1.5px, 6px, 0) skewX(0.5deg);
+    filter: brightness(0.82) contrast(1.2);
+  }
+  38% {
+    transform: translate3d(0, -3px, 0);
+    filter: contrast(1.25) brightness(1.14);
+  }
+  44% {
+    transform: translate3d(1px, 4px, 0);
+    filter: brightness(0.92);
+  }
+  52% {
+    transform: translate3d(-1px, -5px, 0);
+    filter: contrast(1.3) brightness(1.16);
+  }
+  58% {
+    transform: translate3d(0, 4px, 0);
+    filter: brightness(0.85) contrast(1.15);
+  }
+  66% {
+    transform: translate3d(1px, -3px, 0);
+    filter: contrast(1.2) brightness(1.08);
+  }
+  74% {
+    transform: translate3d(0, 2.5px, 0);
+    filter: brightness(0.94);
+  }
+  82% {
+    transform: translate3d(0, -1.5px, 0);
+    filter: contrast(1.08) brightness(1.04);
+  }
+  91% {
+    transform: translate3d(0, 1px, 0);
+    filter: brightness(1.02);
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+    filter: none;
+  }
+}
+
+@keyframes crt-easter-vsync-scanline-jitter {
+  0% {
+    transform: translate3d(0, 0, 0);
+    opacity: 0.72;
+  }
+  25% {
+    transform: translate3d(0, -3px, 0);
+    opacity: 0.95;
+  }
+  50% {
+    transform: translate3d(0, 3px, 0);
+    opacity: 0.62;
+  }
+  75% {
+    transform: translate3d(0, -2px, 0);
+    opacity: 0.92;
+  }
+  100% {
+    transform: translate3d(0, 2px, 0);
+    opacity: 0.78;
+  }
+}
+
+@keyframes crt-easter-vsync-tear-sweep {
+  0% {
+    transform: translate3d(0, -18vh, 0);
+    opacity: 0.85;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(0, 112vh, 0);
+    opacity: 0.55;
+  }
+}
+
 .crt-easter-cartridge-blow {
   animation: crt-easter-cartridge-glitch 900ms steps(2, end) both;
   will-change: transform, filter;
+}
+
+.crt-easter-vsync-glitch {
+  animation: crt-easter-vsync-shell-jitter 2200ms steps(2, end) both;
+  will-change: transform, filter;
+}
+
+.crt-easter-vsync-overlay {
+  position: fixed;
+  inset: -12px 0;
+  z-index: 71;
+  pointer-events: none;
+  overflow: hidden;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0px,
+    rgba(0, 0, 0, 0) 1px,
+    rgba(0, 0, 0, 0.52) 2px,
+    rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.14) 3px
+  );
+  background-size: 100% 4px;
+  animation: crt-easter-vsync-scanline-jitter 95ms steps(2, end) infinite;
+  will-change: transform, opacity;
+}
+
+.crt-easter-vsync-overlay::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 14vh;
+  background: linear-gradient(
+    to bottom,
+    rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0) 0%,
+    rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.26) 46%,
+    rgba(255, 255, 255, 0.22) 50%,
+    rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.16) 58%,
+    rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0) 100%
+  );
+  animation: crt-easter-vsync-tear-sweep 420ms linear infinite;
+  will-change: transform, opacity;
 }
 
 .crt-easter-toast {
@@ -4033,10 +4179,17 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
 
   .crt-easter-barrel-roll,
   .crt-easter-cartridge-blow,
+  .crt-easter-vsync-glitch,
+  .crt-easter-vsync-overlay,
+  .crt-easter-vsync-overlay::after,
   .crt-easter-toast {
     animation: none !important;
     transform: none !important;
     filter: none !important;
+  }
+
+  .crt-easter-vsync-overlay {
+    display: none !important;
   }
 
   .crt-arcade-backdrop,
