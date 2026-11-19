@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  type ArcadeCabinetStyleId,
+  isArcadeCabinetStyleUnlocked,
+} from '../shared/achievementRewards';
 import { prefersReducedMotion } from '../utils/arcadeGames';
 import {
   type ArcadeCartridgeId,
@@ -17,6 +21,9 @@ export interface CrtArcadeModalProps {
   initialTarget: ArcadeLaunchTarget;
   konamiBonus: boolean;
   consoleLabels: string[];
+  earnedPoints?: number;
+  cabinetStyle?: ArcadeCabinetStyleId;
+  onSelectCabinetStyle?: (style: ArcadeCabinetStyleId) => void;
   onClose: () => void;
 }
 
@@ -27,6 +34,9 @@ export function CrtArcadeModal({
   initialTarget,
   konamiBonus,
   consoleLabels,
+  earnedPoints = 0,
+  cabinetStyle = 'standard',
+  onSelectCabinetStyle,
   onClose,
 }: CrtArcadeModalProps) {
   const [rendered, setRendered] = useState(open);
@@ -121,6 +131,20 @@ export function CrtArcadeModal({
 
   if (!rendered) return null;
 
+  const effectiveCabinetStyle: ArcadeCabinetStyleId = isArcadeCabinetStyleUnlocked(
+    cabinetStyle,
+    earnedPoints,
+  )
+    ? cabinetStyle
+    : 'standard';
+
+  const cabinetTrimClass =
+    effectiveCabinetStyle === 'cabinet_gold'
+      ? 'crt-arcade-cabinet-gold'
+      : effectiveCabinetStyle === 'cabinet_overdrive'
+        ? 'crt-arcade-cabinet-overdrive'
+        : '';
+
   return (
     <div
       role="dialog"
@@ -133,13 +157,16 @@ export function CrtArcadeModal({
       <div
         data-arcade-state={modalPhase}
         onClick={(e) => e.stopPropagation()}
-        className="crt-arcade-cabinet w-full max-w-[760px] border border-crt-border-strong bg-crt-surface rounded-md shadow-[0_24px_64px_-16px_rgba(0,0,0,0.95)] overflow-hidden flex flex-col"
+        className={`crt-arcade-cabinet w-full max-w-[760px] border border-crt-border-strong bg-crt-surface rounded-md shadow-[0_24px_64px_-16px_rgba(0,0,0,0.95)] overflow-hidden flex flex-col ${cabinetTrimClass}`}
       >
         {activeView === 'launcher' && (
           <ArcadeMultiCartLauncher
             konamiBonus={konamiBonus}
             muted={muted}
             highScores={highScores}
+            earnedPoints={earnedPoints}
+            cabinetStyle={effectiveCabinetStyle}
+            onSelectCabinetStyle={onSelectCabinetStyle}
             onToggleMute={toggleMute}
             onSelectCartridge={(cartId) => setActiveView(cartId)}
             onClose={onClose}

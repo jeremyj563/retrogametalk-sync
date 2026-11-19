@@ -56,6 +56,115 @@
     --color-crt-crimson: #f06256;
   }
 
+  /* Point-Unlocked Collector CRT Phosphor Palettes */
+  [data-crt-palette="gameboy"] {
+    --color-crt-bg: #080b05;
+    --color-crt-surface: #10150b;
+    --color-crt-elevated: #171f10;
+    --color-crt-border: #27361a;
+    --color-crt-border-strong: #3c5227;
+    --color-crt-text: #e4f0c2;
+    --color-crt-muted: #8fa36b;
+    --color-crt-phosphor: #9bbc0f;
+    --color-crt-phosphor-dim: #4c640c;
+    --color-crt-amber: #d4b82c;
+    --color-crt-crimson: #e06d53;
+  }
+
+  [data-crt-palette="synthwave"] {
+    --color-crt-bg: #09060d;
+    --color-crt-surface: #120b1a;
+    --color-crt-elevated: #1a1026;
+    --color-crt-border: #2e1d42;
+    --color-crt-border-strong: #492c66;
+    --color-crt-text: #f6e9fc;
+    --color-crt-muted: #a68bb8;
+    --color-crt-phosphor: #f45bff;
+    --color-crt-phosphor-dim: #8c2399;
+    --color-crt-amber: #ff9f43;
+    --color-crt-crimson: #ff5277;
+  }
+
+  [data-crt-palette="virtualboy"] {
+    --color-crt-bg: #0a0405;
+    --color-crt-surface: #14080a;
+    --color-crt-elevated: #1f0c10;
+    --color-crt-border: #38151c;
+    --color-crt-border-strong: #59202b;
+    --color-crt-text: #fae6e8;
+    --color-crt-muted: #b38087;
+    --color-crt-phosphor: #ff3b4e;
+    --color-crt-phosphor-dim: #991a27;
+    --color-crt-amber: #ff8a3d;
+    --color-crt-crimson: #ff5c6c;
+  }
+
+  [data-crt-palette="trinitron"] {
+    --color-crt-bg: #07080a;
+    --color-crt-surface: #101216;
+    --color-crt-elevated: #171a20;
+    --color-crt-border: #272c36;
+    --color-crt-border-strong: #3d4554;
+    --color-crt-text: #f2f7fc;
+    --color-crt-muted: #93a0b2;
+    --color-crt-phosphor: #e8f4ff;
+    --color-crt-phosphor-dim: #7c8da1;
+    --color-crt-amber: #f5b942;
+    --color-crt-crimson: #f2685c;
+  }
+
+  /* Prestige Trophy Crest & Hidden Arcade Cabinet Cosmetic Trims */
+  .crt-crest-gold {
+    border-color: rgba(251, 191, 36, 0.72) !important;
+    box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.18), 0 0 14px -4px rgba(245, 158, 11, 0.38);
+  }
+
+  .crt-crest-platinum {
+    border-color: rgba(103, 232, 249, 0.78) !important;
+    box-shadow:
+      0 0 0 1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28),
+      0 0 16px -4px rgba(103, 232, 249, 0.42);
+    animation: crt-crest-prism 5.5s ease-in-out infinite;
+  }
+
+  @keyframes crt-crest-prism {
+    0%,
+    100% {
+      border-color: rgba(103, 232, 249, 0.78);
+      box-shadow:
+        0 0 0 1px rgba(103, 232, 249, 0.24),
+        0 0 16px -4px rgba(103, 232, 249, 0.38);
+    }
+    50% {
+      border-color: rgba(251, 191, 36, 0.8);
+      box-shadow:
+        0 0 0 1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.3),
+        0 0 18px -4px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.45);
+    }
+  }
+
+  .crt-arcade-cabinet-gold {
+    border-color: rgba(251, 191, 36, 0.75) !important;
+    box-shadow:
+      0 0 0 1px rgba(251, 191, 36, 0.22),
+      0 24px 64px -16px rgba(0, 0, 0, 0.95),
+      0 0 36px -12px rgba(245, 158, 11, 0.35) !important;
+  }
+
+  .crt-arcade-cabinet-overdrive {
+    border-color: rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.85) !important;
+    box-shadow:
+      0 0 0 1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.32),
+      0 24px 64px -16px rgba(0, 0, 0, 0.95),
+      0 0 42px -10px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.48) !important;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .crt-crest-platinum {
+      animation: none !important;
+    }
+  }
+
   /* Dynamic CRT phosphor radial ambient glow (scales with Gauss Glow & active palette) */
   .crt-canvas {
     background-color: var(--color-crt-bg);

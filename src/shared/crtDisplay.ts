@@ -1,7 +1,9 @@
 import type { CSSProperties } from 'react';
 
-export type CrtPalette = 'green' | 'amber' | 'cyan';
-export type CrtPresetId = 'subtle' | 'pvm' | 'arcade';
+export type CrtCorePalette = 'green' | 'amber' | 'cyan';
+export type CrtBonusPalette = 'gameboy' | 'synthwave' | 'virtualboy' | 'trinitron';
+export type CrtPalette = CrtCorePalette | CrtBonusPalette;
+export type CrtPresetId = 'subtle' | 'pvm' | 'arcade' | 'bvm';
 export type CrtUiMotionLevel = 'off' | 'low' | 'medium' | 'high' | 'ultra';
 
 export interface CrtFxValues {
@@ -59,15 +61,80 @@ export const CRT_PRESETS: Record<
       chromaticAberration: 45,
     },
   },
+  bvm: {
+    label: 'BVM',
+    description: 'Flagship broadcast reference monitor: ultra-crisp aperture grille, balanced bloom, razor scanlines',
+    values: {
+      scanlines: 65,
+      gaussGlow: 58,
+      vignette: 32,
+      apertureGrille: 82,
+      chromaticAberration: 14,
+    },
+  },
 };
+
+export const CRT_CORE_PALETTES: readonly CrtCorePalette[] = ['green', 'amber', 'cyan'];
+export const CRT_BONUS_PALETTES: readonly CrtBonusPalette[] = [
+  'gameboy',
+  'synthwave',
+  'virtualboy',
+  'trinitron',
+];
 
 export const CRT_PALETTES: Record<
   CrtPalette,
-  { label: string; swatch: string; swatchClass: string; rgb: string }
+  { label: string; shortLabel: string; swatch: string; swatchClass: string; rgb: string }
 > = {
-  green: { label: 'Green', swatch: '#38e56b', swatchClass: 'bg-[#38e56b]', rgb: '56, 229, 107' },
-  amber: { label: 'Amber', swatch: '#ffb000', swatchClass: 'bg-[#ffb000]', rgb: '255, 176, 0' },
-  cyan: { label: 'Cyan', swatch: '#38d9f5', swatchClass: 'bg-[#38d9f5]', rgb: '56, 217, 245' },
+  green: {
+    label: 'Green',
+    shortLabel: 'Green',
+    swatch: '#38e56b',
+    swatchClass: 'bg-[#38e56b]',
+    rgb: '56, 229, 107',
+  },
+  amber: {
+    label: 'Amber',
+    shortLabel: 'Amber',
+    swatch: '#ffb000',
+    swatchClass: 'bg-[#ffb000]',
+    rgb: '255, 176, 0',
+  },
+  cyan: {
+    label: 'Cyan',
+    shortLabel: 'Cyan',
+    swatch: '#38d9f5',
+    swatchClass: 'bg-[#38d9f5]',
+    rgb: '56, 217, 245',
+  },
+  gameboy: {
+    label: 'DMG Olive',
+    shortLabel: 'DMG',
+    swatch: '#9bbc0f',
+    swatchClass: 'bg-[#9bbc0f]',
+    rgb: '155, 188, 15',
+  },
+  synthwave: {
+    label: 'Synthwave',
+    shortLabel: 'Synth',
+    swatch: '#f45bff',
+    swatchClass: 'bg-[#f45bff]',
+    rgb: '244, 91, 255',
+  },
+  virtualboy: {
+    label: 'Crimson Tube',
+    shortLabel: 'Crimson',
+    swatch: '#ff3b4e',
+    swatchClass: 'bg-[#ff3b4e]',
+    rgb: '255, 59, 78',
+  },
+  trinitron: {
+    label: 'Trinitron White',
+    shortLabel: 'White',
+    swatch: '#e8f4ff',
+    swatchClass: 'bg-[#e8f4ff]',
+    rgb: '232, 244, 255',
+  },
 };
 
 export const CRT_UI_MOTION_LEVELS: Record<
@@ -128,8 +195,16 @@ export function extractCrtFxValues(values: CrtFxValues): CrtFxValues {
   };
 }
 
-function isValidPalette(val: unknown): val is CrtPalette {
-  return val === 'green' || val === 'amber' || val === 'cyan';
+export function isValidPalette(val: unknown): val is CrtPalette {
+  return (
+    val === 'green' ||
+    val === 'amber' ||
+    val === 'cyan' ||
+    val === 'gameboy' ||
+    val === 'synthwave' ||
+    val === 'virtualboy' ||
+    val === 'trinitron'
+  );
 }
 
 function isValidUiMotionLevel(val: unknown): val is CrtUiMotionLevel {
@@ -231,7 +306,7 @@ export function saveCrtDisplaySettings(settings: CrtDisplaySettings): void {
 }
 
 export function detectActiveCrtPreset(settings: CrtFxValues): CrtPresetId | 'custom' {
-  for (const id of ['subtle', 'pvm', 'arcade'] as const) {
+  for (const id of ['subtle', 'pvm', 'arcade', 'bvm'] as const) {
     const v = CRT_PRESETS[id].values;
     if (
       settings.scanlines === v.scanlines &&

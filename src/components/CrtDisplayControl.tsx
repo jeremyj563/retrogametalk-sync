@@ -1,7 +1,15 @@
 import type { CSSProperties } from 'react';
-import { Monitor, RotateCcw } from 'lucide-react';
+import { Lock, Monitor, RotateCcw } from 'lucide-react';
+import {
+  BVM_PRESET_REQUIRED_POINTS,
+  isBvmPresetUnlocked,
+  isPaletteUnlocked,
+  PALETTE_REQUIRED_POINTS,
+} from '../shared/achievementRewards';
 import {
   clampCrtPct,
+  CRT_BONUS_PALETTES,
+  CRT_CORE_PALETTES,
   CRT_PALETTES,
   CRT_PRESETS,
   CRT_UI_MOTION_LEVELS,
@@ -16,6 +24,7 @@ import {
 
 interface CrtDisplayControlProps {
   settings: CrtDisplaySettings;
+  earnedPoints?: number;
   onChange: (next: CrtDisplaySettings) => void;
 }
 
@@ -35,7 +44,12 @@ function formatCustomSummary(values: CrtFxValues): string {
   return `Scan ${values.scanlines}% · Glow ${values.gaussGlow}% · Vig ${values.vignette}% · Grille ${values.apertureGrille}% · RGB ${values.chromaticAberration}%`;
 }
 
-export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps) {
+export function CrtDisplayControl({
+  settings,
+  earnedPoints = 0,
+  onChange,
+}: CrtDisplayControlProps) {
+  const bvmUnlocked = isBvmPresetUnlocked(earnedPoints);
   const activePreset = detectActiveCrtPreset(settings);
   const savedCustom =
     activePreset === 'custom' ? extractCrtFxValues(settings) : settings.customValues;
@@ -62,6 +76,7 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
   };
 
   const handleSelectPreset = (id: CrtPresetId) => {
+    if (id === 'bvm' && !bvmUnlocked) return;
     const isCurrentlySelected = settings.enabled && activePreset === id;
     if (isCurrentlySelected && savedCustom) {
       handleRestoreCustom();
@@ -81,6 +96,7 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
   };
 
   const handleSelectPalette = (palette: CrtPalette) => {
+    if (!isPaletteUnlocked(palette, earnedPoints)) return;
     onChange({
       ...settings,
       palette,
@@ -163,28 +179,34 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
               </button>
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-1">
-            {(['subtle', 'pvm', 'arcade'] as const).map((id) => {
-              const isSelected = settings.enabled && activePreset === id;
+          <div className="grid grid-cols-4 gap-1">
+            {(['subtle', 'pvm', 'arcade', 'bvm'] as const).map((id) => {
+              const locked = id === 'bvm' && !bvmUnlocked;
+              const isSelected = !locked && settings.enabled && activePreset === id;
               const canUntoggle = isSelected && Boolean(savedCustom);
-              const tooltip =
-                canUntoggle && savedCustom
+              const tooltip = locked
+                ? `Broadcast BVM monitor preset · Unlock at ${BVM_PRESET_REQUIRED_POINTS.toLocaleString()} trophy pts`
+                : canUntoggle && savedCustom
                   ? `${CRT_PRESETS[id].description} — click again to untoggle back to Custom (${formatCustomSummary(savedCustom)})`
                   : CRT_PRESETS[id].description;
               return (
                 <button
                   key={id}
                   type="button"
+                  disabled={locked}
                   aria-pressed={isSelected}
                   onClick={() => handleSelectPreset(id)}
                   title={tooltip}
-                  className={`px-1.5 py-1 text-[11px] font-mono rounded border transition-colors whitespace-nowrap cursor-pointer ${
-                    isSelected
-                      ? 'border-crt-phosphor/60 bg-crt-elevated text-crt-phosphor font-medium'
-                      : 'border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+                  className={`inline-flex items-center justify-center gap-0.5 px-1 py-1 text-[10px] font-mono rounded border transition-colors whitespace-nowrap ${
+                    locked
+                      ? 'border-crt-border/70 bg-crt-bg/50 text-crt-muted/50 cursor-not-allowed'
+                      : isSelected
+                        ? 'border-crt-phosphor/60 bg-crt-elevated text-crt-phosphor font-medium cursor-pointer'
+                        : 'border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong cursor-pointer'
                   }`}
                 >
-                  {CRT_PRESETS[id].label}
+                  {locked && <Lock className="h-2.5 w-2.5 shrink-0" />}
+                  <span>{CRT_PRESETS[id].label}</span>
                 </button>
               );
             })}
@@ -195,7 +217,7 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
         <div className="space-y-1.5">
           <div className="text-[10px] font-mono text-crt-muted">Phosphor Palette</div>
           <div className="grid grid-cols-3 gap-1">
-            {(['green', 'amber', 'cyan'] as const).map((id) => {
+            {CRT_CORE_PALETTES.map((id) => {
               const pal = CRT_PALETTES[id];
               const active = settings.palette === id;
               return (
@@ -214,7 +236,54 @@ export function CrtDisplayControl({ settings, onChange }: CrtDisplayControlProps
                     aria-hidden="true"
                     className={`w-2 h-2 rounded-full shrink-0 ${pal.swatchClass}`}
                   />
-                  <span>{pal.label}</span>
+                  <span>{pal.shortLabel}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Point-Unlocked Collector Palettes */}
+          <div className="grid grid-cols-2 gap-1">
+            {CRT_BONUS_PALETTES.map((id) => {
+              const pal = CRT_PALETTES[id];
+              const reqPts = PALETTE_REQUIRED_POINTS[id] ?? 0;
+              const unlocked = isPaletteUnlocked(id, earnedPoints);
+              const active = unlocked && settings.palette === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  disabled={!unlocked}
+                  aria-pressed={active}
+                  onClick={() => handleSelectPalette(id)}
+                  title={
+                    unlocked
+                      ? `${pal.label} · Collector phosphor palette`
+                      : `${pal.label} · Unlock at ${reqPts.toLocaleString()} trophy pts`
+                  }
+                  className={`inline-flex items-center justify-between gap-1 px-1.5 py-1 text-[10px] font-mono rounded border transition-colors whitespace-nowrap ${
+                    !unlocked
+                      ? 'border-crt-border/65 bg-crt-bg/45 text-crt-muted/50 cursor-not-allowed'
+                      : active
+                        ? 'border-crt-phosphor/65 bg-crt-elevated text-crt-text font-medium cursor-pointer'
+                        : 'border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong cursor-pointer'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-1.5 min-w-0">
+                    <span
+                      aria-hidden="true"
+                      className={`w-2 h-2 rounded-full shrink-0 ${pal.swatchClass} ${
+                        unlocked ? '' : 'opacity-45'
+                      }`}
+                    />
+                    <span className="truncate">{pal.shortLabel}</span>
+                  </span>
+                  {!unlocked && (
+                    <span className="inline-flex items-center gap-0.5 text-[9px] text-crt-muted/60 shrink-0 tabular-nums">
+                      <Lock className="h-2.5 w-2.5" />
+                      {reqPts}
+                    </span>
+                  )}
                 </button>
               );
             })}

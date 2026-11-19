@@ -23,6 +23,17 @@ import { TrophyCaseDrawer } from './components/TrophyCaseDrawer';
 import { TrophyToastStack } from './components/TrophyToastStack';
 import { useBulkStorageInstaller } from './hooks/useBulkStorageInstaller';
 import {
+  computeOperatorRank,
+  isArcadeCabinetStyleUnlocked,
+  isChimePackUnlocked,
+  isCrestStyleUnlocked,
+  isPaletteUnlocked,
+  loadRewardCosmeticPrefs,
+  type RewardCosmeticPrefs,
+  saveRewardCosmeticPrefs,
+  type TrophyCrestStyleId,
+} from './shared/achievementRewards';
+import {
   type AchievementRecord,
   type AchievementsSnapshot,
   type AchievementUnlockEvent,
@@ -31,7 +42,9 @@ import {
 } from './shared/achievements';
 import {
   computeCrtCssVariables,
+  CRT_PRESETS,
   type CrtDisplaySettings,
+  type CrtPalette,
   isRetroVisionaryCrtConfig,
   loadInitialCrtDisplaySettings,
   saveCrtDisplaySettings,
@@ -559,6 +572,63 @@ export default function App() {
     crtSettingsRef.current = next;
     setCrtSettings(next);
   }, []);
+
+  const [rewardCosmetics, setRewardCosmetics] = useState<RewardCosmeticPrefs>(() =>
+    loadRewardCosmeticPrefs(),
+  );
+
+  const handleUpdateRewardCosmetics = useCallback((patch: Partial<RewardCosmeticPrefs>) => {
+    setRewardCosmetics((prev) => {
+      const next: RewardCosmeticPrefs = { ...prev, ...patch };
+      saveRewardCosmeticPrefs(next);
+      return next;
+    });
+  }, []);
+
+  const earnedPoints = achievementsSnapshot?.summary.earnedPoints ?? 0;
+  const achievementsLoaded = achievementsSnapshot !== null;
+  const operatorRank = computeOperatorRank(earnedPoints);
+
+  const effectiveChimePack =
+    !achievementsLoaded || isChimePackUnlocked(rewardCosmetics.chimePack, earnedPoints)
+      ? rewardCosmetics.chimePack
+      : 'classic_8bit';
+  const effectiveCrestStyle: TrophyCrestStyleId =
+    achievementsLoaded && isCrestStyleUnlocked(rewardCosmetics.crestStyle, earnedPoints)
+      ? rewardCosmetics.crestStyle
+      : 'standard';
+  const effectiveArcadeCabinetStyle =
+    !achievementsLoaded ||
+    isArcadeCabinetStyleUnlocked(rewardCosmetics.arcadeCabinetStyle, earnedPoints)
+      ? rewardCosmetics.arcadeCabinetStyle
+      : 'standard';
+
+  useEffect(() => {
+    retroSynth.setChimePack(effectiveChimePack);
+  }, [effectiveChimePack]);
+
+  // If a locked collector palette was persisted from another DB state, gracefully fall back once snapshot loads
+  const effectiveCrtSettings: CrtDisplaySettings =
+    achievementsLoaded && !isPaletteUnlocked(crtSettings.palette, earnedPoints)
+      ? { ...crtSettings, palette: 'green' }
+      : crtSettings;
+
+  const handleApplyBvmPreset = useCallback(() => {
+    const prev = crtSettingsRef.current;
+    handleCrtSettingsChange({
+      ...prev,
+      enabled: true,
+      ...CRT_PRESETS.bvm.values,
+    });
+  }, [handleCrtSettingsChange]);
+
+  const handleSelectRewardPalette = useCallback(
+    (palette: CrtPalette) => {
+      const prev = crtSettingsRef.current;
+      handleCrtSettingsChange({ ...prev, palette });
+    },
+    [handleCrtSettingsChange],
+  );
 
   // Hidden Retro Gaming Easter Egg Suite state
   const [arcadeOpen, setArcadeOpen] = useState(false);
@@ -1572,25 +1642,27 @@ export default function App() {
     }
   };
 
-  const crtCssVars = computeCrtCssVariables(crtSettings);
-  const isUltraMotion = crtSettings.uiMotion === 'ultra';
+  const crtCssVars = computeCrtCssVariables(effectiveCrtSettings);
+  const isUltraMotion = effectiveCrtSettings.uiMotion === 'ultra';
   const isHighOrUltraMotion =
-    crtSettings.uiMotion === 'high' || crtSettings.uiMotion === 'ultra';
-  const showScanlines = crtSettings.enabled && (crtSettings.scanlines > 0 || isUltraMotion);
-  const showGrille = crtSettings.enabled && (crtSettings.apertureGrille > 0 || isUltraMotion);
+    effectiveCrtSettings.uiMotion === 'high' || effectiveCrtSettings.uiMotion === 'ultra';
+  const showScanlines =
+    effectiveCrtSettings.enabled && (effectiveCrtSettings.scanlines > 0 || isUltraMotion);
+  const showGrille =
+    effectiveCrtSettings.enabled && (effectiveCrtSettings.apertureGrille > 0 || isUltraMotion);
   const showVignette =
-    crtSettings.enabled &&
-    (crtSettings.vignette > 0 || crtSettings.gaussGlow > 0 || isUltraMotion);
-  const showHumBar = crtSettings.enabled && isHighOrUltraMotion;
-  const showDegauss = crtSettings.enabled && isUltraMotion;
+    effectiveCrtSettings.enabled &&
+    (effectiveCrtSettings.vignette > 0 || effectiveCrtSettings.gaussGlow > 0 || isUltraMotion);
+  const showHumBar = effectiveCrtSettings.enabled && isHighOrUltraMotion;
+  const showDegauss = effectiveCrtSettings.enabled && isUltraMotion;
 
   return (
     <div
-      data-crt-palette={crtSettings.palette}
-      data-crt-motion={crtSettings.uiMotion}
+      data-crt-palette={effectiveCrtSettings.palette}
+      data-crt-motion={effectiveCrtSettings.uiMotion}
       data-sync-running={status?.activeRun ? 'true' : 'false'}
       style={crtCssVars}
-      className={`min-h-screen crt-canvas text-crt-text flex flex-col ${crtSettings.enabled ? 'crt-fx-active' : ''}`}
+      className={`min-h-screen crt-canvas text-crt-text flex flex-col ${effectiveCrtSettings.enabled ? 'crt-fx-active' : ''}`}
     >
       {showGrille && <div aria-hidden="true" className="crt-layer-grille" />}
       {showScanlines && <div aria-hidden="true" className="crt-layer-scanlines" />}
@@ -1648,23 +1720,30 @@ export default function App() {
             onClick={() => handleOpenTrophyDrawer()}
             aria-label={
               achievementsSnapshot
-                ? `Open Trophy Case (${achievementsSnapshot.summary.unlockedCount} of ${achievementsSnapshot.summary.totalCount} unlocked)`
+                ? `Open Trophy Case (${achievementsSnapshot.summary.unlockedCount} of ${achievementsSnapshot.summary.totalCount} unlocked, Level ${operatorRank.current.level} ${operatorRank.current.title})`
                 : 'Open Trophy Case'
             }
             title={
               achievementsSnapshot
-                ? `Trophy Case · ${achievementsSnapshot.summary.unlockedCount}/${achievementsSnapshot.summary.totalCount} unlocked (${achievementsSnapshot.summary.earnedPoints.toLocaleString()} pts)`
+                ? `Lv.${operatorRank.current.level} ${operatorRank.current.title} · ${achievementsSnapshot.summary.unlockedCount}/${achievementsSnapshot.summary.totalCount} trophies (${achievementsSnapshot.summary.earnedPoints.toLocaleString()} pts)`
                 : 'Open Trophy Case'
             }
             className={`relative inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-[5px] border font-mono text-xs tabular-nums transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               (achievementsSnapshot?.summary.unseenCount ?? 0) > 0
                 ? 'border-crt-phosphor/70 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/18'
                 : 'border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+            } ${
+              effectiveCrestStyle === 'platinum_aura'
+                ? 'crt-crest-platinum'
+                : effectiveCrestStyle === 'gold_trim'
+                  ? 'crt-crest-gold'
+                  : ''
             }`}
           >
             <Trophy
               className={`h-3.5 w-3.5 shrink-0 ${
-                (achievementsSnapshot?.summary.unseenCount ?? 0) > 0
+                (achievementsSnapshot?.summary.unseenCount ?? 0) > 0 ||
+                effectiveCrestStyle === 'platinum_aura'
                   ? 'text-crt-phosphor'
                   : 'text-crt-amber'
               }`}
@@ -1672,7 +1751,7 @@ export default function App() {
             <span>
               {achievementsSnapshot
                 ? `${achievementsSnapshot.summary.unlockedCount}/${achievementsSnapshot.summary.totalCount}`
-                : '—/60'}
+                : '—/65'}
             </span>
           </button>
 
@@ -1935,7 +2014,11 @@ export default function App() {
             )}
 
             {/* Permanent CRT Display & Living UI Motion Controls */}
-            <CrtDisplayControl settings={crtSettings} onChange={handleCrtSettingsChange} />
+            <CrtDisplayControl
+              settings={effectiveCrtSettings}
+              earnedPoints={earnedPoints}
+              onChange={handleCrtSettingsChange}
+            />
           </div>
 
           {/* Inconspicuous Build Footer */}
@@ -2058,6 +2141,11 @@ export default function App() {
         initialTarget={arcadeInitialTarget}
         konamiBonus={arcadeKonamiBonus}
         consoleLabels={(status?.systems ?? []).map((sys) => sys.systemName)}
+        earnedPoints={earnedPoints}
+        cabinetStyle={effectiveArcadeCabinetStyle}
+        onSelectCabinetStyle={(style) =>
+          handleUpdateRewardCosmetics({ arcadeCabinetStyle: style })
+        }
         onClose={() => setArcadeOpen(false)}
       />
 
@@ -2068,6 +2156,12 @@ export default function App() {
         loading={achievementsLoading}
         focusedTrophyId={focusedTrophyId}
         quietMode={quietMode}
+        crtSettings={effectiveCrtSettings}
+        rewardCosmetics={rewardCosmetics}
+        effectiveCrestStyle={effectiveCrestStyle}
+        onSelectPalette={handleSelectRewardPalette}
+        onApplyBvmPreset={handleApplyBvmPreset}
+        onUpdateRewardCosmetics={handleUpdateRewardCosmetics}
         onToggleQuietMode={handleToggleQuietMode}
         onClose={() => {
           setTrophyDrawerOpen(false);
