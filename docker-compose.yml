@@ -1,8 +1,11 @@
 services:
   rgt-sync:
-    build: .
+    image: ${RGT_SYNC_IMAGE:-ghcr.io/jeremyj563/retrogametalk-sync:1.7.0}
+    # Uncomment below (and comment/override image if needed) to build locally from source:
+    # build: .
     container_name: rgt-sync
     restart: unless-stopped
+    stop_grace_period: 30s
     ports:
       - "3000:3000"
     environment:
@@ -10,12 +13,19 @@ services:
       PORT: 3000
       DATA_DIR: /run/repo/.rgt-data
       DOWNLOAD_DIR: /run/repo
-      CRON_SCHEDULE: "0 */6 * * *"
+      CRON_SCHEDULE: "${CRON_SCHEDULE:-0 */6 * * *}"
       RGT_BASE_URL: "https://retrogametalk.com/repo/"
       RGT_LOGIN_URL: "https://retrogametalk.com/login/login"
       RGT_USERNAME: "${RGT_USERNAME:-}"
       RGT_PASSWORD: "${RGT_PASSWORD:-}"
       SCRAPER_SYSTEM_FILTER: "${SCRAPER_SYSTEM_FILTER:-}"
+      SCRAPER_RELEASE_TYPE_FILTER: "${SCRAPER_RELEASE_TYPE_FILTER:-}"
       SCRAPER_DEBUG: "${SCRAPER_DEBUG:-false}"
     volumes:
       - ./mirror-data:/run/repo
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

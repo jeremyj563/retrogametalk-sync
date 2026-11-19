@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-11-18
+
+- Redesigned `README.md` into a mature open-source project front page featuring custom CRT cartridge banner/icon vector assets (`docs/assets/logo-banner.svg`, `docs/assets/icon.svg`), overview, target audience personas, key capabilities, 2-minute Quick Start, platform deployment matrix, configuration summary, architecture diagram, publishing roadmap, and explicit `TODO` placeholders for external screenshots/license/community links.
+- Added comprehensive, self-contained deployment documentation under `/docs/deploy/` (`README.md`, `docker.md`, `docker-compose.md`, `portainer-and-dockge.md`, `proxmox-lxc.md`, `truenas-scale.md`, `unraid.md`, and `kubernetes-helm.md`) covering storage contracts, all runtime environment variables, and platform-specific install/upgrade/troubleshooting workflows.
+- Staged ready-to-use deployment templates (`docker-compose.yml` defaulting to GHCR multi-arch image, `deploy/truenas/docker-compose.yaml`, and Unraid `deploy/unraid/retrogametalk-sync.xml` + `ca_profile.xml`) and enriched `Dockerfile` OCI labels.
+- Upgraded `.github/workflows/docker-publish.yml` with a template/Helm `validate` job, QEMU + Buildx multi-architecture builds (`linux/amd64,linux/arm64`), SBOM and provenance attestations, OCI Helm chart publishing (`oci://ghcr.io/<owner>/charts/retrogametalk-sync`), and secret-gated Docker Hub mirroring (`DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`).
+
 ## [1.6.0] - 2026-11-18
 
 - Added automatic background detail hydration (`POST /api/items/:id/metadata?lazy=1`) and progressive per-screenshot lazy caching (`GET /api/items/:id/asset?kind=screenshot&index=N&lazy=1`) when opening any Catalog item in `GameDetailDrawer`, preserving fast WordPress REST catalog indexing while loading full screenshots, specs, stats, and release notes on demand without creating folders in the download directory for un-downloaded releases.

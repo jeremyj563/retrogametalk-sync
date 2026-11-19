@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Maintainer>
+  <Icon>https://raw.githubusercontent.com/jeremyj563/retrogametalk-sync/main/docs/assets/icon.svg</Icon>
+  <Profile>RetroGameTalk Sync — Self-hosted retro ROM preservation mirror and direct handheld SD card installer.</Profile>
+  <!-- TODO: Replace with live Unraid Forums profile/thread link before ca.unraid.net submission -->
+  <Forum>https://github.com/jeremyj563/retrogametalk-sync</Forum>
+  <WebPage>https://github.com/jeremyj563/retrogametalk-sync</WebPage>
+</Maintainer>

@@ -1,0 +1,31 @@
+# TrueNAS SCALE (Electric Eel 24.10+ / Community Edition) Custom App YAML Template
+# Apps -> Discover Apps -> Custom App -> Install via YAML
+# Replace <media-pool> and <apps-pool> with your actual TrueNAS ZFS pool names.
+services:
+  rgt-sync:
+    image: ghcr.io/jeremyj563/retrogametalk-sync:1.7.0
+    container_name: rgt-sync
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATA_DIR: /run/repo/.rgt-data
+      DOWNLOAD_DIR: /run/repo
+      CRON_SCHEDULE: "0 */6 * * *"
+      SCRAPER_DEBUG: "false"
+    volumes:
+      - type: bind
+        source: /mnt/<media-pool>/roms
+        target: /run/repo
+      - type: bind
+        source: /mnt/<apps-pool>/apps/rgt-sync/data
+        target: /run/repo/.rgt-data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

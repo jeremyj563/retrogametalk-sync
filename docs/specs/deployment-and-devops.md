@@ -30,10 +30,12 @@ At runtime, `ScraperOrchestrator` exposes `status.build` (`{ version, gitSha, gi
 
 ## 2. GitHub Actions CI/CD (`.github/workflows/docker-publish.yml`)
 
-Every push to `main`, Git tag push (`*`), pull request, or manual `workflow_dispatch` runs the automated container pipeline on `ubuntu-24.04`:
-1. **Full-History Checkout (`fetch-depth: 0`, `fetch-tags: true`)**: Resolves exact Git tags pointing at `HEAD` so tagged releases stamp semantic version tags (`v1.x.y`) into `APP_VERSION`, while untagged branch builds stamp the branch ref.
-2. **Docker Metadata & Buildx**: Uses `docker/metadata-action` and `docker/build-push-action` to publish multi-tag manifests (`latest`, branch ref, semver `{{version}}` / `{{major}}.{{minor}}`, and `sha-<short>`) to **GitHub Container Registry (`ghcr.io`)**.
-3. **GitHub Actions Cache (`type=gha,mode=max`)**: Caches Alpine APK and `npm ci` layers across runs and automatically injects `GIT_SHA`, `APP_VERSION`, and `GIT_URL=${{ github.server_url }}/${{ github.repository }}`.
+Every push to `main`, bare SemVer tag push (`[0-9]*.*.*`), pull request, or manual `workflow_dispatch` runs the automated container and validation pipeline on `ubuntu-24.04`:
+1. **Template & Chart Validation (`validate`)**: Lints Unraid XML templates (`xmllint --noout`), verifies Docker Compose and TrueNAS Compose configs (`docker compose config -q`), and runs `helm lint k8s/charts/retrogametalk-sync`.
+2. **Release Validation & Bare-SemVer Tagging (`release`)**: Confirms strict `1.x.y` lockstep between `package.json` and `Chart.yaml` (`version` + `appVersion`), mints bare `X.Y.Z` annotated tags, and creates GitHub Releases from `CHANGELOG.md`.
+3. **Multi-Arch Buildx, Attestations & Registry Gating (`build-and-push`)**: Builds **`linux/amd64,linux/arm64`** images using QEMU + Buildx (`type=gha,mode=max` cache) with OCI labels, SBOM, and `provenance: mode=max` attestations, pushes to **GHCR** (`ghcr.io/<owner>/retrogametalk-sync`), packages/pushes the Helm chart to **`oci://ghcr.io/<owner>/charts/retrogametalk-sync`** on tagged releases, and mirrors to **Docker Hub** only when `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets are present.
+
+For platform-specific homelab install guides (Docker, Compose, Portainer/Dockge, Proxmox LXC, TrueNAS SCALE, Unraid, Kubernetes), see [`/docs/deploy/`](../deploy/README.md).
 
 ---
 
