@@ -1,5 +1,6 @@
-# EXAMPLE: .../retrogametalk-sync/helm template . -f examples/overrides.yaml
-# helm -n rgt-sync upgrade rgt-sync --install --create-namespace helm\charts\retrogametalk-sync -f helm\charts\retrogametalk-sync\examples\overrides.yaml
+# EXAMPLE:
+# .../charts/retrogametalk-sync$ helm template . -f examples/overrides.yaml
+# .../charts/retrogametalk-sync$ helm -n rgt-sync upgrade rgt-sync . --install --create-namespace -f examples/overrides.yaml
 ---
 credentials:
   username: ""
