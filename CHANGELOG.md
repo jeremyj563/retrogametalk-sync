@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.14.2] - 2026-11-19
+
+- Updated `.github/workflows/update-screenshots.yml` to pass `--legacy-peer-deps` on npm installs (matching `Dockerfile` to avoid the `vite@8` / `esbuild@0.25` optional peer conflict) and fixed the `gh pr list` `jq` query (`// empty`) so first-time PR creation handles an empty PR list cleanly.
+
 ## [1.14.1] - 2026-11-19
 
 - Fixed the **Update README Visual Previews** GitHub Actions workflow (`.github/workflows/update-screenshots.yml`) to work cleanly without a committed `package-lock.json` by removing `cache: 'npm'` from `actions/setup-node` and falling back to `npm install --no-package-lock` (plus `--no-package-lock` for ephemeral Playwright installation).
