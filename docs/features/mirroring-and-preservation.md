@@ -26,7 +26,7 @@ From the top header bar, you can launch a sync at any time in the mode that fits
 
 Not everyone has 20 TB of NAS space—maybe you only collect 8-bit/16-bit cartridge consoles, Sony handhelds, or English fan translations! In **Operations**, you can tailor exactly what gets mirrored:
 
-- **80+ Supported Consoles, Handhelds & Computers**: Pick individual platforms grouped by manufacturer (Nintendo, Sega, Sony, NEC, Atari, SNK, Bandai, Commodore, Sinclair, MSX, Arcade, Homebrew Fantasy Consoles, and more)—or leave the filter open to mirror everything.
+- **30+ Supported Consoles, Handhelds & Computers**: Pick individual platforms grouped by manufacturer (Nintendo, Sega, Sony, NEC, Atari, SNK, Bandai, Commodore, Sinclair, MSX, Arcade, Homebrew Fantasy Consoles, and more)—or leave the filter open to mirror everything.
 - **Granular Release-Type Filtering**: Choose which categories of releases you want `rgt-sync` to download:
   - **Retail ROMs** (original commercial releases across regions)
   - **Translations** (English & international fan translations)
