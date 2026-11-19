@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.7.4] - 2026-11-18
+
+- Preserved Worker 0's active initial 206 stream when sibling multi-chunk workers hit a mirror-only `HTTP 503` by isolating sibling connections on a dedicated `AbortController`, capping the host to `1x`, and letting the primary slice finish cleanly before continuing sequentially.
+- Prevented post-burst mirror `HTTP 503` cooldown tails from poisoning global AIMD pacing by keeping recovery retries on bounded progressive local settles (up to 20s in `AdaptiveRateLimiter.recordThrottle`) without escalating `currentDelayMs` or `rateLimitHits` unless `HTTP 429` or `Retry-After` is received.
+- Fixed the off-by-one `Wave throttle N+1/N` log on retry exhaustion, eliminated duplicate cooldown waits when handing off to stream resume, and corrected log copy to distinguish initial multi-chunk step-downs from subsequent `1x` retries.
+
 ## [1.7.3] - 2026-11-18
 
 - Replaced the overstated `80+ CONSOLES` spec in `docs/assets/logo-banner.svg` with `OFFLINE CATALOG`, and corrected `80+` console count copy across `README.md` and feature documentation to an accurate `30+ classic consoles and handhelds`.
