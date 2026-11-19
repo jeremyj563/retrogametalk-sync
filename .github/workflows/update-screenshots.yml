@@ -74,15 +74,15 @@ jobs:
       - name: Install dependencies & build production frontend
         run: |
           if [ -f package-lock.json ]; then
-            npm ci
+            npm ci --legacy-peer-deps
           else
-            npm install --no-package-lock
+            npm install --no-package-lock --legacy-peer-deps
           fi
           npm run build
 
       - name: Install Playwright Chromium (ephemeral, outside package.json)
         run: |
-          npm install --no-save --no-package-lock playwright
+          npm install --no-save --no-package-lock --legacy-peer-deps playwright
           npx playwright install --with-deps chromium
 
       - name: Capture animated walkthrough & static screenshots
@@ -152,7 +152,7 @@ jobs:
           EOF
           )
 
-          EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --state open --json number --jq '.[0].number')
+          EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --state open --json number --jq '.[0].number // empty')
           if [ -n "$EXISTING_PR" ]; then
             gh pr edit "$EXISTING_PR" \
               --title "docs: refresh README CRT visual previews" \
