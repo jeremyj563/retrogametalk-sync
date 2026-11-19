@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   getDrawerCloseDurationMs,
+  getLightboxCloseDurationMs,
+  getLightboxSlideDurationMs,
   resolveDrawerSwapDirection,
+  resolveLightboxSlideStep,
 } from '../src/utils/drawerMotion.ts';
 
 test('resolveDrawerSwapDirection returns none on initial open or same-item metadata updates', () => {
@@ -100,4 +103,25 @@ test('getDrawerCloseDurationMs matches active Living UI Motion tier and OS reduc
   assert.equal(getDrawerCloseDurationMs('off', false), 200);
   assert.equal(getDrawerCloseDurationMs('low', true), 110);
   assert.equal(getDrawerCloseDurationMs('off', true), 110);
+});
+
+test('getLightboxCloseDurationMs and getLightboxSlideDurationMs scale across motion tiers and reduced-motion', () => {
+  assert.equal(getLightboxCloseDurationMs('low', false), 260);
+  assert.equal(getLightboxCloseDurationMs('ultra', false), 260);
+  assert.equal(getLightboxCloseDurationMs('off', false), 180);
+  assert.equal(getLightboxCloseDurationMs('low', true), 100);
+
+  assert.equal(getLightboxSlideDurationMs('medium', false), 300);
+  assert.equal(getLightboxSlideDurationMs('off', false), 190);
+  assert.equal(getLightboxSlideDurationMs('medium', true), 110);
+});
+
+test('resolveLightboxSlideStep wraps smoothly in both directions and ignores single-slide galleries', () => {
+  assert.deepEqual(resolveLightboxSlideStep(0, 1, 'next'), { nextIndex: 0, changed: false });
+  assert.deepEqual(resolveLightboxSlideStep(0, 1, 'prev'), { nextIndex: 0, changed: false });
+
+  assert.deepEqual(resolveLightboxSlideStep(0, 4, 'next'), { nextIndex: 1, changed: true });
+  assert.deepEqual(resolveLightboxSlideStep(3, 4, 'next'), { nextIndex: 0, changed: true });
+  assert.deepEqual(resolveLightboxSlideStep(0, 4, 'prev'), { nextIndex: 3, changed: true });
+  assert.deepEqual(resolveLightboxSlideStep(2, 4, 'prev'), { nextIndex: 1, changed: true });
 });

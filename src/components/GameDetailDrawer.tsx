@@ -26,7 +26,10 @@ import type { ActiveTransferState, ArchiveInspectResult, RepositoryItemRecord } 
 import { formatBytes, formatDateTime } from '../utils/format';
 import {
   getDrawerCloseDurationMs,
+  getLightboxCloseDurationMs,
+  getLightboxSlideDurationMs,
   resolveDrawerSwapDirection,
+  resolveLightboxSlideStep,
   type DrawerPhase,
   type DrawerSwapDirection,
 } from '../utils/drawerMotion';
@@ -260,6 +263,18 @@ export function GameDetailDrawer({
   const [failedScreenshots, setFailedScreenshots] = useState<Set<number>>(new Set());
   const [loadedScreenshots, setLoadedScreenshots] = useState<Set<number>>(new Set());
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
+  const [renderedLightbox, setRenderedLightbox] = useState<LightboxState | null>(null);
+  const [lightboxPhase, setLightboxPhase] = useState<DrawerPhase>('closed');
+  const [lightboxSlideDir, setLightboxSlideDir] = useState<DrawerSwapDirection>('none');
+  const [lightboxSlideSeq, setLightboxSlideSeq] = useState(0);
+  const [lightboxScaleSeq, setLightboxScaleSeq] = useState(0);
+  const [outgoingLightboxSlide, setOutgoingLightboxSlide] = useState<{
+    src: string;
+    label: string;
+    direction: 'next' | 'prev';
+    seq: number;
+    pixelated: boolean;
+  } | null>(null);
   const [lightboxScaleMode, setLightboxScaleMode] = useState<'fit' | 'native'>('fit');
   const [lightboxLoading, setLightboxLoading] = useState(false);
   const [lightboxDimensions, setLightboxDimensions] = useState<{ width: number; height: number } | null>(null);
@@ -272,14 +287,20 @@ export function GameDetailDrawer({
   const autoUpgradedIdsRef = useRef<Set<number>>(new Set());
   const autoHydratedIdsRef = useRef<Set<number>>(new Set());
   const bodyScrollRef = useRef<HTMLDivElement | null>(null);
+  const lightboxImgRef = useRef<HTMLImageElement | null>(null);
   const pendingSwapDirRef = useRef<DrawerSwapDirection>('none');
   const prevRenderedIdRef = useRef<number | null>(activeItem?.id ?? null);
   const prevNavIndexRef = useRef<number | null>(activeNavigation?.currentIndex ?? null);
   const wasOpenRef = useRef<boolean>(false);
   const phaseRef = useRef<DrawerPhase>(activeItem ? 'entering' : 'closed');
+  const lightboxPhaseRef = useRef<DrawerPhase>('closed');
   const closeTimerRef = useRef<number | null>(null);
   const openRafRef = useRef<number | null>(null);
   const openRafInnerRef = useRef<number | null>(null);
+  const lightboxCloseTimerRef = useRef<number | null>(null);
+  const lightboxOpenRafRef = useRef<number | null>(null);
+  const lightboxOpenRafInnerRef = useRef<number | null>(null);
+  const lightboxOutgoingTimerRef = useRef<number | null>(null);
 
   const setDrawerPhase = useCallback((next: DrawerPhase) => {
     phaseRef.current = next;
@@ -304,12 +325,37 @@ export function GameDetailDrawer({
     }
   }, []);
 
+  const setLightboxTransitionPhase = useCallback((next: DrawerPhase) => {
+    lightboxPhaseRef.current = next;
+    setLightboxPhase(next);
+  }, []);
+
+  const clearLightboxTimers = useCallback(() => {
+    if (lightboxCloseTimerRef.current !== null) {
+      window.clearTimeout(lightboxCloseTimerRef.current);
+      lightboxCloseTimerRef.current = null;
+    }
+    if (lightboxOpenRafRef.current !== null) {
+      window.cancelAnimationFrame(lightboxOpenRafRef.current);
+      lightboxOpenRafRef.current = null;
+    }
+    if (lightboxOpenRafInnerRef.current !== null) {
+      window.cancelAnimationFrame(lightboxOpenRafInnerRef.current);
+      lightboxOpenRafInnerRef.current = null;
+    }
+    if (lightboxOutgoingTimerRef.current !== null) {
+      window.clearTimeout(lightboxOutgoingTimerRef.current);
+      lightboxOutgoingTimerRef.current = null;
+    }
+  }, []);
+
   useEffect(
     () => () => {
       clearCloseTimer();
       clearOpenRafs();
+      clearLightboxTimers();
     },
-    [clearCloseTimer, clearOpenRafs],
+    [clearCloseTimer, clearOpenRafs, clearLightboxTimers],
   );
 
   useEffect(() => {
@@ -596,11 +642,144 @@ export function GameDetailDrawer({
     };
   }, [activeItem, isHydratingDetails, localScreenshotCount, isFullResVerified, onItemUpdated]);
 
+  // Synchronize full-res lightbox smooth open/close transition phase and exit snapshot
+  useLayoutEffect(() => {
+    if (lightbox) {
+      if (lightboxCloseTimerRef.current !== null) {
+        window.clearTimeout(lightboxCloseTimerRef.current);
+        lightboxCloseTimerRef.current = null;
+      }
+      setRenderedLightbox(lightbox);
+      if (lightboxPhaseRef.current === 'closed' || lightboxPhaseRef.current === 'closing') {
+        setLightboxSlideDir('none');
+        setOutgoingLightboxSlide(null);
+        setLightboxTransitionPhase('entering');
+        if (lightboxOpenRafRef.current !== null) {
+          window.cancelAnimationFrame(lightboxOpenRafRef.current);
+        }
+        if (lightboxOpenRafInnerRef.current !== null) {
+          window.cancelAnimationFrame(lightboxOpenRafInnerRef.current);
+        }
+        lightboxOpenRafRef.current = window.requestAnimationFrame(() => {
+          lightboxOpenRafRef.current = null;
+          lightboxOpenRafInnerRef.current = window.requestAnimationFrame(() => {
+            lightboxOpenRafInnerRef.current = null;
+            setLightboxTransitionPhase('open');
+          });
+        });
+      }
+      return;
+    }
+
+    if (lightboxPhaseRef.current !== 'closed' && lightboxPhaseRef.current !== 'closing') {
+      if (lightboxOpenRafRef.current !== null) {
+        window.cancelAnimationFrame(lightboxOpenRafRef.current);
+        lightboxOpenRafRef.current = null;
+      }
+      if (lightboxOpenRafInnerRef.current !== null) {
+        window.cancelAnimationFrame(lightboxOpenRafInnerRef.current);
+        lightboxOpenRafInnerRef.current = null;
+      }
+      setOutgoingLightboxSlide(null);
+      setLightboxTransitionPhase('closing');
+
+      const motionTier =
+        typeof document !== 'undefined'
+          ? document.querySelector('[data-crt-motion]')?.getAttribute('data-crt-motion')
+          : null;
+      const prefersReducedMotion =
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const closeMs = getLightboxCloseDurationMs(motionTier, prefersReducedMotion);
+
+      lightboxCloseTimerRef.current = window.setTimeout(() => {
+        lightboxCloseTimerRef.current = null;
+        setLightboxTransitionPhase('closed');
+        setRenderedLightbox(null);
+        setLightboxSlideDir('none');
+        setLightboxDimensions(null);
+        setLightboxLoading(false);
+      }, closeMs);
+    }
+  }, [lightbox, setLightboxTransitionPhase]);
+
+  const stepLightboxSlide = useCallback(
+    (direction: 'prev' | 'next') => {
+      if (!lightbox || lightbox.slides.length <= 1) return;
+      const { nextIndex, changed } = resolveLightboxSlideStep(
+        lightbox.index,
+        lightbox.slides.length,
+        direction,
+      );
+      if (!changed) return;
+
+      const prevSlide = lightbox.slides[lightbox.index];
+      const nextSeq = lightboxSlideSeq + 1;
+
+      if (prevSlide) {
+        const wasPixelated =
+          lightboxScaleMode === 'native'
+            ? Boolean(lightboxDimensions && lightboxDimensions.width <= 640)
+            : Boolean(isFullResVerified && lightboxDimensions && lightboxDimensions.width <= 512);
+        setOutgoingLightboxSlide({
+          src: prevSlide.src,
+          label: prevSlide.label,
+          direction,
+          seq: nextSeq,
+          pixelated: wasPixelated,
+        });
+        if (lightboxOutgoingTimerRef.current !== null) {
+          window.clearTimeout(lightboxOutgoingTimerRef.current);
+        }
+        const motionTier =
+          typeof document !== 'undefined'
+            ? document.querySelector('[data-crt-motion]')?.getAttribute('data-crt-motion')
+            : null;
+        const prefersReducedMotion =
+          typeof window !== 'undefined' &&
+          typeof window.matchMedia === 'function' &&
+          window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const slideMs = getLightboxSlideDurationMs(motionTier, prefersReducedMotion);
+        lightboxOutgoingTimerRef.current = window.setTimeout(() => {
+          lightboxOutgoingTimerRef.current = null;
+          setOutgoingLightboxSlide(null);
+        }, slideMs);
+      }
+
+      setLightboxSlideDir(direction);
+      setLightboxSlideSeq(nextSeq);
+      setLightbox((prev) => (prev ? { ...prev, index: nextIndex } : null));
+    },
+    [lightbox, lightboxSlideSeq, lightboxScaleMode, lightboxDimensions, isFullResVerified],
+  );
+
+  // Preload adjacent full-res slides so Next/Prev stepping is instantaneous and flicker-free
+  useEffect(() => {
+    if (!lightbox || lightbox.slides.length <= 1) return;
+    const prevIdx = (lightbox.index - 1 + lightbox.slides.length) % lightbox.slides.length;
+    const nextIdx = (lightbox.index + 1) % lightbox.slides.length;
+    const urls = new Set<string>();
+    if (lightbox.slides[prevIdx]?.src) urls.add(lightbox.slides[prevIdx].src);
+    if (lightbox.slides[nextIdx]?.src) urls.add(lightbox.slides[nextIdx].src);
+    urls.forEach((url) => {
+      const pre = new Image();
+      pre.src = url;
+    });
+  }, [lightbox]);
+
   const activeLightboxSrc = lightbox?.slides[lightbox.index]?.src ?? null;
   useEffect(() => {
     if (!activeLightboxSrc) {
+      return;
+    }
+    const img = lightboxImgRef.current;
+    if (img && img.complete && img.naturalWidth > 0 && img.currentSrc.endsWith(activeLightboxSrc)) {
       setLightboxLoading(false);
-      setLightboxDimensions(null);
+      setLightboxDimensions({
+        width: img.naturalWidth,
+        height: img.naturalHeight,
+      });
       return;
     }
     setLightboxLoading(true);
@@ -621,13 +800,11 @@ export function GameDetailDrawer({
       if (lightbox) {
         if (lightbox.slides.length > 1) {
           if (e.key === 'ArrowLeft') {
-            setLightbox((prev) =>
-              prev ? { ...prev, index: (prev.index - 1 + prev.slides.length) % prev.slides.length } : null,
-            );
+            e.preventDefault();
+            stepLightboxSlide('prev');
           } else if (e.key === 'ArrowRight') {
-            setLightbox((prev) =>
-              prev ? { ...prev, index: (prev.index + 1) % prev.slides.length } : null,
-            );
+            e.preventDefault();
+            stepLightboxSlide('next');
           }
         }
         return;
@@ -654,7 +831,7 @@ export function GameDetailDrawer({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeItem, lightbox, activeNavigation, onClose, handlePrevNav, handleNextNav]);
+  }, [activeItem, lightbox, activeNavigation, onClose, handlePrevNav, handleNextNav, stepLightboxSlide]);
 
   const infoRows = useMemo(() => {
     if (!item) return [];
@@ -1968,142 +2145,196 @@ export function GameDetailDrawer({
       </div>
 
       {/* Screenshot & Cover Lightbox Overlay (sibling above z-[60..62] CRT glass so zoomed art stays clean) */}
-      {lightbox && lightbox.slides[lightbox.index] && (
-        <div
-          className="crt-lightbox-clean fixed inset-0 z-[80] bg-black/92 flex flex-col items-center justify-center p-4 sm:p-8"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setLightbox(null);
-          }}
-        >
-          <div className="w-full max-w-6xl flex flex-wrap items-center justify-between gap-3 mb-3">
-            <div className="min-w-0 flex items-center gap-3">
-              <span className="font-mono text-xs text-crt-text truncate">
-                {lightbox.slides[lightbox.index].label}
-              </span>
-              {lightboxDimensions && (
-                <span className="font-mono text-[11px] tabular-nums text-crt-phosphor shrink-0">
-                  {lightboxDimensions.width} × {lightboxDimensions.height} px
+      {(() => {
+        const displayLightbox = lightbox ?? renderedLightbox;
+        const activeSlide = displayLightbox?.slides[displayLightbox.index] ?? null;
+        if (!displayLightbox || !activeSlide || lightboxPhase === 'closed') return null;
+
+        const isClosingLightbox = lightboxPhase === 'closing';
+        const isCurrentPixelated =
+          lightboxScaleMode === 'native'
+            ? Boolean(lightboxDimensions && lightboxDimensions.width <= 640)
+            : Boolean(isFullResVerified && lightboxDimensions && lightboxDimensions.width <= 512);
+
+        return (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Full-resolution artwork viewer: ${activeSlide.label}`}
+            data-lightbox-state={lightboxPhase}
+            className="crt-lightbox-clean crt-lightbox-backdrop fixed inset-0 z-[80] bg-black/92 backdrop-blur-[2px] flex flex-col items-center justify-center p-4 sm:p-8"
+            onClick={(e) => {
+              if (e.target === e.currentTarget && !isClosingLightbox) {
+                setLightbox(null);
+              }
+            }}
+          >
+            <div
+              data-lightbox-state={lightboxPhase}
+              className="crt-lightbox-chrome w-full max-w-6xl flex flex-wrap items-center justify-between gap-3 mb-3"
+            >
+              <div
+                key={`lb-caption-${displayLightbox.index}-${lightboxSlideSeq}`}
+                className={`min-w-0 flex items-center gap-3 ${
+                  lightboxSlideDir !== 'none' ? 'crt-lightbox-caption-swap' : ''
+                }`}
+              >
+                <span className="font-mono text-xs text-crt-text truncate">
+                  {activeSlide.label}
                 </span>
-              )}
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() =>
-                  setLightboxScaleMode((prev) => (prev === 'fit' ? 'native' : 'fit'))
-                }
-                title={
-                  lightboxScaleMode === 'fit'
-                    ? 'Switch to 1:1 native pixel size'
-                    : 'Fit image to viewport'
-                }
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 font-mono text-xs border border-crt-border bg-crt-surface hover:bg-crt-elevated text-crt-text rounded transition-colors"
-              >
-                {lightboxScaleMode === 'fit' ? (
-                  <>
-                    <Minimize2 className="h-3.5 w-3.5 text-crt-phosphor" />
-                    1:1 Pixel
-                  </>
-                ) : (
-                  <>
-                    <Maximize2 className="h-3.5 w-3.5 text-crt-phosphor" />
-                    Fit Screen
-                  </>
+                {displayLightbox.slides.length > 1 && (
+                  <span className="font-mono text-[11px] tabular-nums text-crt-muted shrink-0">
+                    {displayLightbox.index + 1} / {displayLightbox.slides.length}
+                  </span>
                 )}
-              </button>
-              <button
-                type="button"
-                onClick={() => setLightbox(null)}
-                aria-label="Close image lightbox"
-                className="p-2 border border-crt-border bg-crt-surface hover:bg-crt-elevated text-crt-text rounded transition-colors"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-
-          <div className="relative flex-1 w-full max-w-6xl flex items-center justify-center min-h-0">
-            {lightbox.slides.length > 1 && (
-              <button
-                type="button"
-                aria-label="Previous image"
-                onClick={() =>
-                  setLightbox((prev) =>
-                    prev ? { ...prev, index: (prev.index - 1 + prev.slides.length) % prev.slides.length } : null,
-                  )
-                }
-                className="absolute left-2 z-20 p-2.5 border border-crt-border bg-crt-surface/90 hover:bg-crt-elevated text-crt-text rounded transition-colors"
-              >
-                <ChevronLeft className="h-5 w-5" />
-              </button>
-            )}
-
-            {(lightboxLoading || upgradingAssets) && !lightboxDimensions && (
-              <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
-                <div className="inline-flex items-center gap-2 px-3.5 py-2 border border-crt-border bg-crt-surface/95 rounded font-mono text-xs text-crt-phosphor shadow-lg">
-                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                  {!isFullResVerified
-                    ? 'Fetching full-resolution screenshot...'
-                    : 'Loading full-resolution image...'}
-                </div>
+                {lightboxDimensions && (
+                  <span className="font-mono text-[11px] tabular-nums text-crt-phosphor shrink-0">
+                    {lightboxDimensions.width} × {lightboxDimensions.height} px
+                  </span>
+                )}
               </div>
-            )}
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={isClosingLightbox}
+                  onClick={() => {
+                    setLightboxSlideDir('none');
+                    setOutgoingLightboxSlide(null);
+                    setLightboxScaleSeq((seq) => seq + 1);
+                    setLightboxScaleMode((prev) => (prev === 'fit' ? 'native' : 'fit'));
+                  }}
+                  title={
+                    lightboxScaleMode === 'fit'
+                      ? 'Switch to 1:1 native pixel size'
+                      : 'Fit image to viewport'
+                  }
+                  className="crt-lightbox-control-btn inline-flex items-center gap-1.5 px-2.5 py-1.5 font-mono text-xs border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-border-strong text-crt-text rounded cursor-pointer"
+                >
+                  {lightboxScaleMode === 'fit' ? (
+                    <>
+                      <Minimize2 className="h-3.5 w-3.5 text-crt-phosphor" />
+                      1:1 Pixel
+                    </>
+                  ) : (
+                    <>
+                      <Maximize2 className="h-3.5 w-3.5 text-crt-phosphor" />
+                      Fit Screen
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  disabled={isClosingLightbox}
+                  onClick={() => setLightbox(null)}
+                  aria-label="Close image lightbox"
+                  className="crt-lightbox-control-btn p-2 border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-border-strong text-crt-text rounded cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
 
             <div
-              className={
-                lightboxScaleMode === 'native'
-                  ? 'max-h-[82vh] max-w-full overflow-auto rounded border border-crt-border bg-crt-bg p-1 flex items-center justify-center'
-                  : 'w-full h-full max-h-[82vh] flex items-center justify-center'
-              }
+              data-lightbox-state={lightboxPhase}
+              className="crt-lightbox-stage relative flex-1 w-full max-w-6xl flex items-center justify-center min-h-0"
             >
-              <img
-                src={lightbox.slides[lightbox.index].src}
-                alt={lightbox.slides[lightbox.index].label}
-                onLoad={(e) => {
-                  const img = e.currentTarget;
-                  setLightboxLoading(false);
-                  if (img.naturalWidth > 0 && img.naturalHeight > 0) {
-                    setLightboxDimensions({
-                      width: img.naturalWidth,
-                      height: img.naturalHeight,
-                    });
-                  }
-                }}
-                onError={() => setLightboxLoading(false)}
-                className={
-                  lightboxScaleMode === 'native'
-                    ? `max-w-none block ${
-                        lightboxDimensions && lightboxDimensions.width <= 640
-                          ? '[image-rendering:pixelated]'
-                          : ''
-                      }`
-                    : `w-full h-full max-h-[82vh] object-contain rounded border border-crt-border bg-crt-bg ${
-                        isFullResVerified && lightboxDimensions && lightboxDimensions.width <= 512
-                          ? '[image-rendering:pixelated]'
-                          : ''
-                      }`
-                }
-              />
-            </div>
+              {displayLightbox.slides.length > 1 && (
+                <button
+                  type="button"
+                  disabled={isClosingLightbox}
+                  aria-label="Previous image"
+                  onClick={() => stepLightboxSlide('prev')}
+                  className="crt-lightbox-control-btn absolute left-2 z-20 p-2.5 border border-crt-border bg-crt-surface/90 hover:bg-crt-elevated hover:border-crt-phosphor/60 text-crt-text hover:text-crt-phosphor rounded cursor-pointer"
+                >
+                  <ChevronLeft className="h-5 w-5" />
+                </button>
+              )}
 
-            {lightbox.slides.length > 1 && (
-              <button
-                type="button"
-                aria-label="Next image"
-                onClick={() =>
-                  setLightbox((prev) =>
-                    prev ? { ...prev, index: (prev.index + 1) % prev.slides.length } : null,
-                  )
-                }
-                className="absolute right-2 z-20 p-2.5 border border-crt-border bg-crt-surface/90 hover:bg-crt-elevated text-crt-text rounded transition-colors"
+              {(lightboxLoading || upgradingAssets) && !lightboxDimensions && !outgoingLightboxSlide && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+                  <div className="inline-flex items-center gap-2 px-3.5 py-2 border border-crt-border bg-crt-surface/95 rounded font-mono text-xs text-crt-phosphor shadow-lg">
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    {!isFullResVerified
+                      ? 'Fetching full-resolution screenshot...'
+                      : 'Loading full-resolution image...'}
+                  </div>
+                </div>
+              )}
+
+              {/* Outgoing ghost slide for smooth directional Prev/Next crossfade */}
+              {outgoingLightboxSlide && lightboxScaleMode === 'fit' && (
+                <div
+                  key={`lb-out-${outgoingLightboxSlide.seq}`}
+                  aria-hidden="true"
+                  data-slide-dir={outgoingLightboxSlide.direction}
+                  className="crt-lightbox-slide-out pointer-events-none absolute inset-0 flex items-center justify-center"
+                >
+                  <img
+                    src={outgoingLightboxSlide.src}
+                    alt=""
+                    className={`w-full h-full max-h-[82vh] object-contain rounded border border-crt-border bg-crt-bg ${
+                      outgoingLightboxSlide.pixelated ? '[image-rendering:pixelated]' : ''
+                    }`}
+                  />
+                </div>
+              )}
+
+              <div
+                key={`lb-slide-${activeSlide.src}-${lightboxSlideSeq}-${lightboxScaleSeq}`}
+                data-slide-dir={lightboxSlideDir}
+                className={`${
+                  lightboxSlideDir !== 'none' ? 'crt-lightbox-slide-in' : ''
+                } ${
+                  lightboxScaleSeq > 0 && lightboxSlideDir === 'none'
+                    ? 'crt-lightbox-scale-settle'
+                    : ''
+                } ${
+                  lightboxScaleMode === 'native'
+                    ? 'max-h-[82vh] max-w-full overflow-auto rounded border border-crt-border bg-crt-bg p-1 flex items-center justify-center'
+                    : 'w-full h-full max-h-[82vh] flex items-center justify-center'
+                }`}
               >
-                <ChevronRight className="h-5 w-5" />
-              </button>
-            )}
+                <img
+                  ref={lightboxImgRef}
+                  src={activeSlide.src}
+                  alt={activeSlide.label}
+                  onLoad={(e) => {
+                    const img = e.currentTarget;
+                    setLightboxLoading(false);
+                    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                      setLightboxDimensions({
+                        width: img.naturalWidth,
+                        height: img.naturalHeight,
+                      });
+                    }
+                  }}
+                  onError={() => setLightboxLoading(false)}
+                  className={
+                    lightboxScaleMode === 'native'
+                      ? `max-w-none block ${isCurrentPixelated ? '[image-rendering:pixelated]' : ''}`
+                      : `w-full h-full max-h-[82vh] object-contain rounded border border-crt-border bg-crt-bg ${
+                          isCurrentPixelated ? '[image-rendering:pixelated]' : ''
+                        }`
+                  }
+                />
+              </div>
+
+              {displayLightbox.slides.length > 1 && (
+                <button
+                  type="button"
+                  disabled={isClosingLightbox}
+                  aria-label="Next image"
+                  onClick={() => stepLightboxSlide('next')}
+                  className="crt-lightbox-control-btn absolute right-2 z-20 p-2.5 border border-crt-border bg-crt-surface/90 hover:bg-crt-elevated hover:border-crt-phosphor/60 text-crt-text hover:text-crt-phosphor rounded cursor-pointer"
+                >
+                  <ChevronRight className="h-5 w-5" />
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </>
   );
 }

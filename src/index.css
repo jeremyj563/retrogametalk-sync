@@ -937,6 +937,221 @@
   animation-duration: 180ms;
 }
 
+/* ==========================================================================
+   Full-Res Screenshot & Box-Art Lightbox Smooth Transitions
+   ========================================================================== */
+.crt-lightbox-backdrop {
+  will-change: opacity;
+  transition: opacity 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.crt-lightbox-backdrop[data-lightbox-state="entering"] {
+  opacity: 0;
+  pointer-events: auto;
+}
+
+.crt-lightbox-backdrop[data-lightbox-state="open"] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.crt-lightbox-backdrop[data-lightbox-state="closing"] {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: 220ms;
+}
+
+.crt-lightbox-chrome {
+  will-change: transform, opacity;
+  transition:
+    transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.crt-lightbox-chrome[data-lightbox-state="entering"] {
+  opacity: 0;
+  transform: translate3d(0, -8px, 0);
+}
+
+.crt-lightbox-chrome[data-lightbox-state="open"] {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+}
+
+.crt-lightbox-chrome[data-lightbox-state="closing"] {
+  opacity: 0;
+  transform: translate3d(0, -6px, 0);
+  transition-duration: 200ms, 190ms;
+}
+
+.crt-lightbox-stage {
+  will-change: transform, opacity;
+  transition:
+    transform 300ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.crt-lightbox-stage[data-lightbox-state="entering"] {
+  opacity: 0;
+  transform: translate3d(0, 10px, 0) scale(0.955);
+}
+
+.crt-lightbox-stage[data-lightbox-state="open"] {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.crt-lightbox-stage[data-lightbox-state="closing"] {
+  opacity: 0;
+  transform: translate3d(0, 6px, 0) scale(0.965);
+  transition-duration: 220ms, 200ms;
+}
+
+.crt-lightbox-control-btn {
+  will-change: transform, opacity;
+  transition:
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease,
+    opacity 220ms ease;
+}
+
+.crt-lightbox-control-btn:hover:not(:disabled) {
+  transform: scale(1.05);
+}
+
+.crt-lightbox-control-btn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+@keyframes crt-lightbox-in-next {
+  from {
+    opacity: 0;
+    transform: translate3d(30px, 0, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes crt-lightbox-in-prev {
+  from {
+    opacity: 0;
+    transform: translate3d(-30px, 0, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes crt-lightbox-out-next {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(-30px, 0, 0) scale(0.985);
+  }
+}
+
+@keyframes crt-lightbox-out-prev {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(30px, 0, 0) scale(0.985);
+  }
+}
+
+@keyframes crt-lightbox-scale-settle {
+  from {
+    opacity: 0.72;
+    transform: scale(0.982);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes crt-lightbox-caption-fade {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 3px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.crt-lightbox-slide-in[data-slide-dir="next"] {
+  animation: crt-lightbox-in-next 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.crt-lightbox-slide-in[data-slide-dir="prev"] {
+  animation: crt-lightbox-in-prev 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.crt-lightbox-slide-out[data-slide-dir="next"] {
+  animation: crt-lightbox-out-next 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.crt-lightbox-slide-out[data-slide-dir="prev"] {
+  animation: crt-lightbox-out-prev 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.crt-lightbox-scale-settle {
+  animation: crt-lightbox-scale-settle 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.crt-lightbox-caption-swap {
+  animation: crt-lightbox-caption-fade 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Living UI Motion = Off: retain a subtle, crisp lightbox transition */
+[data-crt-motion="off"] .crt-lightbox-backdrop {
+  transition-duration: 180ms;
+}
+
+[data-crt-motion="off"] .crt-lightbox-backdrop[data-lightbox-state="closing"] {
+  transition-duration: 160ms;
+}
+
+[data-crt-motion="off"] .crt-lightbox-chrome {
+  transition-duration: 180ms, 160ms;
+}
+
+[data-crt-motion="off"] .crt-lightbox-stage {
+  transition-duration: 190ms, 170ms;
+}
+
+[data-crt-motion="off"] .crt-lightbox-stage[data-lightbox-state="entering"] {
+  transform: translate3d(0, 4px, 0) scale(0.985);
+}
+
+[data-crt-motion="off"] .crt-lightbox-stage[data-lightbox-state="closing"] {
+  transform: translate3d(0, 3px, 0) scale(0.988);
+  transition-duration: 160ms, 150ms;
+}
+
+[data-crt-motion="off"] .crt-lightbox-slide-in[data-slide-dir="next"],
+[data-crt-motion="off"] .crt-lightbox-slide-in[data-slide-dir="prev"],
+[data-crt-motion="off"] .crt-lightbox-slide-out[data-slide-dir="next"],
+[data-crt-motion="off"] .crt-lightbox-slide-out[data-slide-dir="prev"] {
+  animation-duration: 180ms;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .crt-accordion-grid,
   .crt-cover-lazy,
@@ -954,18 +1169,36 @@
   }
 
   .crt-detail-backdrop,
-  .crt-detail-sheet {
+  .crt-detail-sheet,
+  .crt-lightbox-backdrop,
+  .crt-lightbox-chrome,
+  .crt-lightbox-stage {
     transition: opacity 100ms ease !important;
   }
 
   .crt-detail-sheet[data-drawer-state="entering"],
-  .crt-detail-sheet[data-drawer-state="closing"] {
+  .crt-detail-sheet[data-drawer-state="closing"],
+  .crt-lightbox-chrome[data-lightbox-state="entering"],
+  .crt-lightbox-chrome[data-lightbox-state="closing"],
+  .crt-lightbox-stage[data-lightbox-state="entering"],
+  .crt-lightbox-stage[data-lightbox-state="closing"],
+  .crt-lightbox-control-btn:hover:not(:disabled),
+  .crt-lightbox-control-btn:active:not(:disabled) {
     transform: none !important;
   }
 
   .crt-detail-swap[data-swap-dir="next"],
-  .crt-detail-swap[data-swap-dir="prev"] {
+  .crt-detail-swap[data-swap-dir="prev"],
+  .crt-lightbox-slide-in[data-slide-dir="next"],
+  .crt-lightbox-slide-in[data-slide-dir="prev"],
+  .crt-lightbox-scale-settle,
+  .crt-lightbox-caption-swap {
     animation: crt-detail-reduced-fade 100ms ease both !important;
+  }
+
+  .crt-lightbox-slide-out[data-slide-dir="next"],
+  .crt-lightbox-slide-out[data-slide-dir="prev"] {
+    display: none !important;
   }
 
   .crt-deck-slide[data-slide-state="pre-left"],
