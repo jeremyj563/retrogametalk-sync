@@ -9,7 +9,7 @@
 <h3>Always-On Retro ROM Preservation Mirror, Offline Game Catalog &amp; Direct Handheld SD Installer</h3>
 
 <p>
-  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.13.1-38e56b?style=flat-square&labelColor=0b1510" alt="Version 1.13.1" /></a>
+  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.14.0-38e56b?style=flat-square&labelColor=0b1510" alt="Version 1.14.0" /></a>
   <a href="./.github/workflows/docker-publish.yml"><img src="https://img.shields.io/badge/platforms-linux%2Famd64%20%7C%20linux%2Farm64-1f6feb?style=flat-square&labelColor=0b1510" alt="Architectures: linux/amd64 | linux/arm64" /></a>
   <a href="https://ghcr.io/jeremyj563/retrogametalk-sync"><img src="https://img.shields.io/badge/registry-GHCR-238636?style=flat-square&labelColor=0b1510&logo=github" alt="GHCR Container Registry" /></a>
   <!-- TODO: Replace with live Docker Hub badge once DOCKERHUB_USERNAME/DOCKERHUB_TOKEN are configured and first release image is pushed -->
@@ -42,8 +42,21 @@
 > [!NOTE]
 > **Polite by Design:** Built-in adaptive AIMD rate limiting backs off automatically on `429`/`503` responses, honors `Retry-After` headers, deduplicates host-level throttle bursts, and supports decoupled **Catalog Indexing** so you can browse the repository quickly and download only the archives you actually want.
 
-<!-- TODO: Capture and commit live web UI screenshots (Sync Overview, Box-Art Catalog, Item Detail Drawer, SD Installer) under docs/assets/screenshots/ and replace this placeholder block -->
-> **TODO (Visual Preview):** Add screenshots or an animated walkthrough of the CRT control console (Sync overview, Catalog box-art grid, Game Detail drawer, and SD Card Exporter).
+### Visual Preview
+
+<p align="center">
+  <img src="./docs/assets/screenshots/console-walkthrough.webp" alt="RetroGameTalk Sync CRT Control Console Walkthrough — Sync Overview, Box-Art Catalog, Game Detail Drawer &amp; SD Card Exporter" width="880" />
+</p>
+
+| Sync Overview &amp; Telemetry *(Green · PVM)* | Offline Box-Art Catalog *(Green · PVM)* |
+| :---: | :---: |
+| <img src="./docs/assets/screenshots/sync-overview.webp" alt="Sync Overview with active transfer, Speed-Reactive Sync Wave, Telemetry Deck and Activity Log" width="440" /> | <img src="./docs/assets/screenshots/catalog-grid.webp" alt="Offline Box-Art Catalog grid with multi-select filters and Downloaded/Installed indicators" width="440" /> |
+
+| Game Detail Drawer *(Green · PVM)* | Direct-to-SD-Card Exporter *(Amber Highlight · PVM)* |
+| :---: | :---: |
+| <img src="./docs/assets/screenshots/game-detail-drawer.webp" alt="Game Detail Drawer with cover art, release specs, ROM files and full-res screenshots" width="440" /> | <img src="./docs/assets/screenshots/sd-card-exporter.webp" alt="Device Export and SD Card Exporter configured in warm Amber phosphor" width="440" /> |
+
+> *Previews are generated automatically via **Playwright + FFmpeg** (`.github/workflows/update-screenshots.yml`) using an isolated ephemeral demo SQLite library. Run `npm run capture:screenshots` locally (or pass `-- --url http://localhost:3000` to capture your own running instance).*
 
 ---
 
