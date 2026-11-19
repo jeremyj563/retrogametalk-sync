@@ -11,8 +11,15 @@ export const KONAMI_SEQUENCE = [
   'a',
 ] as const;
 
+export type ArcadeCartridgeId = 'breakout' | 'invaders' | 'snake' | 'tetromino';
+export type ArcadeLaunchTarget = 'launcher' | ArcadeCartridgeId;
+
 export type SecretSearchEffect =
+  | 'arcade_launcher'
   | 'breakout'
+  | 'invaders'
+  | 'snake'
+  | 'tetromino'
   | 'konami_breakout'
   | 'barrel_roll'
   | 'askew'
@@ -121,7 +128,12 @@ const SYSTEM_TAG_MAP: Record<string, string> = {
   'sega-cd': 'SCD',
 };
 
-const HIGH_SCORE_STORAGE_KEY = 'rgt_crt_breakout_best_v1';
+const HIGH_SCORE_STORAGE_KEYS: Record<ArcadeCartridgeId, string> = {
+  breakout: 'rgt_crt_breakout_best_v1',
+  invaders: 'rgt_crt_invaders_best_v1',
+  snake: 'rgt_crt_snake_best_v1',
+  tetromino: 'rgt_crt_tetromino_best_v1',
+};
 const MUTE_STORAGE_KEY = 'rgt_easter_egg_muted_v1';
 
 export function normalizeKeyToken(key: string): string {
@@ -188,8 +200,8 @@ export function normalizeSecretQuery(rawQuery: string): string {
 
 /**
  * Matches classic Google-style secret phrases in the Catalog search input.
- * Ambiguous single-word queries ("breakout", "konami") require explicit Enter submission
- * so casual searches for Breakout or Konami games are never interrupted mid-typing.
+ * Ambiguous single-word queries ("breakout", "konami", "invaders", "snake", "tetris", "arcade")
+ * require explicit Enter submission so casual searches for ROM titles are never interrupted mid-typing.
  */
 export function matchSecretSearch(
   rawQuery: string,
@@ -200,6 +212,18 @@ export function matchSecretSearch(
 
   if (q === 'atari breakout' || q === 'crt breakout' || q === 'cartridge breakout') {
     return 'breakout';
+  }
+  if (q === 'retro invaders' || q === 'space invaders' || q === 'crt invaders') {
+    return 'invaders';
+  }
+  if (q === 'phosphor snake' || q === 'crt snake' || q === 'data bus snake') {
+    return 'snake';
+  }
+  if (q === 'tetromino drop' || q === 'crt tetris' || q === 'block drop') {
+    return 'tetromino';
+  }
+  if (q === 'insert coin' || q === 'multi cart' || q === 'multicart' || q === 'crt arcade') {
+    return 'arcade_launcher';
   }
   if (q === 'up up down down' || q === 'konami code') {
     return 'konami_breakout';
@@ -221,6 +245,10 @@ export function matchSecretSearch(
 
   if (options?.submitted) {
     if (q === 'breakout') return 'breakout';
+    if (q === 'invaders') return 'invaders';
+    if (q === 'snake') return 'snake';
+    if (q === 'tetris' || q === 'tetromino') return 'tetromino';
+    if (q === 'arcade') return 'arcade_launcher';
     if (q === 'konami') return 'konami_breakout';
   }
 
@@ -453,10 +481,10 @@ export function computePaddleBounceVelocity(
   };
 }
 
-export function loadBreakoutHighScore(): number {
+export function loadArcadeHighScore(cartId: ArcadeCartridgeId): number {
   if (typeof window === 'undefined') return 0;
   try {
-    const raw = window.localStorage.getItem(HIGH_SCORE_STORAGE_KEY);
+    const raw = window.localStorage.getItem(HIGH_SCORE_STORAGE_KEYS[cartId]);
     if (!raw) return 0;
     const parsed = Number.parseInt(raw, 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
@@ -465,18 +493,35 @@ export function loadBreakoutHighScore(): number {
   }
 }
 
-export function saveBreakoutHighScore(score: number): number {
+export function saveArcadeHighScore(cartId: ArcadeCartridgeId, score: number): number {
   const clean = Math.max(0, Math.floor(score));
-  const current = loadBreakoutHighScore();
+  const current = loadArcadeHighScore(cartId);
   const next = Math.max(current, clean);
   if (typeof window !== 'undefined') {
     try {
-      window.localStorage.setItem(HIGH_SCORE_STORAGE_KEY, String(next));
+      window.localStorage.setItem(HIGH_SCORE_STORAGE_KEYS[cartId], String(next));
     } catch {
       // Ignore storage quota / private-mode errors
     }
   }
   return next;
+}
+
+export function loadAllArcadeHighScores(): Record<ArcadeCartridgeId, number> {
+  return {
+    breakout: loadArcadeHighScore('breakout'),
+    invaders: loadArcadeHighScore('invaders'),
+    snake: loadArcadeHighScore('snake'),
+    tetromino: loadArcadeHighScore('tetromino'),
+  };
+}
+
+export function loadBreakoutHighScore(): number {
+  return loadArcadeHighScore('breakout');
+}
+
+export function saveBreakoutHighScore(score: number): number {
+  return saveArcadeHighScore('breakout', score);
 }
 
 export function loadEasterEggMuted(): boolean {

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Gamepad2,
   Heart,
+  LayoutGrid,
   Pause,
   Play,
   RotateCcw,
@@ -10,25 +11,34 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
+import { reportAchievementEvent } from '../../utils/achievementsClient';
+import {
+  ARCADE_CARTRIDGE_INDEX,
+  type CrtPaletteTokens,
+  DEFAULT_CRT_PALETTE,
+  prefersReducedMotion,
+  readCrtPaletteTokens,
+} from '../../utils/arcadeGames';
 import {
   type BrickTier,
   computePaddleBounceVelocity,
   generateStageBricks,
-  loadBreakoutHighScore,
-  saveBreakoutHighScore,
-} from '../utils/easterEggs';
-import { reportAchievementEvent } from '../utils/achievementsClient';
-import { retroSynth } from '../utils/retroSynth';
+  loadArcadeHighScore,
+  saveArcadeHighScore,
+} from '../../utils/easterEggs';
+import { retroSynth } from '../../utils/retroSynth';
 
-export interface CartridgeBreakoutModalProps {
-  open: boolean;
+export interface CartridgeBreakoutGameProps {
   konamiBonus: boolean;
   consoleLabels: string[];
+  muted: boolean;
+  onToggleMute: () => void;
+  onSwitchCart: () => void;
   onClose: () => void;
+  onHighScoreChange?: (score: number) => void;
 }
 
 type ArcadePhase = 'TITLE_MENU' | 'PLAYING' | 'PAUSED' | 'STAGE_CLEAR' | 'GAME_OVER';
-type ModalTransitionPhase = 'entering' | 'open' | 'closing';
 type PowerUpKind = 'W' | 'M' | 'S';
 
 interface LiveBrick {
@@ -83,20 +93,6 @@ interface FloatingCallout {
   maxLife: number;
 }
 
-interface CrtPaletteTokens {
-  bg: string;
-  surface: string;
-  elevated: string;
-  border: string;
-  borderStrong: string;
-  text: string;
-  muted: string;
-  phosphor: string;
-  phosphorDim: string;
-  amber: string;
-  crimson: string;
-}
-
 interface HudSnapshot {
   phase: ArcadePhase;
   score: number;
@@ -119,49 +115,6 @@ const PADDLE_Y = LOGICAL_H - 34;
 const BALL_RADIUS = 6;
 const BASE_BALL_SPEED = 325;
 const MAX_LIVES = 6;
-
-const DEFAULT_PALETTE: CrtPaletteTokens = {
-  bg: '#070a08',
-  surface: '#0d130f',
-  elevated: '#121b15',
-  border: '#1e2d23',
-  borderStrong: '#2c4333',
-  text: '#e5f2e8',
-  muted: '#8aa391',
-  phosphor: '#38e56b',
-  phosphorDim: '#1d7a3a',
-  amber: '#f59e0b',
-  crimson: '#f06449',
-};
-
-function readPaletteTokens(el: HTMLElement | null): CrtPaletteTokens {
-  if (!el || typeof window === 'undefined') return DEFAULT_PALETTE;
-  const styles = window.getComputedStyle(el);
-  const pick = (name: string, fallback: string) => {
-    const val = styles.getPropertyValue(name).trim();
-    return val || fallback;
-  };
-  return {
-    bg: pick('--color-crt-bg', DEFAULT_PALETTE.bg),
-    surface: pick('--color-crt-surface', DEFAULT_PALETTE.surface),
-    elevated: pick('--color-crt-elevated', DEFAULT_PALETTE.elevated),
-    border: pick('--color-crt-border', DEFAULT_PALETTE.border),
-    borderStrong: pick('--color-crt-border-strong', DEFAULT_PALETTE.borderStrong),
-    text: pick('--color-crt-text', DEFAULT_PALETTE.text),
-    muted: pick('--color-crt-muted', DEFAULT_PALETTE.muted),
-    phosphor: pick('--color-crt-phosphor', DEFAULT_PALETTE.phosphor),
-    phosphorDim: pick('--color-crt-phosphor-dim', DEFAULT_PALETTE.phosphorDim),
-    amber: pick('--color-crt-amber', DEFAULT_PALETTE.amber),
-    crimson: pick('--color-crt-crimson', DEFAULT_PALETTE.crimson),
-  };
-}
-
-function prefersReducedMotion(): boolean {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
-    return false;
-  }
-  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-}
 
 function getStageBallSpeed(stage: number, slowActive: boolean): number {
   const base = Math.min(460, BASE_BALL_SPEED + (stage - 1) * 26);
@@ -197,34 +150,30 @@ function buildLiveBricks(stage: number, consoleLabels: string[]): {
   return { stageName: layout.stageName, bricks };
 }
 
-export function CartridgeBreakoutModal({
-  open,
+export function CartridgeBreakoutGame({
   konamiBonus,
   consoleLabels,
+  muted,
+  onToggleMute,
+  onSwitchCart,
   onClose,
-}: CartridgeBreakoutModalProps) {
-  const [rendered, setRendered] = useState(open);
-  const [modalPhase, setModalPhase] = useState<ModalTransitionPhase>(open ? 'entering' : 'closing');
-  const [muted, setMuted] = useState<boolean>(() => retroSynth.isMuted());
-
-  const modalPhaseRef = useRef<ModalTransitionPhase>(modalPhase);
-  modalPhaseRef.current = modalPhase;
-  const openRaf1Ref = useRef<number | null>(null);
-  const openRaf2Ref = useRef<number | null>(null);
-  const closeTimerRef = useRef<number | null>(null);
-
-  const rootRef = useRef<HTMLDivElement | null>(null);
+  onHighScoreChange,
+}: CartridgeBreakoutGameProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const paletteRef = useRef<CrtPaletteTokens>(DEFAULT_PALETTE);
+  const paletteRef = useRef<CrtPaletteTokens>(DEFAULT_CRT_PALETTE);
   const consoleLabelsRef = useRef<string[]>(consoleLabels);
   consoleLabelsRef.current = consoleLabels;
   const konamiBonusRef = useRef<boolean>(konamiBonus);
   konamiBonusRef.current = konamiBonus;
+  const onHighScoreChangeRef = useRef(onHighScoreChange);
+  onHighScoreChangeRef.current = onHighScoreChange;
+  const reportedCartPlayedRef = useRef(false);
 
   const [hud, setHud] = useState<HudSnapshot>(() => ({
     phase: 'TITLE_MENU',
     score: 0,
-    bestScore: loadBreakoutHighScore(),
+    bestScore: loadArcadeHighScore('breakout'),
     isNewBest: false,
     stage: 1,
     stageName: 'Classic Cartridge Wall',
@@ -234,15 +183,14 @@ export function CartridgeBreakoutModal({
     slowSec: 0,
   }));
 
-  // Mutable simulation state kept in a ref for silky 60fps canvas rendering without React churn
   const simRef = useRef({
     phase: 'TITLE_MENU' as ArcadePhase,
     score: 0,
-    bestScore: loadBreakoutHighScore(),
+    bestScore: loadArcadeHighScore('breakout'),
     isNewBest: false,
     stage: 1,
     stageName: 'Classic Cartridge Wall',
-    lives: 3,
+    lives: konamiBonus ? 5 : 3,
     bricksCleared: 0,
     combo: 0,
     paddleX: LOGICAL_W / 2,
@@ -252,7 +200,6 @@ export function CartridgeBreakoutModal({
     stageClearTimer: 0,
     shakeTimer: 0,
     keys: { left: false, right: false },
-    pointerActive: false,
     bricks: [] as LiveBrick[],
     balls: [] as LiveBall[],
     powerUps: [] as PowerUpCapsule[],
@@ -311,25 +258,16 @@ export function CartridgeBreakoutModal({
     [spawnStuckBall],
   );
 
-  const resetToTitle = useCallback(() => {
-    const s = simRef.current;
-    const savedBest = loadBreakoutHighScore();
-    s.phase = 'TITLE_MENU';
-    s.score = 0;
-    s.bestScore = savedBest;
-    s.isNewBest = false;
-    s.lives = konamiBonusRef.current ? 5 : 3;
-    s.bricksCleared = 0;
-    s.particles = [];
-    s.callouts = [];
-    s.shakeTimer = 0;
+  // Initialize stage 1 preview on mount
+  useEffect(() => {
+    paletteRef.current = readCrtPaletteTokens(containerRef.current);
     loadStage(1, true);
     syncHudFromSim();
   }, [loadStage, syncHudFromSim]);
 
   const startNewGame = useCallback(() => {
     const s = simRef.current;
-    const savedBest = loadBreakoutHighScore();
+    const savedBest = loadArcadeHighScore('breakout');
     s.score = 0;
     s.bestScore = savedBest;
     s.isNewBest = false;
@@ -341,7 +279,6 @@ export function CartridgeBreakoutModal({
     loadStage(1, true);
     s.phase = 'PLAYING';
 
-    // Launch immediately with a slight crisp upward angle so Start feels responsive
     const speed = getStageBallSpeed(1, false);
     const launchOffset = (Math.random() - 0.5) * 0.45;
     const vel = computePaddleBounceVelocity(launchOffset, speed);
@@ -395,81 +332,8 @@ export function CartridgeBreakoutModal({
     }
   }, [syncHudFromSim]);
 
-  const toggleMute = useCallback(() => {
-    setMuted((prev) => {
-      const next = !prev;
-      retroSynth.setMuted(next);
-      if (!next) {
-        retroSynth.paddleHit();
-      }
-      return next;
-    });
-  }, []);
-
-  // Modal enter/exit transitions (interruptible & smooth)
-  const clearOpenRafs = useCallback(() => {
-    if (openRaf1Ref.current !== null) {
-      window.cancelAnimationFrame(openRaf1Ref.current);
-      openRaf1Ref.current = null;
-    }
-    if (openRaf2Ref.current !== null) {
-      window.cancelAnimationFrame(openRaf2Ref.current);
-      openRaf2Ref.current = null;
-    }
-  }, []);
-
-  const clearCloseTimer = useCallback(() => {
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current);
-      closeTimerRef.current = null;
-    }
-  }, []);
-
-  useLayoutEffect(() => {
-    if (open) {
-      clearCloseTimer();
-      setRendered(true);
-      resetToTitle();
-      if (modalPhaseRef.current !== 'open') {
-        setModalPhase('entering');
-        clearOpenRafs();
-        openRaf1Ref.current = window.requestAnimationFrame(() => {
-          openRaf1Ref.current = null;
-          openRaf2Ref.current = window.requestAnimationFrame(() => {
-            openRaf2Ref.current = null;
-            setModalPhase('open');
-          });
-        });
-      }
-    } else if (rendered) {
-      clearOpenRafs();
-      setModalPhase('closing');
-      clearCloseTimer();
-      const durationMs = prefersReducedMotion() ? 110 : 250;
-      closeTimerRef.current = window.setTimeout(() => {
-        closeTimerRef.current = null;
-        setRendered(false);
-      }, durationMs);
-    }
-  }, [open, rendered, resetToTitle, clearCloseTimer, clearOpenRafs]);
-
+  // Keyboard controls & auto-pause on tab blur
   useEffect(() => {
-    return () => {
-      clearOpenRafs();
-      clearCloseTimer();
-    };
-  }, [clearCloseTimer, clearOpenRafs]);
-
-  // Sample active CRT palette whenever rendered
-  useEffect(() => {
-    if (!rendered) return;
-    paletteRef.current = readPaletteTokens(rootRef.current);
-  }, [rendered, modalPhase]);
-
-  // Keyboard controls scoped strictly while the modal is open
-  useEffect(() => {
-    if (!open) return;
-
     const handleKeyDown = (e: KeyboardEvent) => {
       const key = e.key;
       const lower = key.toLowerCase();
@@ -479,7 +343,6 @@ export function CartridgeBreakoutModal({
         onClose();
         return;
       }
-
       if (key === 'ArrowLeft' || lower === 'a') {
         e.preventDefault();
         simRef.current.keys.left = true;
@@ -490,19 +353,20 @@ export function CartridgeBreakoutModal({
         simRef.current.keys.right = true;
         return;
       }
-
+      if (key === 'ArrowUp' || key === 'ArrowDown') {
+        e.preventDefault();
+        return;
+      }
       if (lower === 'p') {
         e.preventDefault();
         togglePause();
         return;
       }
-
       if (lower === 'm') {
         e.preventDefault();
-        toggleMute();
+        onToggleMute();
         return;
       }
-
       if (key === ' ' || key === 'Enter') {
         const phase = simRef.current.phase;
         if (phase === 'TITLE_MENU' || phase === 'GAME_OVER') {
@@ -520,34 +384,42 @@ export function CartridgeBreakoutModal({
 
     const handleKeyUp = (e: KeyboardEvent) => {
       const lower = e.key.toLowerCase();
-      if (e.key === 'ArrowLeft' || lower === 'a') {
-        simRef.current.keys.left = false;
-      }
-      if (e.key === 'ArrowRight' || lower === 'd') {
-        simRef.current.keys.right = false;
-      }
+      if (e.key === 'ArrowLeft' || lower === 'a') simRef.current.keys.left = false;
+      if (e.key === 'ArrowRight' || lower === 'd') simRef.current.keys.right = false;
     };
 
     const handleBlur = () => {
       simRef.current.keys.left = false;
       simRef.current.keys.right = false;
+      if (simRef.current.phase === 'PLAYING') {
+        simRef.current.phase = 'PAUSED';
+        syncHudFromSim();
+      }
+    };
+
+    const handleVisibility = () => {
+      if (document.hidden && simRef.current.phase === 'PLAYING') {
+        simRef.current.phase = 'PAUSED';
+        syncHudFromSim();
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     window.addEventListener('blur', handleBlur);
+    document.addEventListener('visibilitychange', handleVisibility);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('blur', handleBlur);
+      document.removeEventListener('visibilitychange', handleVisibility);
       simRef.current.keys.left = false;
       simRef.current.keys.right = false;
     };
-  }, [open, onClose, startNewGame, togglePause, toggleMute, launchStuckBalls]);
+  }, [onClose, onToggleMute, startNewGame, togglePause, launchStuckBalls, syncHudFromSim]);
 
-  // Main 60fps simulation & canvas render loop (only active while modal is mounted)
+  // 60fps simulation & canvas render loop
   useEffect(() => {
-    if (!rendered) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -593,9 +465,14 @@ export function CartridgeBreakoutModal({
     const addScore = (pts: number) => {
       const s = simRef.current;
       s.score += pts;
+      if (s.score > 0 && !reportedCartPlayedRef.current) {
+        reportedCartPlayedRef.current = true;
+        reportAchievementEvent('arcade_cart_played', ARCADE_CARTRIDGE_INDEX.breakout);
+      }
       if (s.score > s.bestScore) {
-        s.bestScore = s.score;
+        s.bestScore = saveArcadeHighScore('breakout', s.score);
         s.isNewBest = true;
+        onHighScoreChangeRef.current?.(s.bestScore);
       }
     };
 
@@ -653,8 +530,7 @@ export function CartridgeBreakoutModal({
             anchor.vx = vel.vx;
             anchor.vy = vel.vy;
           }
-          const extraAngles = [-0.42, 0.42];
-          for (const offset of extraAngles) {
+          for (const offset of [-0.42, 0.42]) {
             if (s.balls.length >= 3) break;
             const vel = computePaddleBounceVelocity(offset, speed);
             s.balls.push({
@@ -677,10 +553,7 @@ export function CartridgeBreakoutModal({
       const pal = paletteRef.current;
       const reducedMotion = prefersReducedMotion();
 
-      // Update cosmetic particles, brick hit flashes, callouts, and micro-shake even in STAGE_CLEAR
-      if (s.shakeTimer > 0) {
-        s.shakeTimer = Math.max(0, s.shakeTimer - dt);
-      }
+      if (s.shakeTimer > 0) s.shakeTimer = Math.max(0, s.shakeTimer - dt);
       for (const brick of s.bricks) {
         if (brick.flash > 0) brick.flash = Math.max(0, brick.flash - dt * 5);
       }
@@ -711,14 +584,12 @@ export function CartridgeBreakoutModal({
 
       if (s.phase !== 'PLAYING') return;
 
-      // Keyboard paddle movement
       const paddleSpeed = 520;
       if (s.keys.left) s.paddleX -= paddleSpeed * dt;
       if (s.keys.right) s.paddleX += paddleSpeed * dt;
       const halfPaddle = s.paddleW / 2;
       s.paddleX = Math.max(halfPaddle + 8, Math.min(LOGICAL_W - halfPaddle - 8, s.paddleX));
 
-      // Active power-up countdowns
       let timerHudDirty = false;
       if (s.wideTimer > 0) {
         s.wideTimer = Math.max(0, s.wideTimer - dt);
@@ -740,7 +611,6 @@ export function CartridgeBreakoutModal({
         syncHudFromSim();
       }
 
-      // Move & collect power-up capsules
       const paddleLeft = s.paddleX - s.paddleW / 2;
       const paddleRight = s.paddleX + s.paddleW / 2;
       for (let i = s.powerUps.length - 1; i >= 0; i -= 1) {
@@ -756,12 +626,9 @@ export function CartridgeBreakoutModal({
           applyPowerUp(cap.kind, cap.x, cap.y);
           continue;
         }
-        if (cap.y - cap.h > LOGICAL_H) {
-          s.powerUps.splice(i, 1);
-        }
+        if (cap.y - cap.h > LOGICAL_H) s.powerUps.splice(i, 1);
       }
 
-      // Advance balls & collisions
       let hudDirty = false;
       for (let bi = s.balls.length - 1; bi >= 0; bi -= 1) {
         const ball = s.balls[bi];
@@ -778,7 +645,6 @@ export function CartridgeBreakoutModal({
         ball.x += ball.vx * dt;
         ball.y += ball.vy * dt;
 
-        // Side & top wall rebounds
         if (ball.x - ball.radius < 6) {
           ball.x = 6 + ball.radius;
           ball.vx = Math.abs(ball.vx);
@@ -794,7 +660,6 @@ export function CartridgeBreakoutModal({
           retroSynth.wallHit();
         }
 
-        // Paddle collision
         if (
           ball.vy > 0 &&
           ball.y + ball.radius >= PADDLE_Y &&
@@ -813,7 +678,6 @@ export function CartridgeBreakoutModal({
           emitParticles(ball.x, PADDLE_Y, pal.phosphor, 5);
         }
 
-        // Brick collisions (one brick per ball per frame for deterministic bounces)
         for (let i = s.bricks.length - 1; i >= 0; i -= 1) {
           const brick = s.bricks[i];
           const closestX = Math.max(brick.x, Math.min(ball.x, brick.x + brick.w));
@@ -821,14 +685,11 @@ export function CartridgeBreakoutModal({
           const dx = ball.x - closestX;
           const dy = ball.y - closestY;
           if (dx * dx + dy * dy <= ball.radius * ball.radius) {
-            // Determine dominant bounce axis
             const overlapLeft = ball.x + ball.radius - brick.x;
             const overlapRight = brick.x + brick.w - (ball.x - ball.radius);
             const overlapTop = ball.y + ball.radius - brick.y;
             const overlapBottom = brick.y + brick.h - (ball.y - ball.radius);
-            const minX = Math.min(overlapLeft, overlapRight);
-            const minY = Math.min(overlapTop, overlapBottom);
-            if (minX < minY) {
+            if (Math.min(overlapLeft, overlapRight) < Math.min(overlapTop, overlapBottom)) {
               ball.vx = -ball.vx;
             } else {
               ball.vy = -ball.vy;
@@ -875,13 +736,11 @@ export function CartridgeBreakoutModal({
           }
         }
 
-        // Bottom drain
         if (ball.y - ball.radius > LOGICAL_H + 10) {
           s.balls.splice(bi, 1);
         }
       }
 
-      // Check stage clear
       if (s.bricks.length === 0) {
         addScore(500 * s.stage);
         s.lives = Math.min(MAX_LIVES, s.lives + 1);
@@ -898,7 +757,6 @@ export function CartridgeBreakoutModal({
         return;
       }
 
-      // Check lost life
       if (s.balls.length === 0) {
         s.lives -= 1;
         s.combo = 0;
@@ -908,7 +766,8 @@ export function CartridgeBreakoutModal({
         s.powerUps = [];
         if (s.lives <= 0) {
           s.lives = 0;
-          s.bestScore = saveBreakoutHighScore(s.score);
+          s.bestScore = saveArcadeHighScore('breakout', s.score);
+          onHighScoreChangeRef.current?.(s.bestScore);
           s.phase = 'GAME_OVER';
           retroSynth.gameOver();
           if (s.score > 0) {
@@ -923,9 +782,7 @@ export function CartridgeBreakoutModal({
         return;
       }
 
-      if (hudDirty) {
-        syncHudFromSim();
-      }
+      if (hudDirty) syncHudFromSim();
     };
 
     const drawFrame = () => {
@@ -935,17 +792,14 @@ export function CartridgeBreakoutModal({
       ctx.save();
       ctx.scale(dpr, dpr);
 
-      // Subtle micro-shake on heavy impacts (disabled automatically under reduced-motion)
       if (s.shakeTimer > 0) {
         const mag = s.shakeTimer * 20;
         ctx.translate((Math.random() - 0.5) * mag, (Math.random() - 0.5) * mag);
       }
 
-      // Arena dark CRT phosphor canvas (60% breathing room)
       ctx.fillStyle = pal.bg;
       ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
 
-      // Subtle CRT grid lines in background
       ctx.strokeStyle = pal.border;
       ctx.globalAlpha = 0.22;
       ctx.lineWidth = 1;
@@ -963,7 +817,6 @@ export function CartridgeBreakoutModal({
       }
       ctx.globalAlpha = 1;
 
-      // Subtle stage watermark in upper center
       ctx.fillStyle = pal.muted;
       ctx.globalAlpha = 0.35;
       ctx.font = '600 10px "IBM Plex Mono", monospace';
@@ -976,7 +829,6 @@ export function CartridgeBreakoutModal({
       );
       ctx.globalAlpha = 1;
 
-      // Draw ROM cartridge bricks
       for (const brick of s.bricks) {
         const accent =
           brick.tier === 'armored'
@@ -987,11 +839,9 @@ export function CartridgeBreakoutModal({
                 ? pal.phosphor
                 : pal.phosphorDim;
 
-        // Cartridge body
         ctx.fillStyle = brick.flash > 0 ? pal.text : pal.surface;
         ctx.fillRect(brick.x, brick.y, brick.w, brick.h);
 
-        // Colored top cartridge ridge & border
         ctx.fillStyle = accent;
         ctx.globalAlpha = brick.tier === 'base' ? 0.6 : 0.88;
         ctx.fillRect(brick.x + 1, brick.y + 1, brick.w - 2, 3.5);
@@ -1001,7 +851,6 @@ export function CartridgeBreakoutModal({
         ctx.lineWidth = brick.maxHp > 1 ? 1.5 : 1;
         ctx.strokeRect(brick.x + 0.5, brick.y + 0.5, brick.w - 1, brick.h - 1);
 
-        // Cartridge pin notches along bottom edge
         ctx.fillStyle = accent;
         ctx.globalAlpha = 0.45;
         const pinCount = 4;
@@ -1012,14 +861,12 @@ export function CartridgeBreakoutModal({
         }
         ctx.globalAlpha = 1;
 
-        // Console tag label
         ctx.fillStyle = brick.flash > 0 ? pal.bg : pal.text;
         ctx.font = '600 9.5px "IBM Plex Mono", monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(brick.label, brick.x + brick.w / 2, brick.y + brick.h / 2 + 1);
 
-        // Cracked fracture indicator on damaged armored bricks
         if (brick.maxHp > 1 && brick.hp === 1) {
           ctx.strokeStyle = pal.text;
           ctx.lineWidth = 1.25;
@@ -1031,7 +878,6 @@ export function CartridgeBreakoutModal({
         }
       }
 
-      // Draw falling power-up capsules (explicit icon letter + glow border)
       for (const cap of s.powerUps) {
         const capColor =
           cap.kind === 'W' ? pal.phosphor : cap.kind === 'S' ? pal.amber : pal.text;
@@ -1049,7 +895,6 @@ export function CartridgeBreakoutModal({
         ctx.fillText(cap.kind, cap.x, cap.y + 0.5);
       }
 
-      // Draw CRT Paddle with phosphor energy core
       const px = s.paddleX - s.paddleW / 2;
       ctx.save();
       ctx.shadowColor = s.wideTimer > 0 ? pal.amber : pal.phosphor;
@@ -1059,12 +904,10 @@ export function CartridgeBreakoutModal({
       ctx.strokeStyle = s.wideTimer > 0 ? pal.amber : pal.phosphor;
       ctx.lineWidth = 1.75;
       ctx.strokeRect(px + 0.5, PADDLE_Y + 0.5, s.paddleW - 1, PADDLE_H - 1);
-      // Inner phosphor bar
       ctx.fillStyle = s.wideTimer > 0 ? pal.amber : pal.phosphor;
       ctx.fillRect(px + 8, PADDLE_Y + 4, s.paddleW - 16, PADDLE_H - 8);
       ctx.restore();
 
-      // Draw balls & phosphor trails
       for (const ball of s.balls) {
         for (let t = 0; t < ball.trail.length; t += 1) {
           const pt = ball.trail[t];
@@ -1088,7 +931,6 @@ export function CartridgeBreakoutModal({
         ctx.restore();
       }
 
-      // Draw square-pixel shatter particles
       for (const p of s.particles) {
         ctx.fillStyle = p.color;
         ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
@@ -1096,7 +938,6 @@ export function CartridgeBreakoutModal({
       }
       ctx.globalAlpha = 1;
 
-      // Draw floating callouts
       for (const c of s.callouts) {
         ctx.fillStyle = c.color;
         ctx.globalAlpha = Math.min(1, (c.life / c.maxLife) * 1.4);
@@ -1107,7 +948,6 @@ export function CartridgeBreakoutModal({
       }
       ctx.globalAlpha = 1;
 
-      // Subtle stage-clear banner directly on canvas
       if (s.phase === 'STAGE_CLEAR') {
         ctx.fillStyle = 'rgba(0, 0, 0, 0.58)';
         ctx.fillRect(0, LOGICAL_H / 2 - 44, LOGICAL_W, 88);
@@ -1131,7 +971,6 @@ export function CartridgeBreakoutModal({
         ctx.fillText('LOADING NEXT CARTRIDGE BANK · +1 LIFE', LOGICAL_W / 2, LOGICAL_H / 2 + 16);
       }
 
-      // Subtle CRT scanline sheen inside canvas
       ctx.fillStyle = 'rgba(0, 0, 0, 0.12)';
       for (let sy = 0; sy < LOGICAL_H; sy += 4) {
         ctx.fillRect(0, sy, LOGICAL_W, 1);
@@ -1149,10 +988,8 @@ export function CartridgeBreakoutModal({
     };
 
     rafId = window.requestAnimationFrame(tick);
-    return () => {
-      window.cancelAnimationFrame(rafId);
-    };
-  }, [rendered, loadStage, spawnStuckBall, syncHudFromSim]);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [loadStage, spawnStuckBall, syncHudFromSim]);
 
   const updatePaddleFromClientX = useCallback((clientX: number) => {
     const canvas = canvasRef.current;
@@ -1165,280 +1002,260 @@ export function CartridgeBreakoutModal({
     s.paddleX = Math.max(half + 8, Math.min(LOGICAL_W - half - 8, normalizedX * LOGICAL_W));
   }, []);
 
-  if (!rendered) return null;
-
   return (
-    <div
-      ref={rootRef}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="crt-breakout-title"
-      data-arcade-state={modalPhase}
-      onClick={onClose}
-      className="crt-arcade-backdrop fixed inset-0 z-[75] bg-black/80 backdrop-blur-[3px] flex items-center justify-center p-3 sm:p-5"
-    >
-      <div
-        data-arcade-state={modalPhase}
-        onClick={(e) => e.stopPropagation()}
-        className="crt-arcade-cabinet w-full max-w-[760px] border border-crt-border-strong bg-crt-surface rounded-md shadow-[0_24px_64px_-16px_rgba(0,0,0,0.95)] overflow-hidden flex flex-col"
-      >
-        {/* Single-row Unobtrusive Arcade HUD Bar (never overlaps gameplay) */}
-        <div className="px-3.5 py-2.5 bg-crt-bg/95 border-b border-crt-border flex flex-wrap items-center justify-between gap-2.5">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <Gamepad2 className="h-4 w-4 text-crt-phosphor shrink-0" />
-            <h2
-              id="crt-breakout-title"
-              className="font-display text-sm font-bold tracking-[0.06em] text-crt-phosphor uppercase whitespace-nowrap"
-            >
-              CRT Breakout
-            </h2>
-            <span className="text-[11px] font-mono text-crt-muted border border-crt-border bg-crt-surface px-1.5 py-0.5 rounded-[3px] tabular-nums whitespace-nowrap">
-              STG {String(hud.stage).padStart(2, '0')}
-            </span>
-            {konamiBonus && (
-              <span className="hidden sm:inline-flex items-center text-[10px] font-mono font-semibold text-crt-amber border border-crt-amber/50 bg-crt-amber/10 px-1.5 py-0.5 rounded-[3px] whitespace-nowrap">
-                KONAMI +2
-              </span>
-            )}
-          </div>
-
-          <div className="flex items-center gap-3 sm:gap-4 text-xs font-mono tabular-nums ml-auto">
-            {hud.wideSec > 0 && (
-              <span className="text-[11px] text-crt-phosphor border border-crt-phosphor/45 bg-crt-phosphor/10 px-1.5 py-0.5 rounded-[3px] whitespace-nowrap">
-                [W] {hud.wideSec}s
-              </span>
-            )}
-            {hud.slowSec > 0 && (
-              <span className="text-[11px] text-crt-amber border border-crt-amber/45 bg-crt-amber/10 px-1.5 py-0.5 rounded-[3px] whitespace-nowrap">
-                [S] {hud.slowSec}s
-              </span>
-            )}
-
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] uppercase tracking-wider text-crt-muted">Score</span>
-              <span className="text-crt-text font-semibold">
-                {String(hud.score).padStart(5, '0')}
-              </span>
-            </div>
-
-            <div className="hidden sm:flex items-center gap-1.5">
-              <span className="text-[10px] uppercase tracking-wider text-crt-muted">Best</span>
-              <span className="text-crt-amber font-semibold">
-                {String(hud.bestScore).padStart(5, '0')}
-              </span>
-            </div>
-
-            <div
-              className="flex items-center gap-1"
-              aria-label={`Lives remaining: ${hud.lives}`}
-              title={`Lives: ${hud.lives}`}
-            >
-              <span className="inline-flex items-center gap-0.5 text-crt-crimson">
-                {Array.from({ length: Math.min(hud.lives, 5) }).map((_, i) => (
-                  <Heart key={i} className="h-3 w-3 fill-current" />
-                ))}
-              </span>
-              <span className="text-[11px] text-crt-text font-semibold">×{hud.lives}</span>
-            </div>
-
-            <div className="flex items-center gap-1 border-l border-crt-border pl-2.5">
-              <button
-                type="button"
-                onClick={toggleMute}
-                aria-label={muted ? 'Unmute 8-bit sound effects' : 'Mute 8-bit sound effects'}
-                title={muted ? 'Unmute SFX (M)' : 'Mute SFX (M)'}
-                className="p-1.5 rounded border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong transition-colors cursor-pointer"
-              >
-                {muted ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
-              </button>
-              {(hud.phase === 'PLAYING' || hud.phase === 'PAUSED') && (
-                <button
-                  type="button"
-                  onClick={togglePause}
-                  aria-label={hud.phase === 'PAUSED' ? 'Resume game' : 'Pause game'}
-                  title={hud.phase === 'PAUSED' ? 'Resume (P)' : 'Pause (P)'}
-                  className="p-1.5 rounded border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong transition-colors cursor-pointer"
-                >
-                  {hud.phase === 'PAUSED' ? (
-                    <Play className="h-3.5 w-3.5" />
-                  ) : (
-                    <Pause className="h-3.5 w-3.5" />
-                  )}
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="Close CRT Breakout"
-                title="Close (Esc)"
-                className="p-1.5 rounded border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-crimson hover:border-crt-crimson/50 transition-colors cursor-pointer"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
+    <div ref={containerRef} className="flex flex-col">
+      {/* HUD Header */}
+      <div className="px-3.5 py-2.5 bg-crt-bg/95 border-b border-crt-border flex flex-wrap items-center justify-between gap-2.5">
+        <div className="flex items-center gap-2 min-w-0">
+          <button
+            type="button"
+            onClick={onSwitchCart}
+            title="Switch Cartridge"
+            className="inline-flex items-center gap-1 px-2 py-1 rounded border border-crt-border bg-crt-surface text-[11px] font-mono text-crt-muted hover:text-crt-phosphor hover:border-crt-phosphor/50 transition-colors cursor-pointer shrink-0"
+          >
+            <LayoutGrid className="h-3 w-3" />
+            <span className="hidden sm:inline">Carts</span>
+          </button>
+          <Gamepad2 className="h-4 w-4 text-crt-phosphor shrink-0" />
+          <h2
+            id="crt-arcade-title"
+            className="font-display text-sm font-bold tracking-[0.06em] text-crt-phosphor uppercase whitespace-nowrap"
+          >
+            Cartridge Breakout
+          </h2>
+          <span className="text-[11px] font-mono text-crt-muted border border-crt-border bg-crt-surface px-1.5 py-0.5 rounded-[3px] tabular-nums whitespace-nowrap">
+            STG {String(hud.stage).padStart(2, '0')}
+          </span>
         </div>
 
-        {/* Playable 3:2 CRT Canvas Viewport */}
-        <div className="relative bg-crt-bg p-2.5 sm:p-3.5 flex items-center justify-center">
-          <div className="relative w-full aspect-[3/2] border border-crt-border-strong rounded-[4px] overflow-hidden bg-crt-bg shadow-[inset_0_0_32px_rgba(0,0,0,0.85)]">
-            <canvas
-              ref={canvasRef}
-              onPointerMove={(e) => {
-                if (simRef.current.phase === 'PLAYING') {
-                  updatePaddleFromClientX(e.clientX);
-                }
-              }}
-              onPointerDown={(e) => {
-                if (simRef.current.phase === 'PLAYING') {
-                  updatePaddleFromClientX(e.clientX);
-                  launchStuckBalls();
-                }
-              }}
-              className="block w-full h-full touch-none select-none cursor-crosshair"
-            />
+        <div className="flex items-center gap-3 sm:gap-4 text-xs font-mono tabular-nums ml-auto">
+          {hud.wideSec > 0 && (
+            <span className="text-[11px] text-crt-phosphor border border-crt-phosphor/45 bg-crt-phosphor/10 px-1.5 py-0.5 rounded-[3px] whitespace-nowrap">
+              [W] {hud.wideSec}s
+            </span>
+          )}
+          {hud.slowSec > 0 && (
+            <span className="text-[11px] text-crt-amber border border-crt-amber/45 bg-crt-amber/10 px-1.5 py-0.5 rounded-[3px] whitespace-nowrap">
+              [S] {hud.slowSec}s
+            </span>
+          )}
 
-            {/* TITLE_MENU Overlay */}
-            {hud.phase === 'TITLE_MENU' && (
-              <div className="absolute inset-0 bg-crt-bg/82 backdrop-blur-[2px] flex flex-col items-center justify-center p-5 text-center">
-                <div className="max-w-md w-full border border-crt-border-strong bg-crt-surface/95 rounded-md px-6 py-5 shadow-2xl space-y-4">
-                  <div className="space-y-1.5">
-                    <div className="inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-[0.14em] text-crt-amber">
-                      <Gamepad2 className="h-3.5 w-3.5" />
-                      <span>{konamiBonus ? 'Konami Code Unlocked · 5 Lives' : 'Hidden Arcade Cabinet'}</span>
-                    </div>
-                    <h3 className="font-display text-2xl sm:text-3xl font-bold tracking-[0.06em] text-crt-phosphor uppercase">
-                      Cartridge Breakout
-                    </h3>
-                    <p className="text-xs text-crt-muted">
-                      Clear rows of retro ROM cartridges, stack combo chains, and catch{' '}
-                      <span className="font-mono text-crt-text">[W]</span> Wide,{' '}
-                      <span className="font-mono text-crt-text">[M]</span> Multi-Ball &amp;{' '}
-                      <span className="font-mono text-crt-text">[S]</span> Slow capsules.
-                    </p>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] uppercase tracking-wider text-crt-muted">Score</span>
+            <span className="text-crt-text font-semibold">{String(hud.score).padStart(5, '0')}</span>
+          </div>
+
+          <div className="hidden sm:flex items-center gap-1.5">
+            <span className="text-[10px] uppercase tracking-wider text-crt-muted">Best</span>
+            <span className="text-crt-amber font-semibold">{String(hud.bestScore).padStart(5, '0')}</span>
+          </div>
+
+          <div className="flex items-center gap-1" aria-label={`Lives remaining: ${hud.lives}`}>
+            <span className="inline-flex items-center gap-0.5 text-crt-crimson">
+              {Array.from({ length: Math.min(hud.lives, 5) }).map((_, i) => (
+                <Heart key={i} className="h-3 w-3 fill-current" />
+              ))}
+            </span>
+            <span className="text-[11px] text-crt-text font-semibold">×{hud.lives}</span>
+          </div>
+
+          <div className="flex items-center gap-1 border-l border-crt-border pl-2.5">
+            <button
+              type="button"
+              onClick={onToggleMute}
+              aria-label={muted ? 'Unmute 8-bit sound effects' : 'Mute 8-bit sound effects'}
+              title={muted ? 'Unmute SFX (M)' : 'Mute SFX (M)'}
+              className="p-1.5 rounded border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong transition-colors cursor-pointer"
+            >
+              {muted ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
+            </button>
+            {(hud.phase === 'PLAYING' || hud.phase === 'PAUSED') && (
+              <button
+                type="button"
+                onClick={togglePause}
+                aria-label={hud.phase === 'PAUSED' ? 'Resume game' : 'Pause game'}
+                title={hud.phase === 'PAUSED' ? 'Resume (P)' : 'Pause (P)'}
+                className="p-1.5 rounded border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong transition-colors cursor-pointer"
+              >
+                {hud.phase === 'PAUSED' ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close CRT Arcade"
+              title="Close (Esc)"
+              className="p-1.5 rounded border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-crimson hover:border-crt-crimson/50 transition-colors cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Playable 3:2 CRT Canvas Viewport */}
+      <div className="relative bg-crt-bg p-2.5 sm:p-3.5 flex items-center justify-center">
+        <div className="relative w-full aspect-[3/2] border border-crt-border-strong rounded-[4px] overflow-hidden bg-crt-bg shadow-[inset_0_0_32px_rgba(0,0,0,0.85)]">
+          <canvas
+            ref={canvasRef}
+            onPointerMove={(e) => {
+              if (simRef.current.phase === 'PLAYING') updatePaddleFromClientX(e.clientX);
+            }}
+            onPointerDown={(e) => {
+              if (simRef.current.phase === 'PLAYING') {
+                updatePaddleFromClientX(e.clientX);
+                launchStuckBalls();
+              }
+            }}
+            className="block w-full h-full touch-none select-none cursor-crosshair"
+          />
+
+          {hud.phase === 'TITLE_MENU' && (
+            <div className="absolute inset-0 bg-crt-bg/82 backdrop-blur-[2px] flex flex-col items-center justify-center p-5 text-center">
+              <div className="max-w-md w-full border border-crt-border-strong bg-crt-surface/95 rounded-md px-6 py-5 shadow-2xl space-y-4">
+                <div className="space-y-1.5">
+                  <div className="inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-[0.14em] text-crt-amber">
+                    <Gamepad2 className="h-3.5 w-3.5" />
+                    <span>{konamiBonus ? 'Konami Code Unlocked · 5 Lives' : 'Cart 01 · Hidden Arcade'}</span>
                   </div>
-
-                  {hud.bestScore > 0 && (
-                    <div className="inline-flex items-center gap-2 px-3 py-1 rounded border border-crt-amber/40 bg-crt-amber/10 text-xs font-mono text-crt-amber tabular-nums">
-                      <Trophy className="h-3.5 w-3.5" />
-                      <span>Personal Best: {hud.bestScore.toLocaleString()}</span>
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-center gap-2.5 pt-1">
-                    <button
-                      type="button"
-                      onClick={startNewGame}
-                      className="inline-flex items-center gap-2 px-5 py-2 font-display text-xs font-bold uppercase tracking-[0.08em] text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-all whitespace-nowrap cursor-pointer"
-                    >
-                      <Play className="h-3.5 w-3.5 fill-current" />
-                      Start Game
-                    </button>
-                    <button
-                      type="button"
-                      onClick={toggleMute}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors whitespace-nowrap cursor-pointer"
-                    >
-                      {muted ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
-                      {muted ? 'SFX Off' : 'SFX On'}
-                    </button>
-                  </div>
-
-                  <p className="text-[11px] font-mono text-crt-muted/85 pt-1 border-t border-crt-border/70">
-                    Mouse / Touch / ← → to move · Space to launch · P pause · Esc close
+                  <h3 className="font-display text-2xl sm:text-3xl font-bold tracking-[0.06em] text-crt-phosphor uppercase">
+                    Cartridge Breakout
+                  </h3>
+                  <p className="text-xs text-crt-muted">
+                    Clear rows of retro ROM cartridges, stack combo chains, and catch{' '}
+                    <span className="font-mono text-crt-text">[W]</span> Wide,{' '}
+                    <span className="font-mono text-crt-text">[M]</span> Multi-Ball &amp;{' '}
+                    <span className="font-mono text-crt-text">[S]</span> Slow capsules.
                   </p>
                 </div>
-              </div>
-            )}
 
-            {/* PAUSED Overlay */}
-            {hud.phase === 'PAUSED' && (
-              <div className="absolute inset-0 bg-crt-bg/75 backdrop-blur-[2px] flex items-center justify-center p-4">
-                <div className="border border-crt-border-strong bg-crt-surface/95 rounded-md px-6 py-5 text-center space-y-4 shadow-2xl min-w-[260px]">
-                  <div className="space-y-1">
-                    <h3 className="font-display text-xl font-bold tracking-[0.08em] text-crt-phosphor uppercase">
-                      Paused
-                    </h3>
-                    <p className="text-xs font-mono text-crt-muted">
-                      Stage {hud.stage} · {hud.stageName}
-                    </p>
+                {hud.bestScore > 0 && (
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded border border-crt-amber/40 bg-crt-amber/10 text-xs font-mono text-crt-amber tabular-nums">
+                    <Trophy className="h-3.5 w-3.5" />
+                    <span>Personal Best: {hud.bestScore.toLocaleString()}</span>
                   </div>
-                  <div className="flex items-center justify-center gap-2.5">
-                    <button
-                      type="button"
-                      onClick={togglePause}
-                      className="inline-flex items-center gap-1.5 px-4 py-1.5 font-display text-xs font-bold uppercase tracking-[0.06em] text-crt-bg bg-crt-phosphor hover:brightness-110 rounded whitespace-nowrap cursor-pointer"
-                    >
-                      <Play className="h-3.5 w-3.5 fill-current" />
-                      Resume
-                    </button>
-                    <button
-                      type="button"
-                      onClick={startNewGame}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded whitespace-nowrap cursor-pointer"
-                    >
-                      <RotateCcw className="h-3.5 w-3.5" />
-                      Restart
-                    </button>
-                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    onClick={startNewGame}
+                    className="inline-flex items-center gap-2 px-5 py-2 font-display text-xs font-bold uppercase tracking-[0.08em] text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-all whitespace-nowrap cursor-pointer"
+                  >
+                    <Play className="h-3.5 w-3.5 fill-current" />
+                    Start Game
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onSwitchCart}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors whitespace-nowrap cursor-pointer"
+                  >
+                    <LayoutGrid className="h-3.5 w-3.5" />
+                    Switch Cart
+                  </button>
+                </div>
+
+                <p className="text-[11px] font-mono text-crt-muted/85 pt-1 border-t border-crt-border/70">
+                  Mouse / Touch / ← → to move · Space to launch · P pause · Esc close
+                </p>
+              </div>
+            </div>
+          )}
+
+          {hud.phase === 'PAUSED' && (
+            <div className="absolute inset-0 bg-crt-bg/75 backdrop-blur-[2px] flex items-center justify-center p-4">
+              <div className="border border-crt-border-strong bg-crt-surface/95 rounded-md px-6 py-5 text-center space-y-4 shadow-2xl min-w-[260px]">
+                <div className="space-y-1">
+                  <h3 className="font-display text-xl font-bold tracking-[0.08em] text-crt-phosphor uppercase">
+                    Paused
+                  </h3>
+                  <p className="text-xs font-mono text-crt-muted">
+                    Stage {hud.stage} · {hud.stageName}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={togglePause}
+                    className="inline-flex items-center gap-1.5 px-4 py-1.5 font-display text-xs font-bold uppercase tracking-[0.06em] text-crt-bg bg-crt-phosphor hover:brightness-110 rounded whitespace-nowrap cursor-pointer"
+                  >
+                    <Play className="h-3.5 w-3.5 fill-current" />
+                    Resume
+                  </button>
+                  <button
+                    type="button"
+                    onClick={startNewGame}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded whitespace-nowrap cursor-pointer"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Restart
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onSwitchCart}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded whitespace-nowrap cursor-pointer"
+                  >
+                    <LayoutGrid className="h-3.5 w-3.5" />
+                    Carts
+                  </button>
                 </div>
               </div>
-            )}
+            </div>
+          )}
 
-            {/* GAME_OVER Overlay */}
-            {hud.phase === 'GAME_OVER' && (
-              <div className="absolute inset-0 bg-crt-bg/82 backdrop-blur-[2px] flex items-center justify-center p-4">
-                <div className="max-w-sm w-full border border-crt-border-strong bg-crt-surface/95 rounded-md px-6 py-5 text-center space-y-4 shadow-2xl">
-                  <div className="space-y-1">
-                    {hud.isNewBest && hud.score > 0 && (
-                      <div className="inline-flex items-center gap-1.5 text-[11px] font-mono font-semibold text-crt-amber uppercase tracking-[0.1em]">
-                        <Trophy className="h-3.5 w-3.5" />
-                        <span>New High Score</span>
-                      </div>
-                    )}
-                    <h3 className="font-display text-2xl font-bold tracking-[0.08em] text-crt-crimson uppercase">
-                      Game Over
-                    </h3>
-                  </div>
+          {hud.phase === 'GAME_OVER' && (
+            <div className="absolute inset-0 bg-crt-bg/82 backdrop-blur-[2px] flex items-center justify-center p-4">
+              <div className="max-w-sm w-full border border-crt-border-strong bg-crt-surface/95 rounded-md px-6 py-5 text-center space-y-4 shadow-2xl">
+                <div className="space-y-1">
+                  {hud.isNewBest && hud.score > 0 && (
+                    <div className="inline-flex items-center gap-1.5 text-[11px] font-mono font-semibold text-crt-amber uppercase tracking-[0.1em]">
+                      <Trophy className="h-3.5 w-3.5" />
+                      <span>New High Score</span>
+                    </div>
+                  )}
+                  <h3 className="font-display text-2xl font-bold tracking-[0.08em] text-crt-crimson uppercase">
+                    Game Over
+                  </h3>
+                </div>
 
-                  <div className="grid grid-cols-3 gap-2 border border-crt-border bg-crt-bg/80 rounded p-2.5 font-mono tabular-nums">
-                    <div>
-                      <div className="text-[10px] uppercase text-crt-muted">Score</div>
-                      <div className="text-sm font-semibold text-crt-text">
-                        {hud.score.toLocaleString()}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] uppercase text-crt-muted">Stage</div>
-                      <div className="text-sm font-semibold text-crt-phosphor">{hud.stage}</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] uppercase text-crt-muted">Cleared</div>
-                      <div className="text-sm font-semibold text-crt-amber">{hud.bricksCleared}</div>
+                <div className="grid grid-cols-3 gap-2 border border-crt-border bg-crt-bg/80 rounded p-2.5 font-mono tabular-nums">
+                  <div>
+                    <div className="text-[10px] uppercase text-crt-muted">Score</div>
+                    <div className="text-sm font-semibold text-crt-text">
+                      {hud.score.toLocaleString()}
                     </div>
                   </div>
-
-                  <div className="flex items-center justify-center gap-2.5 pt-1">
-                    <button
-                      type="button"
-                      onClick={startNewGame}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 font-display text-xs font-bold uppercase tracking-[0.06em] text-crt-bg bg-crt-phosphor hover:brightness-110 rounded whitespace-nowrap cursor-pointer"
-                    >
-                      <RotateCcw className="h-3.5 w-3.5" />
-                      Play Again
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onClose}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded whitespace-nowrap cursor-pointer"
-                    >
-                      Close
-                    </button>
+                  <div>
+                    <div className="text-[10px] uppercase text-crt-muted">Stage</div>
+                    <div className="text-sm font-semibold text-crt-phosphor">{hud.stage}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase text-crt-muted">Cleared</div>
+                    <div className="text-sm font-semibold text-crt-amber">{hud.bricksCleared}</div>
                   </div>
                 </div>
+
+                <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={startNewGame}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 font-display text-xs font-bold uppercase tracking-[0.06em] text-crt-bg bg-crt-phosphor hover:brightness-110 rounded whitespace-nowrap cursor-pointer"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Play Again
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onSwitchCart}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded whitespace-nowrap cursor-pointer"
+                  >
+                    <LayoutGrid className="h-3.5 w-3.5" />
+                    Switch Cart
+                  </button>
+                </div>
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

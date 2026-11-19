@@ -266,6 +266,120 @@ class RetroChiptuneSynth {
       this.playTone(hz, dur * 0.8, { type: 'square', delaySec: delay, volume: 0.065 });
     });
   }
+
+  menuSelect(): void {
+    this.playTone(620, 0.035, { type: 'square', freqEnd: 740, volume: 0.06 });
+  }
+
+  cartBoot(): void {
+    const notes = [440, 659.25, 880];
+    notes.forEach((hz, idx) => {
+      this.playTone(hz, idx === 2 ? 0.15 : 0.06, {
+        type: 'square',
+        delaySec: idx * 0.048,
+        volume: 0.085,
+      });
+    });
+  }
+
+  laserShot(): void {
+    this.playTone(960, 0.085, { type: 'square', freqEnd: 230, volume: 0.075 });
+  }
+
+  invaderHit(): void {
+    this.playTone(320, 0.06, { type: 'sawtooth', freqEnd: 110, volume: 0.085 });
+    this.playTone(170, 0.075, { type: 'square', freqEnd: 72, delaySec: 0.025, volume: 0.07 });
+  }
+
+  invaderMarch(stepIndex: number): void {
+    const bassNotes = [98.0, 92.5, 87.31, 82.41]; // G2 -> F#2 -> F2 -> E2
+    const hz = bassNotes[((stepIndex % 4) + 4) % 4];
+    this.playTone(hz, 0.055, { type: 'triangle', freqEnd: hz * 0.86, volume: 0.075 });
+  }
+
+  ufoWarble(): void {
+    this.playTone(760, 0.08, { type: 'triangle', freqEnd: 1080, volume: 0.065 });
+    this.playTone(1080, 0.08, { type: 'triangle', freqEnd: 760, delaySec: 0.08, volume: 0.065 });
+  }
+
+  ufoDestroy(): void {
+    const notes = [880, 1046.5, 1318.51, 1567.98];
+    notes.forEach((hz, idx) => {
+      this.playTone(hz, 0.085, {
+        type: 'square',
+        delaySec: idx * 0.045,
+        volume: 0.095,
+      });
+    });
+  }
+
+  snakeEat(combo = 1): void {
+    const idx = Math.min(COMBO_SCALE_HZ.length - 1, Math.max(0, combo - 1));
+    const hz = COMBO_SCALE_HZ[idx];
+    this.playTone(hz, 0.065, { type: 'square', freqEnd: hz * 1.18, volume: 0.085 });
+  }
+
+  snakeBonus(): void {
+    const notes = [659.25, 880, 1174.66, 1567.98];
+    notes.forEach((hz, idx) => {
+      this.playTone(hz, idx === 3 ? 0.18 : 0.065, {
+        type: 'square',
+        delaySec: idx * 0.05,
+        volume: 0.095,
+      });
+    });
+  }
+
+  shieldBounce(): void {
+    this.playTone(523.25, 0.1, { type: 'triangle', freqEnd: 987.77, volume: 0.1 });
+    this.playTone(783.99, 0.14, { type: 'square', delaySec: 0.06, volume: 0.08 });
+  }
+
+  tetroMove(): void {
+    this.playTone(260, 0.025, { type: 'triangle', volume: 0.05 });
+  }
+
+  tetroRotate(): void {
+    this.playTone(540, 0.04, { type: 'square', freqEnd: 680, volume: 0.065 });
+  }
+
+  tetroLock(): void {
+    this.playTone(150, 0.055, { type: 'triangle', freqEnd: 88, volume: 0.09 });
+  }
+
+  tetroLineClear(lines: number): void {
+    if (lines >= 4) {
+      // Celebratory 4-line QUAD fanfare!
+      const notes = [523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98];
+      notes.forEach((hz, idx) => {
+        this.playTone(hz, idx === notes.length - 1 ? 0.28 : 0.08, {
+          type: 'square',
+          delaySec: idx * 0.052,
+          volume: 0.1,
+        });
+        this.playTone(hz * 0.5, 0.09, {
+          type: 'triangle',
+          delaySec: idx * 0.052,
+          volume: 0.075,
+        });
+      });
+      return;
+    }
+
+    const baseNotes =
+      lines === 3
+        ? [523.25, 659.25, 783.99, 1046.5]
+        : lines === 2
+          ? [523.25, 659.25, 880]
+          : [523.25, 783.99];
+    baseNotes.forEach((hz, idx) => {
+      this.playTone(hz, idx === baseNotes.length - 1 ? 0.16 : 0.07, {
+        type: 'square',
+        delaySec: idx * 0.05,
+        volume: 0.09,
+      });
+    });
+  }
 }
 
 export const retroSynth = new RetroChiptuneSynth();

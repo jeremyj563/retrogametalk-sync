@@ -23,6 +23,9 @@ const SESSION_ONCE_EVENTS = new Set<ClientAchievementEventType>([
   'arcade_opened',
   'arcade_konami',
   'arcade_stage_clear',
+  'arcade_invaders_milestone',
+  'arcade_snake_milestone',
+  'arcade_tetromino_quad',
   'easter_barrel_roll',
   'easter_blow_cartridge',
 ]);
@@ -97,6 +100,10 @@ export function reportAchievementEvent(
   if (SESSION_ONCE_EVENTS.has(type)) {
     if (reportedThisSession.has(type)) return;
     reportedThisSession.add(type);
+  } else if (type === 'arcade_cart_played' && typeof value === 'number') {
+    const key = `${type}:${value}`;
+    if (reportedThisSession.has(key)) return;
+    reportedThisSession.add(key);
   }
 
   const localHour = new Date().getHours();

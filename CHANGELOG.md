@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.10.0] - 2026-11-18
+
+- Expanded the Trophy Case with **4 new hidden trophies** (bringing the catalog to **64 trophies** and **2,145** total points) waiting to be uncovered by curious operators, with the Platinum trophy progress automatically tracking the expanded list.
+- Added a few extra vintage surprises and expanded synthesized 8-bit audio tucked quietly behind the CRT bezel—check the *Back of the Cartridge Manual* note in the Feature Guides if you need a nudge (zero impact on routine sync, catalog, or export workflows).
+
 ## [1.9.1] - 2026-11-18
 
 - Added a **release-level fast-skip** before fetching release HTML pages during Full Sync and Incremental Sync: releases already marked `Downloaded` in SQLite whose files are verified on disk (`size > 0`), whose upstream WordPress `modified_gmt` has not advanced, and whose policy-eligible `downloadHints` are already mirrored are skipped immediately without hitting RetroGameTalk or spamming per-file verification logs (reporting one concise per-console summary count instead).
