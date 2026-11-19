@@ -239,8 +239,7 @@ jobs:
           if [ "${{ github.event_name }}" != "pull_request" ] && [ -n "$SEMVER_FULL" ] && [ -n "$DH_USER" ] && [ -n "$DH_TOKEN" ]; then
             DOCKERHUB_ENABLED="true"
             DH_REPO="${DH_REPO_VAR:-${DH_USER}/retrogametalk-sync}"
-            IMAGES_LIST="${IMAGES_LIST}
-docker.io/${DH_REPO}"
+            IMAGES_LIST="$(printf '%s\ndocker.io/%s' "${IMAGES_LIST}" "${DH_REPO}")"
           fi
 
           echo "git_tag=${GIT_TAG}" >> "$GITHUB_OUTPUT"
@@ -317,7 +316,8 @@ docker.io/${DH_REPO}"
           HELM_EXPERIMENTAL_OCI: "1"
         run: |
           set -euo pipefail
+          REPO_OWNER="$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           mkdir -p /tmp/helm-dist
           helm package k8s/charts/retrogametalk-sync -d /tmp/helm-dist
-          helm push "/tmp/helm-dist/retrogametalk-sync-${{ steps.version.outputs.semver_full }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+          helm push "/tmp/helm-dist/retrogametalk-sync-${{ steps.version.outputs.semver_full }}.tgz" "oci://ghcr.io/${REPO_OWNER}/charts"
