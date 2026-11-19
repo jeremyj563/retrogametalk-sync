@@ -39,3 +39,9 @@ Plus, from the left sidebar on any page, you can monitor your **live connection 
    How to explore your preserved collection offline with multi-faceted `ANY`/`ALL` filters, full-resolution screenshot lightboxes, multi-file release rollups, inside-the-archive inspection, clutter detection, and **Installed / Not Installed** device tracking.
 3. **[Direct Handheld / SD Card Installer, Smart ROM Picker & Folder Mappings](./handheld-and-sd-card-installer.md)**
    How to write ready-to-play, cleanly named ROMs straight from your browser onto SD cards, USB drives, flashcarts, and retro handhelds—complete with **Smart ROM Picker** version selection, automatic in-place SD card version upgrades, customizable console/type folders, and the **CRT Display Studio**.
+
+---
+
+> [!TIP]
+> **Back of the Cartridge Manual:** Just like classic 8-bit hardware manuals and old-school search engines, `rgt-sync` hides a few retro-gaming secrets beneath its CRT bezel. Curious operators might try channeling a famous 1980s cheat code, tapping the console's cartridge emblem in rapid succession, or experimenting with classic browser tricks and vintage cartridge maintenance inside the Catalog search bar.
+

@@ -9,7 +9,7 @@
 <h3>Always-On Retro ROM Preservation Mirror, Offline Game Catalog &amp; Direct Handheld SD Installer</h3>
 
 <p>
-  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.7.6-38e56b?style=flat-square&labelColor=0b1510" alt="Version 1.7.6" /></a>
+  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.8.0-38e56b?style=flat-square&labelColor=0b1510" alt="Version 1.8.0" /></a>
   <a href="./.github/workflows/docker-publish.yml"><img src="https://img.shields.io/badge/platforms-linux%2Famd64%20%7C%20linux%2Farm64-1f6feb?style=flat-square&labelColor=0b1510" alt="Architectures: linux/amd64 | linux/arm64" /></a>
   <a href="https://ghcr.io/jeremyj563/retrogametalk-sync"><img src="https://img.shields.io/badge/registry-GHCR-238636?style=flat-square&labelColor=0b1510&logo=github" alt="GHCR Container Registry" /></a>
   <!-- TODO: Replace with live Docker Hub badge once DOCKERHUB_USERNAME/DOCKERHUB_TOKEN are configured and first release image is pushed -->
@@ -66,7 +66,7 @@
 - **Direct-to-SD-Card Installer & Prepared ROM Streaming:** Inspect `.zip`/`.7z`/`.rar` contents without pre-unpacking on disk, apply FAT32-safe ROM naming rules, use **Smart ROM Picker** for multi-version archives, and push clean files straight to connected SD cards via customizable console folder mappings.
 - **CRT Phosphor Control Console:** Real-time SSE updates, D3 catalog growth and storage analytics, Grafana-style telemetry deck, customizable CRT scanlines/palette/bloom (`Green` / `Amber` / `Cyan`), and **Living UI Motion** presets (`Off` through `Ultra`).
 
-For deep walkthroughs of everyday workflows, see the **[Feature Guides Index](./docs/features/README.md)**.
+For deep walkthroughs of everyday workflows (plus a small *Back of the Cartridge Manual* hint for curious explorers), see the **[Feature Guides Index](./docs/features/README.md)**.
 
 ---
 

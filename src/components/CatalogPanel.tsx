@@ -54,6 +54,11 @@ import type {
   ServiceStatusSnapshot,
 } from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
+import {
+  matchSecretSearch,
+  normalizeSecretQuery,
+  type SecretSearchEffect,
+} from '../utils/easterEggs';
 import { resolveItemTransferProgress } from '../utils/transferProgress';
 import { CatalogStatsPanel } from './CatalogStatsPanel';
 import { GameDetailDrawer, type GameDetailNavigation } from './GameDetailDrawer';
@@ -73,6 +78,7 @@ interface CatalogPanelProps {
   onStartCatalogIndex?: (scope: 'filtered' | 'full') => Promise<void>;
   onStopCatalogIndex?: () => Promise<void>;
   onRefreshStatus: () => Promise<void>;
+  onEasterEggEffect?: (effect: SecretSearchEffect | 'clear_askew') => void;
 }
 
 interface LazyCoverImageProps {
@@ -444,6 +450,7 @@ export function CatalogPanel({
   onStartCatalogIndex,
   onStopCatalogIndex,
   onRefreshStatus,
+  onEasterEggEffect,
 }: CatalogPanelProps) {
   const initialViewMode: CatalogViewPrefs['viewMode'] = memoryCatalogViewPrefs.viewMode;
 
@@ -462,6 +469,47 @@ export function CatalogPanel({
   const [catalogLayout, setCatalogLayout] = useState<'table' | 'grid'>(() => memoryCatalogViewPrefs.catalogLayout);
   const [sort, setSort] = useState<CatalogSortOption>(() => memoryCatalogViewPrefs.sort);
   const [search, setSearch] = useState(() => memoryCatalogViewPrefs.search);
+  const lastSecretQueryRef = useRef<string>('');
+  const askewAppliedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (!onEasterEggEffect) return;
+    const normalized = normalizeSecretQuery(search);
+    const matched = matchSecretSearch(search, { submitted: false });
+
+    if (matched === 'askew') {
+      if (!askewAppliedRef.current) {
+        askewAppliedRef.current = true;
+        onEasterEggEffect('askew');
+      }
+      lastSecretQueryRef.current = normalized;
+      return;
+    }
+
+    if (askewAppliedRef.current) {
+      askewAppliedRef.current = false;
+      onEasterEggEffect('clear_askew');
+    }
+
+    if (!matched) {
+      lastSecretQueryRef.current = '';
+      return;
+    }
+
+    if (lastSecretQueryRef.current !== normalized) {
+      lastSecretQueryRef.current = normalized;
+      onEasterEggEffect(matched);
+    }
+  }, [search, onEasterEggEffect]);
+
+  useEffect(() => {
+    return () => {
+      if (askewAppliedRef.current && onEasterEggEffect) {
+        askewAppliedRef.current = false;
+        onEasterEggEffect('clear_askew');
+      }
+    };
+  }, [onEasterEggEffect]);
   const [systems, setSystems] = useState<string[]>(() => memoryCatalogViewPrefs.systems);
   const [statuses, setStatuses] = useState<string[]>(() => memoryCatalogViewPrefs.statuses);
   const [downloadedFilter, setDownloadedFilter] = useState<CatalogDownloadedFilter>(
@@ -1861,6 +1909,16 @@ export function CatalogPanel({
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && onEasterEggEffect) {
+                      const submittedEffect = matchSecretSearch(search, { submitted: true });
+                      if (submittedEffect && submittedEffect !== 'askew') {
+                        e.preventDefault();
+                        lastSecretQueryRef.current = normalizeSecretQuery(search);
+                        onEasterEggEffect(submittedEffect);
+                      }
+                    }
+                  }}
                   placeholder="Search title, publisher, file..."
                   className={`pl-8 ${search ? 'pr-7' : 'pr-3'} py-1.5 text-xs bg-crt-bg border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-56 ${
                     search.trim() ? 'border-crt-phosphor/60' : 'border-crt-border'
