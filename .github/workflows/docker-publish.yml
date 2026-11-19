@@ -173,10 +173,139 @@ jobs:
             echo "minted=true" >> "$GITHUB_OUTPUT"
           fi
 
-  build-and-push:
-    name: Build & Publish Multi-Arch Container + OCI Helm Chart
+  build:
+    name: Build Native (${{ matrix.platform }})
     needs: [validate, release]
     if: always() && needs.validate.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped')
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve build provenance & registry image
+        id: version
+        env:
+          MINTED_TAG: ${{ needs.release.outputs.release_tag }}
+          MINTED_RELEASE_DATE: ${{ needs.release.outputs.release_date }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            GIT_TAG="${{ github.ref_name }}"
+          elif [ -n "$MINTED_TAG" ]; then
+            GIT_TAG="$MINTED_TAG"
+          else
+            GIT_TAG="$(git tag --points-at HEAD | head -n 1 || true)"
+          fi
+
+          if [ -n "$GIT_TAG" ]; then
+            APP_VERSION="$GIT_TAG"
+            GIT_REF="refs/tags/${GIT_TAG}"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            APP_VERSION="${{ github.head_ref || github.ref_name }}"
+            GIT_REF="${{ github.ref }}"
+          else
+            APP_VERSION="${{ github.ref_name }}"
+            GIT_REF="${{ github.ref }}"
+          fi
+
+          if [ -n "$MINTED_RELEASE_DATE" ]; then
+            BUILT_AT="$MINTED_RELEASE_DATE"
+          else
+            BUILT_AT="$(git show -s --format=%cI HEAD 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          fi
+
+          GHCR_IMAGE="$(printf '%s/%s' "${{ env.REGISTRY }}" "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')"
+          BUILD_OUTPUTS=""
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            BUILD_OUTPUTS="type=image,name=${GHCR_IMAGE},push-by-digest=true,name-canonical=true,push=true"
+          fi
+
+          echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "git_ref=${GIT_REF}" >> "$GITHUB_OUTPUT"
+          echo "built_at=${BUILT_AT}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=${GHCR_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "build_outputs=${BUILD_OUTPUTS}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.version.outputs.ghcr_image }}
+
+      - name: Build native image (push by digest on non-PR)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          outputs: ${{ steps.version.outputs.build_outputs }}
+          provenance: ${{ github.event_name != 'pull_request' && 'mode=max' || 'false' }}
+          sbom: ${{ github.event_name != 'pull_request' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            APP_VERSION=${{ steps.version.outputs.app_version }}
+            GIT_URL=${{ github.server_url }}/${{ github.repository }}
+            GIT_REF=${{ steps.version.outputs.git_ref }}
+            BUILT_AT=${{ steps.version.outputs.built_at }}
+          cache-from: type=gha,scope=build-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}
+
+      - name: Export platform digest
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          if [ -z "$digest" ]; then
+            echo "::error::Build did not emit an image digest for ${{ matrix.platform }}."
+            exit 1
+          fi
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge Multi-Arch Manifests & Publish OCI Helm Chart
+    needs: [release, build]
+    if: github.event_name != 'pull_request' && needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -189,13 +318,19 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Resolve version, git tag & Docker Hub gate
+      - name: Download platform digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Resolve tags & Docker Hub gate
         id: version
         env:
           MINTED_TAG: ${{ needs.release.outputs.release_tag }}
           MINTED_SEMVER_FULL: ${{ needs.release.outputs.semver_full }}
           MINTED_SEMVER_MINOR: ${{ needs.release.outputs.semver_minor }}
-          MINTED_RELEASE_DATE: ${{ needs.release.outputs.release_date }}
           DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
           DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           DH_REPO_VAR: ${{ vars.DOCKERHUB_REPOSITORY }}
@@ -217,52 +352,25 @@ jobs:
             SEMVER_MINOR="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
           fi
 
-          if [ -n "$GIT_TAG" ]; then
-            APP_VERSION="$GIT_TAG"
-            GIT_REF="refs/tags/${GIT_TAG}"
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            APP_VERSION="${{ github.head_ref || github.ref_name }}"
-            GIT_REF="${{ github.ref }}"
-          else
-            APP_VERSION="${{ github.ref_name }}"
-            GIT_REF="${{ github.ref }}"
-          fi
-
-          if [ -n "$MINTED_RELEASE_DATE" ]; then
-            BUILT_AT="$MINTED_RELEASE_DATE"
-          else
-            BUILT_AT="$(git show -s --format=%cI HEAD 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          fi
-
+          GHCR_IMAGE="$(printf '%s/%s' "${{ env.REGISTRY }}" "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')"
           DOCKERHUB_ENABLED="false"
-          IMAGES_LIST="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          if [ "${{ github.event_name }}" != "pull_request" ] && [ -n "$SEMVER_FULL" ] && [ -n "$DH_USER" ] && [ -n "$DH_TOKEN" ]; then
+          DOCKERHUB_IMAGE=""
+          if [ -n "$SEMVER_FULL" ] && [ -n "$DH_USER" ] && [ -n "$DH_TOKEN" ]; then
             DOCKERHUB_ENABLED="true"
             DH_REPO="${DH_REPO_VAR:-${DH_USER}/retrogametalk-sync}"
-            IMAGES_LIST="$(printf '%s\ndocker.io/%s' "${IMAGES_LIST}" "${DH_REPO}")"
+            DOCKERHUB_IMAGE="$(printf 'docker.io/%s' "${DH_REPO}" | tr '[:upper:]' '[:lower:]')"
           fi
 
-          echo "git_tag=${GIT_TAG}" >> "$GITHUB_OUTPUT"
           echo "semver_full=${SEMVER_FULL}" >> "$GITHUB_OUTPUT"
           echo "semver_minor=${SEMVER_MINOR}" >> "$GITHUB_OUTPUT"
-          echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "git_ref=${GIT_REF}" >> "$GITHUB_OUTPUT"
-          echo "built_at=${BUILT_AT}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=${GHCR_IMAGE}" >> "$GITHUB_OUTPUT"
           echo "dockerhub_enabled=${DOCKERHUB_ENABLED}" >> "$GITHUB_OUTPUT"
-          {
-            echo "images<<EOF"
-            echo "$IMAGES_LIST"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+          echo "dockerhub_image=${DOCKERHUB_IMAGE}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -277,11 +385,11 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        id: meta
+      - name: Compute GHCR tags
+        id: meta_ghcr
         uses: docker/metadata-action@v6
         with:
-          images: ${{ steps.version.outputs.images }}
+          images: ${{ steps.version.outputs.ghcr_image }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -290,28 +398,62 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build and push multi-arch Docker image
-        uses: docker/build-push-action@v7
+      - name: Compute Docker Hub tags (Release Tags Only)
+        if: steps.version.outputs.dockerhub_enabled == 'true'
+        id: meta_dockerhub
+        uses: docker/metadata-action@v6
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          provenance: ${{ github.event_name != 'pull_request' && 'mode=max' || 'false' }}
-          sbom: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
-          build-args: |
-            GIT_SHA=${{ github.sha }}
-            APP_VERSION=${{ steps.version.outputs.app_version }}
-            GIT_URL=${{ github.server_url }}/${{ github.repository }}
-            GIT_REF=${{ steps.version.outputs.git_ref }}
-            BUILT_AT=${{ steps.version.outputs.built_at }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          images: ${{ steps.version.outputs.dockerhub_image }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.semver_full }}
+            type=raw,value=${{ steps.version.outputs.semver_minor }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Create multi-arch manifest list on GHCR
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          GHCR_IMAGE: ${{ steps.version.outputs.ghcr_image }}
+          GHCR_TAGS: ${{ steps.meta_ghcr.outputs.tags }}
+        run: |
+          set -euo pipefail
+          mapfile -t TAG_LIST < <(printf '%s\n' "$GHCR_TAGS" | sed '/^$/d')
+          TAG_ARGS=()
+          for t in "${TAG_LIST[@]}"; do
+            TAG_ARGS+=(-t "$t")
+          done
+
+          DIGEST_REFS=()
+          for f in *; do
+            DIGEST_REFS+=("${GHCR_IMAGE}@sha256:${f}")
+          done
+
+          docker buildx imagetools create "${TAG_ARGS[@]}" "${DIGEST_REFS[@]}"
+          docker buildx imagetools inspect "${TAG_LIST[0]}"
+
+      - name: Mirror multi-arch manifest list to Docker Hub (When Configured)
+        if: steps.version.outputs.dockerhub_enabled == 'true'
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          GHCR_IMAGE: ${{ steps.version.outputs.ghcr_image }}
+          DH_TAGS: ${{ steps.meta_dockerhub.outputs.tags }}
+        run: |
+          set -euo pipefail
+          mapfile -t TAG_LIST < <(printf '%s\n' "$DH_TAGS" | sed '/^$/d')
+          TAG_ARGS=()
+          for t in "${TAG_LIST[@]}"; do
+            TAG_ARGS+=(-t "$t")
+          done
+
+          DIGEST_REFS=()
+          for f in *; do
+            DIGEST_REFS+=("${GHCR_IMAGE}@sha256:${f}")
+          done
+
+          docker buildx imagetools create "${TAG_ARGS[@]}" "${DIGEST_REFS[@]}"
+          docker buildx imagetools inspect "${TAG_LIST[0]}"
 
       - name: Publish Helm Chart to GHCR OCI Registry
-        if: github.event_name != 'pull_request' && steps.version.outputs.semver_full != ''
+        if: steps.version.outputs.semver_full != ''
         env:
           HELM_EXPERIMENTAL_OCI: "1"
         run: |
