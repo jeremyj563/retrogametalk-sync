@@ -64,6 +64,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ALLOW_MAJOR_INPUT: ${{ inputs.allow_major_bump }}
           ALLOW_MAJOR_VAR: ${{ vars.ALLOW_MAJOR_VERSION_BUMP }}
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DH_REPO_VAR: ${{ vars.DOCKERHUB_REPOSITORY }}
         run: |
           set -euo pipefail
 
@@ -117,13 +120,30 @@ jobs:
               echo "GitHub Release ${TAG} already exists; skipping creation."
             else
               NOTES_FILE="$(mktemp)"
-              TAG="$TAG" PREV_TAG="$PREV_TAG" REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" IMAGE_REF="ghcr.io/${GITHUB_REPOSITORY}:${TAG}" node -e '
+              REPO_LOWER="$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+              OWNER_LOWER="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+              DH_IMAGE_REF=""
+              if [ -n "${DH_USER:-}" ] && [ -n "${DH_TOKEN:-}" ]; then
+                DH_REPO="${DH_REPO_VAR:-${DH_USER}/retrogametalk-sync}"
+                DH_IMAGE_REF="$(printf 'docker.io/%s:%s' "${DH_REPO}" "${TAG}" | tr '[:upper:]' '[:lower:]')"
+              fi
+              TAG="$TAG" \
+                PREV_TAG="$PREV_TAG" \
+                REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+                IMAGE_REF="ghcr.io/${REPO_LOWER}:${TAG}" \
+                DOCKERHUB_IMAGE_REF="${DH_IMAGE_REF}" \
+                HELM_OCI_REF="oci://ghcr.io/${OWNER_LOWER}/charts/retrogametalk-sync" \
+                HELM_ARCHIVE="retrogametalk-sync-${TAG}.tgz" \
+                node -e '
                 const fs = require("node:fs");
                 const { execFileSync } = require("node:child_process");
                 const tag = process.env.TAG;
                 const prevTag = (process.env.PREV_TAG || "").trim();
                 const repoUrl = process.env.REPO_URL;
                 const imageRef = process.env.IMAGE_REF;
+                const dockerHubImageRef = (process.env.DOCKERHUB_IMAGE_REF || "").trim();
+                const helmOciRef = process.env.HELM_OCI_REF;
+                const helmArchive = process.env.HELM_ARCHIVE;
 
                 let section = "";
                 if (fs.existsSync("CHANGELOG.md")) {
@@ -150,10 +170,30 @@ jobs:
                   }
                 }
 
-                const parts = ["## Summary of Changes", "", section || `- Release ${tag}`];
-                parts.push("", "---", `**Container Image:** \`${imageRef}\``);
+                const artifacts = [
+                  `- **Container Image (GHCR):** \`${imageRef}\` (\`linux/amd64\`, \`linux/arm64\`)`,
+                ];
+                if (dockerHubImageRef) {
+                  artifacts.push(`- **Container Image (Docker Hub):** \`${dockerHubImageRef}\` (\`linux/amd64\`, \`linux/arm64\`)`);
+                }
+                artifacts.push(
+                  `- **Helm Chart (OCI):** \`${helmOciRef}\` (version \`${tag}\`)`,
+                  `- **Helm Chart Archive:** \`${helmArchive}\` *(attached below as a release asset)*`,
+                );
+
+                const parts = [
+                  "## Summary of Changes",
+                  "",
+                  section || `- Release ${tag}`,
+                  "",
+                  "---",
+                  "",
+                  "## Published Artifacts",
+                  "",
+                  ...artifacts,
+                ];
                 if (prevTag && prevTag !== tag) {
-                  parts.push(`**Full Changelog:** ${repoUrl}/compare/${prevTag}...${tag}`);
+                  parts.push("", `**Full Changelog:** ${repoUrl}/compare/${prevTag}...${tag}`);
                 }
                 process.stdout.write(parts.join("\n") + "\n");
               ' > "$NOTES_FILE"
@@ -308,7 +348,7 @@ jobs:
     if: github.event_name != 'pull_request' && needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped')
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
@@ -452,14 +492,22 @@ jobs:
           docker buildx imagetools create "${TAG_ARGS[@]}" "${DIGEST_REFS[@]}"
           docker buildx imagetools inspect "${TAG_LIST[0]}"
 
-      - name: Publish Helm Chart to GHCR OCI Registry
+      - name: Publish Helm Chart (GHCR OCI & GitHub Release Asset)
         if: steps.version.outputs.semver_full != ''
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HELM_EXPERIMENTAL_OCI: "1"
+          CHART_SEMVER: ${{ steps.version.outputs.semver_full }}
         run: |
           set -euo pipefail
           REPO_OWNER="$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          CHART_TGZ="/tmp/helm-dist/retrogametalk-sync-${CHART_SEMVER}.tgz"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           mkdir -p /tmp/helm-dist
           helm package k8s/charts/retrogametalk-sync -d /tmp/helm-dist
-          helm push "/tmp/helm-dist/retrogametalk-sync-${{ steps.version.outputs.semver_full }}.tgz" "oci://ghcr.io/${REPO_OWNER}/charts"
+          helm push "${CHART_TGZ}" "oci://ghcr.io/${REPO_OWNER}/charts"
+          if gh release view "${CHART_SEMVER}" >/dev/null 2>&1; then
+            gh release upload "${CHART_SEMVER}" "${CHART_TGZ}" --clobber
+          else
+            echo "GitHub Release ${CHART_SEMVER} not found; skipping release asset upload."
+          fi
