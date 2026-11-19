@@ -1181,7 +1181,12 @@ export default function App() {
   const handleQueueDownload = async (payload: {
     ids?: number[];
     filters?: Record<string, unknown>;
-  }): Promise<{ queuedCount?: number; skippedCount?: number } | void> => {
+  }): Promise<{
+    queuedCount?: number;
+    skippedCount?: number;
+    alreadyQueuedCount?: number;
+    alreadyDownloadedCount?: number;
+  } | void> => {
     setErrorBanner(null);
     const res = await fetch('/api/items/download', {
       method: 'POST',
@@ -1192,6 +1197,8 @@ export default function App() {
       run?: SyncRunRecord;
       queuedCount?: number;
       skippedCount?: number;
+      alreadyQueuedCount?: number;
+      alreadyDownloadedCount?: number;
       error?: string;
     }>(res);
     if (!parsed.ok) {
@@ -1203,6 +1210,8 @@ export default function App() {
     return {
       queuedCount: parsed.data?.queuedCount,
       skippedCount: parsed.data?.skippedCount,
+      alreadyQueuedCount: parsed.data?.alreadyQueuedCount,
+      alreadyDownloadedCount: parsed.data?.alreadyDownloadedCount,
     };
   };
 

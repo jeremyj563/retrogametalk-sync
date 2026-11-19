@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.11.1] - 2026-11-18
+
+- Hardened on-demand Catalog download queueing against duplicate and overlapping submissions by tracking `inFlightDownloadIds` alongside `pendingDownloadQueueSet`, eliminating the race window while a release is fetching HTML/metadata before its status flips to `downloading`, and avoiding empty `sync_runs` rows when all selected items are already downloaded.
+- Updated `/api/items/download`, `/api/items/ids`, activity logs, and Catalog confirmation/notice banners to distinguish **already queued/downloading** releases from **already downloaded** releases, reporting exact newly-queued counts (`0` when an identical batch is re-submitted) without inflating logs or achievement counters.
+
 ## [1.11.0] - 2026-11-18
 
 - Added the **Retro Visionary** Gold trophy (`90 pts`, bringing the Trophy Case to **65 trophies** and **2,235** total points), awarded after spending a cumulative **30 minutes** in the foreground with CRT Display Studio set to **Ultra** motion or **maxed (`100%`) scanlines**, with live minute-by-minute progress persisted in SQLite across sessions.

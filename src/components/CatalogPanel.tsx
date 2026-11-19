@@ -75,7 +75,12 @@ interface CatalogPanelProps {
   onQueueDownload?: (payload: {
     ids?: number[];
     filters?: Record<string, unknown>;
-  }) => Promise<{ queuedCount?: number; skippedCount?: number } | void>;
+  }) => Promise<{
+    queuedCount?: number;
+    skippedCount?: number;
+    alreadyQueuedCount?: number;
+    alreadyDownloadedCount?: number;
+  } | void>;
   onStartCatalogIndex?: (scope: 'filtered' | 'full') => Promise<void>;
   onStopCatalogIndex?: () => Promise<void>;
   onRefreshStatus: () => Promise<void>;
@@ -564,6 +569,7 @@ export function CatalogPanel({
     loading: boolean;
     queueableIds: number[];
     alreadyDownloadedCount: number;
+    alreadyQueuedCount: number;
     estimatedQueueBytes: number;
     error: string | null;
   }>({
@@ -571,6 +577,7 @@ export function CatalogPanel({
     loading: false,
     queueableIds: [],
     alreadyDownloadedCount: 0,
+    alreadyQueuedCount: 0,
     estimatedQueueBytes: 0,
     error: null,
   });
@@ -1254,6 +1261,27 @@ export function CatalogPanel({
     sourcesMode,
   ]);
 
+  const formatQueueSkipBreakdown = (
+    alreadyQueuedCount: number,
+    alreadyDownloadedCount: number,
+    fallbackSkippedCount: number,
+  ): string | null => {
+    const parts: string[] = [];
+    if (alreadyQueuedCount > 0) {
+      parts.push(`${alreadyQueuedCount.toLocaleString()} already queued`);
+    }
+    if (alreadyDownloadedCount > 0) {
+      parts.push(`${alreadyDownloadedCount.toLocaleString()} already downloaded`);
+    }
+    if (parts.length > 0) {
+      return `${parts.join(', ')} skipped`;
+    }
+    if (fallbackSkippedCount > 0) {
+      return `${fallbackSkippedCount.toLocaleString()} already queued/downloaded skipped`;
+    }
+    return null;
+  };
+
   const handleQueueIds = async (ids: number[], clearSelection = false) => {
     if (!onQueueDownload || ids.length === 0) return;
     if (ids.length === 1) {
@@ -1265,12 +1293,34 @@ export function CatalogPanel({
     try {
       const outcome = await onQueueDownload({ ids });
       const queuedCount = outcome?.queuedCount ?? ids.length;
-      const skippedCount = outcome?.skippedCount ?? 0;
-      setQueueNotice(
-        skippedCount > 0
-          ? `Queued ${queuedCount} release${queuedCount === 1 ? '' : 's'} for download (${skippedCount} already downloaded skipped).`
-          : `Queued ${queuedCount} release${queuedCount === 1 ? '' : 's'} for download.`,
-      );
+      const alreadyQueuedCount = outcome?.alreadyQueuedCount ?? 0;
+      const alreadyDownloadedCount = outcome?.alreadyDownloadedCount ?? 0;
+      const skippedCount = outcome?.skippedCount ?? alreadyQueuedCount + alreadyDownloadedCount;
+
+      if (queuedCount === 0) {
+        if (alreadyQueuedCount > 0 && alreadyDownloadedCount > 0) {
+          setQueueNotice(
+            `No new downloads queued — ${alreadyQueuedCount.toLocaleString()} already queued/downloading and ${alreadyDownloadedCount.toLocaleString()} already downloaded.`,
+          );
+        } else if (alreadyQueuedCount > 0) {
+          setQueueNotice(
+            `Already queued — ${alreadyQueuedCount.toLocaleString()} selected release${alreadyQueuedCount === 1 ? ' is' : 's are'} already queued or downloading.`,
+          );
+        } else {
+          setQueueNotice('All selected releases are already downloaded.');
+        }
+      } else {
+        const skipDetail = formatQueueSkipBreakdown(
+          alreadyQueuedCount,
+          alreadyDownloadedCount,
+          skippedCount,
+        );
+        setQueueNotice(
+          skipDetail
+            ? `Queued ${queuedCount.toLocaleString()} release${queuedCount === 1 ? '' : 's'} for download (${skipDetail}).`
+            : `Queued ${queuedCount.toLocaleString()} release${queuedCount === 1 ? '' : 's'} for download.`,
+        );
+      }
       if (clearSelection) {
         setSelectedCatalogIds(new Set());
       }
@@ -1300,6 +1350,7 @@ export function CatalogPanel({
       loading: true,
       queueableIds: [],
       alreadyDownloadedCount: 0,
+      alreadyQueuedCount: 0,
       estimatedQueueBytes: 0,
       error: null,
     });
@@ -1309,6 +1360,7 @@ export function CatalogPanel({
       const parsed = await readJsonSafely<{
         queueableIds?: number[];
         alreadyDownloadedCount?: number;
+        alreadyQueuedCount?: number;
         estimatedQueueBytes?: number;
         error?: string;
       }>(res);
@@ -1320,6 +1372,7 @@ export function CatalogPanel({
         loading: false,
         queueableIds: parsed.data.queueableIds || [],
         alreadyDownloadedCount: parsed.data.alreadyDownloadedCount || 0,
+        alreadyQueuedCount: parsed.data.alreadyQueuedCount || 0,
         estimatedQueueBytes: parsed.data.estimatedQueueBytes || 0,
         error: null,
       });
@@ -1339,13 +1392,41 @@ export function CatalogPanel({
     try {
       const outcome = await onQueueDownload({ filters: buildFilterPayload() });
       const queuedCount = outcome?.queuedCount ?? filteredDownloadConfirm.queueableIds.length;
-      const skippedCount = outcome?.skippedCount ?? filteredDownloadConfirm.alreadyDownloadedCount;
+      const alreadyQueuedCount =
+        outcome?.alreadyQueuedCount ?? filteredDownloadConfirm.alreadyQueuedCount;
+      const alreadyDownloadedCount =
+        outcome?.alreadyDownloadedCount ?? filteredDownloadConfirm.alreadyDownloadedCount;
+      const skippedCount =
+        outcome?.skippedCount ?? alreadyQueuedCount + alreadyDownloadedCount;
       setFilteredDownloadConfirm((prev) => ({ ...prev, open: false }));
-      setQueueNotice(
-        skippedCount > 0
-          ? `Queued ${queuedCount} filtered release${queuedCount === 1 ? '' : 's'} (~${formatBytes(filteredDownloadConfirm.estimatedQueueBytes)}), ${skippedCount} already downloaded skipped.`
-          : `Queued ${queuedCount} filtered release${queuedCount === 1 ? '' : 's'} for download.`,
-      );
+      if (queuedCount === 0) {
+        if (alreadyQueuedCount > 0 && alreadyDownloadedCount > 0) {
+          setQueueNotice(
+            `No new downloads queued — ${alreadyQueuedCount.toLocaleString()} already queued/downloading and ${alreadyDownloadedCount.toLocaleString()} already downloaded.`,
+          );
+        } else if (alreadyQueuedCount > 0) {
+          setQueueNotice(
+            `All ${alreadyQueuedCount.toLocaleString()} matching release${alreadyQueuedCount === 1 ? ' is' : 's are'} already queued or downloading.`,
+          );
+        } else {
+          setQueueNotice('All matching releases are already downloaded.');
+        }
+      } else {
+        const skipDetail = formatQueueSkipBreakdown(
+          alreadyQueuedCount,
+          alreadyDownloadedCount,
+          skippedCount,
+        );
+        const estLabel =
+          filteredDownloadConfirm.estimatedQueueBytes > 0
+            ? ` (~${formatBytes(filteredDownloadConfirm.estimatedQueueBytes)})`
+            : '';
+        setQueueNotice(
+          skipDetail
+            ? `Queued ${queuedCount.toLocaleString()} filtered release${queuedCount === 1 ? '' : 's'}${estLabel} (${skipDetail}).`
+            : `Queued ${queuedCount.toLocaleString()} filtered release${queuedCount === 1 ? '' : 's'}${estLabel} for download.`,
+        );
+      }
       await loadCatalog(true);
     } catch (err) {
       setFilteredDownloadConfirm((prev) => ({
@@ -2281,8 +2362,12 @@ export function CatalogPanel({
                     <span className="font-mono text-crt-crimson">{filteredDownloadConfirm.error}</span>
                   ) : filteredDownloadConfirm.queueableIds.length === 0 ? (
                     <span className="font-mono text-crt-muted">
-                      All {filteredDownloadConfirm.alreadyDownloadedCount.toLocaleString()} matching release
-                      {filteredDownloadConfirm.alreadyDownloadedCount === 1 ? ' is' : 's are'} already downloaded on disk.
+                      {filteredDownloadConfirm.alreadyQueuedCount > 0 &&
+                      filteredDownloadConfirm.alreadyDownloadedCount > 0
+                        ? `All matching releases are already handled (${filteredDownloadConfirm.alreadyQueuedCount.toLocaleString()} queued/downloading, ${filteredDownloadConfirm.alreadyDownloadedCount.toLocaleString()} downloaded).`
+                        : filteredDownloadConfirm.alreadyQueuedCount > 0
+                          ? `All ${filteredDownloadConfirm.alreadyQueuedCount.toLocaleString()} matching release${filteredDownloadConfirm.alreadyQueuedCount === 1 ? ' is' : 's are'} already queued or downloading.`
+                          : `All ${filteredDownloadConfirm.alreadyDownloadedCount.toLocaleString()} matching release${filteredDownloadConfirm.alreadyDownloadedCount === 1 ? ' is' : 's are'} already downloaded on disk.`}
                     </span>
                   ) : (
                     <div className="font-mono text-crt-text tabular-nums flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -2294,6 +2379,14 @@ export function CatalogPanel({
                         <>
                           <span aria-hidden="true" className="text-crt-muted">·</span>
                           <span>~{formatBytes(filteredDownloadConfirm.estimatedQueueBytes)} est.</span>
+                        </>
+                      )}
+                      {filteredDownloadConfirm.alreadyQueuedCount > 0 && (
+                        <>
+                          <span aria-hidden="true" className="text-crt-muted">·</span>
+                          <span className="text-crt-muted">
+                            {filteredDownloadConfirm.alreadyQueuedCount.toLocaleString()} already queued skipped
+                          </span>
                         </>
                       )}
                       {filteredDownloadConfirm.alreadyDownloadedCount > 0 && (

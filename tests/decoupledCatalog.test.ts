@@ -275,3 +275,38 @@ test('queryRepositoryItemIds and getCatalogTotalsAndSystems separate available, 
   assert.equal(gbaSystem.failedItems, 0);
   assert.equal(gbaSystem.totalBytes, 0);
 });
+
+test('markCatalogItemsQueuedDetailed deduplicates pending/in-flight & downloaded releases and queryRepositoryItemIds counts alreadyQueuedCount', () => {
+  const freshN64 = dbMod.upsertIndexedWpRelease({
+    remoteUrl: 'https://retrogametalk.com/repository/n64/f-zero-x/',
+    remotePath: '/repository/n64/f-zero-x/',
+    localPath: path.join(tempDownloadDir, 'n64', 'f-zero-x'),
+    systemName: 'n64',
+    title: 'F-Zero X',
+    estimatedBytes: 16 * 1024 * 1024,
+    metadata: makeMetadata('F-Zero X', { wpPostId: 2005 }),
+  });
+
+  const before = dbMod.queryRepositoryItemIds({});
+  assert.equal(before.alreadyQueuedCount, 0);
+
+  // First queue pass: mix of fresh available + already-downloaded items
+  const allIds = before.ids;
+  const firstPass = dbMod.markCatalogItemsQueuedDetailed(allIds, null);
+  assert.ok(firstPass.queuedIds.includes(freshN64.id));
+  assert.equal(firstPass.alreadyQueuedIds.length, 0);
+  assert.equal(firstPass.alreadyDownloadedIds.length, 2);
+
+  // Filtered preview now reports queued items separately from downloaded items
+  const whileQueued = dbMod.queryRepositoryItemIds({});
+  assert.equal(whileQueued.queueableIds.length, 0);
+  assert.equal(whileQueued.alreadyQueuedCount, firstPass.queuedIds.length);
+  assert.equal(whileQueued.alreadyDownloadedCount, 2);
+
+  // Re-queueing the same selection while items are pending/in-flight skips all active IDs cleanly
+  const activeOrPendingIds = new Set<number>(firstPass.queuedIds);
+  const secondPass = dbMod.markCatalogItemsQueuedDetailed(allIds, null, { activeOrPendingIds });
+  assert.equal(secondPass.queuedIds.length, 0);
+  assert.equal(secondPass.alreadyQueuedIds.length, firstPass.queuedIds.length);
+  assert.equal(secondPass.alreadyDownloadedIds.length, 2);
+});

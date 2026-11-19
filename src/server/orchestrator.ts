@@ -25,7 +25,7 @@ import {
   getSystemIndexState,
   listReleasesNeedingRetry,
   listSyncRuns,
-  markCatalogItemsQueued,
+  markCatalogItemsQueuedDetailed,
   markCatalogReleaseFailed,
   mergeCatalogReleaseDetailMetadata,
   queryRepositoryItemIds,
@@ -375,6 +375,7 @@ export class ScraperOrchestrator extends EventEmitter {
   private runFinishedWaiters: (() => void)[] = [];
   private pendingDownloadQueueIds: number[] = [];
   private pendingDownloadQueueSet = new Set<number>();
+  private inFlightDownloadIds = new Set<number>();
 
   constructor() {
     super();
@@ -2234,9 +2235,15 @@ export class ScraperOrchestrator extends EventEmitter {
   async queueCatalogDownloads(options: {
     ids?: number[];
     filters?: CatalogQueryFilterParams;
-  }): Promise<{ run: SyncRunRecord; queuedCount: number }> {
-    const resolvedIds = options.filters
-      ? queryRepositoryItemIds(options.filters).queueableIds
+  }): Promise<{
+    run: SyncRunRecord;
+    queuedCount: number;
+    alreadyQueuedCount: number;
+    alreadyDownloadedCount: number;
+  }> {
+    const filterPreview = options.filters ? queryRepositoryItemIds(options.filters) : null;
+    const resolvedIds = filterPreview
+      ? filterPreview.queueableIds
       : Array.from(
           new Set(
             (options.ids || [])
@@ -2245,10 +2252,6 @@ export class ScraperOrchestrator extends EventEmitter {
           ),
         );
 
-    if (resolvedIds.length === 0) {
-      throw new Error('No downloadable or pending catalog releases matched your selection.');
-    }
-
     if (this.activeRun && this.activeRun.triggerType !== 'download') {
       throw new Error(`Sync run #${this.activeRun.id} is already in progress`);
     }
@@ -2256,24 +2259,80 @@ export class ScraperOrchestrator extends EventEmitter {
     const cfg = getInternalConfig();
     this.assertCanRunSync(cfg);
 
-    // Append cleanly to an already-active download queue run
+    // Handle filtered queue request where all matches are already queued/downloaded
+    if (filterPreview && resolvedIds.length === 0) {
+      if (
+        this.activeRun &&
+        this.activeRun.triggerType === 'download' &&
+        filterPreview.alreadyQueuedCount > 0
+      ) {
+        return {
+          run: this.activeRun,
+          queuedCount: 0,
+          alreadyQueuedCount: filterPreview.alreadyQueuedCount,
+          alreadyDownloadedCount: filterPreview.alreadyDownloadedCount,
+        };
+      }
+      if (filterPreview.alreadyQueuedCount > 0) {
+        throw new Error(
+          `All ${filterPreview.alreadyQueuedCount} matching release${filterPreview.alreadyQueuedCount === 1 ? ' is' : 's are'} already queued or downloading.`,
+        );
+      }
+      if (filterPreview.alreadyDownloadedCount > 0) {
+        throw new Error('All matching releases are already downloaded.');
+      }
+      throw new Error('No downloadable or pending catalog releases matched your selection.');
+    }
+
+    if (resolvedIds.length === 0) {
+      throw new Error('No downloadable or pending catalog releases matched your selection.');
+    }
+
+    // Append cleanly to an already-active download queue run without duplicating pending or in-flight releases
     if (this.activeRun && this.activeRun.triggerType === 'download') {
-      const queuedIds = markCatalogItemsQueued(resolvedIds, this.activeRun.id);
-      for (const id of queuedIds) {
-        if (!this.pendingDownloadQueueSet.has(id)) {
+      const activeOrPendingIds = new Set<number>([
+        ...this.pendingDownloadQueueSet,
+        ...this.inFlightDownloadIds,
+      ]);
+      const marked = markCatalogItemsQueuedDetailed(resolvedIds, this.activeRun.id, {
+        activeOrPendingIds,
+      });
+
+      const newlyAddedIds: number[] = [];
+      for (const id of marked.queuedIds) {
+        if (!this.pendingDownloadQueueSet.has(id) && !this.inFlightDownloadIds.has(id)) {
           this.pendingDownloadQueueSet.add(id);
           this.pendingDownloadQueueIds.push(id);
+          newlyAddedIds.push(id);
         }
       }
-      this.log(
-        'info',
-        `Appended ${queuedIds.length} release(s) to active download queue (Run #${this.activeRun.id})`,
-        null,
-        this.activeRun.id,
-      );
-      this.emitCatalogUpdated('items_queued');
-      this.emitStatus();
-      return { run: this.activeRun, queuedCount: queuedIds.length };
+
+      const alreadyQueuedCount =
+        marked.alreadyQueuedIds.length +
+        (marked.queuedIds.length - newlyAddedIds.length) +
+        (filterPreview?.alreadyQueuedCount ?? 0);
+      const alreadyDownloadedCount =
+        marked.alreadyDownloadedIds.length + (filterPreview?.alreadyDownloadedCount ?? 0);
+
+      if (newlyAddedIds.length > 0) {
+        this.log(
+          'info',
+          `Appended ${newlyAddedIds.length} release(s) to active download queue (Run #${this.activeRun.id})${
+            alreadyQueuedCount > 0 ? ` (${alreadyQueuedCount} already queued skipped)` : ''
+          }`,
+          null,
+          this.activeRun.id,
+        );
+        this.emitCatalogUpdated('items_queued');
+        this.emitStatus();
+      }
+
+      return {
+        run: this.activeRun,
+        queuedCount: newlyAddedIds.length,
+        alreadyQueuedCount,
+        alreadyDownloadedCount,
+      };
     }
 
     const lockKey = 'download:queue';
@@ -2281,18 +2340,22 @@ export class ScraperOrchestrator extends EventEmitter {
       throw new Error(`Another pod holds distributed lock "${lockKey}"`);
     }
 
-    const run = createSyncRun('download', 'incremental', false);
-    const queuedIds = markCatalogItemsQueued(resolvedIds, run.id);
-    if (queuedIds.length === 0) {
+    const marked = markCatalogItemsQueuedDetailed(resolvedIds, null);
+    if (marked.queuedIds.length === 0) {
       releaseDistributedLock(lockKey, POD_ID);
+      if (marked.alreadyQueuedIds.length > 0) {
+        throw new Error('All selected releases are already queued or downloading.');
+      }
       throw new Error('All selected releases are already downloaded.');
     }
 
-    this.pendingDownloadQueueIds = [...queuedIds];
-    this.pendingDownloadQueueSet = new Set(queuedIds);
+    const run = createSyncRun('download', 'incremental', false);
+    this.pendingDownloadQueueIds = [...marked.queuedIds];
+    this.pendingDownloadQueueSet = new Set(marked.queuedIds);
+    this.inFlightDownloadIds.clear();
     this.activeRun = run;
     this.abortController = new AbortController();
-    this.currentPhase = `Downloading ${queuedIds.length} queued release${queuedIds.length === 1 ? '' : 's'}`;
+    this.currentPhase = `Downloading ${marked.queuedIds.length} queued release${marked.queuedIds.length === 1 ? '' : 's'}`;
 
     this.lockRenewTimer = setInterval(() => {
       acquireDistributedLock(lockKey, POD_ID, 180);
@@ -2300,7 +2363,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
     this.log(
       'info',
-      `Started on-demand download queue Run #${run.id} for ${queuedIds.length} release(s)`,
+      `Started on-demand download queue Run #${run.id} for ${marked.queuedIds.length} release(s)`,
       null,
       run.id,
     );
@@ -2308,7 +2371,13 @@ export class ScraperOrchestrator extends EventEmitter {
     this.emitStatus();
 
     void this.executeDownloadQueue(run, cfg, lockKey);
-    return { run, queuedCount: queuedIds.length };
+    return {
+      run,
+      queuedCount: marked.queuedIds.length,
+      alreadyQueuedCount: marked.alreadyQueuedIds.length + (filterPreview?.alreadyQueuedCount ?? 0),
+      alreadyDownloadedCount:
+        marked.alreadyDownloadedIds.length + (filterPreview?.alreadyDownloadedCount ?? 0),
+    };
   }
 
   private async executeDownloadQueue(
@@ -2348,86 +2417,91 @@ export class ScraperOrchestrator extends EventEmitter {
 
         await runWithConcurrency(batchIds, cfg.maxConcurrency, signal, async (itemId) => {
           if (signal.aborted) return;
+          this.inFlightDownloadIds.add(itemId);
           this.pendingDownloadQueueSet.delete(itemId);
-          const item = getRepositoryItemById(itemId);
-          if (!item) return;
-
-          const filesToDownload = item.files.filter(
-            (f) =>
-              f.status === 'available' ||
-              f.status === 'queued' ||
-              f.status === 'failed' ||
-              f.status === 'downloading' ||
-              !f.localPath ||
-              !fs.existsSync(f.localPath),
-          );
-
-          processedReleases += 1;
-          this.currentPhase = `Queue (${processedReleases}/${totalInQueue}): ${item.systemName} / ${item.title}`;
-          this.emitStatus();
-
           try {
-            const outcome = await this.retryReleaseEntry(
-              item,
-              filesToDownload,
-              cfg,
-              run.id,
-              root,
-              signal,
-              runLogger,
-              false,
-            );
-            attemptedFiles += Math.max(
-              filesToDownload.length,
-              outcome.downloaded + outcome.skipped + outcome.failed,
-            );
-            downloaded += outcome.downloaded;
-            skipped += outcome.skipped;
-            failed += outcome.failed;
-            bytes += outcome.bytes;
-          } catch (itemErr) {
-            if (signal.aborted) return;
-            const errMsg = itemErr instanceof Error ? itemErr.message : String(itemErr);
-            if (/Cloudflare|Authentication|Re-authentication/i.test(errMsg)) {
-              throw itemErr;
-            }
-            if (filesToDownload.length > 0) {
-              attemptedFiles += filesToDownload.length;
-              for (const f of filesToDownload) {
-                upsertReleaseFile({
-                  releaseId: item.id,
-                  targetFileId: f.id,
-                  remoteUrl: f.remoteUrl,
-                  downloadUrl: f.downloadUrl,
-                  remotePath: f.remotePath,
-                  localPath: f.localPath,
-                  filename: f.filename,
-                  displayLabel: f.displayLabel,
-                  fileRole: f.fileRole,
-                  status: 'failed',
-                  errorMessage: errMsg,
-                  lastRunId: run.id,
-                });
-                failed += 1;
-              }
-            } else {
-              attemptedFiles += 1;
-              failed += 1;
-              markCatalogReleaseFailed(item.id, errMsg, run.id);
-            }
-            runLogger('error', `Download failed for ${item.title}: ${errMsg}`, item.remoteUrl);
-            this.emitCatalogUpdated('file_failed', item.id);
-          }
+            const item = getRepositoryItemById(itemId);
+            if (!item) return;
 
-          this.activeRun = updateSyncRun(run.id, {
-            newFound: attemptedFiles,
-            downloadedCount: downloaded,
-            skippedCount: skipped,
-            failedCount: failed,
-            bytesDownloaded: bytes,
-            avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
-          });
-          this.emitStatus();
+            const filesToDownload = item.files.filter(
+              (f) =>
+                f.status === 'available' ||
+                f.status === 'queued' ||
+                f.status === 'failed' ||
+                f.status === 'downloading' ||
+                !f.localPath ||
+                !fs.existsSync(f.localPath),
+            );
+
+            processedReleases += 1;
+            this.currentPhase = `Queue (${processedReleases}/${totalInQueue}): ${item.systemName} / ${item.title}`;
+            this.emitStatus();
+
+            try {
+              const outcome = await this.retryReleaseEntry(
+                item,
+                filesToDownload,
+                cfg,
+                run.id,
+                root,
+                signal,
+                runLogger,
+                false,
+              );
+              attemptedFiles += Math.max(
+                filesToDownload.length,
+                outcome.downloaded + outcome.skipped + outcome.failed,
+              );
+              downloaded += outcome.downloaded;
+              skipped += outcome.skipped;
+              failed += outcome.failed;
+              bytes += outcome.bytes;
+            } catch (itemErr) {
+              if (signal.aborted) return;
+              const errMsg = itemErr instanceof Error ? itemErr.message : String(itemErr);
+              if (/Cloudflare|Authentication|Re-authentication/i.test(errMsg)) {
+                throw itemErr;
+              }
+              if (filesToDownload.length > 0) {
+                attemptedFiles += filesToDownload.length;
+                for (const f of filesToDownload) {
+                  upsertReleaseFile({
+                    releaseId: item.id,
+                    targetFileId: f.id,
+                    remoteUrl: f.remoteUrl,
+                    downloadUrl: f.downloadUrl,
+                    remotePath: f.remotePath,
+                    localPath: f.localPath,
+                    filename: f.filename,
+                    displayLabel: f.displayLabel,
+                    fileRole: f.fileRole,
+                    status: 'failed',
+                    errorMessage: errMsg,
+                    lastRunId: run.id,
+                  });
+                  failed += 1;
+                }
+              } else {
+                attemptedFiles += 1;
+                failed += 1;
+                markCatalogReleaseFailed(item.id, errMsg, run.id);
+              }
+              runLogger('error', `Download failed for ${item.title}: ${errMsg}`, item.remoteUrl);
+              this.emitCatalogUpdated('file_failed', item.id);
+            }
+
+            this.activeRun = updateSyncRun(run.id, {
+              newFound: attemptedFiles,
+              downloadedCount: downloaded,
+              skippedCount: skipped,
+              failedCount: failed,
+              bytesDownloaded: bytes,
+              avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
+            });
+            this.emitStatus();
+          } finally {
+            this.inFlightDownloadIds.delete(itemId);
+          }
         });
       }
 
@@ -2468,6 +2542,7 @@ export class ScraperOrchestrator extends EventEmitter {
     } finally {
       this.pendingDownloadQueueIds = [];
       this.pendingDownloadQueueSet.clear();
+      this.inFlightDownloadIds.clear();
       if (this.lockRenewTimer) {
         clearInterval(this.lockRenewTimer);
         this.lockRenewTimer = null;
