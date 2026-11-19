@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.7.5] - 2026-11-18
+
+- Added smooth, mellow slide-over open and close transitions to `GameDetailDrawer` (`cubic-bezier(0.22, 1, 0.36, 1)` compositor-only glide from the right paired with a soft backdrop fade), retaining the last rendered item snapshot during close and supporting interruptible mid-close re-opening.
+- Added subtle directional `Prev`/`Next` item crossfades (`±14px` horizontal settle + opacity dissolve) inside the open drawer header and body while keeping outer drawer chrome and navigation controls anchored.
+- Retained a shorter, gentler drawer transition when Living UI Motion is set to `Off`, while honoring OS `prefers-reduced-motion: reduce` with zero spatial slide and a brief `100ms` fade.
+
 ## [1.7.4] - 2026-11-18
 
 - Preserved Worker 0's active initial 206 stream when sibling multi-chunk workers hit a mirror-only `HTTP 503` by isolating sibling connections on a dedicated `AbortController`, capping the host to `1x`, and letting the primary slice finish cleanly before continuing sequentially.
