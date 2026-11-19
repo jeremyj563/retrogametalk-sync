@@ -129,17 +129,25 @@ test('BVM preset, chime packs, crest trims, and secret cabinet trims enforce exa
 });
 
 test('Spoiler protection hides secret cabinet rewards until arcade discovery', () => {
-  assert.equal(ACHIEVEMENT_REWARDS.length, 12);
+  assert.equal(ACHIEVEMENT_REWARDS.length, 18);
+
+  // Verify ascending milestone order
+  for (let i = 1; i < ACHIEVEMENT_REWARDS.length; i += 1) {
+    assert.ok(
+      ACHIEVEMENT_REWARDS[i].requiredPoints >= ACHIEVEMENT_REWARDS[i - 1].requiredPoints,
+      `Reward ${ACHIEVEMENT_REWARDS[i].id} must not have lower requiredPoints than ${ACHIEVEMENT_REWARDS[i - 1].id}`,
+    );
+  }
 
   const hiddenView = getVisibleRewards({ arcadeDiscovered: false });
-  assert.equal(hiddenView.length, 10);
+  assert.equal(hiddenView.length, 16);
   assert.equal(
     hiddenView.some((r) => r.requiresArcadeDiscovery),
     false,
   );
 
   const discoveredView = getVisibleRewards({ arcadeDiscovered: true });
-  assert.equal(discoveredView.length, 12);
+  assert.equal(discoveredView.length, 18);
   assert.equal(
     discoveredView.filter((r) => r.requiresArcadeDiscovery).length,
     2,
@@ -149,6 +157,10 @@ test('Spoiler protection hides secret cabinet rewards until arcade discovery', (
   const nextAtZero = getNextLockedReward(0, { arcadeDiscovered: false });
   assert.equal(nextAtZero?.id, 'palette_gameboy');
   assert.equal(nextAtZero?.requiredPoints, 100);
+
+  const nextAt100 = getNextLockedReward(100, { arcadeDiscovered: false });
+  assert.equal(nextAt100?.id, 'track_bitplane_bounce');
+  assert.equal(nextAt100?.requiredPoints, 150);
 
   const nextAt400Hidden = getNextLockedReward(400, { arcadeDiscovered: false });
   assert.equal(nextAt400Hidden?.id, 'chime_coinop_arcade');

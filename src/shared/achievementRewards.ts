@@ -15,7 +15,8 @@ export type RewardKind =
   | 'crt_preset'
   | 'chime_pack'
   | 'crest_style'
-  | 'arcade_cabinet';
+  | 'arcade_cabinet'
+  | 'music_track';
 
 export interface OperatorRankDefinition {
   level: number;
@@ -157,6 +158,14 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
     swatchHex: '#9bbc0f',
   },
   {
+    id: 'track_bitplane_bounce',
+    title: 'Bitplane Bounce (8-Bit Chiptune)',
+    description: 'Upbeat dual pulse-wave arcade soundtrack loop with triangle bass and crisp 8-bit drums (132 BPM).',
+    kind: 'music_track',
+    requiredPoints: 150,
+    targetKey: 'bitplane_bounce',
+  },
+  {
     id: 'chime_fm_16bit',
     title: '16-Bit FM Synth Chimes',
     description: 'Warm dual-oscillator FM harmonic trophy unlock chimes with octave shimmer.',
@@ -172,6 +181,14 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
     requiredPoints: 350,
     targetKey: 'synthwave',
     swatchHex: '#f45bff',
+  },
+  {
+    id: 'track_outrun_crt',
+    title: 'Outrun CRT (80s Synthwave)',
+    description: 'Driving sawtooth octave bassline, lush detuned retro pads, and gated snare synthwave loop (116 BPM).',
+    kind: 'music_track',
+    requiredPoints: 400,
+    targetKey: 'outrun_crt',
   },
   {
     id: 'arcade_cabinet_gold',
@@ -192,6 +209,14 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
     targetKey: 'coinop_arcade',
   },
   {
+    id: 'track_fm_cartridge_drive',
+    title: 'FM Cartridge Drive (16-Bit FM)',
+    description: 'Metallic 16-bit FM slap bass, crystalline bell chords, and syncopated stage breakbeats (128 BPM).',
+    kind: 'music_track',
+    requiredPoints: 650,
+    targetKey: 'fm_cartridge_drive',
+  },
+  {
     id: 'palette_virtualboy',
     title: 'Crimson Tube Phosphor',
     description: 'Deep 1995 LED crimson-red phosphor palette in CRT Display Studio.',
@@ -208,6 +233,14 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
     requiredPoints: 900,
     targetKey: 'gold_trim',
     swatchHex: '#fbbf24',
+  },
+  {
+    id: 'track_subcarrier_pulse',
+    title: 'Subcarrier Pulse (Acid Techno)',
+    description: 'Four-on-the-floor sub kick, squelchy resonant 303-style acid filter bass, and hypnotic stabs (130 BPM).',
+    kind: 'music_track',
+    requiredPoints: 950,
+    targetKey: 'subcarrier_pulse',
   },
   {
     id: 'chime_symphonic_crt',
@@ -227,6 +260,14 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
     swatchHex: '#e8f4ff',
   },
   {
+    id: 'track_cyberdeck_horizon',
+    title: 'Cyberdeck Horizon (Dark Synth)',
+    description: 'Brooding 16th-note sub-bass arpeggios, chorus pads, and half-time darksynth percussion (108 BPM).',
+    kind: 'music_track',
+    requiredPoints: 1300,
+    targetKey: 'cyberdeck_horizon',
+  },
+  {
     id: 'arcade_cabinet_overdrive',
     title: 'Neon Overdrive Cabinet',
     description: 'High-contrast glowing phosphor cabinet trim & bezel aura in the Multi-Cart Cabinet.',
@@ -243,6 +284,14 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
     kind: 'crt_preset',
     requiredPoints: 1500,
     targetKey: 'bvm',
+  },
+  {
+    id: 'track_broadcast_finale',
+    title: 'Broadcast Finale (Euro-Synth)',
+    description: 'Flagship anthem blending euphoric synth chord stabs, soaring 16-bit arps, and arcade energy (138 BPM).',
+    kind: 'music_track',
+    requiredPoints: 1650,
+    targetKey: 'broadcast_finale',
   },
   {
     id: 'crest_platinum_aura',
