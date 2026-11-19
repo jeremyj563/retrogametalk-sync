@@ -4048,6 +4048,39 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   .crt-arcade-cabinet[data-arcade-state="closing"] {
     transform: none !important;
   }
+
+  .crt-trophy-toast {
+    transition: opacity 100ms ease !important;
+  }
+
+  .crt-trophy-toast[data-trophy-toast-state="entering"],
+  .crt-trophy-toast[data-trophy-toast-state="closing"] {
+    transform: none !important;
+  }
 }
+
+.crt-trophy-toast {
+  will-change: transform, opacity;
+  transition:
+    transform 340ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.crt-trophy-toast[data-trophy-toast-state="entering"] {
+  opacity: 0;
+  transform: translate3d(28px, 0, 0);
+}
+
+.crt-trophy-toast[data-trophy-toast-state="open"] {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+}
+
+.crt-trophy-toast[data-trophy-toast-state="closing"] {
+  opacity: 0;
+  transform: translate3d(20px, 0, 0);
+  transition-duration: 240ms, 200ms;
+}
+
 
 

@@ -281,6 +281,10 @@ function getDb(): Database.Database {
   return db || initDb();
 }
 
+export function getDbInstance(): Database.Database {
+  return getDb();
+}
+
 export function getInternalConfig(): ScraperConfigInternal {
   const row = getDb().prepare('SELECT * FROM scraper_config WHERE id = 1').get() as Record<string, unknown>;
   const envOverrides: string[] = [];

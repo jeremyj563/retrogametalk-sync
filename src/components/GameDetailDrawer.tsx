@@ -30,6 +30,7 @@ import {
   type DrawerPhase,
   type DrawerSwapDirection,
 } from '../utils/drawerMotion';
+import { reportAchievementEvent } from '../utils/achievementsClient';
 import { readJsonSafely } from '../utils/http';
 import { resolveFileTransferProgress, resolveItemTransferProgress } from '../utils/transferProgress';
 
@@ -310,6 +311,11 @@ export function GameDetailDrawer({
     },
     [clearCloseTimer, clearOpenRafs],
   );
+
+  useEffect(() => {
+    if (!activeItem?.id) return;
+    reportAchievementEvent('detail_view');
+  }, [activeItem?.id]);
 
   // Synchronize open/close transition phase, frozen exit snapshot, and directional Prev/Next swaps
   useLayoutEffect(() => {
@@ -862,6 +868,7 @@ export function GameDetailDrawer({
 
   const openCoverLightbox = () => {
     if (!hasCover) return;
+    reportAchievementEvent('lightbox_view');
     setLightbox({
       slides: [
         {
@@ -889,6 +896,7 @@ export function GameDetailDrawer({
       });
     }
     if (slides.length > 0) {
+      reportAchievementEvent('lightbox_view');
       setLightbox({ slides, index: mappedIndex });
     }
   };

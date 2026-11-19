@@ -43,6 +43,15 @@ import {
   type CatalogQueryFilterParams,
 } from './db.ts';
 import { AdaptiveRateLimiter } from './rateLimiter.ts';
+import {
+  evaluateAchievements,
+  getAchievementsSnapshot,
+  recordAchievementCounter,
+  recordClientAchievementEvent,
+  recordNightOwlIfApplicable,
+  runSilentBaselineCatchUp,
+} from './achievements.ts';
+import type { ClientAchievementEventPayload } from '../shared/achievements.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import { estimateDownloadHintsBytes } from '../shared/fileSize.ts';
 import {
@@ -393,8 +402,9 @@ export class ScraperOrchestrator extends EventEmitter {
           : 'Unset';
 
     const schemaReport = getSchemaMigrationReport();
+    const seededBaseline = runSilentBaselineCatchUp();
     console.log(
-      `[${new Date().toISOString()}] [STARTUP] [INFO] Persistence initialized — DATA_DIR="${getDataDir()}", DOWNLOAD_DIR="${refreshedCfg.downloadDir}", schema=v${schemaReport.currentVersion}/v${schemaReport.targetVersion}, auth=${authLabel} (hasCompletedLogin=${authSnap.hasCompletedLogin}, cookies=[${hydrated.cookieNames}]), discoveredSystems=${refreshedCfg.discoveredSystems.length}, catalogReleases=${totals.totalCatalogItems} (reconciledFromDisk=${reconciled.releasesImported}), debugLogging=${isDebugLoggingEnabled() ? 'enabled' : 'disabled'}`,
+      `[${new Date().toISOString()}] [STARTUP] [INFO] Persistence initialized — DATA_DIR="${getDataDir()}", DOWNLOAD_DIR="${refreshedCfg.downloadDir}", schema=v${schemaReport.currentVersion}/v${schemaReport.targetVersion}, auth=${authLabel} (hasCompletedLogin=${authSnap.hasCompletedLogin}, cookies=[${hydrated.cookieNames}]), discoveredSystems=${refreshedCfg.discoveredSystems.length}, catalogReleases=${totals.totalCatalogItems} (reconciledFromDisk=${reconciled.releasesImported}), silentBaselineTrophies=${seededBaseline.length}, debugLogging=${isDebugLoggingEnabled() ? 'enabled' : 'disabled'}`,
     );
 
     this.reconfigureScheduler(refreshedCfg);
@@ -649,9 +659,49 @@ export class ScraperOrchestrator extends EventEmitter {
     });
   }
 
+  evaluateAndEmitAchievements(): void {
+    try {
+      const unlocks = evaluateAchievements({ silent: false });
+      if (unlocks.length > 0) {
+        const snapshot = getAchievementsSnapshot();
+        this.emit('achievement_unlocked', {
+          unlocks,
+          summary: snapshot.summary,
+        });
+      }
+    } catch {
+      // Never allow achievement evaluation errors to interrupt sync operations
+    }
+  }
+
+  recordServerAchievementCounter(
+    key: string,
+    value = 1,
+    mode: 'increment' | 'max' | 'set' = 'increment',
+  ): void {
+    try {
+      recordAchievementCounter(key, value, mode);
+      this.evaluateAndEmitAchievements();
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  handleClientAchievementEvent(payload: ClientAchievementEventPayload) {
+    const result = recordClientAchievementEvent(payload);
+    if (result.newlyUnlocked.length > 0) {
+      this.emit('achievement_unlocked', {
+        unlocks: result.newlyUnlocked,
+        summary: result.snapshot.summary,
+      });
+    }
+    return result;
+  }
+
   notifyInstalledStateChanged(): void {
     this.emitCatalogUpdated('installed_updated');
     this.emitStatus();
+    this.evaluateAndEmitAchievements();
   }
 
   private formatRelativePhasePath(targetUrl: string, baseUrl: string): string {
@@ -767,6 +817,33 @@ export class ScraperOrchestrator extends EventEmitter {
       this.log('info', 'Service configuration saved');
     }
     this.emitStatus();
+    try {
+      if (input.scheduleEnabled && updated.scheduleEnabled) {
+        recordAchievementCounter('autopilot_saved', 1, 'set');
+      }
+      if (
+        (input.systemFilter !== undefined && input.systemFilter.trim().length > 0) ||
+        (Array.isArray(input.allowedReleaseTypes) && input.allowedReleaseTypes.length > 0)
+      ) {
+        recordAchievementCounter('sync_rules_customized', 1, 'set');
+      }
+      if (input.storageFolderConfig !== undefined) {
+        recordAchievementCounter('folder_mappings_customized', 1, 'set');
+      }
+      if (
+        input.baseDelayMs !== undefined ||
+        input.minDelayMs !== undefined ||
+        input.maxDelayMs !== undefined ||
+        input.maxConcurrency !== undefined ||
+        input.downloadChunkConcurrency !== undefined ||
+        input.downloadChunkMinSizeMb !== undefined
+      ) {
+        recordAchievementCounter('pacing_customized', 1, 'set');
+      }
+      this.evaluateAndEmitAchievements();
+    } catch {
+      // Non-fatal
+    }
     return updated;
   }
 
@@ -777,6 +854,7 @@ export class ScraperOrchestrator extends EventEmitter {
     if (result.authenticated) {
       const ts = recordSuccessfulLogin();
       this.client.setPersistedLastAuthenticatedAt(ts);
+      recordAchievementCounter('auth_verified', 1, 'set');
     }
     if (result.discoveredSystems.length > 0) {
       saveDiscoveredSystems(result.discoveredSystems);
@@ -787,6 +865,9 @@ export class ScraperOrchestrator extends EventEmitter {
       `Latency ${result.latencyMs}ms`,
     );
     this.emitStatus();
+    if (result.authenticated) {
+      this.evaluateAndEmitAchievements();
+    }
     if (result.authenticated && !this.shuttingDown) {
       void this.startCatalogIndex('filtered', { auto: true }).catch(() => undefined);
     }
@@ -2125,6 +2206,7 @@ export class ScraperOrchestrator extends EventEmitter {
         this.indexerAbortController = null;
         this.emitCatalogUpdated('indexer_finished');
         this.emitStatus();
+        this.evaluateAndEmitAchievements();
       }
     })();
 
@@ -2359,6 +2441,10 @@ export class ScraperOrchestrator extends EventEmitter {
         'info',
         `Download queue #${run.id} ${finalStatus}: ${downloaded} downloaded, ${skipped} already on disk, ${failed} failed`,
       );
+      if (finalStatus === 'completed') {
+        recordAchievementCounter('runs_completed', 1, 'increment');
+        this.evaluateAndEmitAchievements();
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       updateSyncRun(run.id, {
@@ -3078,6 +3164,10 @@ export class ScraperOrchestrator extends EventEmitter {
             ? `Batch retry dry run #${run.id} ${finalStatus}: ${wouldRecover} fresh link(s) verified, ${skipped} already on disk, ${failed} unresolved`
             : `Batch retry run #${run.id} ${finalStatus}: ${downloaded} recovered, ${skipped} skipped, ${failed} failed`,
         );
+        if (finalStatus === 'completed' && !isDryRun && downloaded > 0) {
+          recordAchievementCounter('retry_recovered', downloaded, 'increment');
+          this.evaluateAndEmitAchievements();
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         updateSyncRun(run.id, {
@@ -4041,6 +4131,18 @@ export class ScraperOrchestrator extends EventEmitter {
           `Run #${run.id} ${finalStatus}: ${downloadedCount} downloaded, ${skippedCount} skipped${typeSkipDetail}, ${failedCount} failed`,
         );
       }
+      if (finalStatus === 'completed') {
+        recordAchievementCounter('runs_completed', 1, 'increment');
+        if (isDryRun) {
+          recordAchievementCounter('dry_runs_completed', 1, 'increment');
+        } else if (run.mode === 'full') {
+          recordAchievementCounter('full_runs_completed', 1, 'increment');
+        }
+        if (run.triggerType === 'scheduled') {
+          recordAchievementCounter('cron_runs_completed', 1, 'increment');
+        }
+        this.evaluateAndEmitAchievements();
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       updateSyncRun(run.id, {
@@ -4174,6 +4276,16 @@ export class ScraperOrchestrator extends EventEmitter {
     this.emitCatalogUpdated('file_downloading', releaseId);
     this.emitStatus();
 
+    const preDownloadRateHits = this.rateLimiter.getTelemetry().rateLimitHits;
+    let sawThrottleLog = false;
+    let sawResume = false;
+    const downloadLogger: LoggerFn = (level, message, detail) => {
+      if (level === 'throttle') {
+        sawThrottleLog = true;
+      }
+      runLogger(level, message, detail);
+    };
+
     try {
       let activeRelease: DiscoveredRelease = { ...release, remotePath };
       let res: Awaited<ReturnType<RetroGameTalkClient['downloadFileAtomic']>>;
@@ -4183,9 +4295,10 @@ export class ScraperOrchestrator extends EventEmitter {
           cfg,
           signal,
           (progress) => {
+            if (progress.resumed) sawResume = true;
             this.handleTransferProgress(workerKey, progress);
           },
-          runLogger,
+          downloadLogger,
         );
       } catch (firstErr) {
         const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
@@ -4263,9 +4376,10 @@ export class ScraperOrchestrator extends EventEmitter {
           cfg,
           signal,
           (progress) => {
+            if (progress.resumed) sawResume = true;
             this.handleTransferProgress(workerKey, progress);
           },
-          runLogger,
+          downloadLogger,
         );
       }
 
@@ -4318,6 +4432,18 @@ export class ScraperOrchestrator extends EventEmitter {
       });
       runLogger('download', `Mirrored ${res.remotePath}`, `${res.bytes} bytes`);
       this.emitCatalogUpdated('file_downloaded', releaseId);
+      try {
+        if (sawResume) {
+          recordAchievementCounter('resumes_completed', 1, 'increment');
+        }
+        if (sawThrottleLog || this.rateLimiter.getTelemetry().rateLimitHits > preDownloadRateHits) {
+          recordAchievementCounter('throttles_survived', 1, 'increment');
+        }
+        recordNightOwlIfApplicable();
+        this.evaluateAndEmitAchievements();
+      } catch {
+        // Non-fatal
+      }
       return { downloaded: true, skipped: false, failed: false, bytes: res.bytes };
     } catch (err) {
       unregisterWorker();

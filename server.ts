@@ -21,6 +21,8 @@ import {
 } from './src/server/archiveService.ts';
 import { formatErrorDetails, isDebugLoggingEnabled, logServer } from './src/server/logger.ts';
 import { ScraperOrchestrator } from './src/server/orchestrator.ts';
+import { getAchievementsSnapshot, markAchievementsSeen } from './src/server/achievements.ts';
+import type { ClientAchievementEventPayload } from './src/shared/achievements.ts';
 import { sanitizeFat32Filename } from './src/shared/romNaming.ts';
 import type { ConfigUpdateInput, RunMode } from './src/server/types.ts';
 
@@ -89,6 +91,7 @@ async function bootstrap() {
     const onCatalogUpdated = (payload: unknown) => sendEvent('catalog_updated', payload);
     const onLogsCleared = (payload: unknown) => sendEvent('logs_cleared', payload);
     const onRunsCleared = (payload: unknown) => sendEvent('runs_cleared', payload);
+    const onAchievementUnlocked = (payload: unknown) => sendEvent('achievement_unlocked', payload);
 
     orchestrator.on('status', onStatus);
     orchestrator.on('log', onLog);
@@ -96,6 +99,7 @@ async function bootstrap() {
     orchestrator.on('catalog_updated', onCatalogUpdated);
     orchestrator.on('logs_cleared', onLogsCleared);
     orchestrator.on('runs_cleared', onRunsCleared);
+    orchestrator.on('achievement_unlocked', onAchievementUnlocked);
 
     const heartbeat = setInterval(() => {
       res.write(': keepalive\n\n');
@@ -109,7 +113,36 @@ async function bootstrap() {
       orchestrator.off('catalog_updated', onCatalogUpdated);
       orchestrator.off('logs_cleared', onLogsCleared);
       orchestrator.off('runs_cleared', onRunsCleared);
+      orchestrator.off('achievement_unlocked', onAchievementUnlocked);
     });
+  });
+
+  // Console-style Trophy & Achievements API
+  app.get('/api/achievements', (_req, res) => {
+    res.json(getAchievementsSnapshot());
+  });
+
+  app.post('/api/achievements/event', (req, res) => {
+    const type = typeof req.body?.type === 'string' ? req.body.type.trim() : '';
+    if (!type) {
+      res.status(400).json({ error: 'Missing achievement event type' });
+      return;
+    }
+    const payload: ClientAchievementEventPayload = {
+      type: type as ClientAchievementEventPayload['type'],
+      value: typeof req.body?.value === 'number' ? req.body.value : undefined,
+      localHour: typeof req.body?.localHour === 'number' ? req.body.localHour : undefined,
+    };
+    const result = orchestrator.handleClientAchievementEvent(payload);
+    res.json(result);
+  });
+
+  app.post('/api/achievements/seen', (req, res) => {
+    const ids = Array.isArray(req.body?.ids)
+      ? req.body.ids.map((id: unknown) => String(id)).filter(Boolean)
+      : undefined;
+    const summary = markAchievementsSeen(ids);
+    res.json({ ok: true, summary });
   });
 
   // Sync runs endpoints
@@ -261,6 +294,9 @@ async function bootstrap() {
         };
         const preview = queryRepositoryItemIds(filters);
         const result = await orchestrator.queueCatalogDownloads({ filters });
+        if (result.queuedCount > 0) {
+          orchestrator.recordServerAchievementCounter('on_demand_queued', result.queuedCount, 'increment');
+        }
         res.status(202).json({
           ...result,
           skippedCount: preview.alreadyDownloadedCount,
@@ -278,6 +314,9 @@ async function bootstrap() {
         return;
       }
       const result = await orchestrator.queueCatalogDownloads({ ids: cleanIds });
+      if (result.queuedCount > 0) {
+        orchestrator.recordServerAchievementCounter('on_demand_queued', result.queuedCount, 'increment');
+      }
       res.status(202).json({
         ...result,
         skippedCount: Math.max(0, cleanIds.length - result.queuedCount),
@@ -396,6 +435,7 @@ async function bootstrap() {
         res.status(404).json({ error: 'Mirrored archive not found on disk' });
         return;
       }
+      orchestrator.recordServerAchievementCounter('archive_inspections', 1, 'increment');
       res.json({ inspection });
     } catch (err) {
       logServer('HTTP', 'debug', `Inspect error for itemId=${itemId}`, formatErrorDetails(err));
@@ -521,6 +561,7 @@ async function bootstrap() {
           ? target.suggestedArchiveName
           : target.suggestedFilename;
 
+      orchestrator.recordServerAchievementCounter('prepared_downloads', 1, 'increment');
       if (target.kind === 'disc_set') {
         await streamCleanDiscZipToResponse(ctx.absPath, target.entryPaths, cleanName, res);
       } else {
@@ -657,6 +698,9 @@ async function bootstrap() {
     }
     try {
       const result = await orchestrator.queueCatalogDownloads({ ids: [itemId] });
+      if (result.queuedCount > 0) {
+        orchestrator.recordServerAchievementCounter('on_demand_queued', result.queuedCount, 'increment');
+      }
       res.status(202).json({
         ...result,
         skippedCount: result.queuedCount > 0 ? 0 : 1,

@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] - 2026-11-18
+
+- Added a console-inspired **Trophy & Achievements System** featuring **60 trophies** across Bronze (`15 pts`), Silver (`30 pts`), Gold (`90 pts`), and Platinum (`180 pts`) tiers spanning preservation milestones, console & era collecting, catalog curation, handheld SD card exporting, CRT Display Studio tuning, homelab resilience, and a handful of hidden secrets waiting to be discovered.
+- Added persistent SQLite achievement tracking (automatic schema migration `v19`) with silent baseline catch-up for existing mirrored libraries and zero passive unlocks on first launch, ensuring no jarring popup storm on startup while staying synced across browsers and unattended cron syncs via real-time SSE (`achievement_unlocked`).
+- Added console-style bottom-right trophy unlock notifications with tier-distinct synthesized Web Audio chimes, sequential display with burst coalescing (`4+` simultaneous unlocks summarize cleanly), and click-to-inspect navigation.
+- Added a compact Trophy counter button in the top header opening a smooth slide-over **Trophy Case Drawer** with completion progress, tier counts, search and category/status filtering, per-milestone progress bars, optional hint reveals for hidden trophies, and inline SFX Mute and Quiet Mode toggles.
+
 ## [1.8.0] - 2026-11-18
 
 - Tucked a few hidden retro-gaming surprises beneath the CRT control console for curious operators to discover (zero impact on routine sync, catalog, or export workflows).

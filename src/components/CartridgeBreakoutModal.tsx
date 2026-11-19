@@ -17,6 +17,7 @@ import {
   loadBreakoutHighScore,
   saveBreakoutHighScore,
 } from '../utils/easterEggs';
+import { reportAchievementEvent } from '../utils/achievementsClient';
 import { retroSynth } from '../utils/retroSynth';
 
 export interface CartridgeBreakoutModalProps {
@@ -888,6 +889,10 @@ export function CartridgeBreakoutModal({
         s.stageClearTimer = 1.7;
         s.powerUps = [];
         retroSynth.stageClear();
+        reportAchievementEvent('arcade_stage_clear', s.stage);
+        if (s.score >= 5000) {
+          reportAchievementEvent('arcade_score', s.score);
+        }
         emitCallout(LOGICAL_W / 2, LOGICAL_H / 2 - 20, `STAGE ${s.stage} CLEARED · +1 LIFE`, pal.phosphor);
         syncHudFromSim();
         return;
@@ -906,6 +911,9 @@ export function CartridgeBreakoutModal({
           s.bestScore = saveBreakoutHighScore(s.score);
           s.phase = 'GAME_OVER';
           retroSynth.gameOver();
+          if (s.score > 0) {
+            reportAchievementEvent('arcade_score', s.score);
+          }
         } else {
           retroSynth.lifeLost();
           spawnStuckBall();

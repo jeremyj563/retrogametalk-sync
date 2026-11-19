@@ -20,6 +20,7 @@ import type {
 } from '../types';
 import { formatBytes } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
+import { reportAchievementEvent } from '../utils/achievementsClient';
 import {
   findUpgradeCandidateOnCard,
   isAbortError,
@@ -388,6 +389,7 @@ export function useBulkStorageInstaller({
         const parsed = await readJsonSafely<{ items?: RepositoryItemRecord[] }>(res);
         if (parsed.ok && Array.isArray(parsed.data?.items) && parsed.data.items.length > 0) {
           onItemsInstalledRef.current?.(parsed.data.items, deviceLabel);
+          reportAchievementEvent('sd_export_complete', parsed.data.items.length);
         }
       } catch {
         // Non-fatal if install flag sync fails after file write
@@ -639,6 +641,7 @@ export function useBulkStorageInstaller({
         };
       }
       if (upgradedOldName) {
+        reportAchievementEvent('sd_version_upgrade');
         return {
           nextState: 'upgraded',
           detail: `Updated in ${folderSummary} (replaced ${upgradedOldName}) · ${formatBytes(rowBytes)}`,
