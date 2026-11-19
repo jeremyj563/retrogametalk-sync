@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { BrandMark } from './components/BrandMark';
 import { BulkInstallDock } from './components/BulkInstallDock';
+import { CartridgeBreakoutModal } from './components/CartridgeBreakoutModal';
 import { CatalogPanel } from './components/CatalogPanel';
 import { CrtDisplayControl } from './components/CrtDisplayControl';
 import { DeviceExportPanel } from './components/DeviceExportPanel';
@@ -43,8 +44,15 @@ import type {
   SyncRunRecord,
   SyncScope,
 } from './types';
+import {
+  advanceKonamiProgress,
+  isTextInputTarget,
+  recordHeaderTap,
+  type SecretSearchEffect,
+} from './utils/easterEggs';
 import { formatLocalDateTimeWithAge } from './utils/format';
 import { readJsonSafely } from './utils/http';
+import { retroSynth } from './utils/retroSynth';
 
 const SYNC_SCOPE_STORAGE_KEY = 'rgt_sync_scope_v1';
 const SYNC_DRY_RUN_STORAGE_KEY = 'rgt_sync_dry_run_v1';
@@ -428,6 +436,140 @@ export default function App() {
     loadInitialCrtDisplaySettings(),
   );
   const [sseConnected, setSseConnected] = useState(false);
+
+  // Hidden Retro Gaming Easter Egg Suite state
+  const [arcadeOpen, setArcadeOpen] = useState(false);
+  const [arcadeKonamiBonus, setArcadeKonamiBonus] = useState(false);
+  const [barrelRollActive, setBarrelRollActive] = useState(false);
+  const [askewActive, setAskewActive] = useState(false);
+  const [cartridgeBlowActive, setCartridgeBlowActive] = useState(false);
+  const [easterToast, setEasterToast] = useState<string | null>(null);
+  const konamiProgressRef = useRef(0);
+  const brandTapTimesRef = useRef<number[]>([]);
+  const barrelRollTimerRef = useRef<number | null>(null);
+  const cartridgeBlowTimerRef = useRef<number | null>(null);
+  const easterToastTimerRef = useRef<number | null>(null);
+
+  const showEasterToast = useCallback((message: string, durationMs = 3000) => {
+    setEasterToast(message);
+    if (easterToastTimerRef.current !== null) {
+      window.clearTimeout(easterToastTimerRef.current);
+    }
+    easterToastTimerRef.current = window.setTimeout(() => {
+      easterToastTimerRef.current = null;
+      setEasterToast(null);
+    }, durationMs);
+  }, []);
+
+  const openArcadeCabinet = useCallback((konamiBonus: boolean) => {
+    setArcadeKonamiBonus(konamiBonus);
+    setArcadeOpen(true);
+    if (konamiBonus) {
+      retroSynth.konamiUnlock();
+    } else {
+      retroSynth.powerupCatch();
+    }
+  }, []);
+
+  const triggerBarrelRoll = useCallback(() => {
+    retroSynth.barrelRoll();
+    const reduced =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduced) {
+      showEasterToast('Do a barrel roll! · Reduced motion active');
+      return;
+    }
+    setBarrelRollActive(false);
+    if (barrelRollTimerRef.current !== null) {
+      window.clearTimeout(barrelRollTimerRef.current);
+    }
+    window.requestAnimationFrame(() => {
+      setBarrelRollActive(true);
+      barrelRollTimerRef.current = window.setTimeout(() => {
+        barrelRollTimerRef.current = null;
+        setBarrelRollActive(false);
+      }, 1400);
+    });
+  }, [showEasterToast]);
+
+  const triggerCartridgeBlow = useCallback(() => {
+    retroSynth.cartridgeBlow();
+    setCartridgeBlowActive(false);
+    if (cartridgeBlowTimerRef.current !== null) {
+      window.clearTimeout(cartridgeBlowTimerRef.current);
+    }
+    window.requestAnimationFrame(() => {
+      setCartridgeBlowActive(true);
+      cartridgeBlowTimerRef.current = window.setTimeout(() => {
+        cartridgeBlowTimerRef.current = null;
+        setCartridgeBlowActive(false);
+      }, 950);
+    });
+    showEasterToast('Cartridge contacts cleaned · Signal locked', 3200);
+  }, [showEasterToast]);
+
+  const handleEasterEggEffect = useCallback(
+    (effect: SecretSearchEffect | 'clear_askew') => {
+      switch (effect) {
+        case 'breakout':
+          openArcadeCabinet(false);
+          break;
+        case 'konami_breakout':
+          openArcadeCabinet(true);
+          break;
+        case 'barrel_roll':
+          triggerBarrelRoll();
+          break;
+        case 'askew':
+          setAskewActive(true);
+          break;
+        case 'clear_askew':
+          setAskewActive(false);
+          break;
+        case 'blow_cartridge':
+          triggerCartridgeBlow();
+          break;
+      }
+    },
+    [openArcadeCabinet, triggerBarrelRoll, triggerCartridgeBlow],
+  );
+
+  // Global Konami Code listener (ignored inside inputs/textareas/selects and while arcade is open)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (arcadeOpen || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (isTextInputTarget(e.target)) {
+        konamiProgressRef.current = 0;
+        return;
+      }
+      const { nextProgress, unlocked } = advanceKonamiProgress(konamiProgressRef.current, e.key);
+      konamiProgressRef.current = nextProgress;
+      if (unlocked) {
+        e.preventDefault();
+        openArcadeCabinet(true);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleGlobalKeyDown);
+    };
+  }, [arcadeOpen, openArcadeCabinet]);
+
+  useEffect(() => {
+    return () => {
+      if (barrelRollTimerRef.current !== null) {
+        window.clearTimeout(barrelRollTimerRef.current);
+      }
+      if (cartridgeBlowTimerRef.current !== null) {
+        window.clearTimeout(cartridgeBlowTimerRef.current);
+      }
+      if (easterToastTimerRef.current !== null) {
+        window.clearTimeout(easterToastTimerRef.current);
+      }
+    };
+  }, []);
   const [actionPending, setActionPending] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
   const [confirmingFullSync, setConfirmingFullSync] = useState(false);
@@ -1198,6 +1340,13 @@ export default function App() {
       )}
       {showVignette && <div aria-hidden="true" className="crt-layer-vignette" />}
       {showDegauss && <div aria-hidden="true" className="crt-layer-degauss" />}
+      <div
+        className={`crt-easter-shell flex-1 flex flex-col ${
+          askewActive ? 'crt-easter-askew' : ''
+        } ${barrelRollActive ? 'crt-easter-barrel-roll' : ''} ${
+          cartridgeBlowActive ? 'crt-easter-cartridge-blow' : ''
+        }`}
+      >
       {/* Sticky Top Header & Full Sync Confirmation Container */}
       <div className="sticky top-0 z-30">
         <header className="relative bg-crt-bg/95 backdrop-blur border-b border-crt-border px-4 lg:px-6 py-3 flex flex-wrap lg:flex-nowrap items-center justify-between gap-4">
@@ -1209,6 +1358,12 @@ export default function App() {
           href="#monitor"
           onClick={(e) => {
             e.preventDefault();
+            const tap = recordHeaderTap(brandTapTimesRef.current, Date.now());
+            brandTapTimesRef.current = tap.nextTimestamps;
+            if (tap.triggered) {
+              openArcadeCabinet(false);
+              return;
+            }
             requestSectionChange('monitor');
           }}
           aria-label="RetroGameTalk Sync"
@@ -1552,6 +1707,7 @@ export default function App() {
                   onStartCatalogIndex={handleStartCatalogIndex}
                   onStopCatalogIndex={handleStopCatalogIndex}
                   onRefreshStatus={loadInitialData}
+                  onEasterEggEffect={handleEasterEggEffect}
                 />
               )}
               {section === 'sync-rules' && (
@@ -1599,6 +1755,27 @@ export default function App() {
           )}
         </main>
       </div>
+      </div>
+
+      {/* Hidden Playable CRT Cartridge Breakout Cabinet */}
+      <CartridgeBreakoutModal
+        open={arcadeOpen}
+        konamiBonus={arcadeKonamiBonus}
+        consoleLabels={(status?.systems ?? []).map((sys) => sys.systemName)}
+        onClose={() => setArcadeOpen(false)}
+      />
+
+      {/* Mellow Phosphor Easter Egg Toast */}
+      {easterToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="crt-easter-toast fixed bottom-5 right-5 z-[72] border border-crt-phosphor/60 bg-crt-surface/95 backdrop-blur px-3.5 py-2 rounded-[5px] shadow-2xl text-xs font-mono text-crt-phosphor flex items-center gap-2 pointer-events-none"
+        >
+          <span className="h-2 w-2 rounded-full bg-crt-phosphor shrink-0" />
+          <span>{easterToast}</span>
+        </div>
+      )}
 
       {/* App-Wide Storage Device Installer Modal (can be closed & reopened while transfers run) */}
       {config && (

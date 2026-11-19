@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] - 2026-11-18
+
+- Tucked a few hidden retro-gaming surprises beneath the CRT control console for curious operators to discover (zero impact on routine sync, catalog, or export workflows).
+- Added a subtle "Back of the Cartridge Manual" hint inside the Feature Guides documentation for anyone looking to uncover what's hiding inside the cabinet.
+
 ## [1.7.6] - 2026-11-18
 
 - Updated default `image.tag` in `k8s/charts/retrogametalk-sync/values.yaml` to empty so Helm chart deployments automatically resolve to `Chart.AppVersion` instead of `main`.
