@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.11.0] - 2026-11-18
+
+- Added the **Retro Visionary** Gold trophy (`90 pts`, bringing the Trophy Case to **65 trophies** and **2,235** total points), awarded after spending a cumulative **30 minutes** in the foreground with CRT Display Studio set to **Ultra** motion or **maxed (`100%`) scanlines**, with live minute-by-minute progress persisted in SQLite across sessions.
+- Tucked another small vintage CRT signal quirk quietly inside the console for operators who like poking around analog display terminology (respects `prefers-reduced-motion` and has zero impact on routine sync, catalog, or export workflows).
+
 ## [1.10.0] - 2026-11-18
 
 - Expanded the Trophy Case with **4 new hidden trophies** (bringing the catalog to **64 trophies** and **2,145** total points) waiting to be uncovered by curious operators, with the Platinum trophy progress automatically tracking the expanded list.

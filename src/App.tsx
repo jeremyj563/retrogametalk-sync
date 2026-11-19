@@ -32,6 +32,7 @@ import {
 import {
   computeCrtCssVariables,
   type CrtDisplaySettings,
+  isRetroVisionaryCrtConfig,
   loadInitialCrtDisplaySettings,
   saveCrtDisplaySettings,
 } from './shared/crtDisplay';
@@ -566,12 +567,15 @@ export default function App() {
   const [barrelRollActive, setBarrelRollActive] = useState(false);
   const [askewActive, setAskewActive] = useState(false);
   const [cartridgeBlowActive, setCartridgeBlowActive] = useState(false);
+  const [vsyncGlitchActive, setVsyncGlitchActive] = useState(false);
   const [easterToast, setEasterToast] = useState<string | null>(null);
   const konamiProgressRef = useRef(0);
   const brandTapTimesRef = useRef<number[]>([]);
   const barrelRollTimerRef = useRef<number | null>(null);
   const cartridgeBlowTimerRef = useRef<number | null>(null);
+  const vsyncGlitchTimerRef = useRef<number | null>(null);
   const easterToastTimerRef = useRef<number | null>(null);
+  const visionaryPendingSecRef = useRef(0);
 
   const showEasterToast = useCallback((message: string, durationMs = 3000) => {
     setEasterToast(message);
@@ -641,6 +645,30 @@ export default function App() {
     showEasterToast('Cartridge contacts cleaned · Signal locked', 3200);
   }, [showEasterToast]);
 
+  const triggerVsyncGlitch = useCallback(() => {
+    retroSynth.vsyncGlitch();
+    const reduced =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduced) {
+      showEasterToast('V-SYNC lost · Reduced motion active', 2800);
+      return;
+    }
+    setVsyncGlitchActive(false);
+    if (vsyncGlitchTimerRef.current !== null) {
+      window.clearTimeout(vsyncGlitchTimerRef.current);
+    }
+    window.requestAnimationFrame(() => {
+      setVsyncGlitchActive(true);
+      vsyncGlitchTimerRef.current = window.setTimeout(() => {
+        vsyncGlitchTimerRef.current = null;
+        setVsyncGlitchActive(false);
+      }, 2250);
+    });
+    showEasterToast('V-SYNC lost · Recalibrating vertical hold...', 2600);
+  }, [showEasterToast]);
+
   const handleEasterEggEffect = useCallback(
     (effect: SecretSearchEffect | 'clear_askew') => {
       switch (effect) {
@@ -674,9 +702,12 @@ export default function App() {
         case 'blow_cartridge':
           triggerCartridgeBlow();
           break;
+        case 'vsync_glitch':
+          triggerVsyncGlitch();
+          break;
       }
     },
-    [openArcadeCabinet, triggerBarrelRoll, triggerCartridgeBlow],
+    [openArcadeCabinet, triggerBarrelRoll, triggerCartridgeBlow, triggerVsyncGlitch],
   );
 
   // Global Konami Code listener (ignored inside inputs/textareas/selects and while arcade is open)
@@ -700,6 +731,55 @@ export default function App() {
     };
   }, [arcadeOpen, openArcadeCabinet]);
 
+  // Cumulative foreground CRT session timer for 'Retro Visionary' (30 min in Ultra motion or 100% scanlines)
+  const retroVisionaryUnlocked = Boolean(
+    achievementsSnapshot?.items.find((item) => item.id === 'retro_visionary')?.unlocked,
+  );
+  const retroVisionaryQualifying = isRetroVisionaryCrtConfig(crtSettings);
+
+  useEffect(() => {
+    const flushPending = (minSeconds: number) => {
+      const pending = visionaryPendingSecRef.current;
+      if (pending >= minSeconds) {
+        visionaryPendingSecRef.current = 0;
+        reportAchievementEvent('crt_visionary_seconds', pending);
+      }
+    };
+
+    if (retroVisionaryUnlocked || !retroVisionaryQualifying) {
+      flushPending(5);
+      return;
+    }
+
+    let lastTickAt = Date.now();
+    const tickInterval = window.setInterval(() => {
+      const now = Date.now();
+      if (document.visibilityState === 'visible') {
+        const elapsedSec = Math.min(15, Math.max(1, Math.round((now - lastTickAt) / 1000)));
+        visionaryPendingSecRef.current += elapsedSec;
+        if (visionaryPendingSecRef.current >= 30) {
+          flushPending(30);
+        }
+      }
+      lastTickAt = now;
+    }, 5000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushPending(5);
+      } else {
+        lastTickAt = Date.now();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.clearInterval(tickInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      flushPending(5);
+    };
+  }, [retroVisionaryQualifying, retroVisionaryUnlocked]);
+
   useEffect(() => {
     return () => {
       if (barrelRollTimerRef.current !== null) {
@@ -707,6 +787,9 @@ export default function App() {
       }
       if (cartridgeBlowTimerRef.current !== null) {
         window.clearTimeout(cartridgeBlowTimerRef.current);
+      }
+      if (vsyncGlitchTimerRef.current !== null) {
+        window.clearTimeout(vsyncGlitchTimerRef.current);
       }
       if (easterToastTimerRef.current !== null) {
         window.clearTimeout(easterToastTimerRef.current);
@@ -1514,7 +1597,7 @@ export default function App() {
           askewActive ? 'crt-easter-askew' : ''
         } ${barrelRollActive ? 'crt-easter-barrel-roll' : ''} ${
           cartridgeBlowActive ? 'crt-easter-cartridge-blow' : ''
-        }`}
+        } ${vsyncGlitchActive ? 'crt-easter-vsync-glitch' : ''}`}
       >
       {/* Sticky Top Header & Full Sync Confirmation Container */}
       <div className="sticky top-0 z-30">
@@ -1989,6 +2072,11 @@ export default function App() {
         onConsumeCurrent={handleConsumeCurrentTrophyToast}
         onSelectTrophy={(trophyId) => handleOpenTrophyDrawer(trophyId)}
       />
+
+      {/* Temporary V-SYNC Vertical Scanline Jitter Overlay */}
+      {vsyncGlitchActive && (
+        <div aria-hidden="true" className="crt-easter-vsync-overlay" />
+      )}
 
       {/* Mellow Phosphor Easter Egg Toast */}
       {easterToast && (

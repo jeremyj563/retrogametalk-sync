@@ -246,6 +246,12 @@ export function detectActiveCrtPreset(settings: CrtFxValues): CrtPresetId | 'cus
   return 'custom';
 }
 
+export function isRetroVisionaryCrtConfig(
+  settings: Pick<CrtDisplaySettings, 'enabled' | 'uiMotion' | 'scanlines'>,
+): boolean {
+  return settings.uiMotion === 'ultra' || (settings.enabled && settings.scanlines >= 100);
+}
+
 export function computeCrtCssVariables(settings: CrtDisplaySettings): CSSProperties {
   const paletteInfo = CRT_PALETTES[settings.palette];
   const on = settings.enabled;
