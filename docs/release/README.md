@@ -50,15 +50,15 @@ Because AI Studio commits externally to GitHub without a local git CLI inside th
    - Checks whether tag `X.Y.Z` already exists in the repository:
      - **New version**: Creates an annotated git tag (`X.Y.Z`), pushes `refs/tags/X.Y.Z`, and creates a corresponding **GitHub Release** (`gh release create X.Y.Z --notes-file ...`) populated from the matching `## [X.Y.Z]` section in `CHANGELOG.md` (automatically falling back to commit subjects since the previous tag if missing), along with the `ghcr.io` image reference and full compare link.
      - **Already-tagged version**: Logs a notice and skips duplicate tag/release creation safely so rolling `main` builds still succeed.
-3. **Job 3 — `build-and-push` (`needs: [validate, release]`, `packages: write`)**
-   - Chained directly behind `validate` and `release` so newly minted tags immediately trigger the multi-arch build without needing a custom Personal Access Token (GitHub Actions suppresses downstream `on: push: tags:` triggers from `GITHUB_TOKEN` pushes).
-   - Builds **`linux/amd64,linux/arm64`** Docker images via QEMU + Buildx with `APP_VERSION=X.Y.Z`, `GIT_SHA`, `GIT_URL`, `GIT_REF`, `BUILT_AT`, plus SBOM and `provenance: mode=max` attestations.
-   - Pushes to **`ghcr.io/<owner>/retrogametalk-sync`** (`X.Y.Z`, `X.Y`, `latest`, `main`, `sha-<short>`), and packages/pushes the Helm chart to **`oci://ghcr.io/<owner>/charts/retrogametalk-sync`** on tagged releases.
-   - **Gated Docker Hub Mirroring:** Pushes matching SemVer tags to **Docker Hub** **only** when a SemVer tag is active *and* maintainer secrets (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) are configured (defaulting target repo to `<DOCKERHUB_USERNAME>/retrogametalk-sync` or optional `vars.DOCKERHUB_REPOSITORY`).
+3. **Job 3 — `build` (`needs: [validate, release]`, Native Matrix: `ubuntu-24.04` + `ubuntu-24.04-arm`)**
+   - Compiles **`linux/amd64`** and **`linux/arm64`** natively on dedicated GitHub-hosted x86_64 and ARM64 runners (no QEMU emulation) with per-arch GHA caching (`scope=build-amd64` / `scope=build-arm64`), `APP_VERSION`, `GIT_SHA`, `GIT_URL`, `GIT_REF`, `BUILT_AT`, plus SBOM and `provenance: mode=max` attestations, pushing tagless digests to GHCR.
+4. **Job 4 — `merge` (`needs: [release, build]`, `packages: write`)**
+   - Combines the `amd64` and `arm64` digests + attestations via `docker buildx imagetools create` into unified multi-arch manifest tags on **`ghcr.io/<owner>/retrogametalk-sync`** (`X.Y.Z`, `X.Y`, `latest`, `main`, `sha-<short>`), and packages/pushes the Helm chart to **`oci://ghcr.io/<owner>/charts/retrogametalk-sync`** on tagged releases.
+   - **Gated Docker Hub Mirroring:** Mirrors the merged multi-arch manifest to **Docker Hub** via `imagetools create` **only** when a SemVer tag is active *and* maintainer secrets (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) are configured (defaulting target repo to `<DOCKERHUB_USERNAME>/retrogametalk-sync` or optional `vars.DOCKERHUB_REPOSITORY`).
 
 ### Pull Requests & Manual Tag Pushes
-- **Pull Requests to `main`**: Run `validate` and `build-and-push` (`push: false`) across `linux/amd64,linux/arm64` as a non-publishing build check.
-- **Manual `[0-9]*.*.*` Tag Push**: Skips the `release` job and runs `validate` + `build-and-push` directly against the pushed bare SemVer tag (`X.Y.Z`, `X.Y`, `sha-<short>`).
+- **Pull Requests to `main`**: Run `validate` and native `build` (`push: false`) across both `linux/amd64` and `linux/arm64` runners without publishing or running `merge`.
+- **Manual `[0-9]*.*.*` Tag Push**: Skips the `release` job and runs `validate` + native `build` + `merge` directly against the pushed bare SemVer tag (`X.Y.Z`, `X.Y`, `sha-<short>`).
 
 ---
 

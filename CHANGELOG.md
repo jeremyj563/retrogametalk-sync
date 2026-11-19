@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] - 2026-11-18
+
+- Replaced QEMU user-mode emulation in `.github/workflows/docker-publish.yml` (which hit `SIGILL` on `linux/arm64`) with a native GitHub Actions build matrix (`ubuntu-24.04` for `linux/amd64` + `ubuntu-24.04-arm` for `linux/arm64`) pushing by digest with per-architecture GHA caches, followed by a `merge` job using `docker buildx imagetools create` to assemble multi-arch GHCR and gated Docker Hub manifests.
+
 ## [1.7.0] - 2026-11-18
 
 - Redesigned `README.md` into a mature open-source project front page featuring custom CRT cartridge banner/icon vector assets (`docs/assets/logo-banner.svg`, `docs/assets/icon.svg`), overview, target audience personas, key capabilities, 2-minute Quick Start, platform deployment matrix, configuration summary, architecture diagram, publishing roadmap, and explicit `TODO` placeholders for external screenshots/license/community links.
