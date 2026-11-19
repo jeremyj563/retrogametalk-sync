@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.13.1] - 2026-11-19
+
+- Added smooth GPU-composited open and close transitions to the Catalog Item Details full-resolution box-art & screenshot lightbox (fade + gentle scale-settle with exit snapshot retention so artwork and controls ease out cleanly on Escape, backdrop click, or Close).
+- Added directional **Next / Previous** crossfade glide transitions with an outgoing ghost slide, caption crossfade, slide counter (`N / M`), adjacent full-res image preloading, smooth `Fit Screen` / `1:1 Pixel` scale settle, and tactile hover/press feedback on lightbox controls—tuned for Living UI Motion `Off` and `prefers-reduced-motion: reduce`.
+
 ## [1.13.0] - 2026-11-19
 
 - Added a **Speed-Reactive Sync Status Wave** effect that renders a phase-continuous CRT oscilloscope sine trace across the Sync Status card and a synchronized traveling wave shimmer inside active combined and parallel transfer progress bars—smoothly accelerating in frequency and wave density via a logarithmic throughput curve as live download speed climbs.
