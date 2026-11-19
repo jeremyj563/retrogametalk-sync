@@ -24,6 +24,12 @@ import {
 } from 'lucide-react';
 import type { ActiveTransferState, ArchiveInspectResult, RepositoryItemRecord } from '../types';
 import { formatBytes, formatDateTime } from '../utils/format';
+import {
+  getDrawerCloseDurationMs,
+  resolveDrawerSwapDirection,
+  type DrawerPhase,
+  type DrawerSwapDirection,
+} from '../utils/drawerMotion';
 import { readJsonSafely } from '../utils/http';
 import { resolveFileTransferProgress, resolveItemTransferProgress } from '../utils/transferProgress';
 
@@ -221,12 +227,12 @@ function LazyScreenshotTile({
 }
 
 export function GameDetailDrawer({
-  item,
+  item: activeItem,
   activeRun,
   activeTransfer = null,
   canSync,
   retryingItem = false,
-  navigation = null,
+  navigation: activeNavigation = null,
   onClose,
   onItemUpdated,
   onRetryItem,
@@ -234,6 +240,12 @@ export function GameDetailDrawer({
   onDeleteItem,
   onExportToSdCard,
 }: GameDetailDrawerProps) {
+  const [renderedItem, setRenderedItem] = useState<RepositoryItemRecord | null>(activeItem);
+  const [renderedNavigation, setRenderedNavigation] = useState<GameDetailNavigation | null>(activeNavigation);
+  const [phase, setPhase] = useState<DrawerPhase>(activeItem ? 'entering' : 'closed');
+  const [swapDir, setSwapDir] = useState<DrawerSwapDirection>('none');
+  const [swapSeq, setSwapSeq] = useState(0);
+
   const [fetchingMeta, setFetchingMeta] = useState(false);
   const [upgradingAssets, setUpgradingAssets] = useState(false);
   const [hydratingItemId, setHydratingItemId] = useState<number | null>(null);
@@ -255,9 +267,147 @@ export function GameDetailDrawer({
   const [inspectError, setInspectError] = useState<string | null>(null);
   const [preparedNames, setPreparedNames] = useState<Record<string, string>>({});
   const [togglingInstalled, setTogglingInstalled] = useState(false);
+
   const autoUpgradedIdsRef = useRef<Set<number>>(new Set());
   const autoHydratedIdsRef = useRef<Set<number>>(new Set());
   const bodyScrollRef = useRef<HTMLDivElement | null>(null);
+  const pendingSwapDirRef = useRef<DrawerSwapDirection>('none');
+  const prevRenderedIdRef = useRef<number | null>(activeItem?.id ?? null);
+  const prevNavIndexRef = useRef<number | null>(activeNavigation?.currentIndex ?? null);
+  const wasOpenRef = useRef<boolean>(false);
+  const phaseRef = useRef<DrawerPhase>(activeItem ? 'entering' : 'closed');
+  const closeTimerRef = useRef<number | null>(null);
+  const openRafRef = useRef<number | null>(null);
+  const openRafInnerRef = useRef<number | null>(null);
+
+  const setDrawerPhase = useCallback((next: DrawerPhase) => {
+    phaseRef.current = next;
+    setPhase(next);
+  }, []);
+
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+
+  const clearOpenRafs = useCallback(() => {
+    if (openRafRef.current !== null) {
+      window.cancelAnimationFrame(openRafRef.current);
+      openRafRef.current = null;
+    }
+    if (openRafInnerRef.current !== null) {
+      window.cancelAnimationFrame(openRafInnerRef.current);
+      openRafInnerRef.current = null;
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      clearCloseTimer();
+      clearOpenRafs();
+    },
+    [clearCloseTimer, clearOpenRafs],
+  );
+
+  // Synchronize open/close transition phase, frozen exit snapshot, and directional Prev/Next swaps
+  useLayoutEffect(() => {
+    if (activeItem) {
+      clearCloseTimer();
+      const wasOpen = wasOpenRef.current;
+      const nextDir = resolveDrawerSwapDirection({
+        pendingDirection: pendingSwapDirRef.current,
+        prevItemId: prevRenderedIdRef.current,
+        nextItemId: activeItem.id,
+        prevIndex: prevNavIndexRef.current,
+        nextIndex: activeNavigation?.currentIndex ?? null,
+        wasOpen,
+      });
+      pendingSwapDirRef.current = 'none';
+
+      if (nextDir !== 'none') {
+        setSwapDir(nextDir);
+        setSwapSeq((seq) => seq + 1);
+      } else if (!wasOpen) {
+        setSwapDir('none');
+      }
+
+      setRenderedItem(activeItem);
+      setRenderedNavigation(activeNavigation);
+      prevRenderedIdRef.current = activeItem.id;
+      prevNavIndexRef.current = activeNavigation?.currentIndex ?? null;
+
+      if (!wasOpen) {
+        wasOpenRef.current = true;
+        clearOpenRafs();
+        if (phaseRef.current === 'closing') {
+          // Interrupt an in-progress exit cleanly by gliding directly back open
+          setDrawerPhase('open');
+        } else {
+          setDrawerPhase('entering');
+          openRafRef.current = window.requestAnimationFrame(() => {
+            openRafRef.current = null;
+            openRafInnerRef.current = window.requestAnimationFrame(() => {
+              openRafInnerRef.current = null;
+              setDrawerPhase('open');
+            });
+          });
+        }
+      }
+      return;
+    }
+
+    // Active item cleared -> retain last snapshot during gentle exit glide before unmounting
+    if (wasOpenRef.current) {
+      clearOpenRafs();
+      clearCloseTimer();
+      wasOpenRef.current = false;
+      pendingSwapDirRef.current = 'none';
+      setLightbox(null);
+      setDrawerPhase('closing');
+
+      const motionTier =
+        typeof document !== 'undefined'
+          ? document.querySelector('[data-crt-motion]')?.getAttribute('data-crt-motion')
+          : null;
+      const prefersReducedMotion =
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const closeDurationMs = getDrawerCloseDurationMs(motionTier, prefersReducedMotion);
+
+      closeTimerRef.current = window.setTimeout(() => {
+        closeTimerRef.current = null;
+        setDrawerPhase('closed');
+        setRenderedItem(null);
+        setRenderedNavigation(null);
+        setSwapDir('none');
+        setConfirmDelete(false);
+        setMetaError(null);
+        setInspectError(null);
+        setInspection(null);
+        prevRenderedIdRef.current = null;
+        prevNavIndexRef.current = null;
+      }, closeDurationMs);
+    }
+  }, [activeItem, activeNavigation, clearCloseTimer, clearOpenRafs, setDrawerPhase]);
+
+  const handlePrevNav = useCallback(() => {
+    if (!activeNavigation || !activeNavigation.canPrev || activeNavigation.loading) return;
+    pendingSwapDirRef.current = 'prev';
+    activeNavigation.onPrev();
+  }, [activeNavigation]);
+
+  const handleNextNav = useCallback(() => {
+    if (!activeNavigation || !activeNavigation.canNext || activeNavigation.loading) return;
+    pendingSwapDirRef.current = 'next';
+    activeNavigation.onNext();
+  }, [activeNavigation]);
+
+  // Display item stays frozen on the last snapshot during closing; active side effects always check activeItem
+  const item = activeItem ?? renderedItem;
+  const navigation = activeItem ? activeNavigation : renderedNavigation;
 
   const assetVersion = item?.metadata?.fetchedAt ? `&v=${encodeURIComponent(item.metadata.fetchedAt)}` : '';
   const localScreenshotCount = item?.metadata?.screenshotLocalRelPaths?.length ?? item?.screenshotsCount ?? 0;
@@ -302,8 +452,9 @@ export function GameDetailDrawer({
     });
   }, []);
 
-  // Reset drawer-scoped UI state only when switching to a different catalog item
+  // Reset drawer-scoped UI state only when switching to a different active catalog item
   useEffect(() => {
+    if (!activeItem) return;
     setMetaError(null);
     setConfirmDelete(false);
     setCoverFailed(false);
@@ -320,11 +471,11 @@ export function GameDetailDrawer({
     setTogglingInstalled(false);
     setQueueingDownload(false);
     bodyScrollRef.current?.scrollTo({ top: 0, behavior: 'auto' });
-  }, [item?.id]);
+  }, [activeItem?.id]);
 
   // Refresh artwork URLs in place (without closing an open Lightbox) when metadata updates
   useEffect(() => {
-    if (!item) return;
+    if (!activeItem) return;
     setCoverFailed(false);
     setFailedScreenshots(new Set());
     setLightbox((prev) => {
@@ -333,14 +484,14 @@ export function GameDetailDrawer({
         if (slide.kind === 'cover') {
           return {
             ...slide,
-            src: `/api/items/${item.id}/asset?kind=cover${item.status !== 'available' ? '&full=1' : '&lazy=1'}${assetVersion}`,
+            src: `/api/items/${activeItem.id}/asset?kind=cover${activeItem.status !== 'available' ? '&full=1' : '&lazy=1'}${assetVersion}`,
           };
         }
         const idx = slide.screenshotIndex ?? 0;
-        const useLazy = idx >= localScreenshotCount || item.status === 'available';
+        const useLazy = idx >= localScreenshotCount || activeItem.status === 'available';
         return {
           ...slide,
-          src: `/api/items/${item.id}/asset?kind=screenshot&index=${idx}${useLazy ? '&lazy=1' : '&full=1'}${assetVersion}`,
+          src: `/api/items/${activeItem.id}/asset?kind=screenshot&index=${idx}${useLazy ? '&lazy=1' : '&full=1'}${assetVersion}`,
         };
       });
       if (updatedSlides.every((s, idx) => s.src === prev.slides[idx]?.src)) {
@@ -351,12 +502,12 @@ export function GameDetailDrawer({
         slides: updatedSlides,
       };
     });
-  }, [item, assetVersion, localScreenshotCount]);
+  }, [activeItem, assetVersion, localScreenshotCount]);
 
   // Lazy-hydrate release-page specs, screenshot URLs, and description when opening an unhydrated catalog item
   useEffect(() => {
-    if (!item || !needsDetailHydration) return;
-    const targetId = item.id;
+    if (!activeItem || !needsDetailHydration) return;
+    const targetId = activeItem.id;
     if (autoHydratedIdsRef.current.has(targetId)) return;
 
     const controller = new AbortController();
@@ -405,22 +556,22 @@ export function GameDetailDrawer({
       cancelled = true;
       controller.abort();
     };
-  }, [item?.id, needsDetailHydration, onItemUpdated]);
+  }, [activeItem?.id, needsDetailHydration, onItemUpdated]);
 
   // Automatically upgrade legacy small-thumbnail items to full-resolution artwork in the background
   useEffect(() => {
-    if (!item || isHydratingDetails) return;
-    const hasLocalArtwork = localScreenshotCount > 0 || Boolean(item.coverLocalPath);
-    if (!item.hasMetadata || !hasLocalArtwork || isFullResVerified || item.status === 'available') return;
-    if (autoUpgradedIdsRef.current.has(item.id)) return;
+    if (!activeItem || isHydratingDetails) return;
+    const hasLocalArtwork = localScreenshotCount > 0 || Boolean(activeItem.coverLocalPath);
+    if (!activeItem.hasMetadata || !hasLocalArtwork || isFullResVerified || activeItem.status === 'available') return;
+    if (autoUpgradedIdsRef.current.has(activeItem.id)) return;
 
-    autoUpgradedIdsRef.current.add(item.id);
+    autoUpgradedIdsRef.current.add(activeItem.id);
     let cancelled = false;
     setUpgradingAssets(true);
 
     void (async () => {
       try {
-        const res = await fetch(`/api/items/${item.id}/metadata?upgradeAssets=1`, { method: 'POST' });
+        const res = await fetch(`/api/items/${activeItem.id}/metadata?upgradeAssets=1`, { method: 'POST' });
         const parsed = await readJsonSafely<{ item?: RepositoryItemRecord }>(res);
         if (!cancelled && parsed.ok && parsed.data?.item) {
           onItemUpdated(parsed.data.item);
@@ -437,7 +588,7 @@ export function GameDetailDrawer({
     return () => {
       cancelled = true;
     };
-  }, [item, isHydratingDetails, localScreenshotCount, isFullResVerified, onItemUpdated]);
+  }, [activeItem, isHydratingDetails, localScreenshotCount, isFullResVerified, onItemUpdated]);
 
   const activeLightboxSrc = lightbox?.slides[lightbox.index]?.src ?? null;
   useEffect(() => {
@@ -451,7 +602,7 @@ export function GameDetailDrawer({
   }, [activeLightboxSrc]);
 
   useEffect(() => {
-    if (!item) return;
+    if (!activeItem) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (lightbox) {
@@ -475,7 +626,7 @@ export function GameDetailDrawer({
         }
         return;
       }
-      if (!navigation || navigation.loading || e.altKey || e.ctrlKey || e.metaKey) {
+      if (!activeNavigation || activeNavigation.loading || e.altKey || e.ctrlKey || e.metaKey) {
         return;
       }
       if (
@@ -487,17 +638,17 @@ export function GameDetailDrawer({
       ) {
         return;
       }
-      if (e.key === 'ArrowLeft' && navigation.canPrev) {
+      if (e.key === 'ArrowLeft' && activeNavigation.canPrev) {
         e.preventDefault();
-        navigation.onPrev();
-      } else if (e.key === 'ArrowRight' && navigation.canNext) {
+        handlePrevNav();
+      } else if (e.key === 'ArrowRight' && activeNavigation.canNext) {
         e.preventDefault();
-        navigation.onNext();
+        handleNextNav();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [item, lightbox, navigation, onClose]);
+  }, [activeItem, lightbox, activeNavigation, onClose, handlePrevNav, handleNextNav]);
 
   const infoRows = useMemo(() => {
     if (!item) return [];
@@ -576,7 +727,7 @@ export function GameDetailDrawer({
     return rows;
   }, [item]);
 
-  if (!item) return null;
+  if (!item || phase === 'closed') return null;
 
   const hasCover = Boolean(item.coverLocalPath || item.metadata?.coverUrl) && !coverFailed;
   const coverSrc = item.coverLocalPath
@@ -592,6 +743,7 @@ export function GameDetailDrawer({
     (item.status === 'available' || item.status === 'failed' || item.status === 'partial');
 
   const handleFetchMetadata = async () => {
+    if (!activeItem) return;
     setFetchingMeta(true);
     setMetaError(null);
     autoHydratedIdsRef.current.delete(item.id);
@@ -623,6 +775,7 @@ export function GameDetailDrawer({
   };
 
   const handleRetry = async (fileId?: number, dryRun = false) => {
+    if (!activeItem) return;
     setRetryingKey(
       fileId
         ? dryRun
@@ -640,7 +793,7 @@ export function GameDetailDrawer({
   };
 
   const handleQueueReleaseDownload = async () => {
-    if (!onQueueDownload || queueingDownload) return;
+    if (!activeItem || !onQueueDownload || queueingDownload) return;
     setQueueingDownload(true);
     setMetaError(null);
     try {
@@ -653,6 +806,7 @@ export function GameDetailDrawer({
   };
 
   const handleDelete = async () => {
+    if (!activeItem) return;
     setDeleting(true);
     try {
       await onDeleteItem(item.id);
@@ -662,7 +816,7 @@ export function GameDetailDrawer({
   };
 
   const handleToggleInstalled = async (installed: boolean) => {
-    if (togglingInstalled) return;
+    if (!activeItem || togglingInstalled) return;
     setTogglingInstalled(true);
     try {
       const res = await fetch('/api/items/installed', {
@@ -680,6 +834,7 @@ export function GameDetailDrawer({
   };
 
   const handleInspectPreparedRom = async (fileId: number) => {
+    if (!activeItem) return;
     setInspectingFileId(fileId);
     setInspectError(null);
     try {
@@ -751,15 +906,19 @@ export function GameDetailDrawer({
   return (
     <>
       <div
-        className="fixed inset-0 z-50 flex justify-end bg-black/75 backdrop-blur-xs"
+        className="crt-detail-backdrop fixed inset-0 z-50 flex justify-end bg-black/75 backdrop-blur-xs"
+        data-drawer-state={phase}
         role="dialog"
         aria-modal="true"
         aria-label={item.title}
         onClick={(e) => {
-          if (e.target === e.currentTarget) onClose();
+          if (e.target === e.currentTarget && activeItem) onClose();
         }}
       >
-        <div className="crt-canvas crt-drawer-panel relative w-full max-w-3xl h-full bg-crt-surface border-l border-crt-border-strong flex flex-col shadow-2xl">
+        <div
+          className="crt-canvas crt-drawer-panel crt-detail-sheet relative w-full max-w-3xl h-full bg-crt-surface border-l border-crt-border-strong flex flex-col shadow-2xl"
+          data-drawer-state={phase}
+        >
           <div aria-hidden="true" className="crt-edge-beam">
             <span />
           </div>
@@ -768,7 +927,11 @@ export function GameDetailDrawer({
           </div>
         {/* Drawer Header */}
         <header className="px-6 py-4 border-b border-crt-border bg-crt-bg flex items-start justify-between gap-4 shrink-0">
-          <div className="min-w-0 flex-1 space-y-1">
+          <div
+            key={`header-${item.id}-${swapSeq}`}
+            data-swap-dir={swapDir}
+            className="crt-detail-swap min-w-0 flex-1 space-y-1"
+          >
             <div className="flex flex-wrap items-center gap-3">
               <h2 className="font-display text-xl font-bold text-crt-text tracking-tight break-words">
                 {item.title}
@@ -840,7 +1003,7 @@ export function GameDetailDrawer({
                 >
                   <button
                     type="button"
-                    onClick={navigation.onPrev}
+                    onClick={handlePrevNav}
                     disabled={!navigation.canPrev || Boolean(navigation.loading)}
                     aria-label={
                       navigation.prevTitle
@@ -860,7 +1023,7 @@ export function GameDetailDrawer({
                   </button>
                   <button
                     type="button"
-                    onClick={navigation.onNext}
+                    onClick={handleNextNav}
                     disabled={!navigation.canNext || Boolean(navigation.loading)}
                     aria-label={
                       navigation.nextTitle
@@ -886,7 +1049,7 @@ export function GameDetailDrawer({
               type="button"
               onClick={onClose}
               aria-label="Close game details"
-              className="p-1.5 border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors shrink-0"
+              className="p-1.5 border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors shrink-0 cursor-pointer"
             >
               <X className="h-4 w-4" />
             </button>
@@ -975,7 +1138,12 @@ export function GameDetailDrawer({
         )}
 
         {/* Scrollable Body */}
-        <div ref={bodyScrollRef} className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
+        <div ref={bodyScrollRef} className="flex-1 overflow-y-auto px-6 py-5">
+          <div
+            key={`body-${item.id}-${swapSeq}`}
+            data-swap-dir={swapDir}
+            className="crt-detail-swap space-y-6"
+          >
           {/* Missing Metadata / Fallback Prompt (shown only after auto-hydration fails or when manually retrying) */}
           {!isHydratingDetails && (!item.hasMetadata || (hydrationErrorForItem && !item.metadata?.detailHydrated)) && (
             <div className="border border-crt-amber/40 bg-crt-amber/5 rounded-md p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -1646,6 +1814,7 @@ export function GameDetailDrawer({
               )}
             </div>
           </section>
+          </div>
         </div>
 
         {/* Sticky Footer */}

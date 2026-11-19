@@ -713,6 +713,121 @@
   animation: crt-chart-tooltip-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* ==========================================================================
+   Mellow Slide-Over Detail Drawer & Directional Prev/Next Item Crossfade
+   ========================================================================== */
+.crt-detail-backdrop {
+  will-change: opacity;
+  transition: opacity 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.crt-detail-backdrop[data-drawer-state="entering"] {
+  opacity: 0;
+  pointer-events: auto;
+}
+
+.crt-detail-backdrop[data-drawer-state="open"] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.crt-detail-backdrop[data-drawer-state="closing"] {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: 240ms;
+}
+
+.crt-detail-sheet {
+  will-change: transform, opacity;
+  transition:
+    transform 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.crt-detail-sheet[data-drawer-state="entering"] {
+  opacity: 0;
+  transform: translate3d(44px, 0, 0);
+}
+
+.crt-detail-sheet[data-drawer-state="open"] {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+}
+
+.crt-detail-sheet[data-drawer-state="closing"] {
+  opacity: 0;
+  transform: translate3d(36px, 0, 0);
+  transition-duration: 260ms, 220ms;
+}
+
+@keyframes crt-detail-swap-next {
+  from {
+    opacity: 0;
+    transform: translate3d(14px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes crt-detail-swap-prev {
+  from {
+    opacity: 0;
+    transform: translate3d(-14px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes crt-detail-reduced-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.crt-detail-swap[data-swap-dir="next"] {
+  animation: crt-detail-swap-next 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.crt-detail-swap[data-swap-dir="prev"] {
+  animation: crt-detail-swap-prev 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+/* Living UI Motion = Off: retain a subtle, shorter transition rather than snapping abruptly */
+[data-crt-motion="off"] .crt-detail-backdrop {
+  transition-duration: 200ms;
+}
+
+[data-crt-motion="off"] .crt-detail-backdrop[data-drawer-state="closing"] {
+  transition-duration: 180ms;
+}
+
+[data-crt-motion="off"] .crt-detail-sheet {
+  transition-duration: 220ms, 200ms;
+}
+
+[data-crt-motion="off"] .crt-detail-sheet[data-drawer-state="entering"] {
+  transform: translate3d(18px, 0, 0);
+}
+
+[data-crt-motion="off"] .crt-detail-sheet[data-drawer-state="closing"] {
+  transform: translate3d(14px, 0, 0);
+  transition-duration: 180ms, 160ms;
+}
+
+[data-crt-motion="off"] .crt-detail-swap[data-swap-dir="next"],
+[data-crt-motion="off"] .crt-detail-swap[data-swap-dir="prev"] {
+  animation-duration: 180ms;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .crt-accordion-grid,
   .crt-cover-lazy,
@@ -727,6 +842,21 @@
   .crt-chart-tooltip-static {
     transition-duration: 0ms !important;
     animation: none !important;
+  }
+
+  .crt-detail-backdrop,
+  .crt-detail-sheet {
+    transition: opacity 100ms ease !important;
+  }
+
+  .crt-detail-sheet[data-drawer-state="entering"],
+  .crt-detail-sheet[data-drawer-state="closing"] {
+    transform: none !important;
+  }
+
+  .crt-detail-swap[data-swap-dir="next"],
+  .crt-detail-swap[data-swap-dir="prev"] {
+    animation: crt-detail-reduced-fade 100ms ease both !important;
   }
 
   .crt-deck-slide[data-slide-state="pre-left"],
