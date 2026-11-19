@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import { Lock, Monitor, RotateCcw } from 'lucide-react';
+import { Lock, Monitor, RotateCcw, Waves } from 'lucide-react';
 import {
   BVM_PRESET_REQUIRED_POINTS,
   isBvmPresetUnlocked,
@@ -331,6 +331,60 @@ export function CrtDisplayControl({
                 </button>
               );
             })}
+          </div>
+
+          {/* Independent Sync Status Speed Wave toggle */}
+          <div className="flex items-center justify-between gap-2 pt-1.5">
+            <span
+              title={
+                settings.uiMotion === 'off'
+                  ? 'Requires Living UI Motion set to Low or higher'
+                  : 'Oscilloscope & transfer bar wave in Sync Status that speeds up with live download throughput'
+              }
+              className={`inline-flex items-center gap-1.5 min-w-0 text-[10px] font-mono ${
+                settings.uiMotion === 'off' ? 'text-crt-muted/55' : 'text-crt-muted'
+              }`}
+            >
+              <Waves
+                className={`h-3 w-3 shrink-0 ${
+                  settings.uiMotion !== 'off' && settings.syncSpeedWave
+                    ? 'text-crt-phosphor'
+                    : 'text-crt-muted/60'
+                }`}
+              />
+              <span className="truncate">Sync Speed Wave</span>
+            </span>
+            <button
+              type="button"
+              disabled={settings.uiMotion === 'off'}
+              aria-pressed={settings.uiMotion !== 'off' && settings.syncSpeedWave}
+              onClick={() =>
+                onChange({
+                  ...settings,
+                  syncSpeedWave: !settings.syncSpeedWave,
+                })
+              }
+              title={
+                settings.uiMotion === 'off'
+                  ? 'Set Living UI Motion to Low or higher to activate the Sync Speed Wave'
+                  : settings.syncSpeedWave
+                    ? 'Disable Sync Status speed wave without turning off other Living UI Motion effects'
+                    : 'Enable speed-reactive Sync Status wave effect'
+              }
+              className={`px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded border transition-colors whitespace-nowrap shrink-0 ${
+                settings.uiMotion === 'off'
+                  ? 'border-crt-border/60 bg-crt-bg/50 text-crt-muted/45 cursor-not-allowed'
+                  : settings.syncSpeedWave
+                    ? 'border-crt-phosphor/55 bg-crt-phosphor/12 text-crt-phosphor hover:bg-crt-phosphor/20 cursor-pointer'
+                    : 'border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong cursor-pointer'
+              }`}
+            >
+              {settings.uiMotion === 'off'
+                ? 'OFF'
+                : settings.syncSpeedWave
+                  ? 'ON'
+                  : 'OFF'}
+            </button>
           </div>
         </div>
 

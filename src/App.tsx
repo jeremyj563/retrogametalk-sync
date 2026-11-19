@@ -46,6 +46,7 @@ import {
   type CrtDisplaySettings,
   type CrtPalette,
   isRetroVisionaryCrtConfig,
+  isSyncSpeedWaveActive,
   loadInitialCrtDisplaySettings,
   saveCrtDisplaySettings,
 } from './shared/crtDisplay';
@@ -1660,6 +1661,7 @@ export default function App() {
     <div
       data-crt-palette={effectiveCrtSettings.palette}
       data-crt-motion={effectiveCrtSettings.uiMotion}
+      data-crt-sync-wave={isSyncSpeedWaveActive(effectiveCrtSettings) ? 'on' : 'off'}
       data-sync-running={status?.activeRun ? 'true' : 'false'}
       style={crtCssVars}
       className={`min-h-screen crt-canvas text-crt-text flex flex-col ${effectiveCrtSettings.enabled ? 'crt-fx-active' : ''}`}
@@ -2064,6 +2066,9 @@ export default function App() {
                   logsClearedRevision={logsClearedRevision}
                   catalogRevision={catalogRevision}
                   activeRetryItemId={activeRetryItemId}
+                  uiMotion={effectiveCrtSettings.uiMotion}
+                  syncSpeedWave={effectiveCrtSettings.syncSpeedWave}
+                  crtPalette={effectiveCrtSettings.palette}
                   onSaveConfig={handleSaveConfig}
                   onClearLogs={handleClearLogs}
                   onClearRuns={handleClearRuns}

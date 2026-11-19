@@ -4344,5 +4344,76 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   transition-duration: 240ms, 200ms;
 }
 
+/* ==========================================================================
+   Speed-Reactive Sync Status Progress Bar Wave Modulation
+   (Activated by Living UI Motion Low..Ultra + independent data-crt-sync-wave)
+   ========================================================================== */
+@keyframes crt-speed-wave-travel {
+  0% {
+    transform: translate3d(-48px, 0, 0);
+  }
+  100% {
+    transform: translate3d(0px, 0, 0);
+  }
+}
+
+.crt-progress-beam-wave {
+  position: relative;
+  overflow: hidden;
+}
+
+.crt-progress-beam-wave::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: calc(100% + 48px);
+  pointer-events: none;
+  opacity: 0;
+  will-change: transform;
+  background-image: repeating-linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0px,
+    rgba(255, 255, 255, 0.34) 12px,
+    rgba(255, 255, 255, 0.04) 24px,
+    rgba(255, 255, 255, 0.24) 36px,
+    rgba(255, 255, 255, 0) 48px
+  );
+}
+
+[data-crt-sync-wave="on"][data-crt-motion="low"] .crt-progress-beam-wave::before {
+  opacity: 0.55;
+  animation: crt-speed-wave-travel var(--crt-wave-duration, 1.6s) linear infinite;
+}
+
+[data-crt-sync-wave="on"][data-crt-motion="medium"] .crt-progress-beam-wave::before {
+  opacity: 0.75;
+  animation: crt-speed-wave-travel var(--crt-wave-duration, 1.4s) linear infinite;
+}
+
+[data-crt-sync-wave="on"][data-crt-motion="high"] .crt-progress-beam-wave::before {
+  opacity: 0.9;
+  animation: crt-speed-wave-travel var(--crt-wave-duration, 1.2s) linear infinite;
+}
+
+[data-crt-sync-wave="on"][data-crt-motion="ultra"] .crt-progress-beam-wave::before {
+  opacity: 1;
+  animation: crt-speed-wave-travel var(--crt-wave-duration, 1s) linear infinite;
+}
+
+[data-crt-sync-wave="on"][data-crt-motion="low"] .crt-progress-beam-wave::after,
+[data-crt-sync-wave="on"][data-crt-motion="medium"] .crt-progress-beam-wave::after,
+[data-crt-sync-wave="on"][data-crt-motion="high"] .crt-progress-beam-wave::after,
+[data-crt-sync-wave="on"][data-crt-motion="ultra"] .crt-progress-beam-wave::after {
+  animation-duration: calc(var(--crt-wave-duration, 1.55s) * 1.15);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crt-progress-beam-wave::before {
+    opacity: 0 !important;
+    animation: none !important;
+    transform: none !important;
+  }
+}
+
 
 
