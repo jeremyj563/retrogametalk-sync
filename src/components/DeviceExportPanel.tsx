@@ -8,6 +8,7 @@ import {
   useState,
 } from 'react';
 import { HardDrive } from 'lucide-react';
+import type { BulkStorageInstallerController } from '../hooks/useBulkStorageInstaller';
 import { useSectionSpotlight } from '../hooks/useSectionSpotlight';
 import { formatPreparedRomName, ROM_NAMING_PRESETS } from '../shared/romNaming';
 import {
@@ -29,6 +30,7 @@ import { StorageFolderMappingsSection } from './StorageFolderMappingsSection';
 interface DeviceExportPanelProps {
   config: ScraperConfigPublic;
   status: ServiceStatusSnapshot;
+  installer?: BulkStorageInstallerController;
   focusRequest?: ConfigFocusRequest | null;
   onDirtyChange?: (state: ConfigDirtyState) => void;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
@@ -36,7 +38,7 @@ interface DeviceExportPanelProps {
 
 export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanelProps>(
   function DeviceExportPanel(
-    { config, status, focusRequest = null, onDirtyChange, onSaveConfig },
+    { config, status, installer, focusRequest = null, onDirtyChange, onSaveConfig },
     ref,
   ) {
     const [romNamingTemplate, setRomNamingTemplate] = useState(config.romNamingTemplate);
@@ -373,6 +375,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
           value={storageFolderConfig}
           onChange={setStorageFolderConfig}
           discoveredAndSyncedSlugs={discoveredAndSyncedSlugs}
+          installer={installer}
         />
 
         <ConfigSaveBar

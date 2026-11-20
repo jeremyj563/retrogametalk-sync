@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.22.0] - 2026-11-20
+
+- Added **Export Device Auto-Configure** inside **Device Export → Storage Device Folder Mappings**:
+  - Pick an export base folder directly in the browser (or one-click scan your already-mounted storage device) via the File System Access API—automatically mounting the chosen base path for immediate exporting.
+  - Discovers console base paths across 75+ retro platforms and common handheld/emulator layouts—including direct root folders, OnionOS/GarlicOS (`Roms/FC`, `Roms/SFC`, `Roms/MD`, etc.), ES-DE/Batocera/EmuDeck (`Emulation/roms/*`), MiSTer (`games/*`), Analogue Pocket OpenFPGA (`Assets/<core>/common`), and decorated human-readable folder names—using parent-root consensus and shallow ROM-extension corroboration.
+  - Detects existing per-console **ROM-type subfolders** (`Hacks`, `Translations`, `Homebrew`, `Ports`, `Undubs`, `Prototypes`, `Unlicensed`, `BIOS`, `DLC`, `PSX2PSP`) while preserving exact on-disk casing.
+  - Displays an inline **Auto-Configure Preview** with per-console checkboxes, path diffs (`New`, `Updates Custom`, `Already Matches`), alternate-path conflict switchers, ROM-type subfolder toggle, and non-destructive merge into the Device Export draft form before saving.
+
 ## [1.21.10] - 2026-11-20
 
 - Made the **Catalog** bulk selection and filter action buttons status-aware:
