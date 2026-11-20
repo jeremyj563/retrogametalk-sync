@@ -4,7 +4,10 @@ import {
   STARTER_TRACK_ID,
 } from '../shared/soundtrack';
 
-export type NoteCell = number | readonly [midi: number, steps: number, vel?: number] | null;
+export type NoteCell =
+  | number
+  | readonly [midi: number, steps: number, vel?: number, glideSemi?: number]
+  | null;
 
 export interface TomHit {
   readonly step: number;
@@ -12,28 +15,63 @@ export interface TomHit {
   readonly vel?: number;
 }
 
+export type CustomWaveType =
+  | OscillatorType
+  | 'pulse25'
+  | 'pulse12'
+  | 'organ'
+  | 'brass'
+  | 'strings'
+  | 'epiano'
+  | 'slapbass'
+  | 'guitar';
+
 export interface SynthVoiceConfig {
-  waveform: OscillatorType;
+  waveform: CustomWaveType;
+  /** Subtle detune cents; if chorus3 is true, spawns -detune / 0 / +detune ensemble */
   detuneCents?: number;
+  chorus3?: boolean;
+  /** Highpass filter to carve low-end mud from pads, arps, and guitars */
+  highpassHz?: number;
+  /** Lowpass cutoff (rest frequency) and envelope peak frequency */
   cutoffHz?: number;
   cutoffPeakHz?: number;
+  filterDecaySec?: number;
   q?: number;
+  /** Click-free ADSR envelope parameters */
   attackSec: number;
+  decaySec?: number;
+  sustainLevel?: number;
   releaseSec: number;
   gain: number;
+  /** Spatial sends */
   delaySend?: number;
+  reverbSend?: number;
   pan?: number;
-  /** Optional 2-operator FM modulation ratio & index (for 16-bit FM bells, basses & OPL2 leads) */
+  /** Optional 2-operator FM modulation for DX7 Rhodes, slap bass, bells & metal */
   fmRatio?: number;
   fmIndexHz?: number;
-  /** Soft-clipping overdrive amount (0..1) routed before the lowpass cab filter */
+  fmDecaySec?: number;
+  /** Soft-clipping overdrive amount (0..1) */
   driveAmount?: number;
-  /** Optional -1 octave sub-oscillator blend (0..1) */
+  /** Guitar power-chord mode: layers Root + Perfect 5th (+ optional octave) */
+  powerChord?: boolean;
+  /** Guitar speaker-cabinet tone shaping (eliminates harsh digital fizz) */
+  cabinetEq?: boolean;
+  /** Optional -1 octave triangle sub-oscillator blend (0..1) */
   subOctaveGain?: number;
-  /** Optional expressiveness vibrato on sustained notes */
+  /** Optional expressive vibrato on sustained notes */
   vibratoHz?: number;
   vibratoCents?: number;
   vibratoDelaySec?: number;
+}
+
+export interface ChordEvent {
+  readonly notes: readonly number[];
+  readonly steps?: number;
+  readonly vel?: number;
+  /** Optional alternate pad/chord voice (e.g., gothic organ intro or brass stab) */
+  readonly altVoice?: boolean;
 }
 
 export interface TrackScore {
@@ -44,14 +82,18 @@ export interface TrackScore {
   counter?: readonly NoteCell[];
   arp: readonly NoteCell[];
   bass: readonly NoteCell[];
-  /** Chord MIDI note arrays triggered at specific 16th steps (with optional sustain steps) */
-  chords: Partial<Record<number, readonly number[] | { notes: readonly number[]; steps?: number; vel?: number }>>;
-  /** Optional accented steps (e.g. filter / FM bite boost) */
+  /** Chord MIDI note arrays triggered at specific 16th steps */
+  chords: Partial<Record<number, readonly number[] | ChordEvent>>;
+  /** Optional accented steps (boosts filter / FM bite) */
   accentSteps?: readonly number[];
   /** Percussion step triggers (0..totalSteps-1) */
   kick: readonly number[];
   snare: readonly number[];
+  gatedSnare?: boolean;
+  clap?: readonly number[];
+  rim?: readonly number[];
   hatClosed: readonly number[];
+  hatAccent?: readonly number[];
   hatOpen?: readonly number[];
   clang?: readonly number[];
   crash?: readonly number[];
@@ -61,9 +103,12 @@ export interface TrackScore {
   arpVoice: SynthVoiceConfig;
   bassVoice: SynthVoiceConfig;
   padVoice: SynthVoiceConfig;
+  /** Optional secondary chord voice (e.g., gothic organ or brass stabs) */
+  altPadVoice?: SynthVoiceConfig;
   drumGain: number;
   delayFeedback: number;
   delayMix: number;
+  reverbMix: number;
 }
 
 function midiToHz(midi: number): number {
@@ -73,9 +118,14 @@ function midiToHz(midi: number): number {
 const SCHEDULE_AHEAD_SEC = 0.14;
 const LOOKAHEAD_MS = 25;
 
-/** Concise sustained/articulated note tuple helper: s(midi, steps, velocity) */
-function s(midi: number, steps = 2, vel = 1): readonly [number, number, number] {
-  return [midi, steps, vel];
+/** Articulated note tuple helper: s(midi, steps, velocity, optionalGlideSemitones) */
+function s(
+  midi: number,
+  steps = 2,
+  vel = 1,
+  glideSemi?: number,
+): readonly [number, number, number] | readonly [number, number, number, number] {
+  return glideSemi !== undefined ? [midi, steps, vel, glideSemi] : [midi, steps, vel];
 }
 
 function concatBars(...barsList: readonly (readonly NoteCell[])[]): NoteCell[] {
@@ -96,991 +146,1599 @@ function repeatBars(stepsInBar: readonly number[], barIndices: readonly number[]
   return out;
 }
 
-const BARS_0_TO_7 = [0, 1, 2, 3, 4, 5, 6, 7] as const;
+const EMPTY_BAR: readonly NoteCell[] = [
+  null, null, null, null, null, null, null, null,
+  null, null, null, null, null, null, null, null,
+];
+
+// ============================================================================
+// 7 ORIGINAL MULTI-SECTION COMPOSITIONS INSPIRED BY CLASSIC VGM SOUNDTRACKS
+// ============================================================================
 
 export const TRACK_SCORES: Record<MusicTrackId, TrackScore> = {
-  // =========================================================================
-  // 1. Starter (0 pts) — "Hollow Corridor" (Corpse Party PSP Ch.1 Main Vibe)
-  // 88 BPM · C# Minor / Harmonic Minor · 8 bars (128 steps)
-  // Fragile FM music-box motif, cold ominous string drones, quiet pulse ticks
-  // =========================================================================
+  // ==========================================================================
+  // 1. Starter (0 pts) — "Neon Corridor"
+  //    Inspired by: Corpse Party BCR (PSP) — Chapter 1 Main Theme
+  //    128 BPM · F Minor / Ab Major · 12 bars (192 steps)
+  //    Bars 0-1: Rapid sparkling 8-bit 25%-pulse arpeggio intro + riser
+  //    Bars 2-5: Punchy syncopated electro-breakbeat funk & FM bass groove
+  //    Bars 6-11: Euphoric arcade synth-funk chorus with warm DX7 E-piano & lead
+  // ==========================================================================
   phosphor_idle: {
-    bpm: 88,
-    totalSteps: 128,
+    bpm: 128,
+    totalSteps: 192,
     chords: {
-      // A Section: C#m9 -> A/C# -> F#m7 -> G#7sus4 -> G#7
-      0: { notes: [49, 56, 60, 64], steps: 15 },
-      16: { notes: [49, 57, 61, 64], steps: 15 },
-      32: { notes: [42, 54, 57, 61], steps: 15 },
-      48: { notes: [44, 56, 61, 63], steps: 8 },
-      56: { notes: [44, 56, 60, 63], steps: 7 },
-      // B Section: Amaj7 -> G#m7 -> F#m9 -> Ddim7/G# (chilling turnaround)
-      64: { notes: [45, 57, 61, 64], steps: 15 },
-      80: { notes: [44, 56, 59, 63], steps: 15 },
-      96: { notes: [42, 54, 57, 61], steps: 15 },
-      112: { notes: [44, 53, 56, 60], steps: 15 },
+      // Bars 2-5: Sharp staccato funk-synth stabs (altPadVoice)
+      32: { notes: [60, 63, 68, 72], steps: 3, vel: 0.9, altVoice: true }, // Fm7
+      42: { notes: [60, 63, 68, 72], steps: 2, vel: 0.72, altVoice: true },
+      48: { notes: [61, 65, 68, 72], steps: 3, vel: 0.9, altVoice: true }, // DbMaj7
+      58: { notes: [61, 65, 68, 72], steps: 2, vel: 0.72, altVoice: true },
+      64: { notes: [63, 67, 70, 72], steps: 3, vel: 0.9, altVoice: true }, // Eb6
+      74: { notes: [63, 67, 70, 72], steps: 2, vel: 0.72, altVoice: true },
+      80: { notes: [60, 63, 67, 70], steps: 4, vel: 0.88, altVoice: true }, // Cm7
+      88: { notes: [60, 64, 67, 70], steps: 4, vel: 0.95, altVoice: true }, // C7 turnaround
+      // Bars 6-11: Warm lush DX7 electric piano chorus chords (padVoice)
+      96: { notes: [53, 60, 65, 68], steps: 10, vel: 0.92 }, // DbMaj7/F
+      106: { notes: [53, 60, 65, 68], steps: 4, vel: 0.65 },
+      112: { notes: [55, 63, 67, 70], steps: 10, vel: 0.92 }, // Eb7
+      122: { notes: [55, 63, 67, 70], steps: 4, vel: 0.65 },
+      128: { notes: [55, 60, 63, 70], steps: 10, vel: 0.9 }, // Cm7
+      138: { notes: [55, 60, 63, 70], steps: 4, vel: 0.65 },
+      144: { notes: [53, 60, 63, 68], steps: 10, vel: 0.95 }, // Fm7
+      154: { notes: [56, 63, 68, 72], steps: 4, vel: 0.75 }, // Ab/Eb lift
+      160: { notes: [58, 61, 65, 68], steps: 8, vel: 0.92 }, // Bbm7
+      168: { notes: [60, 63, 67, 70], steps: 7, vel: 0.92 }, // Cm7
+      176: { notes: [61, 65, 68, 72], steps: 7, vel: 0.95 }, // DbMaj7
+      184: { notes: [60, 64, 67, 70], steps: 7, vel: 1.0 }, // C7
     },
-    bass: concatBars(
-      // Bar 0-3 (Section A)
-      [s(37, 6, 0.9), null, null, null, null, null, null, null, s(44, 4, 0.75), null, null, null, null, null, null, null],
-      [s(37, 6, 0.9), null, null, null, null, null, null, null, s(45, 4, 0.75), null, null, null, null, null, null, null],
-      [s(30, 6, 0.9), null, null, null, null, null, null, null, s(37, 4, 0.75), null, null, null, null, null, null, null],
-      [s(32, 6, 0.9), null, null, null, null, null, null, null, s(32, 4, 0.8), null, null, null, s(39, 3, 0.7), null, null, null],
-      // Bar 4-7 (Section B)
-      [s(33, 6, 0.95), null, null, null, null, null, null, null, s(40, 4, 0.75), null, null, null, null, null, null, null],
-      [s(32, 6, 0.95), null, null, null, null, null, null, null, s(39, 4, 0.75), null, null, null, null, null, null, null],
-      [s(30, 6, 0.95), null, null, null, null, null, null, null, s(37, 4, 0.75), null, null, null, null, null, null, null],
-      [s(32, 8, 1.0), null, null, null, null, null, null, null, s(32, 4, 0.85), null, null, null, s(44, 2, 0.7), null, null, null],
-    ),
     arp: concatBars(
-      // Cold clockwork music-box pattern
-      [61, null, 68, null, 73, null, 68, null, 64, null, 68, null, 73, null, 68, null],
-      [61, null, 69, null, 73, null, 69, null, 64, null, 69, null, 73, null, 69, null],
-      [61, null, 66, null, 69, null, 66, null, 64, null, 66, null, 69, null, 66, null],
-      [63, null, 68, null, 73, null, 68, null, 60, null, 68, null, 72, null, 68, null],
-      [64, null, 69, null, 73, null, 69, null, 68, null, 73, null, 76, null, 73, null],
-      [63, null, 68, null, 71, null, 68, null, 66, null, 71, null, 75, null, 71, null],
-      [61, null, 66, null, 69, null, 66, null, 64, null, 69, null, 73, null, 69, null],
-      [60, null, 65, null, 68, null, 72, null, 68, null, 65, null, 60, null, null, null],
+      // Bar 0: Iconic crisp 8-bit chiptune square arp intro (Fm -> Db)
+      [65, 68, 72, 77, 72, 68, 65, 72, 61, 65, 68, 73, 68, 65, 61, 68],
+      // Bar 1: Climbing chiptune arp (Eb -> C7 climax into drop!)
+      [63, 67, 70, 75, 70, 67, 63, 70, 60, 64, 67, 70, 72, 76, 79, 82],
+      // Bars 2-5: Tight syncopated funky electro pings
+      [null, null, 72, null, null, 68, null, 72, null, null, 75, null, null, 72, null, null],
+      [null, null, 73, null, null, 68, null, 73, null, null, 77, null, null, 73, null, null],
+      [null, null, 75, null, null, 70, null, 75, null, null, 79, null, null, 75, null, null],
+      [null, null, 72, null, null, 67, null, 72, null, 70, null, 72, null, 76, null, null],
+      // Bars 6-11: Shimmering arcade synth-funk arpeggio sparkle
+      [65, null, 68, null, 72, null, 77, null, 72, null, 68, null, 72, null, 77, null],
+      [67, null, 70, null, 75, null, 79, null, 75, null, 70, null, 75, null, 79, null],
+      [67, null, 70, null, 72, null, 75, null, 72, null, 70, null, 72, null, 75, null],
+      [65, null, 68, null, 72, null, 77, null, 75, null, 72, null, 68, null, 72, null],
+      [65, null, 68, null, 73, null, 70, null, 67, null, 70, null, 75, null, 72, null],
+      [65, null, 68, null, 72, null, 77, null, 67, null, 70, null, 76, null, 79, null],
+    ),
+    bass: concatBars(
+      // Bars 0-1: Silent during pure 8-bit chiptune intro, sub pickup at end of Bar 1
+      EMPTY_BAR,
+      [null, null, null, null, null, null, null, null, null, null, null, null, s(36, 1, 0.7), null, s(48, 2, 0.9), null],
+      // Bars 2-5: Punchy syncopated electro-breakbeat FM bassline
+      [s(41, 2, 1), null, s(41, 1, 0.75), null, null, null, s(53, 1, 0.9), null, null, null, s(41, 2, 0.95), null, s(48, 1, 0.8), null, s(44, 2, 0.88), null],
+      [s(37, 2, 1), null, s(37, 1, 0.75), null, null, null, s(49, 1, 0.9), null, null, null, s(37, 2, 0.95), null, s(44, 1, 0.8), null, s(41, 2, 0.88), null],
+      [s(39, 2, 1), null, s(39, 1, 0.75), null, null, null, s(51, 1, 0.9), null, null, null, s(39, 2, 0.95), null, s(46, 1, 0.8), null, s(43, 2, 0.88), null],
+      [s(36, 2, 1), null, s(36, 1, 0.75), null, null, null, s(48, 1, 0.9), null, s(36, 2, 0.95), null, s(40, 2, 0.9), null, s(43, 2, 0.95), null, s(46, 2, 0.95), null],
+      // Bars 6-11: Bouncy melodic synth-funk chorus bass
+      [s(37, 2, 1), null, s(49, 1, 0.85), null, null, null, s(37, 2, 0.95), null, null, null, s(44, 2, 0.9), null, s(49, 2, 0.9), null, s(41, 2, 0.85), null],
+      [s(39, 2, 1), null, s(51, 1, 0.85), null, null, null, s(39, 2, 0.95), null, null, null, s(46, 2, 0.9), null, s(51, 2, 0.9), null, s(43, 2, 0.85), null],
+      [s(36, 2, 1), null, s(48, 1, 0.85), null, null, null, s(36, 2, 0.95), null, null, null, s(43, 2, 0.9), null, s(48, 2, 0.9), null, s(39, 2, 0.85), null],
+      [s(41, 2, 1), null, s(53, 1, 0.85), null, null, null, s(41, 2, 0.95), null, s(44, 2, 0.9), null, s(48, 2, 0.92), null, s(44, 2, 0.88), null, s(41, 2, 0.9), null],
+      [s(34, 2, 1), null, s(46, 1, 0.85), null, s(34, 2, 0.9), null, s(41, 2, 0.85), null, s(36, 2, 1), null, s(48, 1, 0.85), null, s(36, 2, 0.9), null, s(43, 2, 0.88), null],
+      [s(37, 2, 1), null, s(49, 1, 0.85), null, s(37, 2, 0.92), null, s(44, 2, 0.9), null, s(36, 2, 1), null, s(48, 1, 0.85), null, s(40, 2, 0.95), null, s(43, 2, 0.95), null],
     ),
     lead: concatBars(
-      // Bar 0-3: eerie hesitant melody with long held breaths
-      [null, null, null, null, s(76, 4, 0.9), null, null, null, s(75, 2, 0.85), null, s(73, 4, 0.95), null, null, null, null, null],
-      [null, null, null, null, s(76, 3, 0.9), null, null, s(78, 2, 0.9), s(76, 4, 0.9), null, null, null, s(73, 3, 0.75), null, null, null],
-      [null, null, null, null, s(73, 3, 0.85), null, null, s(75, 2, 0.85), s(76, 4, 0.9), null, null, null, s(73, 3, 0.8), null, null, null],
-      [s(75, 6, 0.9), null, null, null, null, null, s(73, 2, 0.8), null, s(72, 6, 0.95), null, null, null, null, null, null, null],
-      // Bar 4-7: darker harmonic minor climb + descent
-      [s(80, 4, 0.95), null, null, null, s(78, 2, 0.85), null, s(76, 4, 0.9), null, null, null, s(75, 2, 0.8), null, s(76, 3, 0.9), null, null, null],
-      [s(75, 4, 0.9), null, null, null, s(73, 2, 0.85), null, s(71, 4, 0.85), null, null, null, null, null, s(75, 3, 0.8), null, null, null],
-      [s(73, 4, 0.9), null, null, null, s(76, 2, 0.9), null, s(78, 4, 0.95), null, null, null, s(76, 2, 0.85), null, s(73, 3, 0.8), null, null, null],
-      [s(72, 6, 0.95), null, null, null, null, null, s(75, 2, 0.85), null, s(73, 4, 0.8), null, null, null, null, null, null, null],
+      // Bars 0-1: Let the sparkling 8-bit chiptune arp shine solo!
+      EMPTY_BAR,
+      EMPTY_BAR,
+      // Bars 2-5: Catchy, playful syncopated electro-breakbeat synth hook
+      [s(77, 2, 0.95), null, s(75, 1, 0.85), null, s(72, 2, 0.9), null, s(75, 2, 0.95), null, null, null, s(77, 2, 1, -2), null, s(80, 2, 0.95), null, s(77, 2, 0.85), null],
+      [s(73, 2, 0.95), null, s(72, 1, 0.85), null, s(68, 2, 0.9), null, s(72, 2, 0.92), null, null, null, s(73, 2, 0.95), null, s(75, 2, 0.95), null, s(72, 2, 0.85), null],
+      [s(75, 2, 0.95), null, s(72, 1, 0.85), null, s(70, 2, 0.9), null, s(72, 2, 0.95), null, null, null, s(75, 2, 1), null, s(79, 2, 0.95), null, s(75, 2, 0.88), null],
+      [s(72, 3, 0.95), null, null, s(70, 2, 0.88), null, s(67, 2, 0.85), null, s(70, 2, 0.9), null, s(72, 3, 0.95), null, null, s(76, 3, 1), null, null, null],
+      // Bars 6-11: Euphoric, super-catchy arcade synth-funk chorus melody!
+      [s(80, 3, 1, -2), null, null, s(77, 2, 0.9), null, s(75, 2, 0.88), null, s(77, 3, 0.95), null, null, s(80, 2, 0.95), null, s(84, 3, 1), null, null, null],
+      [s(82, 3, 1), null, null, s(79, 2, 0.9), null, s(75, 2, 0.88), null, s(79, 3, 0.95), null, null, s(77, 2, 0.9), null, s(75, 3, 0.92), null, null, null],
+      [s(79, 3, 0.98), null, null, s(75, 2, 0.9), null, s(72, 2, 0.88), null, s(75, 3, 0.95), null, null, s(79, 2, 0.95), null, s(82, 3, 1), null, null, null],
+      [s(80, 4, 1, -1), null, null, null, s(77, 2, 0.92), null, s(75, 2, 0.9), null, s(72, 4, 0.95), null, null, null, s(75, 2, 0.88), null, s(77, 2, 0.92), null],
+      [s(77, 3, 0.98), null, null, s(73, 2, 0.9), null, s(77, 2, 0.95), null, s(80, 2, 1), null, s(79, 3, 0.95), null, null, s(75, 2, 0.9), null, s(79, 2, 0.95), null],
+      [s(80, 4, 1), null, null, null, s(84, 2, 1), null, s(80, 2, 0.92), null, s(79, 4, 1, -1), null, null, null, s(76, 3, 0.95), null, null, null],
     ),
     counter: concatBars(
-      [null, null, null, null, null, null, null, null, null, null, null, null, s(68, 4, 0.7), null, null, null],
-      [null, null, null, null, null, null, null, null, null, null, null, null, s(69, 4, 0.7), null, null, null],
-      [null, null, null, null, null, null, null, null, null, null, null, null, s(66, 4, 0.7), null, null, null],
-      [null, null, null, null, null, null, null, null, s(68, 6, 0.75), null, null, null, null, null, null, null],
-      [s(73, 6, 0.75), null, null, null, null, null, null, null, s(71, 6, 0.75), null, null, null, null, null, null, null],
-      [s(71, 6, 0.75), null, null, null, null, null, null, null, s(68, 6, 0.7), null, null, null, null, null, null, null],
-      [s(69, 6, 0.75), null, null, null, null, null, null, null, s(68, 6, 0.75), null, null, null, null, null, null, null],
-      [s(68, 8, 0.8), null, null, null, null, null, null, null, s(67, 4, 0.7), null, null, null, null, null, null, null],
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      // Bars 6-11: Bright octave-bell harmony answers in the chorus
+      [null, null, null, null, null, null, null, null, null, null, null, null, s(72, 2, 0.7), null, s(77, 2, 0.78), null],
+      [null, null, null, null, null, null, null, null, null, null, null, null, s(70, 2, 0.7), null, s(75, 2, 0.78), null],
+      [null, null, null, null, null, null, null, null, null, null, null, null, s(70, 2, 0.7), null, s(75, 2, 0.78), null],
+      [null, null, null, null, null, null, null, null, null, null, null, null, s(72, 2, 0.72), null, s(77, 2, 0.8), null],
+      [null, null, null, null, s(68, 2, 0.72), null, null, null, null, null, null, null, s(72, 2, 0.75), null, null, null],
+      [null, null, null, null, s(72, 2, 0.76), null, null, null, null, null, null, null, s(76, 2, 0.8), null, s(79, 2, 0.85), null],
     ),
-    kick: repeatBars([0, 8], [2, 3, 4, 5, 6, 7]),
-    snare: repeatBars([12], [4, 5, 6, 7]),
-    hatClosed: repeatBars([0, 4, 8, 12], BARS_0_TO_7),
-    clang: [48, 112],
+    accentSteps: [32, 48, 64, 80, 96, 112, 128, 144, 160, 176],
+    kick: [
+      ...repeatBars([0, 6, 10], [2, 3, 4, 5]),
+      ...repeatBars([0, 3, 6, 10], [6, 7, 8, 9, 10, 11]),
+    ],
+    snare: [
+      30, 31, // snappy fill out of 8-bit intro into drop!
+      ...repeatBars([4, 12], [2, 3, 4, 5, 6, 7, 8, 9, 10]),
+      180, 188, 190, 191, // energetic turnaround fill
+    ],
+    clap: repeatBars([4, 12], [6, 7, 8, 9, 10, 11]),
+    hatClosed: repeatBars([0, 2, 4, 6, 8, 10, 12, 14], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+    hatAccent: repeatBars([2, 6, 10, 14], [6, 7, 8, 9, 10, 11]),
+    hatOpen: repeatBars([14], [3, 5, 7, 9]),
+    crash: [32, 96, 160],
     leadVoice: {
-      waveform: 'sine',
-      fmRatio: 3.5,
-      fmIndexHz: 115,
-      cutoffHz: 3100,
-      attackSec: 0.01,
-      releaseSec: 0.58,
-      gain: 0.135,
-      delaySend: 0.48,
-      pan: 0.12,
-      vibratoHz: 4.8,
-      vibratoCents: 9,
-      vibratoDelaySec: 0.18,
+      waveform: 'pulse25',
+      detuneCents: 6,
+      highpassHz: 280,
+      cutoffHz: 3200,
+      cutoffPeakHz: 5800,
+      filterDecaySec: 0.14,
+      q: 1.4,
+      attackSec: 0.008,
+      decaySec: 0.14,
+      sustainLevel: 0.72,
+      releaseSec: 0.14,
+      gain: 0.165,
+      delaySend: 0.24,
+      reverbSend: 0.28,
+      pan: 0.06,
+      vibratoHz: 5.5,
+      vibratoCents: 11,
+      vibratoDelaySec: 0.12,
     },
     counterVoice: {
-      waveform: 'triangle',
-      detuneCents: 10,
-      cutoffHz: 1450,
-      attackSec: 0.08,
-      releaseSec: 0.9,
-      gain: 0.068,
-      delaySend: 0.35,
-      pan: -0.22,
+      waveform: 'epiano',
+      highpassHz: 420,
+      cutoffHz: 4200,
+      attackSec: 0.005,
+      decaySec: 0.18,
+      sustainLevel: 0.28,
+      releaseSec: 0.24,
+      gain: 0.11,
+      fmRatio: 3,
+      fmIndexHz: 110,
+      fmDecaySec: 0.08,
+      delaySend: 0.26,
+      reverbSend: 0.34,
+      pan: 0.38,
     },
     arpVoice: {
-      waveform: 'sine',
-      fmRatio: 2,
-      fmIndexHz: 65,
-      cutoffHz: 2600,
-      attackSec: 0.005,
-      releaseSec: 0.24,
-      gain: 0.072,
-      delaySend: 0.42,
-      pan: -0.18,
+      waveform: 'pulse25',
+      highpassHz: 360,
+      cutoffHz: 4600,
+      attackSec: 0.003,
+      decaySec: 0.075,
+      sustainLevel: 0.22,
+      releaseSec: 0.06,
+      gain: 0.105,
+      delaySend: 0.22,
+      reverbSend: 0.16,
+      pan: -0.26,
     },
     bassVoice: {
-      waveform: 'triangle',
-      cutoffHz: 360,
-      attackSec: 0.02,
-      releaseSec: 0.45,
+      waveform: 'slapbass',
+      cutoffHz: 950,
+      cutoffPeakHz: 2600,
+      filterDecaySec: 0.09,
+      q: 2.0,
+      attackSec: 0.004,
+      decaySec: 0.12,
+      sustainLevel: 0.58,
+      releaseSec: 0.08,
       gain: 0.24,
-      subOctaveGain: 0.35,
+      subOctaveGain: 0.38,
+      fmRatio: 2,
+      fmIndexHz: 95,
+      fmDecaySec: 0.055,
+      reverbSend: 0.04,
     },
     padVoice: {
-      waveform: 'sawtooth',
-      detuneCents: 12,
-      cutoffHz: 850,
-      attackSec: 0.28,
-      releaseSec: 1.9,
-      gain: 0.048,
-      delaySend: 0.3,
-      pan: 0.08,
+      waveform: 'epiano',
+      detuneCents: 6,
+      highpassHz: 220,
+      cutoffHz: 3000,
+      cutoffPeakHz: 4600,
+      filterDecaySec: 0.25,
+      attackSec: 0.012,
+      decaySec: 0.32,
+      sustainLevel: 0.52,
+      releaseSec: 0.38,
+      gain: 0.088,
+      fmRatio: 7,
+      fmIndexHz: 48,
+      fmDecaySec: 0.06,
+      reverbSend: 0.36,
+      pan: -0.18,
     },
-    drumGain: 0.095,
-    delayFeedback: 0.42,
-    delayMix: 0.34,
+    altPadVoice: {
+      waveform: 'brass',
+      detuneCents: 9,
+      highpassHz: 260,
+      cutoffHz: 2200,
+      cutoffPeakHz: 4800,
+      filterDecaySec: 0.1,
+      q: 1.4,
+      attackSec: 0.008,
+      decaySec: 0.12,
+      sustainLevel: 0.45,
+      releaseSec: 0.1,
+      gain: 0.078,
+      reverbSend: 0.24,
+      pan: 0.24,
+    },
+    drumGain: 0.29,
+    delayFeedback: 0.24,
+    delayMix: 0.18,
+    reverbMix: 0.24,
   },
 
-  // =========================================================================
-  // 2. 150 pts — "Clockwork Chamber" (Escape Goat: Machinery Vibe)
-  // 118 BPM · D Dorian / Minor · 8 bars (128 steps)
-  // Quirky interlocking pulse-wave puzzle gears, Dorian hook, crisp mechanical ticks
-  // =========================================================================
+  // ==========================================================================
+  // 2. 150 pts — "Velvet Machinery"
+  //    Inspired by: Escape Goat OST — Machinery
+  //    118 BPM · G Dorian / G Minor · 12 bars (192 steps)
+  //    Bars 0-1: Signature funky slap-bass & crisp fusion drum pocket intro
+  //    Bars 2-5: Warm DX7 Rhodes minor-9th groove + glassy bells + soulful lead
+  //    Bars 6-9: Soaring 90s Japanese fusion chorus with brass stabs & bends
+  //    Bars 10-11: Breezy jazz-fusion turnaround walking cleanly back to Bar 0
+  // ==========================================================================
   bitplane_bounce: {
     bpm: 118,
-    totalSteps: 128,
+    totalSteps: 192,
     chords: {
-      0: { notes: [50, 57, 62, 65], steps: 14 }, // Dm
-      16: { notes: [50, 55, 59, 62], steps: 14 }, // G/D (Dorian lift)
-      32: { notes: [46, 53, 57, 62], steps: 14 }, // Bbmaj7
-      48: { notes: [45, 52, 57, 61], steps: 14 }, // A7
-      64: { notes: [53, 57, 60, 64], steps: 14 }, // Fmaj7
-      80: { notes: [52, 55, 59, 64], steps: 14 }, // Em7
-      96: { notes: [46, 53, 58, 62], steps: 14 }, // Bb
-      112: { notes: [45, 52, 55, 61], steps: 14 }, // A7
+      // Bars 2-5: Warm velvety DX7 Rhodes jazz-fusion voicings (Gm9 -> C13)
+      32: { notes: [58, 62, 65, 69], steps: 10, vel: 0.88 }, // Gm9 (root G in bass)
+      42: { notes: [58, 62, 65, 69], steps: 4, vel: 0.62 },
+      48: { notes: [58, 62, 64, 69], steps: 10, vel: 0.88 }, // C13 (root C in bass)
+      58: { notes: [58, 62, 64, 69], steps: 4, vel: 0.62 },
+      64: { notes: [58, 62, 65, 69], steps: 10, vel: 0.9 }, // Gm9
+      74: { notes: [60, 63, 67, 70], steps: 4, vel: 0.68 }, // Cm7 passing
+      80: { notes: [58, 62, 64, 69], steps: 8, vel: 0.88 }, // C13
+      88: { notes: [60, 62, 66, 69], steps: 6, vel: 0.92, altVoice: true }, // D9 brass lift
+      // Bars 6-9: Lush soaring fusion chorus (EbMaj7 -> Dm7 -> Cm9 -> D7)
+      96: { notes: [58, 62, 65, 67], steps: 11, vel: 0.94 }, // EbMaj7
+      108: { notes: [58, 62, 65, 67], steps: 3, vel: 0.72, altVoice: true },
+      112: { notes: [57, 60, 64, 67], steps: 11, vel: 0.92 }, // Dm7(11)
+      124: { notes: [57, 60, 64, 67], steps: 3, vel: 0.72, altVoice: true },
+      128: { notes: [58, 62, 63, 67], steps: 11, vel: 0.94 }, // Cm9
+      144: { notes: [57, 60, 65, 67], steps: 7, vel: 0.9 }, // F6/9
+      152: { notes: [58, 62, 64, 69], steps: 7, vel: 0.92, altVoice: true }, // C13 stab
+      // Bars 10-11: Breezy fusion turnaround (Cm9 -> F13 -> BbMaj7 -> D7)
+      160: { notes: [58, 62, 63, 67], steps: 7, vel: 0.9 }, // Cm9
+      168: { notes: [57, 60, 62, 69], steps: 7, vel: 0.9 }, // F13
+      176: { notes: [57, 62, 65, 69], steps: 7, vel: 0.92 }, // BbMaj7
+      184: { notes: [57, 60, 66, 69], steps: 7, vel: 0.95, altVoice: true }, // D7 brass hit
     },
     bass: concatBars(
-      [38, null, 50, null, 38, 50, 41, 45, 38, null, 50, null, 45, null, 41, null],
-      [38, null, 50, null, 38, 50, 43, 47, 38, null, 50, null, 47, null, 43, null],
-      [34, null, 46, null, 34, 46, 38, 41, 34, null, 46, null, 41, null, 38, null],
-      [33, null, 45, null, 33, 45, 37, 40, 33, null, 45, null, 40, 43, 45, 37],
-      [41, null, 53, null, 41, 53, 45, 48, 41, null, 53, null, 48, null, 45, null],
-      [40, null, 52, null, 40, 52, 43, 47, 40, null, 52, null, 47, null, 43, null],
-      [34, null, 46, null, 34, 46, 41, 38, 34, null, 46, null, 41, null, 43, null],
-      [33, null, 45, null, 33, 45, 40, 37, 33, null, 40, 43, 45, null, 49, null],
+      // Bar 0-1: Iconic funky slap-bass pocket (thumb low G + bright octave pop!)
+      [s(43, 2, 1), null, s(43, 1, 0.7), s(55, 1, 0.92), null, null, s(43, 2, 0.95), null, null, s(41, 1, 0.78), s(43, 2, 0.95), null, s(53, 1, 0.88), null, s(50, 2, 0.85), null],
+      [s(43, 2, 1), null, s(43, 1, 0.7), s(55, 1, 0.92), null, null, s(48, 2, 0.95), null, null, s(46, 1, 0.8), s(48, 2, 0.92), null, s(50, 1, 0.88), null, s(46, 2, 0.88), null],
+      // Bars 2-5: Gm9 -> C13 -> Gm9 -> C13/D7 funky slap pocket
+      [s(43, 2, 1), null, s(43, 1, 0.7), s(55, 1, 0.9), null, null, s(43, 2, 0.92), null, null, s(41, 1, 0.75), s(43, 2, 0.92), null, s(53, 1, 0.88), null, s(50, 2, 0.84), null],
+      [s(36, 2, 1), null, s(36, 1, 0.7), s(48, 1, 0.92), null, null, s(36, 2, 0.92), null, null, s(43, 1, 0.8), s(46, 2, 0.92), null, s(48, 1, 0.9), null, s(43, 2, 0.85), null],
+      [s(43, 2, 1), null, s(43, 1, 0.7), s(55, 1, 0.92), null, null, s(43, 2, 0.92), null, null, s(46, 1, 0.82), s(48, 2, 0.92), null, s(50, 1, 0.88), null, s(46, 2, 0.86), null],
+      [s(36, 2, 1), null, s(48, 1, 0.88), null, null, null, s(36, 2, 0.9), null, s(38, 2, 1), null, s(50, 1, 0.9), null, s(45, 2, 0.88), null, s(38, 2, 0.92), null],
+      // Bars 6-9: EbMaj7 -> Dm7 -> Cm9 -> F6/C13 walking fusion slap bass
+      [s(39, 2, 1), null, s(51, 1, 0.88), null, null, null, s(39, 2, 0.92), null, null, s(46, 1, 0.82), s(51, 2, 0.9), null, s(46, 2, 0.85), null, s(43, 2, 0.85), null],
+      [s(38, 2, 1), null, s(50, 1, 0.88), null, null, null, s(38, 2, 0.92), null, null, s(45, 1, 0.82), s(50, 2, 0.9), null, s(45, 2, 0.85), null, s(41, 2, 0.85), null],
+      [s(36, 2, 1), null, s(48, 1, 0.88), null, null, null, s(36, 2, 0.92), null, null, s(43, 1, 0.82), s(48, 2, 0.9), null, s(46, 2, 0.86), null, s(43, 2, 0.86), null],
+      [s(41, 2, 1), null, s(53, 1, 0.88), null, s(41, 2, 0.9), null, s(45, 2, 0.86), null, s(36, 2, 1), null, s(48, 1, 0.9), null, s(43, 2, 0.9), null, s(46, 2, 0.9), null],
+      // Bars 10-11: Cm9 -> F13 -> BbMaj7 -> D7 nimble turnaround
+      [s(36, 2, 1), null, s(48, 1, 0.88), null, s(43, 2, 0.88), null, s(36, 2, 0.86), null, s(41, 2, 1), null, s(53, 1, 0.88), null, s(48, 2, 0.88), null, s(45, 2, 0.86), null],
+      [s(34, 2, 1), null, s(46, 1, 0.88), null, s(41, 2, 0.88), null, s(34, 2, 0.86), null, s(38, 2, 1), null, s(50, 1, 0.92), null, s(45, 2, 0.9), null, s(41, 2, 0.92), null],
     ),
     arp: concatBars(
-      [62, 65, 69, 72, 69, 65, 62, 69, 62, 65, 69, 72, 74, 72, 69, 65],
-      [62, 67, 71, 74, 71, 67, 62, 71, 62, 67, 71, 74, 76, 74, 71, 67],
-      [58, 62, 65, 69, 65, 62, 58, 65, 58, 62, 65, 69, 72, 69, 65, 62],
-      [57, 61, 64, 69, 64, 61, 57, 64, 57, 61, 64, 67, 69, 73, 76, 73],
-      [65, 69, 72, 76, 72, 69, 65, 72, 65, 69, 72, 76, 77, 76, 72, 69],
-      [64, 67, 71, 74, 71, 67, 64, 71, 64, 67, 71, 74, 76, 74, 71, 67],
-      [58, 62, 65, 70, 65, 62, 58, 65, 58, 62, 65, 70, 74, 70, 65, 62],
-      [57, 61, 64, 67, 69, 67, 64, 61, 57, 61, 64, 69, 73, null, 76, null],
+      // Bars 0-1: Subtle syncopated FM bell ticks over the slap bass intro
+      [null, null, null, null, null, null, 74, null, null, null, null, null, null, null, 79, null],
+      [null, null, null, null, null, null, 77, null, null, null, null, null, 74, null, 79, null],
+      // Bars 2-5: Sparkly DX7 bell accents answering the Rhodes
+      [null, null, 74, null, null, null, 77, null, null, null, 81, null, null, null, 79, null],
+      [null, null, 76, null, null, null, 79, null, null, null, 81, null, null, null, 76, null],
+      [null, null, 74, null, null, null, 77, null, null, null, 81, null, null, null, 79, null],
+      [null, null, 76, null, null, null, 79, null, null, 78, null, 81, null, null, 78, null],
+      // Bars 6-11: Silky bell arpeggio shimmer in chorus & bridge
+      [74, null, 79, null, 82, null, 79, null, 74, null, 79, null, 82, null, 79, null],
+      [72, null, 77, null, 81, null, 77, null, 72, null, 77, null, 81, null, 77, null],
+      [74, null, 75, null, 79, null, 82, null, 79, null, 75, null, 74, null, 79, null],
+      [72, null, 77, null, 81, null, 77, null, 76, null, 79, null, 81, null, 79, null],
+      [74, null, 79, null, 75, null, 79, null, 77, null, 81, null, 74, null, 77, null],
+      [74, null, 77, null, 81, null, 77, null, 78, null, 81, null, 84, null, 81, null],
     ),
     lead: concatBars(
-      [s(74, 2), null, 77, null, s(76, 2), 74, 72, null, s(74, 2), null, 69, null, s(72, 3), null, null, null],
-      [s(71, 2), null, 74, null, s(76, 2), 74, 71, null, s(74, 2), null, 79, null, s(76, 3), null, null, null],
-      [s(74, 2), null, 77, null, s(81, 2), 79, 77, null, s(74, 2), null, 70, null, s(74, 3), null, null, null],
-      [s(73, 2), null, 76, null, s(79, 2), 76, 73, null, s(69, 4), null, null, null, s(76, 2), null, 73, null],
-      [s(77, 2), null, 81, null, s(79, 2), 77, 76, null, s(72, 2), null, 76, null, s(77, 3), null, null, null],
-      [s(76, 2), null, 79, null, s(78, 2), 76, 74, null, s(71, 2), null, 74, null, s(76, 3), null, null, null],
-      [s(74, 2), null, 70, null, s(74, 2), 77, 82, null, s(81, 2), null, 77, null, s(74, 3), null, null, null],
-      [s(76, 2), null, 73, null, s(69, 2), 73, 76, null, s(81, 4), null, null, null, s(76, 2), null, null, null],
+      // Bars 0-1: Pure slap-bass & drum groove intro!
+      EMPTY_BAR,
+      EMPTY_BAR,
+      // Bars 2-5: Soulful, expressive 90s fusion FM synth lead with smooth glides
+      [null, null, s(74, 3, 0.92, -2), null, null, s(77, 2, 0.9), null, s(79, 4, 0.96, -1), null, null, null, s(77, 2, 0.86), null, s(74, 3, 0.88), null, null],
+      [null, null, s(76, 3, 0.94, -2), null, null, s(79, 2, 0.92), null, s(81, 4, 0.98), null, null, null, s(79, 2, 0.88), null, s(76, 2, 0.86), null, s(74, 2, 0.84)],
+      [s(74, 3, 0.94), null, null, s(77, 2, 0.9), null, s(79, 2, 0.94), null, s(82, 4, 1, -2), null, null, null, s(81, 2, 0.9), null, s(79, 3, 0.9), null, null],
+      [s(76, 4, 0.94), null, null, null, s(74, 2, 0.86), null, s(72, 2, 0.85), null, s(74, 4, 0.95), null, null, null, s(78, 3, 0.95, -2), null, null, null],
+      // Bars 6-9: Soaring jazz-fusion chorus melody!
+      [s(79, 4, 1, -2), null, null, null, s(82, 2, 0.94), null, s(86, 4, 1, -2), null, null, null, s(82, 2, 0.9), null, s(79, 3, 0.92), null, null, null],
+      [s(81, 4, 0.98), null, null, null, s(77, 2, 0.9), null, s(76, 4, 0.94), null, null, null, s(77, 2, 0.9), null, s(79, 3, 0.94), null, null, null],
+      [s(79, 3, 0.96), null, null, s(75, 2, 0.9), null, s(74, 2, 0.88), null, s(75, 3, 0.94), null, null, s(79, 2, 0.95), null, s(82, 3, 1), null, null, null],
+      [s(81, 4, 1, -2), null, null, null, s(79, 2, 0.92), null, s(77, 2, 0.9), null, s(76, 5, 0.96), null, null, null, null, s(74, 2, 0.88), null, null],
+      // Bars 10-11: Breezy playful fusion bridge & turnaround
+      [s(75, 3, 0.95), null, null, s(79, 2, 0.92), null, s(74, 2, 0.88), null, null, s(77, 3, 0.95), null, null, s(81, 2, 0.94), null, s(79, 2, 0.9), null, null],
+      [s(77, 3, 0.96), null, null, s(74, 2, 0.9), null, s(77, 2, 0.94), null, null, s(78, 4, 1, -2), null, null, null, s(81, 3, 0.98), null, null, null],
     ),
     counter: concatBars(
-      [null, null, null, null, null, null, null, null, 69, null, 72, null, 69, null, null, null],
-      [null, null, null, null, null, null, null, null, 67, null, 71, null, 67, null, null, null],
-      [null, null, null, null, null, null, null, null, 65, null, 69, null, 65, null, null, null],
-      [null, null, null, null, null, null, null, null, 64, null, 67, null, 69, null, null, null],
-      [72, null, null, null, 76, null, null, null, 69, null, 72, null, 76, null, null, null],
-      [71, null, null, null, 74, null, null, null, 67, null, 71, null, 74, null, null, null],
-      [70, null, null, null, 74, null, null, null, 77, null, 74, null, 70, null, null, null],
-      [69, null, 73, null, 76, null, 73, null, 76, null, null, null, null, null, null, null],
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      // Bars 6-9: Subtle warm synth-brass harmony pad answering chorus phrases
+      [null, null, null, null, null, null, null, null, null, null, null, null, s(70, 3, 0.72), null, null, null],
+      [null, null, null, null, null, null, null, null, null, null, null, null, s(69, 3, 0.72), null, null, null],
+      [null, null, null, null, null, null, null, null, null, null, null, null, s(70, 3, 0.72), null, null, null],
+      [null, null, null, null, null, null, null, null, s(69, 3, 0.75), null, null, null, s(72, 3, 0.78), null, null, null],
+      EMPTY_BAR,
+      [null, null, null, null, null, null, null, null, s(72, 3, 0.75), null, null, null, s(74, 3, 0.78), null, null, null],
     ),
-    kick: repeatBars([0, 6, 8, 12], BARS_0_TO_7),
-    snare: [...repeatBars([4, 12], BARS_0_TO_7), 62, 126],
-    hatClosed: repeatBars([0, 2, 4, 6, 8, 10, 12, 14], BARS_0_TO_7),
-    hatOpen: [14, 46, 78, 110],
-    clang: repeatBars([2, 10], [0, 2, 4, 6]),
-    crash: [0, 64],
+    accentSteps: [0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176],
+    kick: repeatBars([0, 6, 10], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+    snare: [
+      ...repeatBars([4, 12], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+      180, 188, 190,
+    ],
+    rim: repeatBars([7, 15], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+    hatClosed: repeatBars([0, 2, 3, 4, 6, 8, 10, 11, 12, 14], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+    hatAccent: repeatBars([2, 6, 10, 14], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+    hatOpen: repeatBars([14], [1, 3, 5, 7, 9, 11]),
+    crash: [32, 96],
     leadVoice: {
-      waveform: 'square',
-      cutoffHz: 3400,
-      cutoffPeakHz: 4600,
-      q: 1.6,
-      attackSec: 0.005,
-      releaseSec: 0.16,
-      gain: 0.11,
-      delaySend: 0.22,
-      pan: 0.1,
-      vibratoHz: 6.0,
-      vibratoCents: 10,
+      waveform: 'brass',
+      detuneCents: 7,
+      highpassHz: 260,
+      cutoffHz: 2400,
+      cutoffPeakHz: 4800,
+      filterDecaySec: 0.16,
+      q: 1.5,
+      attackSec: 0.018,
+      decaySec: 0.16,
+      sustainLevel: 0.78,
+      releaseSec: 0.18,
+      gain: 0.165,
+      fmRatio: 1,
+      fmIndexHz: 42,
+      fmDecaySec: 0.12,
+      delaySend: 0.24,
+      reverbSend: 0.34,
+      pan: 0.08,
+      vibratoHz: 5.2,
+      vibratoCents: 14,
       vibratoDelaySec: 0.14,
     },
     counterVoice: {
-      waveform: 'square',
+      waveform: 'brass',
       detuneCents: 8,
-      cutoffHz: 2200,
-      attackSec: 0.006,
-      releaseSec: 0.14,
-      gain: 0.072,
-      delaySend: 0.18,
-      pan: -0.24,
-    },
-    arpVoice: {
-      waveform: 'square',
-      cutoffHz: 2050,
-      attackSec: 0.004,
-      releaseSec: 0.075,
-      gain: 0.056,
-      delaySend: 0.14,
-      pan: 0.26,
-    },
-    bassVoice: {
-      waveform: 'triangle',
-      cutoffHz: 850,
-      attackSec: 0.005,
-      releaseSec: 0.13,
-      gain: 0.25,
-      subOctaveGain: 0.25,
-    },
-    padVoice: {
-      waveform: 'triangle',
-      detuneCents: 10,
-      cutoffHz: 1450,
-      attackSec: 0.03,
-      releaseSec: 0.7,
-      gain: 0.045,
-      pan: -0.1,
-    },
-    drumGain: 0.175,
-    delayFeedback: 0.24,
-    delayMix: 0.19,
-  },
-
-  // =========================================================================
-  // 3. 400 pts — "Celestial Assembly" (Sea of Stars: Stars Align on the Assembly Line Vibe)
-  // 124 BPM · F# Minor · 8 bars (128 steps)
-  // Futuristic SNES-meets-synthwave factory groove, solstice bells, driving bass arps
-  // =========================================================================
-  outrun_crt: {
-    bpm: 124,
-    totalSteps: 128,
-    chords: {
-      0: { notes: [54, 57, 61, 66], steps: 15 }, // F#m
-      16: { notes: [50, 54, 57, 61], steps: 15 }, // Dmaj7
-      32: { notes: [52, 56, 59, 64], steps: 15 }, // E
-      48: { notes: [49, 52, 56, 61], steps: 15 }, // C#m7
-      64: { notes: [47, 50, 54, 57], steps: 15 }, // Bm7
-      80: { notes: [49, 52, 56, 61], steps: 15 }, // C#m7
-      96: { notes: [50, 54, 57, 61], steps: 15 }, // Dmaj7
-      112: { notes: [52, 56, 59, 64], steps: 8 }, // E
-      120: { notes: [49, 53, 56, 61], steps: 7 }, // C#7 turnaround
-    },
-    bass: concatBars(
-      [42, 42, 54, 42, 42, 42, 54, 42, 42, 42, 54, 42, 45, 42, 52, 42],
-      [38, 38, 50, 38, 38, 38, 50, 38, 38, 38, 50, 38, 42, 38, 49, 38],
-      [40, 40, 52, 40, 40, 40, 52, 40, 40, 40, 52, 40, 44, 40, 50, 40],
-      [37, 37, 49, 37, 37, 37, 49, 37, 37, 37, 49, 37, 40, 42, 44, 47],
-      [35, 35, 47, 35, 35, 35, 47, 35, 35, 35, 47, 35, 38, 35, 45, 35],
-      [37, 37, 49, 37, 37, 37, 49, 37, 37, 37, 49, 37, 40, 37, 47, 37],
-      [38, 38, 50, 38, 38, 38, 50, 38, 38, 38, 50, 38, 42, 38, 49, 38],
-      [40, 40, 52, 40, 40, 40, 52, 40, 37, 37, 49, 37, 41, 44, 49, 44],
-    ),
-    arp: concatBars(
-      [66, null, 69, null, 73, null, 69, null, 66, null, 69, null, 73, null, 78, null],
-      [62, null, 66, null, 69, null, 66, null, 62, null, 66, null, 69, null, 73, null],
-      [64, null, 68, null, 71, null, 68, null, 64, null, 68, null, 71, null, 76, null],
-      [61, null, 64, null, 68, null, 64, null, 61, null, 64, null, 68, null, 71, null],
-      [59, 62, 66, 69, 66, 62, 59, 66, 59, 62, 66, 69, 71, 69, 66, 62],
-      [61, 64, 68, 71, 68, 64, 61, 68, 61, 64, 68, 71, 73, 71, 68, 64],
-      [62, 66, 69, 73, 69, 66, 62, 69, 62, 66, 69, 73, 76, 73, 69, 66],
-      [64, 68, 71, 76, 71, 68, 64, 71, 61, 65, 68, 73, 77, 73, 68, 65],
-    ),
-    lead: concatBars(
-      [s(73, 3), null, null, 76, s(78, 4), null, null, 76, s(73, 2), null, 71, null, s(73, 3), null, null, null],
-      [s(74, 3), null, null, 76, s(78, 4), null, null, 73, s(69, 4), null, null, null, null, null, s(71, 2), null],
-      [s(76, 3), null, null, 78, s(80, 4), null, null, 76, s(74, 2), null, 73, null, s(71, 3), null, null, null],
-      [s(73, 4), null, null, null, s(71, 2), null, 69, null, s(68, 4), null, null, null, s(71, 2), null, 73, null],
-      [s(74, 3), null, null, 76, s(78, 4), null, null, 74, s(71, 2), null, 74, null, s(76, 3), null, null, null],
-      [s(73, 3), null, null, 74, s(76, 4), null, null, 73, s(68, 2), null, 71, null, s(73, 3), null, null, null],
-      [s(78, 3), null, null, 81, s(80, 4), null, null, 78, s(76, 2), null, 74, null, s(73, 3), null, null, null],
-      [s(76, 4), null, null, null, s(78, 3), null, null, 76, s(77, 6), null, null, null, null, null, s(73, 2), null],
-    ),
-    counter: concatBars(
-      [null, null, null, null, null, null, null, null, 78, null, 81, null, 78, null, null, null],
-      [null, null, null, null, null, null, null, null, 76, null, 78, null, 73, null, null, null],
-      [null, null, null, null, null, null, null, null, 76, null, 79, null, 76, null, null, null],
-      [null, null, null, null, null, null, null, null, 73, null, 76, null, 73, null, null, null],
-      [s(71, 4, 0.8), null, null, null, s(74, 4, 0.8), null, null, null, s(78, 4, 0.85), null, null, null, null, null, null, null],
-      [s(73, 4, 0.8), null, null, null, s(76, 4, 0.8), null, null, null, s(80, 4, 0.85), null, null, null, null, null, null, null],
-      [s(74, 4, 0.8), null, null, null, s(78, 4, 0.8), null, null, null, s(81, 4, 0.9), null, null, null, null, null, null, null],
-      [s(76, 4, 0.85), null, null, null, s(80, 4, 0.85), null, null, null, s(81, 6, 0.9), null, null, null, null, null, null, null],
-    ),
-    kick: repeatBars([0, 4, 8, 12], BARS_0_TO_7),
-    snare: [...repeatBars([4, 12], BARS_0_TO_7), 62, 126],
-    hatClosed: repeatBars([0, 2, 4, 6, 8, 10, 12, 14], BARS_0_TO_7),
-    hatOpen: [14, 30, 46, 62, 78, 94, 110, 126],
-    clang: repeatBars([2, 10], [0, 1, 2, 3, 4, 5, 6, 7]),
-    crash: [0, 64],
-    leadVoice: {
-      waveform: 'sawtooth',
-      detuneCents: 13,
-      cutoffHz: 2300,
+      highpassHz: 260,
+      cutoffHz: 2000,
       cutoffPeakHz: 3600,
-      q: 2.0,
-      attackSec: 0.015,
-      releaseSec: 0.34,
-      gain: 0.115,
-      delaySend: 0.36,
-      pan: 0.08,
-      vibratoHz: 5.5,
-      vibratoCents: 12,
-      vibratoDelaySec: 0.16,
-    },
-    counterVoice: {
-      waveform: 'sine',
-      fmRatio: 2,
-      fmIndexHz: 185,
-      cutoffHz: 3300,
-      attackSec: 0.004,
-      releaseSec: 0.25,
-      gain: 0.085,
-      delaySend: 0.34,
-      pan: -0.28,
+      filterDecaySec: 0.18,
+      attackSec: 0.025,
+      decaySec: 0.18,
+      sustainLevel: 0.65,
+      releaseSec: 0.22,
+      gain: 0.11,
+      reverbSend: 0.34,
+      pan: -0.32,
     },
     arpVoice: {
-      waveform: 'triangle',
-      cutoffHz: 2400,
-      attackSec: 0.006,
-      releaseSec: 0.15,
-      gain: 0.075,
-      delaySend: 0.28,
-      pan: 0.26,
-    },
-    bassVoice: {
-      waveform: 'sawtooth',
-      cutoffHz: 360,
-      cutoffPeakHz: 1300,
-      q: 3.1,
+      waveform: 'epiano',
+      highpassHz: 480,
+      cutoffHz: 5200,
       attackSec: 0.004,
-      releaseSec: 0.14,
-      gain: 0.21,
-      subOctaveGain: 0.28,
-    },
-    padVoice: {
-      waveform: 'sawtooth',
-      detuneCents: 15,
-      cutoffHz: 1150,
-      attackSec: 0.16,
-      releaseSec: 1.55,
-      gain: 0.052,
-      delaySend: 0.24,
-      pan: -0.1,
-    },
-    drumGain: 0.21,
-    delayFeedback: 0.34,
-    delayMix: 0.26,
-  },
-
-  // =========================================================================
-  // 4. 650 pts — "Ironworks Sector" (Donkey Kong Country: Fear Factory Vibe)
-  // 134 BPM · E Minor · 8 bars (128 steps)
-  // 16-bit SNES industrial atmosphere, heavy driving synth bass & anvil clangs
-  // =========================================================================
-  fm_cartridge_drive: {
-    bpm: 134,
-    totalSteps: 128,
-    chords: {
-      0: { notes: [52, 55, 59, 64], steps: 15 }, // Em
-      16: { notes: [48, 52, 55, 60], steps: 15 }, // C
-      32: { notes: [50, 54, 57, 62], steps: 15 }, // D
-      48: { notes: [47, 50, 54, 59], steps: 8 }, // Bm
-      56: { notes: [47, 51, 54, 59], steps: 7 }, // B7
-      64: { notes: [48, 52, 55, 60], steps: 15 }, // C
-      80: { notes: [50, 54, 57, 62], steps: 15 }, // D
-      96: { notes: [52, 55, 59, 64], steps: 15 }, // Em
-      112: { notes: [45, 48, 52, 57], steps: 8 }, // Am
-      120: { notes: [47, 51, 54, 59], steps: 7 }, // B7 turnaround
-    },
-    bass: concatBars(
-      [40, null, 40, 52, 40, null, 40, 47, 40, null, 40, 52, 47, null, 43, 40],
-      [36, null, 36, 48, 36, null, 36, 43, 36, null, 36, 48, 43, null, 40, 36],
-      [38, null, 38, 50, 38, null, 38, 45, 38, null, 38, 50, 45, null, 42, 38],
-      [35, null, 35, 47, 35, null, 35, 42, 35, null, 35, 47, 42, 43, 45, 39],
-      [36, 36, 48, null, 36, 36, 48, null, 36, 36, 48, 43, 40, 43, 48, null],
-      [38, 38, 50, null, 38, 38, 50, null, 38, 38, 50, 45, 42, 45, 50, null],
-      [40, 40, 52, null, 40, 40, 52, null, 40, 40, 52, 47, 43, 47, 52, null],
-      [33, 33, 45, null, 33, 33, 45, null, 35, 35, 47, null, 39, 42, 47, null],
-    ),
-    arp: concatBars(
-      [64, 67, 71, null, 64, 67, 71, 76, 64, 67, 71, null, 76, 71, 67, null],
-      [60, 64, 67, null, 60, 64, 67, 72, 60, 64, 67, null, 72, 67, 64, null],
-      [62, 66, 69, null, 62, 66, 69, 74, 62, 66, 69, null, 74, 69, 66, null],
-      [59, 62, 66, null, 59, 63, 66, 71, 66, 71, 75, null, 71, 66, 63, null],
-      [60, 64, 67, 72, 67, 64, 60, 67, 60, 64, 67, 72, 76, 72, 67, 64],
-      [62, 66, 69, 74, 69, 66, 62, 69, 62, 66, 69, 74, 78, 74, 69, 66],
-      [64, 67, 71, 76, 71, 67, 64, 71, 64, 67, 71, 76, 79, 76, 71, 67],
-      [57, 60, 64, 69, 64, 60, 57, 64, 59, 63, 66, 71, 75, 71, 66, 63],
-    ),
-    lead: concatBars(
-      [s(76, 2), null, 79, null, s(76, 2), 74, 71, null, s(72, 2), null, 71, null, s(67, 4), null, null, null],
-      [s(72, 2), null, 76, null, s(79, 2), 76, 74, null, s(72, 2), null, 71, null, s(67, 4), null, null, null],
-      [s(74, 2), null, 78, null, s(81, 2), 78, 76, null, s(74, 2), null, 72, null, s(71, 4), null, null, null],
-      [s(71, 2), null, 74, null, s(78, 2), 75, 71, null, s(75, 4), null, null, null, s(78, 2), null, 75, null],
-      // B section: soaring DKC industrial hook
-      [s(79, 4), null, null, 76, s(72, 3), null, null, 74, s(76, 4), null, null, null, s(79, 2), null, 76, null],
-      [s(81, 4), null, null, 78, s(74, 3), null, null, 76, s(78, 4), null, null, null, s(81, 2), null, 78, null],
-      [s(83, 4), null, null, 79, s(76, 3), null, null, 79, s(83, 4), null, null, null, s(86, 2), null, 83, null],
-      [s(81, 4), null, null, 79, s(76, 2), null, 74, null, s(75, 6), null, null, null, null, null, 71, null],
-    ),
-    counter: concatBars(
-      [null, null, null, null, null, null, null, null, null, null, null, null, 64, null, 67, null],
-      [null, null, null, null, null, null, null, null, null, null, null, null, 60, null, 64, null],
-      [null, null, null, null, null, null, null, null, null, null, null, null, 62, null, 66, null],
-      [null, null, null, null, null, null, null, null, 63, null, 66, null, 71, null, null, null],
-      [s(72, 4, 0.8), null, null, null, null, null, null, null, s(72, 4, 0.8), null, null, null, null, null, null, null],
-      [s(74, 4, 0.8), null, null, null, null, null, null, null, s(74, 4, 0.8), null, null, null, null, null, null, null],
-      [s(76, 4, 0.85), null, null, null, null, null, null, null, s(76, 4, 0.85), null, null, null, null, null, null, null],
-      [s(72, 4, 0.8), null, null, null, null, null, null, null, s(71, 6, 0.85), null, null, null, null, null, null, null],
-    ),
-    kick: repeatBars([0, 3, 8, 10], BARS_0_TO_7),
-    snare: [...repeatBars([4, 12], BARS_0_TO_7), 62, 126],
-    hatClosed: repeatBars([0, 2, 4, 6, 8, 10, 12, 14], BARS_0_TO_7),
-    hatOpen: [6, 22, 38, 54, 70, 86, 102, 118],
-    clang: repeatBars([0, 6, 12], BARS_0_TO_7),
-    crash: [0, 64],
-    toms: [
-      { step: 60, midi: 55, vel: 0.9 },
-      { step: 62, midi: 50, vel: 0.95 },
-      { step: 124, midi: 59, vel: 0.9 },
-      { step: 125, midi: 55, vel: 0.9 },
-      { step: 126, midi: 50, vel: 1.0 },
-    ],
-    leadVoice: {
-      waveform: 'sawtooth',
-      fmRatio: 2,
-      fmIndexHz: 140,
-      cutoffHz: 2900,
-      cutoffPeakHz: 3900,
-      q: 2.2,
-      attackSec: 0.006,
+      decaySec: 0.16,
+      sustainLevel: 0.18,
       releaseSec: 0.24,
-      gain: 0.12,
-      delaySend: 0.3,
-      pan: 0.12,
-      vibratoHz: 5.8,
-      vibratoCents: 11,
-      vibratoDelaySec: 0.15,
-    },
-    counterVoice: {
-      waveform: 'square',
-      detuneCents: 10,
-      cutoffHz: 1900,
-      attackSec: 0.015,
-      releaseSec: 0.3,
-      gain: 0.065,
-      delaySend: 0.25,
-      pan: -0.24,
-    },
-    arpVoice: {
-      waveform: 'sine',
-      fmRatio: 3,
-      fmIndexHz: 130,
-      cutoffHz: 2600,
-      attackSec: 0.004,
-      releaseSec: 0.11,
-      gain: 0.068,
-      delaySend: 0.22,
-      pan: 0.25,
+      gain: 0.095,
+      fmRatio: 4,
+      fmIndexHz: 145,
+      fmDecaySec: 0.07,
+      delaySend: 0.28,
+      reverbSend: 0.34,
+      pan: 0.36,
     },
     bassVoice: {
-      waveform: 'sawtooth',
-      fmRatio: 1,
-      fmIndexHz: 120,
-      cutoffHz: 680,
-      cutoffPeakHz: 1450,
-      q: 2.6,
-      attackSec: 0.004,
-      releaseSec: 0.15,
-      gain: 0.22,
-      driveAmount: 0.25,
+      waveform: 'slapbass',
+      cutoffHz: 880,
+      cutoffPeakHz: 3200,
+      filterDecaySec: 0.075,
+      q: 2.2,
+      attackSec: 0.003,
+      decaySec: 0.11,
+      sustainLevel: 0.54,
+      releaseSec: 0.075,
+      gain: 0.255,
       subOctaveGain: 0.32,
+      fmRatio: 2,
+      fmIndexHz: 115,
+      fmDecaySec: 0.05,
+      reverbSend: 0.05,
     },
     padVoice: {
-      waveform: 'sawtooth',
-      detuneCents: 14,
-      cutoffHz: 980,
-      attackSec: 0.12,
-      releaseSec: 1.25,
-      gain: 0.048,
-      delaySend: 0.22,
-      pan: -0.1,
+      waveform: 'epiano',
+      detuneCents: 5,
+      highpassHz: 220,
+      cutoffHz: 2800,
+      cutoffPeakHz: 4200,
+      filterDecaySec: 0.28,
+      attackSec: 0.01,
+      decaySec: 0.36,
+      sustainLevel: 0.48,
+      releaseSec: 0.42,
+      gain: 0.092,
+      fmRatio: 14,
+      fmIndexHz: 38,
+      fmDecaySec: 0.055,
+      reverbSend: 0.38,
+      pan: -0.22,
     },
-    drumGain: 0.21,
-    delayFeedback: 0.3,
-    delayMix: 0.24,
+    altPadVoice: {
+      waveform: 'brass',
+      detuneCents: 10,
+      highpassHz: 260,
+      cutoffHz: 2400,
+      cutoffPeakHz: 5200,
+      filterDecaySec: 0.12,
+      attackSec: 0.01,
+      decaySec: 0.12,
+      sustainLevel: 0.55,
+      releaseSec: 0.14,
+      gain: 0.082,
+      reverbSend: 0.28,
+      pan: 0.22,
+    },
+    drumGain: 0.27,
+    delayFeedback: 0.25,
+    delayMix: 0.18,
+    reverbMix: 0.26,
   },
 
-  // =========================================================================
-  // 5. 950 pts — "Ultra Combo" (Killer Instinct: The Instinct Arcade Vibe)
-  // 116 BPM · E Minor / Phrygian · 8 bars (128 steps)
-  // Saturated industrial metal chugs, heavy arcade synth stabs, breakbeat punch
-  // =========================================================================
-  subcarrier_pulse: {
-    bpm: 116,
-    totalSteps: 128,
+  // ==========================================================================
+  // 3. 400 pts — "Celestial Assembly"
+  //    Inspired by: Sea of Stars — Stars Align on the Assembly Line
+  //    120 BPM · C Minor / Eb Major · 12 bars (192 steps)
+  //    Bars 0-3: Rubbery cosmic electro-funk bass, 80s gated snare & synth stabs
+  //    Bars 4-7: Soaring nostalgic synthwave lead over wide stereo pads
+  //    Bars 8-9: Tight robotic drum-machine & bleep break
+  //    Bars 10-11: Uplifting full-power cosmic chorus climax
+  // ==========================================================================
+  outrun_crt: {
+    bpm: 120,
+    totalSteps: 192,
     chords: {
-      // Bar 0-3: Aggressive arcade stabs on riff turnarounds
-      0: { notes: [52, 59, 64], steps: 4, vel: 1.1 },
-      6: { notes: [53, 60, 65], steps: 3, vel: 1.0 },
-      12: { notes: [55, 62, 67], steps: 4, vel: 1.1 },
-      16: { notes: [52, 59, 64], steps: 4, vel: 1.1 },
-      22: { notes: [58, 65, 70], steps: 3, vel: 1.1 },
-      28: { notes: [57, 64, 69], steps: 4, vel: 1.0 },
-      32: { notes: [52, 59, 64], steps: 4, vel: 1.1 },
-      38: { notes: [53, 60, 65], steps: 3, vel: 1.0 },
-      44: { notes: [55, 62, 67], steps: 4, vel: 1.1 },
-      48: { notes: [58, 65, 70], steps: 6, vel: 1.15 },
-      56: { notes: [57, 64, 69], steps: 4, vel: 1.05 },
-      60: { notes: [55, 62, 67], steps: 4, vel: 1.05 },
-      // Bar 4-7: Brooding character-select cinematic progression (Em -> Cmaj7 -> Am9 -> B7sus4/B7)
-      64: { notes: [52, 55, 59, 64], steps: 15 },
-      80: { notes: [48, 52, 55, 59], steps: 15 },
-      96: { notes: [45, 52, 55, 59], steps: 15 },
-      112: { notes: [47, 52, 54, 59], steps: 8 },
-      120: { notes: [47, 51, 54, 59], steps: 7 },
+      // Bars 0-3: Slick syncopated electro-funk brass stabs (altPadVoice)
+      0: { notes: [60, 63, 67, 70], steps: 4, vel: 0.88, altVoice: true }, // Cm7
+      10: { notes: [60, 63, 67, 70], steps: 3, vel: 0.72, altVoice: true },
+      16: { notes: [56, 60, 63, 67], steps: 4, vel: 0.88, altVoice: true }, // AbMaj7
+      26: { notes: [56, 60, 63, 67], steps: 3, vel: 0.72, altVoice: true },
+      32: { notes: [56, 60, 65, 67], steps: 4, vel: 0.88, altVoice: true }, // Fm9
+      42: { notes: [56, 60, 65, 67], steps: 3, vel: 0.72, altVoice: true },
+      48: { notes: [58, 62, 65, 67], steps: 6, vel: 0.85, altVoice: true }, // G7sus4
+      56: { notes: [59, 62, 65, 67], steps: 6, vel: 0.94, altVoice: true }, // G7
+      // Bars 4-7: Wide lush stereo synthwave pads (padVoice)
+      64: { notes: [56, 60, 63, 67], steps: 15, vel: 0.95 }, // AbMaj7
+      80: { notes: [58, 62, 65, 69], steps: 15, vel: 0.95 }, // BbMaj7
+      96: { notes: [60, 63, 67, 70], steps: 15, vel: 0.95 }, // Cm7
+      112: { notes: [58, 62, 67, 70], steps: 8, vel: 0.9 }, // Gm7
+      120: { notes: [59, 62, 65, 67], steps: 7, vel: 0.95 }, // G7
+      // Bars 8-9: Robotic machine-break staccato stabs
+      128: { notes: [60, 63, 67, 72], steps: 2, vel: 0.85, altVoice: true },
+      134: { notes: [60, 63, 67, 72], steps: 2, vel: 0.78, altVoice: true },
+      144: { notes: [56, 60, 65, 70], steps: 2, vel: 0.85, altVoice: true },
+      152: { notes: [58, 62, 67, 70], steps: 4, vel: 0.9, altVoice: true },
+      // Bars 10-11: Big uplifting synthwave finale pads
+      160: { notes: [56, 60, 63, 67], steps: 8, vel: 1.0 }, // AbMaj7
+      168: { notes: [58, 62, 65, 70], steps: 7, vel: 1.0 }, // Bb
+      176: { notes: [60, 63, 67, 70], steps: 8, vel: 1.0 }, // Cm7
+      184: { notes: [59, 62, 65, 67], steps: 7, vel: 1.0 }, // G7
     },
     bass: concatBars(
-      [40, 40, 40, null, 40, 40, 41, null, 40, 40, 40, null, 43, null, 40, null],
-      [40, 40, 40, null, 40, 40, 46, null, 40, 40, 40, null, 45, null, 43, 41],
-      [40, 40, 40, null, 40, 40, 41, null, 40, 40, 40, null, 43, null, 45, 43],
-      [46, null, 46, null, 40, 40, 45, null, 43, null, 41, null, 40, 43, 45, 47],
-      // B section: atmospheric sustained bass
-      [s(40, 6), null, null, null, null, null, s(40, 2), null, s(47, 4), null, null, null, s(43, 3), null, null, null],
-      [s(36, 6), null, null, null, null, null, s(36, 2), null, s(43, 4), null, null, null, s(40, 3), null, null, null],
-      [s(33, 6), null, null, null, null, null, s(33, 2), null, s(40, 4), null, null, null, s(38, 3), null, null, null],
-      [s(35, 6), null, null, null, null, null, s(35, 2), null, s(42, 4), null, null, null, s(47, 2), 45, 43, 41],
+      // Bars 0-3: Signature rubbery bouncy electro-funk bassline
+      [s(36, 2, 1), null, s(36, 1, 0.78), s(48, 1, 0.92), null, null, s(46, 2, 0.9), null, s(36, 2, 0.95), null, s(43, 2, 0.88), null, s(46, 1, 0.86), null, s(48, 2, 0.92), null],
+      [s(32, 2, 1), null, s(32, 1, 0.78), s(44, 1, 0.92), null, null, s(43, 2, 0.9), null, s(32, 2, 0.95), null, s(39, 2, 0.88), null, s(43, 1, 0.86), null, s(44, 2, 0.9), null],
+      [s(41, 2, 1), null, s(41, 1, 0.78), s(53, 1, 0.92), null, null, s(51, 2, 0.9), null, s(41, 2, 0.95), null, s(48, 2, 0.88), null, s(44, 1, 0.85), null, s(48, 2, 0.9), null],
+      [s(43, 2, 1), null, s(43, 1, 0.8), s(55, 1, 0.92), null, null, s(43, 2, 0.9), null, s(43, 2, 0.95), null, s(41, 2, 0.9), null, s(39, 2, 0.9), null, s(38, 2, 0.92), null],
+      // Bars 4-7: Driving 8th-note cosmic synthwave bass
+      [s(32, 2, 1), null, s(44, 2, 0.85), null, s(32, 2, 0.95), null, s(44, 2, 0.85), null, s(32, 2, 0.95), null, s(44, 2, 0.85), null, s(39, 2, 0.88), null, s(44, 2, 0.88), null],
+      [s(34, 2, 1), null, s(46, 2, 0.85), null, s(34, 2, 0.95), null, s(46, 2, 0.85), null, s(34, 2, 0.95), null, s(46, 2, 0.85), null, s(41, 2, 0.88), null, s(46, 2, 0.88), null],
+      [s(36, 2, 1), null, s(48, 2, 0.85), null, s(36, 2, 0.95), null, s(48, 2, 0.85), null, s(36, 2, 0.95), null, s(48, 2, 0.85), null, s(43, 2, 0.88), null, s(46, 2, 0.88), null],
+      [s(43, 2, 1), null, s(55, 2, 0.85), null, s(43, 2, 0.95), null, s(46, 2, 0.88), null, s(43, 2, 0.95), null, s(41, 2, 0.9), null, s(39, 2, 0.9), null, s(38, 2, 0.95), null],
+      // Bars 8-9: Tight syncopated robotic machine-break bass
+      [s(36, 2, 1), null, null, s(48, 1, 0.9), null, null, s(36, 2, 0.95), null, null, null, s(43, 2, 0.9), null, s(46, 2, 0.92), null, null, null],
+      [s(41, 2, 1), null, null, s(53, 1, 0.9), null, null, s(41, 2, 0.95), null, s(43, 2, 1), null, s(43, 1, 0.8), null, s(46, 2, 0.95), null, s(43, 2, 0.95), null],
+      // Bars 10-11: Epic lifting chorus bass
+      [s(32, 2, 1), null, s(44, 2, 0.88), null, s(32, 2, 0.95), null, s(44, 2, 0.88), null, s(34, 2, 1), null, s(46, 2, 0.88), null, s(34, 2, 0.95), null, s(46, 2, 0.88), null],
+      [s(36, 2, 1), null, s(48, 2, 0.88), null, s(36, 2, 0.95), null, s(46, 2, 0.88), null, s(43, 2, 1), null, s(41, 2, 0.92), null, s(39, 2, 0.92), null, s(38, 2, 0.95), null],
     ),
-    accentSteps: [0, 6, 12, 16, 22, 28, 32, 38, 44, 48, 56, 60],
     arp: concatBars(
-      [52, null, 59, null, 64, null, 53, null, 52, null, 59, null, 67, null, 64, null],
-      [52, null, 59, null, 64, null, 58, null, 52, null, 59, null, 69, null, 67, null],
-      [52, null, 59, null, 64, null, 53, null, 52, null, 59, null, 67, null, 69, null],
-      [58, null, 65, null, 64, null, 57, null, 55, null, 53, null, 52, 55, 57, 59],
-      [64, null, 67, null, 71, null, 74, null, 71, null, 67, null, 64, null, 71, null],
-      [60, null, 64, null, 67, null, 71, null, 67, null, 64, null, 60, null, 67, null],
-      [57, null, 60, null, 64, null, 67, null, 64, null, 60, null, 57, null, 64, null],
-      [59, null, 64, null, 66, null, 71, null, 66, null, 63, null, 59, null, null, null],
+      // Bars 0-3: Cosmic clockwork 16th-note pulse arps
+      [60, null, 67, null, 70, null, 72, null, 67, null, 70, null, 75, null, 72, null],
+      [60, null, 63, null, 67, null, 72, null, 67, null, 63, null, 72, null, 67, null],
+      [60, null, 65, null, 68, null, 72, null, 68, null, 65, null, 72, null, 68, null],
+      [62, null, 67, null, 70, null, 74, null, 62, null, 67, null, 71, null, 74, null],
+      // Bars 4-7: Flowing synthwave shimmer
+      [63, 67, 72, 75, 72, 67, 63, 67, 63, 67, 72, 75, 72, 67, 63, 67],
+      [65, 70, 74, 77, 74, 70, 65, 70, 65, 70, 74, 77, 74, 70, 65, 70],
+      [67, 72, 75, 79, 75, 72, 67, 72, 67, 72, 75, 79, 75, 72, 67, 72],
+      [67, 70, 74, 79, 74, 70, 67, 70, 67, 71, 74, 79, 74, 71, 67, 71],
+      // Bars 8-9: Playful robotic assembly-line chiptune bleeps
+      [72, null, 75, null, 79, null, null, 75, null, 72, null, 79, null, 84, null, null],
+      [77, null, 75, null, 72, null, null, 74, null, 79, null, 77, null, 74, null, null],
+      // Bars 10-11: Sparkling cosmic finale arps
+      [63, 67, 72, 75, 79, 75, 72, 67, 65, 70, 74, 77, 82, 77, 74, 70],
+      [67, 72, 75, 79, 84, 79, 75, 72, 67, 71, 74, 79, 83, 79, 74, 71],
     ),
     lead: concatBars(
-      [s(64, 4, 1.05), null, null, null, s(65, 2, 1.0), null, null, null, s(67, 4, 1.05), null, null, null, null, null, 64, null],
-      [s(64, 4, 1.05), null, null, null, s(70, 3, 1.1), null, null, null, s(69, 3, 1.0), null, null, 67, s(65, 2), null, 64, null],
-      [s(76, 4, 1.05), null, null, null, s(77, 2, 1.0), null, null, null, s(79, 4, 1.1), null, null, null, s(76, 2), null, 74, null],
-      [s(82, 4, 1.1), null, null, null, s(81, 3, 1.05), null, null, null, s(79, 3, 1.0), null, null, 77, s(76, 2), null, null, null],
-      // B section: atmospheric fighting-game select lead
-      [s(76, 6, 0.9), null, null, null, null, null, s(79, 2), null, s(78, 6, 0.9), null, null, null, null, null, null, null],
-      [s(76, 6, 0.9), null, null, null, null, null, s(74, 2), null, s(72, 6, 0.9), null, null, null, null, null, null, null],
-      [s(71, 6, 0.9), null, null, null, null, null, s(72, 2), null, s(74, 6, 0.95), null, null, null, null, null, null, null],
-      [s(76, 4, 0.95), null, null, null, s(74, 2), null, 72, null, s(71, 6, 1.0), null, null, null, null, null, null, null],
+      // Bars 0-3: Slick funky rhythmic synth motif
+      [null, null, s(72, 2, 0.92), null, null, null, s(75, 2, 0.95), null, null, null, s(74, 2, 0.9), null, s(72, 2, 0.9), null, s(70, 2, 0.86), null],
+      [s(72, 4, 0.95), null, null, null, s(68, 2, 0.88), null, s(72, 2, 0.92), null, s(75, 4, 0.98, -2), null, null, null, s(72, 3, 0.9), null, null, null],
+      [s(77, 3, 0.98), null, null, s(75, 2, 0.9), null, s(72, 2, 0.88), null, s(75, 3, 0.94), null, null, s(72, 2, 0.9), null, s(70, 3, 0.88), null, null, null],
+      [s(74, 6, 0.98, -2), null, null, null, null, null, s(72, 2, 0.88), null, s(74, 4, 0.98), null, null, null, s(79, 3, 1), null, null, null],
+      // Bars 4-7: Soaring, emotional cosmic synthwave chorus lead!
+      [s(79, 4, 1, -2), null, null, null, s(80, 2, 0.95), null, s(79, 2, 0.92), null, s(75, 4, 0.96), null, null, null, s(72, 3, 0.9), null, null, null],
+      [s(77, 4, 1), null, null, null, s(79, 2, 0.95), null, s(77, 2, 0.92), null, s(74, 4, 0.95), null, null, null, s(77, 3, 0.94), null, null, null],
+      [s(79, 4, 1, -2), null, null, null, s(84, 2, 1), null, s(82, 2, 0.95), null, s(79, 4, 0.98), null, null, null, s(75, 3, 0.92), null, null, null],
+      [s(74, 6, 0.98), null, null, null, null, null, s(75, 2, 0.92), null, s(79, 6, 1, -2), null, null, null, null, null, null, null],
+      // Bars 8-9: Let the robotic machine break groove!
+      EMPTY_BAR,
+      [null, null, null, null, null, null, null, null, s(74, 2, 0.9), null, s(75, 2, 0.94), null, s(79, 3, 1, -2), null, null, null],
+      // Bars 10-11: Uplifting soaring finale hook!
+      [s(80, 4, 1), null, null, null, s(79, 2, 0.94), null, s(75, 2, 0.92), null, s(82, 4, 1, -2), null, null, null, s(79, 3, 0.95), null, null, null],
+      [s(84, 6, 1, -2), null, null, null, null, null, s(82, 2, 0.94), null, s(79, 6, 1), null, null, null, null, null, null, null],
     ),
-    kick: [...repeatBars([0, 3, 6, 10, 12], [0, 1, 2, 3]), ...repeatBars([0, 6, 8, 14], [4, 5, 6, 7])],
-    snare: [...repeatBars([4, 12], BARS_0_TO_7), 62, 125, 126],
-    hatClosed: repeatBars([0, 2, 4, 6, 8, 10, 12, 14], BARS_0_TO_7),
-    hatOpen: [14, 30, 46, 62, 78, 94, 110, 126],
-    clang: repeatBars([0, 6, 12], [0, 1, 2, 3]),
-    crash: [0, 48, 64],
-    toms: [
-      { step: 61, midi: 57, vel: 0.95 },
-      { step: 62, midi: 53, vel: 1.0 },
-      { step: 63, midi: 48, vel: 1.0 },
-      { step: 124, midi: 57, vel: 0.95 },
-      { step: 125, midi: 54, vel: 0.95 },
-      { step: 126, midi: 50, vel: 1.0 },
-      { step: 127, midi: 47, vel: 1.0 },
+    counter: concatBars(
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      // Bars 4-7: Warm upper harmony strings/synth doubling key chorus notes
+      [s(75, 4, 0.72), null, null, null, null, null, null, null, s(72, 4, 0.7), null, null, null, null, null, null, null],
+      [s(74, 4, 0.72), null, null, null, null, null, null, null, s(70, 4, 0.7), null, null, null, null, null, null, null],
+      [s(75, 4, 0.74), null, null, null, s(79, 4, 0.78), null, null, null, s(75, 4, 0.72), null, null, null, null, null, null, null],
+      [s(70, 6, 0.72), null, null, null, null, null, null, null, s(74, 6, 0.78), null, null, null, null, null, null, null],
+      EMPTY_BAR,
+      EMPTY_BAR,
+      [s(75, 4, 0.78), null, null, null, null, null, null, null, s(77, 4, 0.8), null, null, null, null, null, null, null],
+      [s(79, 6, 0.84), null, null, null, null, null, null, null, s(74, 6, 0.8), null, null, null, null, null, null, null],
+    ),
+    accentSteps: [0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176],
+    kick: [
+      ...repeatBars([0, 6, 8, 14], [0, 1, 2, 3]),
+      ...repeatBars([0, 4, 8, 12], [4, 5, 6, 7, 10, 11]),
+      128, 134, 138, 144, 150, 154, 156,
     ],
+    snare: [
+      ...repeatBars([4, 12], [0, 1, 2, 3, 4, 5, 6, 7, 8, 10]),
+      148, 156, 158, 159, // robotic machine-break snare roll into chorus!
+      180, 188, 190,
+    ],
+    gatedSnare: true,
+    clap: repeatBars([4, 12], [0, 1, 2, 3, 4, 5, 6, 7, 10, 11]),
+    rim: repeatBars([2, 10], [8, 9]),
+    hatClosed: repeatBars([0, 2, 4, 6, 8, 10, 12, 14], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+    hatAccent: repeatBars([2, 6, 10, 14], [4, 5, 6, 7, 10, 11]),
+    hatOpen: repeatBars([14], [1, 3, 5, 7, 11]),
+    crash: [64, 160],
     leadVoice: {
       waveform: 'sawtooth',
-      detuneCents: 14,
-      cutoffHz: 2200,
-      cutoffPeakHz: 3600,
-      q: 2.8,
-      attackSec: 0.008,
-      releaseSec: 0.28,
-      gain: 0.115,
-      driveAmount: 0.55,
-      delaySend: 0.32,
-      pan: 0.1,
-      vibratoHz: 5.6,
+      detuneCents: 10,
+      chorus3: true,
+      highpassHz: 260,
+      cutoffHz: 2800,
+      cutoffPeakHz: 5600,
+      filterDecaySec: 0.16,
+      q: 1.5,
+      attackSec: 0.012,
+      decaySec: 0.18,
+      sustainLevel: 0.78,
+      releaseSec: 0.22,
+      gain: 0.145,
+      delaySend: 0.3,
+      reverbSend: 0.36,
+      pan: 0.05,
+      vibratoHz: 5.4,
       vibratoCents: 13,
       vibratoDelaySec: 0.14,
     },
+    counterVoice: {
+      waveform: 'strings',
+      detuneCents: 12,
+      highpassHz: 320,
+      cutoffHz: 3000,
+      attackSec: 0.06,
+      decaySec: 0.25,
+      sustainLevel: 0.72,
+      releaseSec: 0.35,
+      gain: 0.095,
+      reverbSend: 0.45,
+      pan: -0.34,
+    },
     arpVoice: {
-      waveform: 'square',
-      cutoffHz: 1950,
-      q: 2.0,
+      waveform: 'pulse25',
+      highpassHz: 420,
+      cutoffHz: 3400,
+      cutoffPeakHz: 5200,
+      filterDecaySec: 0.07,
+      q: 1.8,
       attackSec: 0.004,
-      releaseSec: 0.11,
-      gain: 0.065,
-      driveAmount: 0.35,
-      delaySend: 0.22,
-      pan: -0.22,
+      decaySec: 0.08,
+      sustainLevel: 0.22,
+      releaseSec: 0.07,
+      gain: 0.082,
+      delaySend: 0.28,
+      reverbSend: 0.22,
+      pan: 0.34,
     },
     bassVoice: {
       waveform: 'sawtooth',
-      cutoffHz: 480,
-      cutoffPeakHz: 1650,
-      q: 3.0,
-      attackSec: 0.004,
-      releaseSec: 0.14,
-      gain: 0.22,
-      driveAmount: 0.65,
-      subOctaveGain: 0.4,
+      detuneCents: 6,
+      cutoffHz: 580,
+      cutoffPeakHz: 2400,
+      filterDecaySec: 0.1,
+      q: 3.1,
+      attackSec: 0.005,
+      decaySec: 0.13,
+      sustainLevel: 0.56,
+      releaseSec: 0.09,
+      gain: 0.235,
+      subOctaveGain: 0.45,
+      reverbSend: 0.04,
     },
     padVoice: {
-      waveform: 'sawtooth',
-      detuneCents: 16,
-      cutoffHz: 1450,
-      cutoffPeakHz: 2600,
-      q: 2.2,
-      attackSec: 0.015,
+      waveform: 'strings',
+      detuneCents: 13,
+      chorus3: true,
+      highpassHz: 240,
+      cutoffHz: 2200,
+      cutoffPeakHz: 3400,
+      filterDecaySec: 0.55,
+      attackSec: 0.11,
+      decaySec: 0.4,
+      sustainLevel: 0.72,
       releaseSec: 0.55,
-      gain: 0.06,
-      driveAmount: 0.3,
-      delaySend: 0.28,
-      pan: 0.16,
+      gain: 0.068,
+      reverbSend: 0.48,
+      pan: -0.14,
     },
-    drumGain: 0.24,
-    delayFeedback: 0.32,
-    delayMix: 0.24,
+    altPadVoice: {
+      waveform: 'brass',
+      detuneCents: 9,
+      highpassHz: 280,
+      cutoffHz: 2000,
+      cutoffPeakHz: 4800,
+      filterDecaySec: 0.11,
+      q: 1.6,
+      attackSec: 0.008,
+      decaySec: 0.12,
+      sustainLevel: 0.45,
+      releaseSec: 0.12,
+      gain: 0.076,
+      reverbSend: 0.28,
+      pan: 0.22,
+    },
+    drumGain: 0.3,
+    delayFeedback: 0.3,
+    delayMix: 0.22,
+    reverbMix: 0.3,
   },
 
-  // =========================================================================
-  // 6. 1,300 pts — "Phobos Gate" (Doom E1M1 - At Doom's Gate Vibe)
-  // 122 BPM · E Minor · 8 bars (128 steps)
-  // Relentless 16th-note OPL2 overdrive pedal-E thrash riff, twin-lead harmonies
-  // =========================================================================
-  cyberdeck_horizon: {
-    bpm: 122,
-    totalSteps: 128,
+  // ==========================================================================
+  // 4. 650 pts — "Ironworks Sector"
+  //    Inspired by: Donkey Kong Country — Fear Factory
+  //    130 BPM · D Minor · 12 bars (192 steps)
+  //    Bars 0-3: Hypnotic pulsing resonant industrial bass + metallic clanks & rims
+  //    Bars 4-5: Dramatic orchestral brass hits over driving industrial rhythm
+  //    Bars 6-9: Huge sweeping emotional SNES strings & soaring lead climax
+  //    Bars 10-11: Haunting ethereal celestial pad & bell breakdown -> drum slam back
+  // ==========================================================================
+  fm_cartridge_drive: {
+    bpm: 130,
+    totalSteps: 192,
     chords: {
-      // Punchy power-chord hits underneath the B-section bridge
-      64: { notes: [48, 55, 60], steps: 12, vel: 1.05 }, // C5
-      80: { notes: [50, 57, 62], steps: 12, vel: 1.05 }, // D5
-      96: { notes: [52, 59, 64], steps: 12, vel: 1.05 }, // E5
-      112: { notes: [46, 53, 58], steps: 6, vel: 1.05 }, // Bb5
-      118: { notes: [47, 54, 59], steps: 6, vel: 1.1 }, // B5
+      // Bars 4-5: Dramatic industrial brass hits (altPadVoice)
+      64: { notes: [57, 62, 65, 69], steps: 4, vel: 0.95, altVoice: true }, // Dm
+      74: { notes: [57, 62, 65, 69], steps: 3, vel: 0.85, altVoice: true },
+      80: { notes: [55, 60, 64, 67], steps: 4, vel: 0.92, altVoice: true }, // C
+      88: { notes: [58, 62, 65, 69], steps: 4, vel: 0.95, altVoice: true }, // BbMaj7
+      92: { notes: [57, 61, 64, 69], steps: 3, vel: 0.98, altVoice: true }, // A
+      // Bars 6-9: Huge sweeping emotional SNES strings climax (padVoice)
+      96: { notes: [57, 62, 65, 69], steps: 15, vel: 1.0 }, // Dm
+      112: { notes: [58, 62, 65, 69], steps: 15, vel: 1.0 }, // BbMaj7
+      128: { notes: [55, 58, 62, 67], steps: 15, vel: 1.0 }, // Gm
+      144: { notes: [57, 62, 64, 69], steps: 8, vel: 0.95 }, // Asus4
+      152: { notes: [57, 61, 64, 69], steps: 7, vel: 1.0 }, // A7
+      // Bars 10-11: Ethereal celestial pad breakdown (padVoice)
+      160: { notes: [58, 62, 65, 69], steps: 15, vel: 0.9 }, // BbMaj7
+      176: { notes: [57, 60, 64, 69], steps: 8, vel: 0.88 }, // Am7
+      184: { notes: [57, 62, 65, 69], steps: 7, vel: 0.92 }, // Dm
     },
-    // Original pedal-E thrash phrasing in the spirit of 90s DOS OPL2 metal
     bass: concatBars(
-      [40, 40, 52, 40, 40, 50, 40, 40, 48, 40, 40, 46, 40, 40, 47, 48],
-      [40, 40, 52, 40, 40, 50, 40, 40, 48, 40, 40, 46, null, null, 43, 45],
-      [40, 40, 52, 40, 40, 50, 40, 40, 48, 40, 40, 46, 40, 40, 47, 48],
-      [45, 45, 57, 45, 45, 55, 45, 45, 53, 45, 45, 51, 45, 47, 48, 50],
-      // B Section: heavy triplet-feel pedal shift C -> D -> E -> Bb/B chromatic climb
-      [36, 36, 36, 48, 36, 36, 36, 48, 36, 36, 36, 48, 36, 43, 40, 36],
-      [38, 38, 38, 50, 38, 38, 38, 50, 38, 38, 38, 50, 38, 45, 42, 38],
-      [40, 40, 40, 52, 40, 40, 40, 52, 40, 40, 40, 52, 40, 47, 43, 40],
-      [34, 34, 46, null, 34, 46, 35, 35, 47, null, 35, 47, 40, 43, 45, 47],
+      // Bars 0-3: Signature pulsing hypnotic D-minor resonant industrial bassline
+      [s(38, 2, 1), null, s(38, 1, 0.78), null, s(38, 2, 0.95), null, s(45, 1, 0.85), null, s(38, 2, 0.95), null, s(48, 1, 0.85), null, s(45, 2, 0.9), null, s(41, 1, 0.8), null],
+      [s(38, 2, 1), null, s(38, 1, 0.78), null, s(38, 2, 0.95), null, s(45, 1, 0.85), null, s(36, 2, 0.95), null, s(43, 1, 0.85), null, s(34, 2, 0.95), null, s(33, 2, 0.9), null],
+      [s(38, 2, 1), null, s(38, 1, 0.78), null, s(38, 2, 0.95), null, s(45, 1, 0.85), null, s(38, 2, 0.95), null, s(50, 1, 0.88), null, s(48, 2, 0.9), null, s(45, 1, 0.82), null],
+      [s(34, 2, 1), null, s(34, 1, 0.8), null, s(36, 2, 0.95), null, s(36, 1, 0.8), null, s(33, 2, 1), null, s(45, 1, 0.88), null, s(40, 2, 0.9), null, s(33, 2, 0.92), null],
+      // Bars 4-5: Driving industrial bass under brass punches
+      [s(38, 2, 1), null, s(38, 1, 0.8), null, s(38, 2, 0.95), null, s(45, 1, 0.88), null, s(38, 2, 0.95), null, s(41, 2, 0.9), null, s(45, 2, 0.92), null, s(48, 2, 0.9), null],
+      [s(36, 2, 1), null, s(36, 1, 0.8), null, s(43, 2, 0.92), null, s(36, 1, 0.82), null, s(34, 2, 1), null, s(41, 2, 0.9), null, s(33, 2, 1), null, s(40, 2, 0.95), null],
+      // Bars 6-9: Powerful driving bass anchoring the sweeping strings climax!
+      [s(38, 2, 1), null, s(50, 1, 0.85), null, s(38, 2, 0.95), null, s(45, 2, 0.88), null, s(38, 2, 0.95), null, s(50, 1, 0.85), null, s(41, 2, 0.9), null, s(45, 2, 0.9), null],
+      [s(34, 2, 1), null, s(46, 1, 0.85), null, s(34, 2, 0.95), null, s(41, 2, 0.88), null, s(34, 2, 0.95), null, s(46, 1, 0.85), null, s(38, 2, 0.9), null, s(41, 2, 0.9), null],
+      [s(43, 2, 1), null, s(55, 1, 0.85), null, s(43, 2, 0.95), null, s(50, 2, 0.88), null, s(43, 2, 0.95), null, s(46, 2, 0.9), null, s(50, 2, 0.92), null, s(46, 2, 0.9), null],
+      [s(33, 2, 1), null, s(45, 1, 0.88), null, s(33, 2, 0.95), null, s(40, 2, 0.88), null, s(33, 2, 1), null, s(45, 1, 0.88), null, s(37, 2, 0.92), null, s(40, 2, 0.95), null],
+      // Bars 10-11: Deep spacious bass breathing in the ethereal breakdown
+      [s(34, 8, 0.85), null, null, null, null, null, null, null, s(36, 8, 0.85), null, null, null, null, null, null, null],
+      [s(38, 8, 0.88), null, null, null, null, null, null, null, s(33, 6, 0.92), null, null, null, null, null, s(36, 2, 0.9), null],
     ),
-    accentSteps: [2, 5, 8, 11, 14, 18, 21, 24, 27, 34, 37, 40, 43, 50, 53, 56, 59],
     arp: concatBars(
-      [52, 52, 64, 52, 52, 62, 52, 52, 60, 52, 52, 58, 52, 52, 59, 60],
-      [52, 52, 64, 52, 52, 62, 52, 52, 60, 52, 52, 58, null, null, 55, 57],
-      [52, 52, 64, 52, 52, 62, 52, 52, 60, 52, 52, 58, 52, 52, 59, 60],
-      [57, 57, 69, 57, 57, 67, 57, 57, 65, 57, 57, 63, 57, 59, 60, 62],
-      [60, 64, 67, 72, 67, 64, 60, 67, 60, 64, 67, 72, 76, 72, 67, 64],
-      [62, 66, 69, 74, 69, 66, 62, 69, 62, 66, 69, 74, 78, 74, 69, 66],
-      [64, 67, 71, 76, 71, 67, 64, 71, 64, 67, 71, 76, 79, 76, 71, 67],
-      [58, 62, 65, null, 58, 62, 59, 63, 66, null, 66, 71, 75, 71, 66, 63],
+      // Bars 0-3: Hypnotic factory metallic synth pings (classic DKC atmosphere)
+      [null, null, 74, null, null, 77, null, null, null, null, 74, null, null, 81, null, null],
+      [null, null, 74, null, null, 72, null, null, null, null, 70, null, null, 69, null, null],
+      [null, null, 74, null, null, 77, null, null, null, null, 81, null, null, 77, null, null],
+      [null, null, 70, null, null, 72, null, null, null, null, 69, null, null, 73, null, null],
+      // Bars 4-5: Mechanical interlocking ticks
+      [62, null, 69, null, 74, null, 69, null, 65, null, 69, null, 74, null, 69, null],
+      [60, null, 67, null, 72, null, 67, null, 58, null, 65, null, 61, null, 69, null],
+      // Bars 6-9: Restrained shimmer so the sweeping strings & lead dominate
+      [null, null, 74, null, null, null, 81, null, null, null, 77, null, null, null, 74, null],
+      [null, null, 70, null, null, null, 77, null, null, null, 74, null, null, null, 70, null],
+      [null, null, 70, null, null, null, 74, null, null, null, 79, null, null, null, 74, null],
+      [null, null, 69, null, null, null, 74, null, null, null, 73, null, null, null, 76, null],
+      // Bars 10-11: Delicate crystalline celestial flute/bell melody in the breakdown!
+      [s(77, 4, 0.92), null, null, null, s(81, 4, 0.95), null, null, null, s(79, 4, 0.92), null, null, null, s(76, 4, 0.88), null, null, null],
+      [s(74, 4, 0.95), null, null, null, s(77, 4, 0.92), null, null, null, s(76, 4, 0.9), null, null, null, s(73, 3, 0.92), null, null, null],
     ),
     lead: concatBars(
-      [null, null, 76, null, null, 74, null, null, 72, null, null, 70, null, null, 71, 72],
-      [null, null, 76, null, null, 74, null, null, 72, null, null, s(70, 3), null, null, 67, 69],
-      [s(76, 2), null, 79, null, null, 78, null, null, 76, null, null, 74, null, null, 75, 76],
-      [s(81, 2), null, 84, null, null, 83, null, null, 81, null, null, 79, null, null, 78, 79],
-      // B section: screaming harmonized solo over C -> D -> E -> Bb/B
-      [s(72, 4, 1.05), null, null, 74, s(76, 4, 1.05), null, null, 79, s(76, 4, 1.05), null, null, null, null, null, 74, null],
-      [s(74, 4, 1.05), null, null, 76, s(78, 4, 1.05), null, null, 81, s(78, 4, 1.05), null, null, null, null, null, 76, null],
-      [s(79, 4, 1.1), null, null, 78, s(76, 4, 1.1), null, null, 79, s(83, 6, 1.1), null, null, null, null, null, null, null],
-      [s(82, 3, 1.1), null, null, 81, 79, null, s(83, 3, 1.1), null, null, 81, 79, null, s(76, 4, 1.1), null, null, null],
+      // Bars 0-3: Let the hypnotic industrial bass & factory percussion build tension!
+      EMPTY_BAR,
+      EMPTY_BAR,
+      [null, null, null, null, s(69, 3, 0.85), null, null, null, s(74, 4, 0.9), null, null, null, s(72, 3, 0.82), null, null, null],
+      [s(70, 4, 0.88), null, null, null, s(72, 3, 0.86), null, null, null, s(69, 6, 0.92), null, null, null, null, null, null, null],
+      // Bars 4-5: Rhythmic sharp industrial synth motif answering the brass hits
+      [null, null, null, null, s(74, 2, 0.95), null, s(77, 2, 0.95), null, s(81, 3, 1), null, null, null, s(77, 2, 0.92), null, s(74, 2, 0.9), null],
+      [null, null, null, null, s(72, 2, 0.92), null, s(76, 2, 0.95), null, s(77, 3, 0.98), null, null, null, s(76, 3, 1), null, null, null],
+      // Bars 6-9: HUGE sweeping melancholic heroic lead over SNES strings!
+      [s(81, 6, 1, -2), null, null, null, null, null, s(79, 2, 0.92), null, s(77, 4, 0.96), null, null, null, s(74, 4, 0.94), null, null, null],
+      [s(77, 6, 1), null, null, null, null, null, s(79, 2, 0.94), null, s(81, 6, 1, -2), null, null, null, null, null, s(77, 2, 0.9), null],
+      [s(79, 6, 1), null, null, null, null, null, s(82, 2, 0.96), null, s(86, 4, 1, -2), null, null, null, s(82, 2, 0.94), null, s(79, 2, 0.92), null],
+      [s(81, 6, 1), null, null, null, null, null, s(77, 2, 0.92), null, s(76, 6, 1), null, null, null, null, null, null, null],
+      // Bars 10-11: Silent in the ethereal bell breakdown so the bells/pad float!
+      EMPTY_BAR,
+      EMPTY_BAR,
     ),
     counter: concatBars(
-      // Twin-guitar 3rds / 5ths harmony
-      [null, null, 71, null, null, 69, null, null, 67, null, null, 65, null, null, 66, 67],
-      [null, null, 71, null, null, 69, null, null, 67, null, null, s(65, 3), null, null, 62, 64],
-      [s(71, 2), null, 74, null, null, 72, null, null, 71, null, null, 69, null, null, 70, 71],
-      [s(76, 2), null, 79, null, null, 77, null, null, 76, null, null, 74, null, null, 72, 74],
-      [s(67, 4), null, null, 69, s(71, 4), null, null, 74, s(72, 4), null, null, null, null, null, 69, null],
-      [s(69, 4), null, null, 71, s(74, 4), null, null, 76, s(74, 4), null, null, null, null, null, 71, null],
-      [s(74, 4), null, null, 72, s(71, 4), null, null, 74, s(76, 6), null, null, null, null, null, null, null],
-      [s(77, 3), null, null, 76, 74, null, s(78, 3), null, null, 76, 75, null, s(71, 4), null, null, null],
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      // Bars 6-9: Sweeping harmonized counter-strings (3rds/6ths below lead!)
+      [s(77, 6, 0.8), null, null, null, null, null, s(76, 2, 0.74), null, s(74, 4, 0.78), null, null, null, s(69, 4, 0.75), null, null, null],
+      [s(74, 6, 0.8), null, null, null, null, null, s(76, 2, 0.75), null, s(77, 6, 0.82), null, null, null, null, null, s(74, 2, 0.74), null],
+      [s(74, 6, 0.82), null, null, null, null, null, s(79, 2, 0.78), null, s(82, 4, 0.84), null, null, null, s(79, 2, 0.78), null, s(74, 2, 0.75), null],
+      [s(76, 6, 0.82), null, null, null, null, null, s(74, 2, 0.75), null, s(73, 6, 0.84), null, null, null, null, null, null, null],
+      EMPTY_BAR,
+      EMPTY_BAR,
     ),
+    accentSteps: [0, 16, 32, 48, 64, 80, 96, 112, 128, 144],
     kick: [
-      ...repeatBars([0, 2, 4, 6, 8, 10, 12, 14], [0, 1, 2, 3]),
-      ...repeatBars([0, 1, 4, 8, 9, 12], [4, 5, 6, 7]),
+      ...repeatBars([0, 6, 8, 10], [0, 1, 2, 3, 4, 5]),
+      ...repeatBars([0, 4, 8, 12, 14], [6, 7, 8, 9]),
+      188, 190, // pickup back into industrial drop
     ],
-    snare: [...repeatBars([4, 12], BARS_0_TO_7), 30, 62, 94, 126],
-    hatClosed: repeatBars([0, 2, 4, 6, 8, 10, 12, 14], BARS_0_TO_7),
-    hatOpen: [14, 46, 78, 110],
-    crash: [0, 32, 64, 96, 112],
+    snare: [
+      ...repeatBars([4, 12], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+      188, 190, 191,
+    ],
+    rim: repeatBars([2, 7, 14], [0, 1, 2, 3, 4, 5]),
+    clang: [
+      ...repeatBars([0, 8], [0, 1, 2, 3, 4, 5]),
+      96, 112, 128, 144,
+    ],
+    hatClosed: repeatBars([0, 2, 4, 6, 8, 10, 12, 14], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+    hatAccent: repeatBars([2, 6, 10, 14], [4, 5, 6, 7, 8, 9]),
+    hatOpen: repeatBars([14], [1, 3, 5, 7, 9]),
+    crash: [64, 96, 160],
     toms: [
-      { step: 60, midi: 57, vel: 0.95 },
-      { step: 61, midi: 54, vel: 0.95 },
-      { step: 62, midi: 50, vel: 1.0 },
-      { step: 63, midi: 47, vel: 1.0 },
-      { step: 124, midi: 59, vel: 0.95 },
-      { step: 125, midi: 55, vel: 0.95 },
-      { step: 126, midi: 52, vel: 1.0 },
-      { step: 127, midi: 47, vel: 1.0 },
+      { step: 156, midi: 53, vel: 0.9 },
+      { step: 157, midi: 50, vel: 0.9 },
+      { step: 158, midi: 45, vel: 0.95 },
+      { step: 159, midi: 41, vel: 1.0 },
     ],
     leadVoice: {
       waveform: 'sawtooth',
+      detuneCents: 10,
+      highpassHz: 280,
+      cutoffHz: 2600,
+      cutoffPeakHz: 5200,
+      filterDecaySec: 0.18,
+      q: 1.4,
+      attackSec: 0.02,
+      decaySec: 0.18,
+      sustainLevel: 0.82,
+      releaseSec: 0.24,
+      gain: 0.155,
+      driveAmount: 0.18,
+      delaySend: 0.28,
+      reverbSend: 0.42,
+      pan: 0.08,
+      vibratoHz: 5.3,
+      vibratoCents: 15,
+      vibratoDelaySec: 0.14,
+    },
+    counterVoice: {
+      waveform: 'strings',
       detuneCents: 12,
-      fmRatio: 2,
-      fmIndexHz: 110,
-      cutoffHz: 2500,
-      cutoffPeakHz: 4000,
-      q: 2.5,
-      attackSec: 0.004,
-      releaseSec: 0.22,
+      chorus3: true,
+      highpassHz: 280,
+      cutoffHz: 3200,
+      attackSec: 0.055,
+      decaySec: 0.22,
+      sustainLevel: 0.78,
+      releaseSec: 0.34,
       gain: 0.11,
-      driveAmount: 0.72,
-      delaySend: 0.24,
-      pan: 0.16,
-      vibratoHz: 6.2,
+      reverbSend: 0.48,
+      pan: -0.32,
+    },
+    arpVoice: {
+      waveform: 'epiano',
+      highpassHz: 480,
+      cutoffHz: 5000,
+      attackSec: 0.006,
+      decaySec: 0.26,
+      sustainLevel: 0.26,
+      releaseSec: 0.34,
+      gain: 0.105,
+      fmRatio: 3,
+      fmIndexHz: 110,
+      fmDecaySec: 0.1,
+      delaySend: 0.34,
+      reverbSend: 0.44,
+      pan: 0.3,
+    },
+    bassVoice: {
+      waveform: 'sawtooth',
+      detuneCents: 7,
+      cutoffHz: 520,
+      cutoffPeakHz: 2100,
+      filterDecaySec: 0.11,
+      q: 4.2,
+      attackSec: 0.005,
+      decaySec: 0.12,
+      sustainLevel: 0.56,
+      releaseSec: 0.085,
+      gain: 0.24,
+      subOctaveGain: 0.48,
+      driveAmount: 0.15,
+      reverbSend: 0.05,
+    },
+    padVoice: {
+      waveform: 'strings',
+      detuneCents: 14,
+      chorus3: true,
+      highpassHz: 240,
+      cutoffHz: 2600,
+      cutoffPeakHz: 3800,
+      filterDecaySec: 0.65,
+      attackSec: 0.12,
+      decaySec: 0.4,
+      sustainLevel: 0.76,
+      releaseSec: 0.6,
+      gain: 0.075,
+      reverbSend: 0.54,
+    },
+    altPadVoice: {
+      waveform: 'brass',
+      detuneCents: 10,
+      highpassHz: 240,
+      cutoffHz: 2200,
+      cutoffPeakHz: 4800,
+      filterDecaySec: 0.14,
+      attackSec: 0.01,
+      decaySec: 0.16,
+      sustainLevel: 0.58,
+      releaseSec: 0.18,
+      gain: 0.095,
+      reverbSend: 0.36,
+      pan: -0.18,
+    },
+    drumGain: 0.31,
+    delayFeedback: 0.32,
+    delayMix: 0.24,
+    reverbMix: 0.32,
+  },
+
+  // ==========================================================================
+  // 5. 950 pts — "Ultra Combo"
+  //    Inspired by: Killer Instinct — The Instinct (Original Arcade Soundtrack)
+  //    110 BPM · E Minor / Phrygian · 12 bars (192 steps)
+  //    Bars 0-1: Dark ominous sci-fi pad intro + distant clangs + drum pickup
+  //    Bars 2-5: Crushing 110 BPM industrial breakbeat + cab-shaped guitar riff
+  //    Bars 6-9: Aggressive soaring arena synth lead + bold brass stabs
+  //    Bars 10-11: Atmospheric dark bass & sci-fi pad breakdown -> slam back
+  // ==========================================================================
+  subcarrier_pulse: {
+    bpm: 110,
+    totalSteps: 192,
+    chords: {
+      // Bars 0-1: Dark brooding sci-fi intro drone pads (padVoice)
+      0: { notes: [52, 59, 64, 67], steps: 16, vel: 0.95 }, // Em
+      16: { notes: [52, 59, 65, 67], steps: 15, vel: 0.98 }, // Em(b9) tension
+      // Bars 2-5: Bold arcade orchestral/brass punches (altPadVoice)
+      32: { notes: [59, 64, 67, 71], steps: 3, vel: 0.98, altVoice: true }, // Em
+      44: { notes: [60, 64, 67, 72], steps: 3, vel: 0.92, altVoice: true }, // C
+      48: { notes: [59, 64, 67, 71], steps: 3, vel: 0.98, altVoice: true }, // Em
+      58: { notes: [57, 60, 65, 69], steps: 3, vel: 0.95, altVoice: true }, // F Phrygian punch
+      64: { notes: [59, 64, 67, 71], steps: 3, vel: 0.98, altVoice: true }, // Em
+      76: { notes: [57, 62, 66, 69], steps: 3, vel: 0.92, altVoice: true }, // D
+      80: { notes: [59, 64, 67, 71], steps: 3, vel: 0.98, altVoice: true }, // Em
+      88: { notes: [58, 62, 65, 70], steps: 3, vel: 0.95, altVoice: true }, // Bb/F tension
+      92: { notes: [59, 63, 66, 71], steps: 3, vel: 1.0, altVoice: true }, // B5 slam
+      // Bars 6-9: Big arena chords + brass hooks
+      96: { notes: [55, 59, 64, 67], steps: 12, vel: 0.92 }, // Em
+      112: { notes: [55, 60, 64, 67], steps: 8, vel: 0.92 }, // C
+      120: { notes: [57, 62, 66, 69], steps: 7, vel: 0.94, altVoice: true }, // D
+      128: { notes: [55, 59, 64, 67], steps: 12, vel: 0.94 }, // Em
+      144: { notes: [57, 60, 65, 69], steps: 8, vel: 0.95, altVoice: true }, // F Phrygian
+      152: { notes: [59, 63, 66, 71], steps: 7, vel: 1.0, altVoice: true }, // B7
+      // Bars 10-11: Atmospheric dark sci-fi breakdown pads
+      160: { notes: [55, 59, 64, 66], steps: 15, vel: 0.95 }, // Em9
+      176: { notes: [55, 60, 64, 67], steps: 8, vel: 0.92 }, // C
+      184: { notes: [59, 63, 66, 71], steps: 7, vel: 0.98, altVoice: true }, // B slam
+    },
+    bass: concatBars(
+      // Bars 0-1: Deep pulsing sci-fi sub drone building into the drop
+      [s(40, 14, 0.85), null, null, null, null, null, null, null, null, null, null, null, null, null, null, null],
+      [s(40, 8, 0.9), null, null, null, null, null, null, null, s(41, 4, 0.92), null, null, null, s(40, 2, 0.95), null, s(38, 2, 0.95), null],
+      // Bars 2-5: Heavy swaggering industrial breakbeat bass locked to guitar riff
+      [s(40, 2, 1), null, s(40, 1, 0.85), s(40, 1, 0.85), null, null, s(43, 2, 0.95), null, null, null, s(40, 2, 0.95), null, s(48, 2, 0.92), null, s(43, 2, 0.9), null],
+      [s(40, 2, 1), null, s(40, 1, 0.85), s(40, 1, 0.85), null, null, s(41, 2, 0.98), null, null, null, s(40, 2, 0.95), null, s(38, 2, 0.92), null, s(35, 2, 0.92), null],
+      [s(40, 2, 1), null, s(40, 1, 0.85), s(40, 1, 0.85), null, null, s(43, 2, 0.95), null, null, null, s(45, 2, 0.95), null, s(43, 2, 0.92), null, s(38, 2, 0.9), null],
+      [s(40, 2, 1), null, s(40, 1, 0.85), s(40, 1, 0.85), null, null, s(41, 2, 0.98), null, s(36, 2, 0.95), null, s(38, 2, 0.95), null, s(35, 3, 1), null, null, null],
+      // Bars 6-9: Driving heavy breakbeat bass under soaring arena hook
+      [s(40, 2, 1), null, s(40, 1, 0.8), s(52, 1, 0.9), null, null, s(40, 2, 0.95), null, null, null, s(47, 2, 0.92), null, s(43, 2, 0.9), null, s(40, 2, 0.9), null],
+      [s(36, 2, 1), null, s(36, 1, 0.8), s(48, 1, 0.9), null, null, s(36, 2, 0.95), null, s(38, 2, 1), null, s(38, 1, 0.85), null, s(45, 2, 0.92), null, s(38, 2, 0.92), null],
+      [s(40, 2, 1), null, s(40, 1, 0.8), s(52, 1, 0.9), null, null, s(40, 2, 0.95), null, null, null, s(43, 2, 0.92), null, s(47, 2, 0.92), null, s(43, 2, 0.9), null],
+      [s(41, 2, 1), null, s(41, 1, 0.85), s(48, 1, 0.92), null, null, s(41, 2, 0.95), null, s(35, 2, 1), null, s(35, 1, 0.85), null, s(42, 2, 0.95), null, s(47, 2, 0.98), null],
+      // Bars 10-11: Moody syncopated rolling breakdown bass
+      [s(40, 2, 0.95), null, s(47, 2, 0.82), null, s(40, 2, 0.9), null, s(43, 2, 0.85), null, s(40, 2, 0.92), null, s(47, 2, 0.82), null, s(45, 2, 0.85), null, s(43, 2, 0.85), null],
+      [s(36, 2, 0.95), null, s(43, 2, 0.84), null, s(36, 2, 0.92), null, s(40, 2, 0.86), null, s(35, 2, 1), null, s(35, 2, 0.95), null, s(42, 2, 0.98), null, s(47, 2, 1), null],
+    ),
+    // counter = Heavy Cab-Shaped Distorted Power-Chord Guitar Riff!
+    counter: concatBars(
+      EMPTY_BAR,
+      [null, null, null, null, null, null, null, null, null, null, null, null, s(40, 2, 0.85), null, s(38, 2, 0.9), null],
+      // Bars 2-5: Crushing Killer Instinct palm-muted industrial power-chord riff
+      [s(40, 2, 1), null, s(40, 1, 0.82), s(40, 1, 0.88), null, null, s(43, 2, 0.96), null, null, null, s(40, 2, 0.95), null, s(48, 2, 0.94), null, s(43, 2, 0.9), null],
+      [s(40, 2, 1), null, s(40, 1, 0.82), s(40, 1, 0.88), null, null, s(41, 2, 1), null, null, null, s(40, 2, 0.95), null, s(38, 2, 0.92), null, s(35, 2, 0.92), null],
+      [s(40, 2, 1), null, s(40, 1, 0.82), s(40, 1, 0.88), null, null, s(43, 2, 0.96), null, null, null, s(45, 2, 0.96), null, s(43, 2, 0.94), null, s(38, 2, 0.9), null],
+      [s(40, 2, 1), null, s(40, 1, 0.82), s(40, 1, 0.88), null, null, s(41, 2, 1), null, s(36, 2, 0.95), null, s(38, 2, 0.95), null, s(35, 4, 1), null, null, null],
+      // Bars 6-9: Big heavy sustained power-chord chunks supporting the lead hook
+      [s(40, 4, 0.92), null, null, null, null, null, s(40, 2, 0.88), null, null, null, s(40, 2, 0.9), null, s(43, 2, 0.88), null, null, null],
+      [s(36, 4, 0.92), null, null, null, null, null, s(36, 2, 0.88), null, s(38, 4, 0.95), null, null, null, null, null, s(38, 2, 0.9), null],
+      [s(40, 4, 0.92), null, null, null, null, null, s(40, 2, 0.88), null, null, null, s(43, 2, 0.9), null, s(47, 2, 0.9), null, null, null],
+      [s(41, 4, 0.96), null, null, null, null, null, s(41, 2, 0.92), null, s(35, 4, 1), null, null, null, s(35, 2, 0.95), null, s(35, 2, 0.98), null],
+      // Bars 10-11: Guitar drops out for atmospheric breakdown, slams back at end of Bar 11!
+      EMPTY_BAR,
+      [null, null, null, null, null, null, null, null, s(35, 2, 0.92), null, s(35, 2, 0.95), null, s(38, 2, 0.98), null, s(35, 2, 1), null],
+    ),
+    arp: concatBars(
+      // Bars 0-1: Shimmering dark sci-fi metallic echoes in intro
+      [76, null, null, null, 79, null, null, null, 71, null, null, null, 76, null, null, null],
+      [77, null, null, null, 76, null, null, null, 71, null, null, null, 72, null, null, null],
+      // Bars 2-5: Restrained rhythmic cyber-synth ticks
+      [null, null, null, null, null, null, 76, null, null, null, null, null, null, null, 79, null],
+      [null, null, null, null, null, null, 77, null, null, null, null, null, null, null, 74, null],
+      [null, null, null, null, null, null, 76, null, null, null, null, null, null, null, 81, null],
+      [null, null, null, null, null, null, 77, null, null, null, 74, null, null, null, 71, null],
+      // Bars 6-9: Pulsing subtle industrial counter-arps
+      [null, null, 76, null, null, null, 71, null, null, null, 79, null, null, null, 76, null],
+      [null, null, 72, null, null, null, 76, null, null, null, 74, null, null, null, 78, null],
+      [null, null, 76, null, null, null, 79, null, null, null, 83, null, null, null, 79, null],
+      [null, null, 77, null, null, null, 72, null, null, null, 75, null, null, null, 78, null],
+      // Bars 10-11: Atmospheric cyber-echo motif in breakdown
+      [76, null, 71, null, 74, null, 76, null, 79, null, 76, null, 74, null, 71, null],
+      [72, null, 76, null, 79, null, 76, null, 75, null, 78, null, 83, null, 78, null],
+    ),
+    lead: concatBars(
+      // Bars 0-1: Atmospheric intro — let the dark pad & sub build suspense!
+      EMPTY_BAR,
+      EMPTY_BAR,
+      // Bars 2-5: Let the crushing power-chord guitar riff & brass stabs own the groove!
+      EMPTY_BAR,
+      [null, null, null, null, null, null, null, null, null, null, s(76, 2, 0.9), null, s(77, 2, 0.94), null, s(74, 2, 0.9), null],
+      EMPTY_BAR,
+      [null, null, null, null, null, null, null, null, s(72, 2, 0.9), null, s(74, 2, 0.94), null, s(75, 4, 1, -2), null, null, null],
+      // Bars 6-9: Soaring, aggressive Killer Instinct arena synth/vocal-style hook!
+      [s(76, 4, 1, -2), null, null, null, s(79, 2, 0.95), null, s(83, 4, 1, -2), null, null, null, s(79, 2, 0.92), null, s(76, 3, 0.94), null, null, null],
+      [s(79, 4, 0.98), null, null, null, s(76, 2, 0.92), null, s(74, 6, 0.98, -2), null, null, null, null, null, s(78, 3, 0.95), null, null, null],
+      [s(76, 3, 1), null, null, s(79, 2, 0.94), null, s(83, 3, 1, -2), null, null, s(84, 3, 1), null, null, s(83, 2, 0.94), null, s(79, 3, 0.95), null, null],
+      [s(77, 4, 1, -1), null, null, null, s(76, 2, 0.94), null, s(72, 2, 0.9), null, s(75, 6, 1, -2), null, null, null, null, null, null, null],
+      // Bars 10-11: Breakdown breather + screaming pickup back into drop
+      EMPTY_BAR,
+      [null, null, null, null, null, null, null, null, s(75, 2, 0.92), null, s(78, 2, 0.95), null, s(83, 4, 1, -2), null, null, null],
+    ),
+    accentSteps: [32, 48, 64, 80, 96, 112, 128, 144, 184],
+    kick: [
+      0, 16, 28, 30, // intro pulse & drop pickup
+      ...repeatBars([0, 3, 10], [2, 3, 4, 5, 6, 7, 8, 9]),
+      160, 170, 176, 184, 188,
+    ],
+    snare: [
+      28, 30, 31, // explosive drop roll!
+      ...repeatBars([4, 12], [2, 3, 4, 5, 6, 7, 8, 9]),
+      164, 172, 180, 186, 188, 190, 191,
+    ],
+    gatedSnare: true,
+    clang: [
+      0, 16,
+      ...repeatBars([0, 6], [2, 3, 4, 5, 6, 7, 8, 9]),
+      160, 176,
+    ],
+    hatClosed: repeatBars([0, 2, 3, 4, 6, 8, 10, 11, 12, 14], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+    hatAccent: repeatBars([2, 6, 10, 14], [2, 3, 4, 5, 6, 7, 8, 9]),
+    hatOpen: repeatBars([14], [3, 5, 7, 9]),
+    crash: [32, 64, 96, 144],
+    toms: [
+      { step: 26, midi: 50, vel: 0.85 },
+      { step: 27, midi: 47, vel: 0.88 },
+      { step: 28, midi: 43, vel: 0.92 },
+      { step: 29, midi: 40, vel: 0.98 },
+    ],
+    leadVoice: {
+      waveform: 'sawtooth',
+      detuneCents: 11,
+      highpassHz: 300,
+      cutoffHz: 2600,
+      cutoffPeakHz: 5400,
+      filterDecaySec: 0.16,
+      q: 1.8,
+      attackSec: 0.015,
+      decaySec: 0.16,
+      sustainLevel: 0.82,
+      releaseSec: 0.22,
+      gain: 0.16,
+      driveAmount: 0.34,
+      cabinetEq: true,
+      delaySend: 0.3,
+      reverbSend: 0.38,
+      pan: 0.06,
+      vibratoHz: 5.6,
+      vibratoCents: 18,
+      vibratoDelaySec: 0.12,
+    },
+    // Heavy cab-filtered industrial power-chord guitar!
+    counterVoice: {
+      waveform: 'guitar',
+      detuneCents: 7,
+      highpassHz: 115,
+      cutoffHz: 2500,
+      cutoffPeakHz: 3400,
+      filterDecaySec: 0.12,
+      q: 1.2,
+      attackSec: 0.004,
+      decaySec: 0.11,
+      sustainLevel: 0.62,
+      releaseSec: 0.075,
+      gain: 0.155,
+      driveAmount: 0.64,
+      powerChord: true,
+      cabinetEq: true,
+      reverbSend: 0.16,
+      pan: -0.16,
+    },
+    arpVoice: {
+      waveform: 'epiano',
+      highpassHz: 460,
+      cutoffHz: 3600,
+      attackSec: 0.005,
+      decaySec: 0.18,
+      sustainLevel: 0.22,
+      releaseSec: 0.26,
+      gain: 0.082,
+      fmRatio: 2.5,
+      fmIndexHz: 120,
+      fmDecaySec: 0.08,
+      delaySend: 0.34,
+      reverbSend: 0.42,
+      pan: 0.36,
+    },
+    bassVoice: {
+      waveform: 'sawtooth',
+      detuneCents: 5,
+      cutoffHz: 620,
+      cutoffPeakHz: 1550,
+      filterDecaySec: 0.1,
+      q: 2.2,
+      attackSec: 0.005,
+      decaySec: 0.13,
+      sustainLevel: 0.64,
+      releaseSec: 0.09,
+      gain: 0.23,
+      subOctaveGain: 0.5,
+      driveAmount: 0.16,
+      reverbSend: 0.04,
+    },
+    padVoice: {
+      waveform: 'strings',
+      detuneCents: 15,
+      chorus3: true,
+      highpassHz: 240,
+      cutoffHz: 1900,
+      cutoffPeakHz: 2900,
+      filterDecaySec: 0.7,
+      attackSec: 0.16,
+      decaySec: 0.4,
+      sustainLevel: 0.74,
+      releaseSec: 0.65,
+      gain: 0.076,
+      reverbSend: 0.54,
+    },
+    altPadVoice: {
+      waveform: 'brass',
+      detuneCents: 11,
+      highpassHz: 260,
+      cutoffHz: 2400,
+      cutoffPeakHz: 5200,
+      filterDecaySec: 0.12,
+      attackSec: 0.008,
+      decaySec: 0.14,
+      sustainLevel: 0.58,
+      releaseSec: 0.16,
+      gain: 0.092,
+      reverbSend: 0.34,
+      pan: 0.22,
+    },
+    drumGain: 0.34,
+    delayFeedback: 0.28,
+    delayMix: 0.2,
+    reverbMix: 0.32,
+  },
+
+  // ==========================================================================
+  // 6. 1,300 pts — "Phobos Gate"
+  //    Inspired by: Doom OST — E1M1 — At Doom's Gate
+  //    120 BPM (double-time 16th-note thrash gallop) · E Minor · 8 bars (128 steps)
+  //    Bars 0-1: Razor-tight cab-shaped pedal-E 16th-note thrash chugs + chromatic accents
+  //    Bar 2: Iconic shift UP a 4th to A minor pedal-A thrash riff!
+  //    Bar 3: Return to E minor with fierce descending chromatic turnaround
+  //    Bars 4-7: Screaming harmonized twin-lead metal guitar bridge & solo over power chords
+  // ==========================================================================
+  cyberdeck_horizon: {
+    bpm: 120,
+    totalSteps: 128,
+    chords: {
+      // Heavy sustained power-chord punctuation in the metal bridge (Bars 4-7)
+      64: { notes: [48, 55, 60], steps: 7, vel: 0.92 }, // C5
+      72: { notes: [50, 57, 62], steps: 7, vel: 0.94 }, // D5
+      80: { notes: [52, 59, 64], steps: 14, vel: 0.96 }, // E5
+      96: { notes: [48, 55, 60], steps: 7, vel: 0.92 }, // C5
+      104: { notes: [50, 57, 62], steps: 7, vel: 0.94 }, // D5
+      112: { notes: [47, 54, 59], steps: 10, vel: 1.0 }, // B5 climax
+    },
+    // Bass locks tight in unison with the thrash rhythm guitar (punchy pick bass!)
+    bass: concatBars(
+      // Bar 0 (E minor thrash pedal riff)
+      [s(40, 1, 1), s(40, 1, 0.8), s(50, 1, 1), s(40, 1, 0.85), s(40, 1, 0.8), s(48, 1, 1), s(40, 1, 0.85), s(40, 1, 0.8), s(46, 1, 1), s(40, 1, 0.85), s(40, 1, 0.8), s(47, 1, 1), s(48, 2, 1), null, s(40, 1, 0.85), s(40, 1, 0.85)],
+      // Bar 1 (E minor thrash repeat with snappy low-E turnaround)
+      [s(40, 1, 1), s(40, 1, 0.8), s(50, 1, 1), s(40, 1, 0.85), s(40, 1, 0.8), s(48, 1, 1), s(40, 1, 0.85), s(40, 1, 0.8), s(46, 1, 1), s(40, 1, 0.85), s(40, 1, 0.8), s(45, 1, 1), s(43, 2, 1), null, s(42, 2, 0.95), null],
+      // Bar 2 (Shift UP a 4th to A minor!)
+      [s(45, 1, 1), s(45, 1, 0.8), s(55, 1, 1), s(45, 1, 0.85), s(45, 1, 0.8), s(53, 1, 1), s(45, 1, 0.85), s(45, 1, 0.8), s(51, 1, 1), s(45, 1, 0.85), s(45, 1, 0.8), s(52, 1, 1), s(53, 2, 1), null, s(45, 1, 0.85), s(45, 1, 0.85)],
+      // Bar 3 (Return to E minor + fierce chromatic turnaround)
+      [s(40, 1, 1), s(40, 1, 0.8), s(50, 1, 1), s(40, 1, 0.85), s(40, 1, 0.8), s(48, 1, 1), s(40, 1, 0.85), s(40, 1, 0.8), s(47, 2, 1), null, s(46, 2, 1), null, s(45, 2, 1), null, s(43, 1, 0.95), s(42, 1, 0.95)],
+      // Bars 4-7: Driving galloping metal bass (C -> D -> E -> C -> D -> B)
+      [s(36, 1, 1), s(36, 1, 0.8), s(36, 1, 0.85), s(36, 1, 0.8), s(36, 2, 0.95), null, s(36, 1, 0.85), s(36, 1, 0.8), s(38, 1, 1), s(38, 1, 0.8), s(38, 1, 0.85), s(38, 1, 0.8), s(38, 2, 0.95), null, s(38, 1, 0.85), s(38, 1, 0.8)],
+      [s(40, 1, 1), s(40, 1, 0.8), s(40, 1, 0.85), s(40, 1, 0.8), s(40, 2, 0.95), null, s(43, 1, 0.9), s(42, 1, 0.88), s(40, 1, 1), s(40, 1, 0.8), s(40, 1, 0.85), s(40, 1, 0.8), s(47, 2, 0.96), null, s(43, 2, 0.92), null],
+      [s(36, 1, 1), s(36, 1, 0.8), s(36, 1, 0.85), s(36, 1, 0.8), s(36, 2, 0.95), null, s(36, 1, 0.85), s(36, 1, 0.8), s(38, 1, 1), s(38, 1, 0.8), s(38, 1, 0.85), s(38, 1, 0.8), s(38, 2, 0.95), null, s(38, 1, 0.85), s(38, 1, 0.8)],
+      [s(35, 1, 1), s(35, 1, 0.8), s(35, 1, 0.85), s(35, 1, 0.8), s(35, 2, 0.98), null, s(35, 1, 0.85), s(35, 1, 0.8), s(35, 2, 1), null, s(38, 2, 1), null, s(40, 2, 1), null, s(42, 2, 1), null],
+    ),
+    // arp = Heavy Cab-Shaped Palm-Muted Rhythm Power-Chord Guitar!
+    arp: concatBars(
+      // Bar 0: Tight razor-sharp palm-muted pedal-E chugs + power accents
+      [s(40, 1, 0.88), s(40, 1, 0.72), s(50, 1, 1), s(40, 1, 0.82), s(40, 1, 0.72), s(48, 1, 1), s(40, 1, 0.82), s(40, 1, 0.72), s(46, 1, 1), s(40, 1, 0.82), s(40, 1, 0.72), s(47, 1, 1), s(48, 2, 1), null, s(40, 1, 0.82), s(40, 1, 0.78)],
+      // Bar 1
+      [s(40, 1, 0.88), s(40, 1, 0.72), s(50, 1, 1), s(40, 1, 0.82), s(40, 1, 0.72), s(48, 1, 1), s(40, 1, 0.82), s(40, 1, 0.72), s(46, 1, 1), s(40, 1, 0.82), s(40, 1, 0.72), s(45, 1, 1), s(43, 2, 1), null, s(42, 2, 0.96), null],
+      // Bar 2: Shifts UP a 4th to A minor!
+      [s(45, 1, 0.9), s(45, 1, 0.74), s(55, 1, 1), s(45, 1, 0.84), s(45, 1, 0.74), s(53, 1, 1), s(45, 1, 0.84), s(45, 1, 0.74), s(51, 1, 1), s(45, 1, 0.84), s(45, 1, 0.74), s(52, 1, 1), s(53, 2, 1), null, s(45, 1, 0.84), s(45, 1, 0.78)],
+      // Bar 3: Return to E minor + descending chromatic slam
+      [s(40, 1, 0.9), s(40, 1, 0.74), s(50, 1, 1), s(40, 1, 0.84), s(40, 1, 0.74), s(48, 1, 1), s(40, 1, 0.84), s(40, 1, 0.74), s(47, 2, 1), null, s(46, 2, 1), null, s(45, 2, 1), null, s(43, 1, 0.96), s(42, 1, 0.96)],
+      // Bars 4-7: Galloping muted chugs underneath the harmonized twin leads
+      [s(48, 1, 0.86), s(48, 1, 0.72), s(48, 1, 0.82), s(48, 1, 0.72), s(48, 2, 0.94), null, s(48, 1, 0.8), s(48, 1, 0.72), s(50, 1, 0.88), s(50, 1, 0.74), s(50, 1, 0.82), s(50, 1, 0.72), s(50, 2, 0.94), null, s(50, 1, 0.82), s(50, 1, 0.74)],
+      [s(40, 1, 0.88), s(40, 1, 0.72), s(40, 1, 0.82), s(40, 1, 0.72), s(40, 2, 0.94), null, s(43, 1, 0.86), s(42, 1, 0.84), s(40, 1, 0.88), s(40, 1, 0.72), s(40, 1, 0.82), s(40, 1, 0.72), s(47, 2, 0.95), null, s(43, 2, 0.9), null],
+      [s(48, 1, 0.86), s(48, 1, 0.72), s(48, 1, 0.82), s(48, 1, 0.72), s(48, 2, 0.94), null, s(48, 1, 0.8), s(48, 1, 0.72), s(50, 1, 0.88), s(50, 1, 0.74), s(50, 1, 0.82), s(50, 1, 0.72), s(50, 2, 0.94), null, s(50, 1, 0.82), s(50, 1, 0.74)],
+      [s(47, 1, 0.9), s(47, 1, 0.76), s(47, 1, 0.86), s(47, 1, 0.76), s(47, 2, 0.98), null, s(47, 1, 0.86), s(47, 1, 0.78), s(47, 2, 1), null, s(50, 2, 1), null, s(52, 2, 1), null, s(54, 2, 1), null],
+    ),
+    lead: concatBars(
+      // Bars 0-1: Let the razor-tight E-pedal thrash riff shine with clean bite!
+      EMPTY_BAR,
+      [null, null, null, null, null, null, null, null, null, null, null, null, s(67, 2, 0.94), null, s(66, 2, 0.96), null],
+      // Bar 2-3: High-octave scream punctuation on the A-minor shift & turnaround
+      [null, null, s(79, 1, 0.95), null, null, s(77, 1, 0.95), null, null, s(75, 1, 0.98), null, null, s(76, 1, 0.96), s(77, 2, 1), null, null, null],
+      [null, null, null, null, null, null, null, null, s(71, 2, 1), null, s(70, 2, 1), null, s(69, 2, 1), null, s(67, 1, 0.96), s(66, 1, 0.96)],
+      // Bars 4-7: Screaming melodic thrash metal lead guitar solo!
+      [s(72, 3, 1, -2), null, null, s(76, 2, 0.96), null, s(79, 3, 1), null, null, s(74, 3, 1), null, null, s(78, 2, 0.96), null, s(81, 3, 1), null, null],
+      [s(83, 4, 1, -2), null, null, null, s(79, 2, 0.95), null, s(76, 2, 0.92), null, s(79, 3, 1), null, null, s(78, 2, 0.94), null, s(76, 3, 0.98), null, null],
+      [s(72, 2, 0.96), null, s(76, 2, 0.96), null, s(79, 2, 1), null, s(84, 2, 1), null, s(81, 2, 1), null, s(78, 2, 0.96), null, s(74, 2, 0.95), null, s(81, 2, 1), null],
+      [s(83, 6, 1, -2), null, null, null, null, null, s(81, 2, 0.96), null, s(79, 2, 0.98), null, s(78, 2, 0.98), null, s(76, 2, 1), null, s(78, 2, 1), null],
+    ),
+    // counter = Harmonized Twin-Lead Metal Guitar (3rd below Lead, panned opposite!)
+    counter: concatBars(
+      EMPTY_BAR,
+      EMPTY_BAR,
+      EMPTY_BAR,
+      [null, null, null, null, null, null, null, null, s(67, 2, 0.85), null, s(66, 2, 0.85), null, s(64, 2, 0.85), null, s(62, 1, 0.85), s(61, 1, 0.85)],
+      [s(67, 3, 0.85), null, null, s(72, 2, 0.84), null, s(76, 3, 0.86), null, null, s(69, 3, 0.85), null, null, s(74, 2, 0.84), null, s(78, 3, 0.88), null, null],
+      [s(79, 4, 0.88), null, null, null, s(76, 2, 0.84), null, s(71, 2, 0.82), null, s(76, 3, 0.86), null, null, s(74, 2, 0.84), null, s(71, 3, 0.86), null, null],
+      [s(67, 2, 0.84), null, s(72, 2, 0.84), null, s(76, 2, 0.86), null, s(79, 2, 0.88), null, s(78, 2, 0.86), null, s(74, 2, 0.84), null, s(69, 2, 0.84), null, s(78, 2, 0.88), null],
+      [s(78, 6, 0.9), null, null, null, null, null, s(76, 2, 0.86), null, s(74, 2, 0.88), null, s(73, 2, 0.88), null, s(71, 2, 0.9), null, s(73, 2, 0.9), null],
+    ),
+    accentSteps: [0, 2, 5, 8, 11, 16, 18, 21, 24, 27, 32, 34, 37, 40, 43, 48, 56, 64, 72, 80, 96, 104, 112],
+    kick: [
+      ...repeatBars([0, 2, 6, 8, 10, 14], [0, 1, 2, 3]),
+      ...repeatBars([0, 1, 6, 8, 9, 14], [4, 5, 6, 7]),
+    ],
+    snare: [
+      ...repeatBars([4, 12], [0, 1, 2, 3, 4, 5, 6]),
+      116, 120, 122, 124, 125, 126, 127, // blazing thrash snare roll!
+    ],
+    hatClosed: repeatBars([0, 2, 4, 6, 8, 10, 12, 14], [0, 1, 2, 3, 4, 5, 6, 7]),
+    hatAccent: repeatBars([0, 4, 8, 12], [0, 1, 2, 3, 4, 5, 6, 7]),
+    hatOpen: repeatBars([2, 10], [4, 5, 6, 7]),
+    crash: [0, 32, 64, 80, 96, 112],
+    toms: [
+      { step: 60, midi: 52, vel: 0.9 },
+      { step: 61, midi: 48, vel: 0.9 },
+      { step: 62, midi: 45, vel: 0.95 },
+      { step: 63, midi: 40, vel: 1.0 },
+    ],
+    leadVoice: {
+      waveform: 'guitar',
+      detuneCents: 9,
+      highpassHz: 260,
+      cutoffHz: 2700,
+      cutoffPeakHz: 4200,
+      filterDecaySec: 0.14,
+      q: 1.4,
+      attackSec: 0.008,
+      decaySec: 0.16,
+      sustainLevel: 0.82,
+      releaseSec: 0.18,
+      gain: 0.165,
+      driveAmount: 0.62,
+      cabinetEq: true,
+      delaySend: 0.22,
+      reverbSend: 0.28,
+      pan: -0.26,
+      vibratoHz: 6.0,
+      vibratoCents: 18,
+      vibratoDelaySec: 0.11,
+    },
+    counterVoice: {
+      waveform: 'guitar',
+      detuneCents: 8,
+      highpassHz: 260,
+      cutoffHz: 2600,
+      cutoffPeakHz: 4000,
+      filterDecaySec: 0.14,
+      q: 1.4,
+      attackSec: 0.008,
+      decaySec: 0.16,
+      sustainLevel: 0.8,
+      releaseSec: 0.18,
+      gain: 0.14,
+      driveAmount: 0.58,
+      cabinetEq: true,
+      delaySend: 0.2,
+      reverbSend: 0.26,
+      pan: 0.28,
+      vibratoHz: 5.8,
+      vibratoCents: 16,
+      vibratoDelaySec: 0.12,
+    },
+    // Palm-muted cab-filtered thrash rhythm power-chord guitar!
+    arpVoice: {
+      waveform: 'guitar',
+      detuneCents: 6,
+      highpassHz: 120,
+      cutoffHz: 2450,
+      cutoffPeakHz: 3300,
+      filterDecaySec: 0.075,
+      q: 1.15,
+      attackSec: 0.003,
+      decaySec: 0.075,
+      sustainLevel: 0.45,
+      releaseSec: 0.045,
+      gain: 0.15,
+      driveAmount: 0.65,
+      powerChord: true,
+      cabinetEq: true,
+      reverbSend: 0.14,
+      pan: 0.04,
+    },
+    bassVoice: {
+      waveform: 'sawtooth',
+      cutoffHz: 950,
+      cutoffPeakHz: 1850,
+      filterDecaySec: 0.07,
+      q: 1.6,
+      attackSec: 0.003,
+      decaySec: 0.09,
+      sustainLevel: 0.56,
+      releaseSec: 0.05,
+      gain: 0.23,
+      subOctaveGain: 0.38,
+      driveAmount: 0.26,
+      reverbSend: 0.04,
+    },
+    padVoice: {
+      waveform: 'guitar',
+      detuneCents: 10,
+      highpassHz: 140,
+      cutoffHz: 2300,
+      attackSec: 0.01,
+      decaySec: 0.22,
+      sustainLevel: 0.72,
+      releaseSec: 0.18,
+      gain: 0.075,
+      driveAmount: 0.55,
+      cabinetEq: true,
+      reverbSend: 0.22,
+    },
+    drumGain: 0.34,
+    delayFeedback: 0.2,
+    delayMix: 0.15,
+    reverbMix: 0.24,
+  },
+
+  // ==========================================================================
+  // 7. 1,650 pts — "Lunar Core: Final Phase"
+  //    Inspired by: Final Fantasy IV — The Final Battle ~ Zeromus Battle Theme
+  //    152 BPM · G Minor · 12 bars (192 steps)
+  //    Bars 0-1: Gothic drawbar pipe-organ prelude + blistering 16th-note fanfare!
+  //    Bars 2-5: Urgent rapid-fire bass ostinato + heroic SNES French horn/brass theme
+  //    Bars 6-9: Dramatic modulation & soaring orchestral strings/brass climax
+  //    Bars 10-11: Iconic syncopated bass/snare/timpani breakdown -> finale launch!
+  // ==========================================================================
+  broadcast_finale: {
+    bpm: 152,
+    totalSteps: 192,
+    chords: {
+      // Bar 0-1: Dramatic Gothic Cathedral Pipe Organ Prelude (altPadVoice = 'organ')
+      0: { notes: [55, 58, 62, 67], steps: 7, vel: 1.0, altVoice: true }, // Gm
+      8: { notes: [55, 58, 63, 67], steps: 7, vel: 1.0, altVoice: true }, // Eb/G
+      16: { notes: [54, 57, 62, 66], steps: 7, vel: 1.0, altVoice: true }, // D7/F#
+      24: { notes: [55, 58, 62, 67], steps: 7, vel: 1.0, altVoice: true }, // Gm -> fanfare!
+      // Bars 2-5: Heroic battle lush orchestral strings (padVoice)
+      32: { notes: [58, 62, 67, 70], steps: 15, vel: 0.92 }, // Gm
+      48: { notes: [57, 60, 65, 69], steps: 15, vel: 0.92 }, // F
+      64: { notes: [55, 58, 63, 67], steps: 15, vel: 0.94 }, // Eb
+      80: { notes: [57, 62, 66, 69], steps: 15, vel: 0.98, altVoice: true }, // D7 organ punch
+      // Bars 6-9: Dramatic modulation (EbMaj7 -> F -> Dm7 -> Gm -> Cm7 -> D7)
+      96: { notes: [58, 62, 63, 67], steps: 15, vel: 0.96 }, // EbMaj7
+      112: { notes: [57, 60, 65, 69], steps: 15, vel: 0.96 }, // F
+      128: { notes: [57, 60, 62, 69], steps: 8, vel: 0.94 }, // Dm7
+      136: { notes: [58, 62, 67, 70], steps: 7, vel: 0.96 }, // Gm
+      144: { notes: [55, 60, 63, 67], steps: 8, vel: 0.96 }, // Cm
+      152: { notes: [57, 62, 66, 69], steps: 7, vel: 1.0, altVoice: true }, // D7 organ slam
+      // Bars 10-11: Sharp brass/organ stabs in the syncopated bass breakdown
+      160: { notes: [58, 62, 67, 70], steps: 2, vel: 0.98, altVoice: true },
+      166: { notes: [58, 62, 67, 70], steps: 2, vel: 0.95, altVoice: true },
+      172: { notes: [55, 58, 63, 67], steps: 2, vel: 0.98, altVoice: true },
+      176: { notes: [57, 60, 65, 69], steps: 2, vel: 0.98, altVoice: true },
+      182: { notes: [57, 62, 66, 69], steps: 4, vel: 1.0, altVoice: true },
+    },
+    bass: concatBars(
+      // Bar 0-1: Deep solemn pipe-organ pedals under the Gothic prelude
+      [s(43, 8, 1), null, null, null, null, null, null, null, s(39, 8, 1), null, null, null, null, null, null, null],
+      [s(38, 8, 1), null, null, null, null, null, null, null, s(43, 6, 1), null, null, null, null, null, s(38, 2, 0.95), null],
+      // Bars 2-5: Classic Nobuo Uematsu urgent rapid-fire 8th/16th bass ostinato!
+      [s(43, 1, 1), null, s(43, 1, 0.85), s(55, 1, 0.9), s(43, 1, 0.95), null, s(43, 1, 0.85), s(50, 1, 0.88), s(43, 1, 0.98), null, s(43, 1, 0.85), s(53, 1, 0.9), s(43, 1, 0.95), null, s(50, 1, 0.88), s(46, 1, 0.88)],
+      [s(41, 1, 1), null, s(41, 1, 0.85), s(53, 1, 0.9), s(41, 1, 0.95), null, s(41, 1, 0.85), s(48, 1, 0.88), s(41, 1, 0.98), null, s(41, 1, 0.85), s(51, 1, 0.9), s(41, 1, 0.95), null, s(48, 1, 0.88), s(45, 1, 0.88)],
+      [s(39, 1, 1), null, s(39, 1, 0.85), s(51, 1, 0.9), s(39, 1, 0.95), null, s(39, 1, 0.85), s(46, 1, 0.88), s(39, 1, 0.98), null, s(39, 1, 0.85), s(50, 1, 0.9), s(39, 1, 0.95), null, s(46, 1, 0.88), s(43, 1, 0.88)],
+      [s(38, 1, 1), null, s(38, 1, 0.85), s(50, 1, 0.9), s(38, 1, 0.95), null, s(45, 1, 0.88), s(42, 1, 0.88), s(38, 1, 1), null, s(42, 1, 0.9), s(45, 1, 0.92), s(48, 1, 0.95), null, s(45, 1, 0.92), s(42, 1, 0.92)],
+      // Bars 6-9: Driving urgent bass through heroic modulation
+      [s(39, 1, 1), null, s(39, 1, 0.85), s(51, 1, 0.9), s(39, 1, 0.95), null, s(46, 1, 0.88), null, s(39, 1, 0.98), null, s(39, 1, 0.85), s(51, 1, 0.9), s(46, 1, 0.92), null, s(43, 1, 0.9), null],
+      [s(41, 1, 1), null, s(41, 1, 0.85), s(53, 1, 0.9), s(41, 1, 0.95), null, s(48, 1, 0.88), null, s(41, 1, 0.98), null, s(41, 1, 0.85), s(53, 1, 0.9), s(48, 1, 0.92), null, s(45, 1, 0.9), null],
+      [s(38, 1, 1), null, s(38, 1, 0.85), s(50, 1, 0.9), s(45, 1, 0.92), null, s(41, 1, 0.88), null, s(43, 1, 1), null, s(43, 1, 0.85), s(55, 1, 0.9), s(50, 1, 0.92), null, s(46, 1, 0.9), null],
+      [s(36, 1, 1), null, s(36, 1, 0.85), s(48, 1, 0.9), s(43, 1, 0.92), null, s(39, 1, 0.88), null, s(38, 1, 1), null, s(42, 1, 0.92), s(45, 1, 0.94), s(50, 2, 1), null, s(38, 2, 0.96), null],
+      // Bars 10-11: Iconic syncopated Zeromus bass/drum breakdown!
+      [s(43, 2, 1), null, s(43, 1, 0.9), null, s(50, 1, 0.92), null, s(43, 2, 1), null, s(46, 1, 0.9), null, s(43, 1, 0.9), null, s(39, 2, 1), null, s(39, 1, 0.9), null],
+      [s(41, 2, 1), null, s(41, 1, 0.9), null, s(48, 1, 0.92), null, s(38, 2, 1), null, s(38, 1, 0.92), s(42, 1, 0.94), s(45, 1, 0.96), s(48, 1, 0.98), s(50, 2, 1), null, s(38, 2, 1), null],
+    ),
+    arp: concatBars(
+      // Bar 0: Solemn Gothic organ chords solo
+      EMPTY_BAR,
+      // Bar 1: Blistering ascending Baroque 16th-note arpeggio fanfare into battle!
+      [54, 57, 62, 66, 69, 74, 78, 81, 67, 70, 74, 79, 82, 86, 82, 79],
+      // Bars 2-5: Urgent Baroque harpsichord/organ battle arpeggios
+      [62, 67, 70, 74, 70, 67, 62, 67, 62, 67, 70, 74, 79, 74, 70, 67],
+      [60, 65, 69, 72, 69, 65, 60, 65, 60, 65, 69, 72, 77, 72, 69, 65],
+      [58, 63, 67, 70, 67, 63, 58, 63, 58, 63, 67, 70, 75, 70, 67, 63],
+      [62, 66, 69, 74, 69, 66, 62, 66, 62, 66, 69, 74, 78, 74, 69, 66],
+      // Bars 6-9: Rapid shimmering modulation arps
+      [63, 67, 70, 75, 70, 67, 63, 67, 63, 67, 70, 75, 79, 75, 70, 67],
+      [65, 69, 72, 77, 72, 69, 65, 69, 65, 69, 72, 77, 81, 77, 72, 69],
+      [62, 65, 69, 74, 69, 65, 62, 65, 62, 67, 70, 74, 79, 74, 70, 67],
+      [60, 63, 67, 72, 67, 63, 60, 63, 62, 66, 69, 74, 78, 81, 78, 74],
+      // Bars 10-11: Silent during syncopated bass/drum breakdown -> ascending sweep at end!
+      EMPTY_BAR,
+      [null, null, null, null, null, null, null, null, 62, 66, 69, 74, 78, 81, 86, 81],
+    ),
+    lead: concatBars(
+      // Bars 0-1: Let the Gothic Pipe Organ & ascending fanfare command the intro!
+      EMPTY_BAR,
+      EMPTY_BAR,
+      // Bars 2-5: Bold, triumphant SNES French Horn / Brass hero battle melody!
+      [s(79, 4, 1), null, null, null, s(74, 2, 0.94), null, s(75, 2, 0.95), null, s(77, 2, 0.98), null, s(79, 2, 1), null, s(82, 4, 1, -2), null, null, null],
+      [s(81, 4, 1), null, null, null, s(77, 2, 0.94), null, s(72, 2, 0.92), null, s(77, 4, 0.98), null, null, null, s(79, 4, 1), null, null, null],
+      [s(79, 3, 1), null, null, s(75, 2, 0.94), null, s(70, 2, 0.92), null, null, s(75, 3, 0.98), null, null, s(79, 2, 0.98), null, s(82, 3, 1), null, null],
+      [s(81, 6, 1, -1), null, null, null, null, null, s(78, 2, 0.96), null, s(74, 4, 0.96), null, null, null, s(78, 4, 1), null, null, null],
+      // Bars 6-9: Dramatic heroic modulation & soaring high climax!
+      [s(82, 4, 1, -2), null, null, null, s(79, 2, 0.95), null, s(75, 2, 0.92), null, s(79, 4, 0.98), null, null, null, s(82, 4, 1), null, null, null],
+      [s(84, 4, 1, -2), null, null, null, s(81, 2, 0.95), null, s(77, 2, 0.94), null, s(81, 4, 0.98), null, null, null, s(84, 4, 1), null, null, null],
+      [s(86, 4, 1, -2), null, null, null, s(81, 2, 0.96), null, s(77, 2, 0.94), null, s(82, 4, 1), null, null, null, s(79, 4, 0.96), null, null, null],
+      [s(84, 4, 1), null, null, null, s(79, 2, 0.95), null, s(75, 2, 0.94), null, s(81, 6, 1, -2), null, null, null, null, null, s(78, 2, 0.98), null],
+      // Bars 10-11: Syncopated heroic brass fanfare hits over the bass/drum break!
+      [s(79, 2, 1), null, null, null, null, null, s(79, 2, 1), null, null, null, null, null, s(75, 2, 1), null, null, null],
+      [s(77, 2, 1), null, null, null, null, null, s(78, 4, 1), null, null, null, s(81, 2, 1), null, s(86, 4, 1, -2), null, null, null],
+    ),
+    counter: concatBars(
+      EMPTY_BAR,
+      EMPTY_BAR,
+      // Bars 2-9: Harmonized SNES orchestral strings doubling the heroic brass lead!
+      [s(74, 4, 0.8), null, null, null, s(70, 2, 0.74), null, s(72, 2, 0.75), null, s(74, 2, 0.78), null, s(75, 2, 0.8), null, s(79, 4, 0.84), null, null, null],
+      [s(77, 4, 0.8), null, null, null, s(72, 2, 0.74), null, s(69, 2, 0.72), null, s(72, 4, 0.78), null, null, null, s(74, 4, 0.8), null, null, null],
+      [s(75, 3, 0.8), null, null, s(70, 2, 0.74), null, s(67, 2, 0.72), null, null, s(70, 3, 0.78), null, null, s(75, 2, 0.78), null, s(79, 3, 0.82), null, null],
+      [s(78, 6, 0.84), null, null, null, null, null, s(74, 2, 0.78), null, s(69, 4, 0.78), null, null, null, s(74, 4, 0.82), null, null, null],
+      [s(79, 4, 0.84), null, null, null, s(75, 2, 0.78), null, s(70, 2, 0.75), null, s(75, 4, 0.8), null, null, null, s(79, 4, 0.84), null, null, null],
+      [s(81, 4, 0.84), null, null, null, s(77, 2, 0.78), null, s(72, 2, 0.76), null, s(77, 4, 0.8), null, null, null, s(81, 4, 0.84), null, null, null],
+      [s(81, 4, 0.86), null, null, null, s(77, 2, 0.8), null, s(74, 2, 0.78), null, s(79, 4, 0.84), null, null, null, s(74, 4, 0.8), null, null, null],
+      [s(79, 4, 0.86), null, null, null, s(75, 2, 0.8), null, s(72, 2, 0.78), null, s(78, 6, 0.88), null, null, null, null, null, s(74, 2, 0.82), null],
+      EMPTY_BAR,
+      EMPTY_BAR,
+    ),
+    accentSteps: [0, 8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176],
+    kick: [
+      0, 8, 16, 24, // solemn organ prelude downbeats
+      ...repeatBars([0, 2, 6, 8, 10, 14], [2, 3, 4, 5, 6, 7, 8, 9]),
+      160, 166, 172, 176, 182, 188, 190,
+    ],
+    snare: [
+      ...repeatBars([4, 12], [2, 3, 4, 5, 6, 7, 8, 9]),
+      164, 170, 174, 180, 186, 188, 190, 191,
+    ],
+    hatClosed: repeatBars([0, 2, 4, 6, 8, 10, 12, 14], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+    hatAccent: repeatBars([0, 4, 8, 12], [2, 3, 4, 5, 6, 7, 8, 9]),
+    hatOpen: repeatBars([14], [3, 5, 7, 9]),
+    crash: [0, 32, 64, 96, 128, 160],
+    toms: [
+      // Orchestral timpani booms in Gothic intro & dramatic fills!
+      { step: 0, midi: 43, vel: 1.0 },
+      { step: 8, midi: 39, vel: 0.96 },
+      { step: 16, midi: 38, vel: 0.98 },
+      { step: 24, midi: 43, vel: 1.0 },
+      { step: 92, midi: 50, vel: 0.9 },
+      { step: 93, midi: 45, vel: 0.92 },
+      { step: 94, midi: 43, vel: 0.95 },
+      { step: 95, midi: 38, vel: 1.0 },
+      { step: 184, midi: 50, vel: 0.95 },
+      { step: 186, midi: 46, vel: 0.95 },
+      { step: 188, midi: 43, vel: 1.0 },
+      { step: 190, midi: 38, vel: 1.0 },
+    ],
+    leadVoice: {
+      waveform: 'brass',
+      detuneCents: 9,
+      chorus3: true,
+      highpassHz: 260,
+      cutoffHz: 2800,
+      cutoffPeakHz: 5600,
+      filterDecaySec: 0.14,
+      q: 1.4,
+      attackSec: 0.015,
+      decaySec: 0.16,
+      sustainLevel: 0.84,
+      releaseSec: 0.2,
+      gain: 0.16,
+      delaySend: 0.22,
+      reverbSend: 0.42,
+      pan: 0.08,
+      vibratoHz: 5.8,
       vibratoCents: 14,
       vibratoDelaySec: 0.12,
     },
     counterVoice: {
-      waveform: 'sawtooth',
-      detuneCents: 8,
-      cutoffHz: 2200,
-      cutoffPeakHz: 3400,
-      q: 2.2,
-      attackSec: 0.004,
-      releaseSec: 0.2,
-      gain: 0.08,
-      driveAmount: 0.68,
-      delaySend: 0.22,
-      pan: -0.22,
+      waveform: 'strings',
+      detuneCents: 11,
+      highpassHz: 280,
+      cutoffHz: 3200,
+      attackSec: 0.035,
+      decaySec: 0.2,
+      sustainLevel: 0.78,
+      releaseSec: 0.26,
+      gain: 0.105,
+      reverbSend: 0.46,
+      pan: -0.32,
     },
     arpVoice: {
-      waveform: 'sawtooth',
-      cutoffHz: 1750,
-      q: 2.2,
-      attackSec: 0.003,
-      releaseSec: 0.09,
-      gain: 0.062,
-      driveAmount: 0.55,
-      delaySend: 0.12,
+      waveform: 'organ',
+      highpassHz: 360,
+      cutoffHz: 4600,
+      attackSec: 0.004,
+      decaySec: 0.085,
+      sustainLevel: 0.28,
+      releaseSec: 0.075,
+      gain: 0.085,
+      delaySend: 0.2,
+      reverbSend: 0.3,
+      pan: 0.34,
+    },
+    bassVoice: {
+      waveform: 'slapbass',
+      cutoffHz: 1100,
+      cutoffPeakHz: 2500,
+      filterDecaySec: 0.075,
+      q: 1.8,
+      attackSec: 0.004,
+      decaySec: 0.09,
+      sustainLevel: 0.56,
+      releaseSec: 0.06,
+      gain: 0.23,
+      subOctaveGain: 0.4,
+      reverbSend: 0.06,
+    },
+    padVoice: {
+      waveform: 'strings',
+      detuneCents: 12,
+      chorus3: true,
+      highpassHz: 240,
+      cutoffHz: 2500,
+      attackSec: 0.09,
+      decaySec: 0.35,
+      sustainLevel: 0.74,
+      releaseSec: 0.48,
+      gain: 0.07,
+      reverbSend: 0.5,
       pan: -0.14,
     },
-    bassVoice: {
-      waveform: 'sawtooth',
-      cutoffHz: 520,
-      cutoffPeakHz: 1750,
-      q: 3.1,
-      attackSec: 0.003,
-      releaseSec: 0.12,
-      gain: 0.215,
-      driveAmount: 0.78,
-      subOctaveGain: 0.36,
-    },
-    padVoice: {
-      waveform: 'sawtooth',
-      detuneCents: 14,
-      cutoffHz: 1500,
-      attackSec: 0.012,
-      releaseSec: 0.45,
-      gain: 0.055,
-      driveAmount: 0.5,
-      delaySend: 0.18,
-      pan: 0.08,
-    },
-    drumGain: 0.23,
-    delayFeedback: 0.26,
-    delayMix: 0.2,
-  },
-
-  // =========================================================================
-  // 7. 1,650 pts — "Lunar Core: Final Phase" (FFIV: The Final Battle ~ Zeromus Vibe)
-  // 156 BPM · G Minor · 12 bars (192 steps: Fanfare Intro + Frantic Battle A + Dramatic Bridge B)
-  // Apocalyptic SNES final boss anthem: gothic organ stabs, harmonic minor sweeps & timpani
-  // =========================================================================
-  broadcast_finale: {
-    bpm: 156,
-    totalSteps: 192,
-    chords: {
-      // Bars 0-3: Apocalyptic gothic organ / brass fanfare stabs
-      0: { notes: [55, 58, 62, 67], steps: 10, vel: 1.15 }, // Gm
-      12: { notes: [51, 55, 58, 63], steps: 4, vel: 1.05 }, // Eb
-      16: { notes: [54, 57, 60, 66], steps: 10, vel: 1.15 }, // D7/F#
-      28: { notes: [55, 58, 62, 67], steps: 4, vel: 1.1 }, // Gm
-      32: { notes: [48, 55, 58, 63], steps: 12, vel: 1.1 }, // Cm7
-      48: { notes: [50, 54, 57, 62], steps: 14, vel: 1.15 }, // D7
-      // Bars 4-7: Frantic Battle A (Gm -> Eb -> F -> Dm7/D7)
-      64: { notes: [55, 58, 62], steps: 6 },
-      72: { notes: [55, 58, 62], steps: 6 },
-      80: { notes: [51, 55, 58], steps: 6 },
-      88: { notes: [51, 55, 58], steps: 6 },
-      96: { notes: [53, 57, 60], steps: 6 },
-      104: { notes: [53, 57, 60], steps: 6 },
-      112: { notes: [50, 54, 57, 60], steps: 14 },
-      // Bars 8-11: Heroic Tragic Bridge B (Cm -> F -> Bbmaj7 -> Ebmaj7 -> D7)
-      128: { notes: [48, 51, 55, 60], steps: 14 },
-      144: { notes: [53, 57, 60, 65], steps: 14 },
-      160: { notes: [46, 53, 57, 62], steps: 14 },
-      176: { notes: [51, 55, 58, 62], steps: 7 },
-      184: { notes: [50, 54, 57, 62], steps: 7 },
-    },
-    bass: concatBars(
-      // Intro Fanfare Bars 0-3
-      [s(43, 6), null, null, null, null, null, 43, null, 43, null, null, null, s(39, 4), null, null, null],
-      [s(42, 6), null, null, null, null, null, 42, null, 42, null, null, null, s(43, 4), null, null, null],
-      [36, null, 48, null, 36, null, 48, null, 36, null, 48, null, 39, null, 43, null],
-      [38, null, 50, null, 38, null, 50, null, 38, 38, 50, null, 42, 45, 50, null],
-      // Frantic Battle A Bars 4-7
-      [43, 43, 55, null, 43, 43, 55, null, 43, 43, 55, null, 46, null, 50, null],
-      [39, 39, 51, null, 39, 39, 51, null, 39, 39, 51, null, 43, null, 46, null],
-      [41, 41, 53, null, 41, 41, 53, null, 41, 41, 53, null, 45, null, 48, null],
-      [38, 38, 50, null, 38, 38, 50, null, 42, 42, 54, null, 45, null, 50, null],
-      // Tragic Bridge B Bars 8-11
-      [36, null, 48, null, 36, null, 48, null, 36, null, 48, null, 43, null, 48, null],
-      [41, null, 53, null, 41, null, 53, null, 41, null, 53, null, 45, null, 48, null],
-      [34, null, 46, null, 34, null, 46, null, 34, null, 46, null, 41, null, 46, null],
-      [39, null, 51, null, 39, null, 51, null, 38, null, 50, null, 42, 45, 50, 54],
-    ),
-    arp: concatBars(
-      // Bars 0-3: Sweeping baroque boss arpeggios
-      [67, 70, 74, 79, 74, 70, 67, 74, 67, 70, 74, 79, 75, 70, 67, 63],
-      [66, 69, 72, 78, 72, 69, 66, 72, 66, 69, 72, 78, 79, 74, 70, 67],
-      [60, 63, 67, 72, 67, 63, 60, 67, 60, 63, 67, 72, 75, 72, 67, 63],
-      [62, 66, 69, 74, 69, 66, 62, 69, 62, 66, 69, 74, 78, 74, 69, 66],
-      // Bars 4-7: Relentless 16th-note battle arps
-      [67, 70, 74, 79, 74, 70, 67, 74, 67, 70, 74, 79, 82, 79, 74, 70],
-      [63, 67, 70, 75, 70, 67, 63, 70, 63, 67, 70, 75, 79, 75, 70, 67],
-      [65, 69, 72, 77, 72, 69, 65, 72, 65, 69, 72, 77, 81, 77, 72, 69],
-      [62, 66, 69, 74, 69, 66, 62, 69, 66, 69, 72, 78, 81, 78, 74, 69],
-      // Bars 8-11
-      [60, 63, 67, 72, 67, 63, 60, 67, 60, 63, 67, 72, 75, 72, 67, 63],
-      [65, 69, 72, 77, 72, 69, 65, 72, 65, 69, 72, 77, 81, 77, 72, 69],
-      [58, 62, 65, 70, 65, 62, 58, 65, 58, 62, 65, 70, 74, 70, 65, 62],
-      [63, 67, 70, 75, 70, 67, 63, 70, 62, 66, 69, 74, 78, 74, 69, 66],
-    ),
-    lead: concatBars(
-      // Bars 0-3: Fanfare proclamation
-      [s(79, 6, 1.05), null, null, null, null, null, 74, null, 79, null, null, null, s(82, 4, 1.05), null, null, null],
-      [s(81, 6, 1.05), null, null, null, null, null, 78, null, 81, null, null, null, s(79, 4, 1.05), null, null, null],
-      [s(75, 2), null, 74, null, s(72, 2), null, 74, null, s(75, 4), null, null, null, s(79, 4), null, null, null],
-      [s(78, 6, 1.05), null, null, null, null, null, 74, null, s(81, 6, 1.1), null, null, null, null, null, null, null],
-      // Bars 4-7: Frantic SNES boss melody
-      [s(79, 2), null, 82, null, s(86, 2), null, 82, null, s(79, 2), null, 81, null, s(82, 3), null, null, null],
-      [s(87, 2), null, 86, null, s(82, 2), null, 79, null, s(82, 2), null, 79, null, s(75, 3), null, null, null],
-      [s(77, 2), null, 81, null, s(84, 2), null, 81, null, s(77, 2), null, 79, null, s(81, 3), null, null, null],
-      [s(86, 2), null, 84, null, s(81, 2), null, 78, null, s(81, 4), null, null, null, s(86, 2), null, 84, null],
-      // Bars 8-11: Heroic tragic climax
-      [s(84, 4, 1.05), null, null, 82, s(79, 4), null, null, 75, s(79, 4), null, null, null, s(84, 2), null, 82, null],
-      [s(81, 4, 1.05), null, null, 79, s(77, 4), null, null, 74, s(77, 4), null, null, null, s(81, 2), null, 79, null],
-      [s(82, 4, 1.05), null, null, 81, s(77, 4), null, null, 74, s(77, 4), null, null, null, s(82, 2), null, 84, null],
-      [s(87, 4, 1.1), null, null, 86, s(82, 2), null, 79, null, s(81, 6, 1.15), null, null, null, null, null, 78, null],
-    ),
-    counter: concatBars(
-      // Dual orchestral string/brass counterpoint
-      [s(74, 6, 0.85), null, null, null, null, null, 70, null, 74, null, null, null, s(75, 4), null, null, null],
-      [s(74, 6, 0.85), null, null, null, null, null, 72, null, 74, null, null, null, s(74, 4), null, null, null],
-      [s(72, 4), null, null, null, s(67, 4), null, null, null, s(72, 4), null, null, null, s(75, 4), null, null, null],
-      [s(74, 8), null, null, null, null, null, null, null, s(78, 6), null, null, null, null, null, null, null],
-      [s(74, 4), null, null, null, s(79, 4), null, null, null, s(74, 4), null, null, null, s(79, 4), null, null, null],
-      [s(75, 4), null, null, null, s(79, 4), null, null, null, s(75, 4), null, null, null, s(79, 4), null, null, null],
-      [s(72, 4), null, null, null, s(77, 4), null, null, null, s(72, 4), null, null, null, s(77, 4), null, null, null],
-      [s(74, 4), null, null, null, s(78, 4), null, null, null, s(78, 4), null, null, null, s(81, 4), null, null, null],
-      [s(75, 4), null, null, null, s(72, 4), null, null, null, s(75, 4), null, null, null, s(79, 4), null, null, null],
-      [s(77, 4), null, null, null, s(72, 4), null, null, null, s(77, 4), null, null, null, s(81, 4), null, null, null],
-      [s(74, 4), null, null, null, s(70, 4), null, null, null, s(74, 4), null, null, null, s(79, 4), null, null, null],
-      [s(79, 4), null, null, null, s(75, 4), null, null, null, s(74, 6), null, null, null, null, null, null, null],
-    ),
-    kick: [
-      ...repeatBars([0, 6, 8, 12], [0, 1]),
-      ...repeatBars([0, 4, 8, 12], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
-    ],
-    snare: [
-      ...repeatBars([4, 12], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
-      58, 60, 62, 124, 126, 188, 190,
-    ],
-    hatClosed: repeatBars([0, 2, 4, 6, 8, 10, 12, 14], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
-    hatOpen: [46, 62, 78, 94, 110, 126, 142, 158, 174, 190],
-    crash: [0, 16, 32, 64, 96, 128, 160, 176],
-    toms: [
-      // Timpani boss intro & transition fills
-      { step: 0, midi: 43, vel: 1.05 },
-      { step: 12, midi: 39, vel: 1.0 },
-      { step: 16, midi: 42, vel: 1.05 },
-      { step: 28, midi: 43, vel: 1.0 },
-      { step: 60, midi: 50, vel: 0.95 },
-      { step: 61, midi: 48, vel: 0.95 },
-      { step: 62, midi: 45, vel: 1.0 },
-      { step: 63, midi: 43, vel: 1.0 },
-      { step: 124, midi: 50, vel: 0.95 },
-      { step: 125, midi: 46, vel: 0.95 },
-      { step: 126, midi: 43, vel: 1.0 },
-      { step: 188, midi: 54, vel: 0.95 },
-      { step: 189, midi: 50, vel: 0.95 },
-      { step: 190, midi: 46, vel: 1.0 },
-      { step: 191, midi: 43, vel: 1.05 },
-    ],
-    leadVoice: {
-      waveform: 'square',
-      detuneCents: 11,
-      cutoffHz: 3400,
-      cutoffPeakHz: 4600,
-      q: 1.9,
-      attackSec: 0.006,
-      releaseSec: 0.24,
-      gain: 0.11,
-      delaySend: 0.34,
-      pan: 0.14,
-      vibratoHz: 6.2,
-      vibratoCents: 13,
-      vibratoDelaySec: 0.12,
-    },
-    counterVoice: {
-      waveform: 'sawtooth',
-      detuneCents: 14,
-      cutoffHz: 2400,
-      attackSec: 0.025,
-      releaseSec: 0.38,
-      gain: 0.072,
-      delaySend: 0.3,
-      pan: -0.22,
-    },
-    arpVoice: {
-      waveform: 'triangle',
-      fmRatio: 2,
-      fmIndexHz: 85,
-      cutoffHz: 3100,
-      attackSec: 0.004,
-      releaseSec: 0.1,
-      gain: 0.068,
-      delaySend: 0.22,
-      pan: 0.24,
-    },
-    bassVoice: {
-      waveform: 'sawtooth',
-      cutoffHz: 480,
-      cutoffPeakHz: 1550,
-      q: 2.8,
-      attackSec: 0.004,
-      releaseSec: 0.14,
-      gain: 0.22,
-      driveAmount: 0.3,
-      subOctaveGain: 0.35,
-    },
-    padVoice: {
-      waveform: 'sawtooth',
-      detuneCents: 18,
-      cutoffHz: 1950,
-      cutoffPeakHz: 3000,
-      q: 1.8,
+    // Gothic Cathedral Drawbar Pipe Organ!
+    altPadVoice: {
+      waveform: 'organ',
+      detuneCents: 8,
+      chorus3: true,
+      highpassHz: 180,
+      cutoffHz: 3800,
       attackSec: 0.015,
-      releaseSec: 0.55,
-      gain: 0.065,
-      delaySend: 0.32,
-      pan: -0.1,
+      decaySec: 0.22,
+      sustainLevel: 0.85,
+      releaseSec: 0.36,
+      gain: 0.095,
+      reverbSend: 0.55,
     },
-    drumGain: 0.225,
-    delayFeedback: 0.34,
-    delayMix: 0.27,
+    drumGain: 0.32,
+    delayFeedback: 0.22,
+    delayMix: 0.16,
+    reverbMix: 0.34,
   },
 };
+
+export type LoopCompleteCallback = (trackId: MusicTrackId, loopsCompleted: number) => void;
+
+// ============================================================================
+// STUDIO-GRADE ZERO-DEPENDENCY WEB AUDIO VGM SYNTHESIZER & SEQUENCER
+// ============================================================================
 
 class RetroMusicSequencer {
   private ctx: AudioContext | null = null;
@@ -1091,9 +1749,12 @@ class RetroMusicSequencer {
   private delayNode: DelayNode | null = null;
   private delayFeedbackGain: GainNode | null = null;
   private delayReturnGain: GainNode | null = null;
+  private reverbNode: ConvolverNode | null = null;
+  private reverbReturnGain: GainNode | null = null;
   private noiseBuffer: AudioBuffer | null = null;
-  private freqBins: Uint8Array<ArrayBuffer> | null = null;
   private driveCurves = new Map<number, Float32Array<ArrayBuffer>>();
+  private periodicWaves = new Map<string, PeriodicWave>();
+  private freqBins: Uint8Array<ArrayBuffer> | null = null;
 
   private playing = false;
   private currentTrackId: MusicTrackId = STARTER_TRACK_ID;
@@ -1104,49 +1765,173 @@ class RetroMusicSequencer {
   private duckReleaseTimer: number | null = null;
 
   private schedulerTimer: number | null = null;
-  private nextStepTime = 0;
   private currentStep = 0;
+  private nextStepTime = 0;
   private loopsCompleted = 0;
-  private onLoopComplete: ((trackId: MusicTrackId, loopsCompleted: number) => void) | null = null;
+  private onLoopComplete: LoopCompleteCallback | null = null;
 
-  setLoopCompleteHandler(
-    handler: ((trackId: MusicTrackId, loopsCompleted: number) => void) | null,
-  ): void {
-    this.onLoopComplete = handler;
-  }
-
-  isPlaying(): boolean {
-    return this.playing;
+  setLoopCompleteHandler(cb: LoopCompleteCallback | null): void {
+    this.onLoopComplete = cb;
   }
 
   getTrackId(): MusicTrackId {
     return this.currentTrackId;
   }
 
+  isPlaying(): boolean {
+    return this.playing;
+  }
+
+  private createImpulseResponse(ctx: AudioContext, durationSec = 1.45, decay = 2.8): AudioBuffer {
+    const sampleRate = ctx.sampleRate;
+    const length = Math.floor(sampleRate * durationSec);
+    const impulse = ctx.createBuffer(2, length, sampleRate);
+    const preDelaySamples = Math.floor(sampleRate * 0.014);
+
+    for (let ch = 0; ch < 2; ch += 1) {
+      const channelData = impulse.getChannelData(ch);
+      let lp = 0;
+      for (let i = 0; i < length; i += 1) {
+        if (i < preDelaySamples) {
+          channelData[i] = 0;
+          continue;
+        }
+        const t = (i - preDelaySamples) / Math.max(1, length - preDelaySamples);
+        const env = Math.pow(1 - t, decay);
+        const white = Math.random() * 2 - 1;
+        // Progressive warm high-frequency damping across the reverb tail
+        const alpha = 0.28 * (1 - t * 0.65) + 0.08;
+        lp += alpha * (white - lp);
+        channelData[i] = lp * env * 0.65;
+      }
+    }
+    return impulse;
+  }
+
+  private getPeriodicWave(ctx: AudioContext, wave: CustomWaveType): PeriodicWave | null {
+    if (wave === 'sine' || wave === 'triangle' || wave === 'sawtooth' || wave === 'square') {
+      return null;
+    }
+    const cached = this.periodicWaves.get(wave);
+    if (cached) return cached;
+
+    const harmonics = 24;
+    const real = new Float32Array(harmonics + 1);
+    const imag = new Float32Array(harmonics + 1);
+
+    if (wave === 'pulse25') {
+      for (let n = 1; n <= harmonics; n += 1) {
+        imag[n] = (2 / (n * Math.PI)) * Math.sin(n * Math.PI * 0.25);
+      }
+    } else if (wave === 'pulse12') {
+      for (let n = 1; n <= harmonics; n += 1) {
+        imag[n] = (2 / (n * Math.PI)) * Math.sin(n * Math.PI * 0.125);
+      }
+    } else if (wave === 'organ') {
+      // Baroque cathedral drawbar pipe organ (16', 8', 4', 2⅔', 2', 1⅓', 1')
+      const weights: Record<number, number> = {
+        1: 1.0,
+        2: 0.78,
+        3: 0.56,
+        4: 0.62,
+        6: 0.34,
+        8: 0.42,
+        10: 0.16,
+        12: 0.2,
+        16: 0.12,
+      };
+      for (const [h, w] of Object.entries(weights)) {
+        imag[Number(h)] = w;
+      }
+    } else if (wave === 'brass') {
+      // Warm SNES French horn / orchestral brass harmonic series
+      const weights = [0, 1.0, 0.85, 0.66, 0.5, 0.36, 0.26, 0.19, 0.13, 0.09, 0.06, 0.04, 0.025];
+      for (let n = 1; n < weights.length; n += 1) {
+        imag[n] = weights[n];
+      }
+    } else if (wave === 'strings') {
+      // Smooth ensemble bowed strings (warm rolled-off sawtooth)
+      for (let n = 1; n <= 16; n += 1) {
+        imag[n] = (1 / Math.pow(n, 1.18)) * (n % 2 === 0 ? 0.85 : 1.0);
+      }
+    } else if (wave === 'epiano') {
+      // Warm Rhodes / DX7 electric piano timbre
+      imag[1] = 1.0;
+      imag[2] = 0.28;
+      imag[3] = 0.18;
+      imag[4] = 0.06;
+      imag[5] = 0.08;
+      imag[7] = 0.05;
+      imag[9] = 0.025;
+    } else if (wave === 'slapbass') {
+      // Funky slap bass: strong fundamental + woody odd/even slap harmonics
+      imag[1] = 1.0;
+      imag[2] = 0.72;
+      imag[3] = 0.55;
+      imag[4] = 0.3;
+      imag[5] = 0.38;
+      imag[6] = 0.18;
+      imag[7] = 0.22;
+      imag[8] = 0.12;
+      imag[9] = 0.1;
+    } else if (wave === 'guitar') {
+      // Picked electric guitar harmonic profile (fed into tube drive + speaker cab EQ)
+      for (let n = 1; n <= 18; n += 1) {
+        const pickNotch = Math.abs(Math.sin(n * 0.42)) * 0.45 + 0.55;
+        imag[n] = (1 / Math.pow(n, 0.92)) * pickNotch;
+      }
+    }
+
+    const built = ctx.createPeriodicWave(real, imag, { disableNormalization: false });
+    this.periodicWaves.set(wave, built);
+    return built;
+  }
+
+  private applyOscWaveform(ctx: AudioContext, osc: OscillatorNode, wave: CustomWaveType): void {
+    const custom = this.getPeriodicWave(ctx, wave);
+    if (custom) {
+      osc.setPeriodicWave(custom);
+    } else {
+      osc.type = wave as OscillatorType;
+    }
+  }
+
   private ensureAudioGraph(): AudioContext | null {
     if (typeof window === 'undefined') return null;
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioCtx) return null;
 
     if (!this.ctx) {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return null;
+
       try {
         const ctx = new AudioCtx();
-        const mixBus = ctx.createGain();
-        mixBus.gain.value = 1;
 
-        const masterFilter = ctx.createBiquadFilter();
-        masterFilter.type = 'lowpass';
-        masterFilter.frequency.value = 11500;
-        masterFilter.Q.value = 0.6;
+        const mixBus = ctx.createGain();
+        mixBus.gain.value = 0.88;
+
+        // Clean studio mastering bus: remove subsonic rumble, add warm body, tame harsh highs
+        const masterHp = ctx.createBiquadFilter();
+        masterHp.type = 'highpass';
+        masterHp.frequency.value = 30;
+
+        const masterWarmth = ctx.createBiquadFilter();
+        masterWarmth.type = 'lowshelf';
+        masterWarmth.frequency.value = 95;
+        masterWarmth.gain.value = 1.6;
+
+        const masterSmooth = ctx.createBiquadFilter();
+        masterSmooth.type = 'highshelf';
+        masterSmooth.frequency.value = 8200;
+        masterSmooth.gain.value = -1.8;
 
         const compressor = ctx.createDynamicsCompressor();
-        compressor.threshold.value = -15;
+        compressor.threshold.value = -14;
         compressor.knee.value = 18;
-        compressor.ratio.value = 4.2;
-        compressor.attack.value = 0.006;
-        compressor.release.value = 0.15;
+        compressor.ratio.value = 3.2;
+        compressor.attack.value = 0.008;
+        compressor.release.value = 0.14;
 
         const duckGain = ctx.createGain();
         duckGain.gain.value = this.computeDuckTarget();
@@ -1158,25 +1943,44 @@ class RetroMusicSequencer {
         analyser.fftSize = 64;
         analyser.smoothingTimeConstant = 0.78;
 
-        // Parallel dotted-8th tempo-synced stereo echo bus
+        // 1. Parallel tempo-synced band-shaped echo bus (highpass + lowpass keeps echoes clean!)
         const delayNode = ctx.createDelay(1.5);
         delayNode.delayTime.value = 0.34;
-        const delayFilter = ctx.createBiquadFilter();
-        delayFilter.type = 'lowpass';
-        delayFilter.frequency.value = 2400;
+        const delayHp = ctx.createBiquadFilter();
+        delayHp.type = 'highpass';
+        delayHp.frequency.value = 280;
+        const delayLp = ctx.createBiquadFilter();
+        delayLp.type = 'lowpass';
+        delayLp.frequency.value = 2600;
         const delayFeedbackGain = ctx.createGain();
-        delayFeedbackGain.gain.value = 0.28;
+        delayFeedbackGain.gain.value = 0.25;
         const delayReturnGain = ctx.createGain();
-        delayReturnGain.gain.value = 0.24;
+        delayReturnGain.gain.value = 0.2;
 
-        delayNode.connect(delayFilter);
-        delayFilter.connect(delayFeedbackGain);
+        delayNode.connect(delayHp);
+        delayHp.connect(delayLp);
+        delayLp.connect(delayFeedbackGain);
         delayFeedbackGain.connect(delayNode);
-        delayFilter.connect(delayReturnGain);
+        delayLp.connect(delayReturnGain);
         delayReturnGain.connect(mixBus);
 
-        mixBus.connect(masterFilter);
-        masterFilter.connect(compressor);
+        // 2. Parallel Stereo Hall/Plate Convolution Reverb (huge upgrade for VGM realism!)
+        const reverbNode = ctx.createConvolver();
+        reverbNode.buffer = this.createImpulseResponse(ctx, 1.45, 2.75);
+        const reverbHp = ctx.createBiquadFilter();
+        reverbHp.type = 'highpass';
+        reverbHp.frequency.value = 210;
+        const reverbReturnGain = ctx.createGain();
+        reverbReturnGain.gain.value = 0.28;
+
+        reverbNode.connect(reverbHp);
+        reverbHp.connect(reverbReturnGain);
+        reverbReturnGain.connect(mixBus);
+
+        mixBus.connect(masterHp);
+        masterHp.connect(masterWarmth);
+        masterWarmth.connect(masterSmooth);
+        masterSmooth.connect(compressor);
         compressor.connect(duckGain);
         duckGain.connect(volumeGain);
         volumeGain.connect(analyser);
@@ -1190,6 +1994,8 @@ class RetroMusicSequencer {
         this.delayNode = delayNode;
         this.delayFeedbackGain = delayFeedbackGain;
         this.delayReturnGain = delayReturnGain;
+        this.reverbNode = reverbNode;
+        this.reverbReturnGain = reverbReturnGain;
         this.freqBins = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
       } catch {
         return null;
@@ -1206,7 +2012,7 @@ class RetroMusicSequencer {
     if (this.noiseBuffer && this.noiseBuffer.sampleRate === ctx.sampleRate) {
       return this.noiseBuffer;
     }
-    const len = Math.floor(ctx.sampleRate * 0.75);
+    const len = Math.floor(ctx.sampleRate * 0.8);
     const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
     const data = buffer.getChannelData(0);
     for (let i = 0; i < len; i += 1) {
@@ -1221,13 +2027,15 @@ class RetroMusicSequencer {
     const cached = this.driveCurves.get(key);
     if (cached) return cached;
 
+    // Asymmetric warm tube saturation curve (richer even+odd harmonics, less brittle than hard clip)
     const samples = 512;
     const curve = new Float32Array(new ArrayBuffer(samples * 4));
-    const drive = 1 + (key / 100) * 14;
+    const drive = 1 + (key / 100) * 11;
     const norm = Math.tanh(drive);
     for (let i = 0; i < samples; i += 1) {
       const x = (i * 2) / (samples - 1) - 1;
-      curve[i] = Math.tanh(drive * x) / norm;
+      const asym = x >= 0 ? x * 1.08 : x * 0.92;
+      curve[i] = Math.tanh(drive * asym) / norm;
     }
     this.driveCurves.set(key, curve);
     return curve;
@@ -1247,7 +2055,7 @@ class RetroMusicSequencer {
   private computeVolumeTarget(): number {
     if (this.muted || this.volumePct <= 0) return 0.0001;
     const norm = Math.max(0, Math.min(1, this.volumePct / 100));
-    return Math.max(0.0001, Math.pow(norm, 1.45) * 0.56);
+    return Math.max(0.0001, Math.pow(norm, 1.4) * 0.62);
   }
 
   private computeDuckTarget(): number {
@@ -1274,7 +2082,7 @@ class RetroMusicSequencer {
     this.duckGain.gain.setTargetAtTime(target, now, timeConstant);
   }
 
-  private syncTrackDelay(): void {
+  private syncTrackSpatialBus(): void {
     if (!this.ctx || !this.delayNode || !this.delayFeedbackGain || !this.delayReturnGain) return;
     const score = TRACK_SCORES[this.currentTrackId];
     const sixteenth = 60 / score.bpm / 4;
@@ -1283,6 +2091,9 @@ class RetroMusicSequencer {
     this.delayNode.delayTime.setTargetAtTime(dottedEighth, now, 0.08);
     this.delayFeedbackGain.gain.setTargetAtTime(score.delayFeedback, now, 0.08);
     this.delayReturnGain.gain.setTargetAtTime(score.delayMix, now, 0.08);
+    if (this.reverbReturnGain) {
+      this.reverbReturnGain.gain.setTargetAtTime(score.reverbMix, now, 0.08);
+    }
   }
 
   setVolume(volumePct: number): void {
@@ -1333,7 +2144,7 @@ class RetroMusicSequencer {
     if (!ctx) return false;
 
     this.playing = true;
-    this.syncTrackDelay();
+    this.syncTrackSpatialBus();
     this.applyDuckRamp(0.05);
     this.applyVolumeRamp(0.08);
 
@@ -1363,7 +2174,7 @@ class RetroMusicSequencer {
     if (wasPlaying) {
       const ctx = this.ensureAudioGraph();
       if (ctx) {
-        this.syncTrackDelay();
+        this.syncTrackSpatialBus();
         if (this.volumeGain) {
           const now = ctx.currentTime;
           this.volumeGain.gain.cancelScheduledValues(now);
@@ -1428,7 +2239,7 @@ class RetroMusicSequencer {
   private resolveNoteCell(
     cell: NoteCell | undefined,
     defaultSteps: number,
-  ): { midi: number; steps: number; vel: number } | null {
+  ): { midi: number; steps: number; vel: number; glideSemi?: number } | null {
     if (cell === null || cell === undefined) return null;
     if (typeof cell === 'number') {
       return { midi: cell, steps: defaultSteps, vel: 1 };
@@ -1437,6 +2248,7 @@ class RetroMusicSequencer {
       midi: cell[0],
       steps: Math.max(0.5, cell[1] ?? defaultSteps),
       vel: cell[2] ?? 1,
+      glideSemi: cell[3],
     };
   }
 
@@ -1448,18 +2260,32 @@ class RetroMusicSequencer {
   ): void {
     const isAccented = Boolean(score.accentSteps?.includes(step));
 
-    // 1. Chord Pad / Stabs
+    // 1. Chord Pad / Pipe Organ / Brass Stabs
     const chordSpec = score.chords[step];
     if (chordSpec) {
       const isRichChord = !Array.isArray(chordSpec) && 'notes' in chordSpec;
       const notes: readonly number[] = isRichChord ? chordSpec.notes : (chordSpec as readonly number[]);
       const chordSteps = isRichChord && chordSpec.steps ? chordSpec.steps : null;
       const chordVel = isRichChord && chordSpec.vel ? chordSpec.vel : 1;
+      const voice =
+        isRichChord && chordSpec.altVoice && score.altPadVoice ? score.altPadVoice : score.padVoice;
       const dur = chordSteps
-        ? Math.max(sixteenthDur * 1.5, sixteenthDur * chordSteps)
-        : Math.max(sixteenthDur * 2, score.padVoice.releaseSec);
-      for (const midi of notes) {
-        this.triggerSynthVoice(midiToHz(midi), time, dur, score.padVoice, false, chordVel);
+        ? Math.max(sixteenthDur * 1.4, sixteenthDur * chordSteps)
+        : Math.max(sixteenthDur * 2, voice.releaseSec);
+      // Slight stereo spread across chord tones for lush studio width
+      const spreadCount = Math.max(1, notes.length - 1);
+      for (let i = 0; i < notes.length; i += 1) {
+        const midi = notes[i];
+        const notePan =
+          (voice.pan ?? 0) + ((i / spreadCount) * 2 - 1) * 0.16;
+        this.triggerSynthVoice(
+          midiToHz(midi),
+          time,
+          dur,
+          { ...voice, pan: Math.max(-0.85, Math.min(0.85, notePan)) },
+          false,
+          chordVel,
+        );
       }
     }
 
@@ -1473,33 +2299,36 @@ class RetroMusicSequencer {
         score.bassVoice,
         isAccented,
         bassNote.vel,
+        bassNote.glideSemi,
       );
     }
 
-    // 3. Arpeggio
-    const arpNote = this.resolveNoteCell(score.arp[step], 0.95);
+    // 3. Arpeggio / Rhythm Guitar
+    const arpNote = this.resolveNoteCell(score.arp[step], 0.92);
     if (arpNote) {
       this.triggerSynthVoice(
         midiToHz(arpNote.midi),
         time,
         sixteenthDur * arpNote.steps,
         score.arpVoice,
-        false,
+        isAccented,
         arpNote.vel,
+        arpNote.glideSemi,
       );
     }
 
-    // 4. Counter-melody / Harmony Guitar / Strings
+    // 4. Counter-melody / Power-Chord Riff / Harmonized Strings
     if (score.counter && score.counterVoice) {
-      const counterNote = this.resolveNoteCell(score.counter[step], 1.8);
+      const counterNote = this.resolveNoteCell(score.counter[step], 1.75);
       if (counterNote) {
         this.triggerSynthVoice(
           midiToHz(counterNote.midi),
           time,
           sixteenthDur * counterNote.steps,
           score.counterVoice,
-          false,
+          isAccented,
           counterNote.vel,
+          counterNote.glideSemi,
         );
       }
     }
@@ -1514,31 +2343,39 @@ class RetroMusicSequencer {
         score.leadVoice,
         isAccented,
         leadNote.vel,
+        leadNote.glideSemi,
       );
     }
 
-    // 6. Synthesized Percussion & Industrial Kit
+    // 6. Studio VGM Percussion Kit
     if (score.kick.includes(step)) {
       this.triggerKick(time, score.drumGain);
     }
     if (score.snare.includes(step)) {
-      this.triggerSnare(time, score.drumGain * 0.72);
+      this.triggerSnare(time, score.drumGain * 0.78, Boolean(score.gatedSnare));
+    }
+    if (score.clap?.includes(step)) {
+      this.triggerClap(time, score.drumGain * 0.52);
+    }
+    if (score.rim?.includes(step)) {
+      this.triggerRim(time, score.drumGain * 0.44);
     }
     if (score.hatOpen?.includes(step)) {
-      this.triggerHiHat(time, score.drumGain * 0.44, true);
+      this.triggerHiHat(time, score.drumGain * 0.4, true);
     } else if (score.hatClosed.includes(step)) {
-      this.triggerHiHat(time, score.drumGain * 0.34, false);
+      const hatBoost = score.hatAccent?.includes(step) ? 0.34 : 0.2;
+      this.triggerHiHat(time, score.drumGain * hatBoost, false);
     }
     if (score.clang?.includes(step)) {
-      this.triggerClang(time, score.drumGain * 0.48);
+      this.triggerClang(time, score.drumGain * 0.5);
     }
     if (score.crash?.includes(step)) {
-      this.triggerCrash(time, score.drumGain * 0.45);
+      this.triggerCrash(time, score.drumGain * 0.46);
     }
     if (score.toms) {
       for (const tom of score.toms) {
         if (tom.step === step) {
-          this.triggerTom(time, midiToHz(tom.midi), score.drumGain * 0.85 * (tom.vel ?? 1));
+          this.triggerTom(time, midiToHz(tom.midi), score.drumGain * 0.88 * (tom.vel ?? 1));
         }
       }
     }
@@ -1551,35 +2388,74 @@ class RetroMusicSequencer {
     voice: SynthVoiceConfig,
     accent: boolean,
     velocity = 1,
+    glideSemi?: number,
   ): void {
     const ctx = this.ctx;
     const mixBus = this.mixBus;
     if (!ctx || !mixBus) return;
 
+    // 1. Click-Free True ADSR Envelope
     const envGain = ctx.createGain();
-    const peakGain = Math.max(0.001, voice.gain * velocity * (accent ? 1.2 : 1));
-    const totalDur = Math.max(0.05, durationSec);
-    const releaseEnd = time + totalDur + voice.releaseSec;
+    const peakGain = Math.max(0.001, voice.gain * velocity * (accent ? 1.16 : 1));
+    const totalDur = Math.max(0.045, durationSec);
+    const attackSec = Math.min(voice.attackSec, totalDur * 0.65);
+    const attackEnd = time + attackSec;
+    const decaySec = voice.decaySec ?? 0.14;
+    const sustainLvl = Math.max(0.05, Math.min(1, voice.sustainLevel ?? 0.72));
+    const sustainGain = Math.max(0.0004, peakGain * sustainLvl);
+    const noteOff = Math.max(attackEnd + 0.008, time + totalDur);
+    const decayEnd = Math.min(noteOff, attackEnd + decaySec);
+    const releaseEnd = noteOff + voice.releaseSec;
 
     envGain.gain.setValueAtTime(0.0001, time);
-    envGain.gain.linearRampToValueAtTime(peakGain, time + voice.attackSec);
-    envGain.gain.setValueAtTime(peakGain * 0.92, time + Math.max(voice.attackSec + 0.005, totalDur * 0.72));
+    envGain.gain.linearRampToValueAtTime(peakGain, attackEnd);
+    if (decayEnd > attackEnd + 0.002 && sustainLvl < 0.99) {
+      envGain.gain.exponentialRampToValueAtTime(sustainGain, decayEnd);
+      if (noteOff > decayEnd + 0.002) {
+        envGain.gain.setValueAtTime(sustainGain, noteOff);
+      }
+    } else if (noteOff > attackEnd + 0.002) {
+      envGain.gain.setValueAtTime(peakGain, noteOff);
+    }
     envGain.gain.exponentialRampToValueAtTime(0.0001, releaseEnd);
 
-    // Build filter/drive chain backwards from envGain
+    // 2. Build Filter / Amp / Speaker Cabinet Chain backwards from envGain
     let inputStage: AudioNode = envGain;
 
-    if (voice.cutoffHz) {
+    if (voice.cabinetEq) {
+      // Authentic 4x12 guitar speaker cabinet curve: kills fizzy highs, adds palm-mute chunk & pick bite
+      const cabLp = ctx.createBiquadFilter();
+      cabLp.type = 'lowpass';
+      cabLp.frequency.setValueAtTime(voice.cutoffHz ?? 2600, time);
+      cabLp.Q.setValueAtTime(0.95, time);
+
+      const cabBite = ctx.createBiquadFilter();
+      cabBite.type = 'peaking';
+      cabBite.frequency.setValueAtTime(2050, time);
+      cabBite.Q.setValueAtTime(1.4, time);
+      cabBite.gain.setValueAtTime(3.2, time);
+
+      const cabChunk = ctx.createBiquadFilter();
+      cabChunk.type = 'peaking';
+      cabChunk.frequency.setValueAtTime(175, time);
+      cabChunk.Q.setValueAtTime(1.2, time);
+      cabChunk.gain.setValueAtTime(3.6, time);
+
+      cabChunk.connect(cabBite);
+      cabBite.connect(cabLp);
+      cabLp.connect(inputStage);
+      inputStage = cabChunk;
+    } else if (voice.cutoffHz) {
       const filter = ctx.createBiquadFilter();
       filter.type = 'lowpass';
       const baseCut = voice.cutoffHz;
-      const peakCut = (voice.cutoffPeakHz ?? baseCut) * (accent ? 1.32 : 1);
+      const peakCut = (voice.cutoffPeakHz ?? baseCut) * (accent ? 1.24 : 1);
       filter.Q.setValueAtTime(voice.q ?? 1.1, time);
       if (peakCut > baseCut) {
-        filter.frequency.setValueAtTime(Math.min(12000, peakCut), time);
+        filter.frequency.setValueAtTime(Math.min(11000, peakCut), time);
         filter.frequency.exponentialRampToValueAtTime(
           Math.max(90, baseCut),
-          time + Math.min(0.32, totalDur),
+          time + Math.min(voice.filterDecaySec ?? 0.22, totalDur + 0.05),
         );
       } else {
         filter.frequency.setValueAtTime(baseCut, time);
@@ -1596,86 +2472,128 @@ class RetroMusicSequencer {
       inputStage = shaper;
     }
 
-    const osc1 = ctx.createOscillator();
-    osc1.type = voice.waveform;
-    osc1.frequency.setValueAtTime(freqHz, time);
-    osc1.connect(inputStage);
-
-    let osc2: OscillatorNode | null = null;
-    if (voice.detuneCents && voice.detuneCents > 0) {
-      osc2 = ctx.createOscillator();
-      osc2.type = voice.waveform;
-      osc2.frequency.setValueAtTime(freqHz, time);
-      osc2.detune.setValueAtTime(voice.detuneCents, time);
-      osc2.connect(inputStage);
+    if (voice.highpassHz && voice.highpassHz > 20) {
+      const hp = ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.setValueAtTime(voice.highpassHz, time);
+      hp.connect(inputStage);
+      inputStage = hp;
     }
 
-    let subOsc: OscillatorNode | null = null;
+    // 3. Oscillators (Single, Detuned Pair, 3-Voice Ensemble, or Power Chord Stack)
+    const oscs: OscillatorNode[] = [];
+    const startFreq =
+      glideSemi && glideSemi !== 0 ? freqHz * Math.pow(2, glideSemi / 12) : freqHz;
+    const glideTime = Math.min(0.055, totalDur * 0.32);
+
+    const spawnOsc = (targetHz: number, detuneCents: number, gainMult = 1): OscillatorNode => {
+      const osc = ctx.createOscillator();
+      this.applyOscWaveform(ctx, osc, voice.waveform);
+      const initHz =
+        glideSemi && glideSemi !== 0 ? targetHz * Math.pow(2, glideSemi / 12) : targetHz;
+      osc.frequency.setValueAtTime(initHz, time);
+      if (glideSemi && glideSemi !== 0) {
+        osc.frequency.exponentialRampToValueAtTime(targetHz, time + glideTime);
+      }
+      if (detuneCents !== 0) {
+        osc.detune.setValueAtTime(detuneCents, time);
+      }
+      if (gainMult !== 1) {
+        const g = ctx.createGain();
+        g.gain.value = gainMult;
+        osc.connect(g);
+        g.connect(inputStage);
+      } else {
+        osc.connect(inputStage);
+      }
+      oscs.push(osc);
+      return osc;
+    };
+
+    const primaryOsc = spawnOsc(freqHz, 0, voice.chorus3 ? 0.65 : 1);
+
+    if (voice.chorus3 && voice.detuneCents && voice.detuneCents > 0) {
+      spawnOsc(freqHz, -voice.detuneCents, 0.52);
+      spawnOsc(freqHz, voice.detuneCents, 0.52);
+    } else if (voice.detuneCents && voice.detuneCents > 0) {
+      spawnOsc(freqHz, voice.detuneCents, 0.72);
+    }
+
+    if (voice.powerChord) {
+      // Layer tight Perfect 5th (+7 semitones) + subtle octave (+12 semitones) for heavy rock/metal riffing
+      spawnOsc(freqHz * 1.498307, -3, 0.78);
+      spawnOsc(freqHz * 2.0, 4, 0.34);
+    }
+
     if (voice.subOctaveGain && voice.subOctaveGain > 0.01) {
-      subOsc = ctx.createOscillator();
+      const subOsc = ctx.createOscillator();
       subOsc.type = 'triangle';
-      subOsc.frequency.setValueAtTime(freqHz * 0.5, time);
+      subOsc.frequency.setValueAtTime(startFreq * 0.5, time);
+      if (glideSemi && glideSemi !== 0) {
+        subOsc.frequency.exponentialRampToValueAtTime(freqHz * 0.5, time + glideTime);
+      }
       const subGain = ctx.createGain();
       subGain.gain.value = voice.subOctaveGain;
       subOsc.connect(subGain);
       subGain.connect(inputStage);
+      oscs.push(subOsc);
     }
 
-    // Optional 2-operator FM modulator for authentic 16-bit FM timbre
-    let modOsc: OscillatorNode | null = null;
+    // 4. Optional 2-Operator FM Modulator (DX7 Rhodes tine, Slap Bass pop, FM Bell)
     if (voice.fmRatio && voice.fmIndexHz) {
-      modOsc = ctx.createOscillator();
+      const modOsc = ctx.createOscillator();
       modOsc.type = 'sine';
       modOsc.frequency.setValueAtTime(freqHz * voice.fmRatio, time);
       const modGain = ctx.createGain();
-      modGain.gain.setValueAtTime(voice.fmIndexHz * (accent ? 1.28 : 1), time);
-      modGain.gain.exponentialRampToValueAtTime(8, time + Math.min(0.28, totalDur));
+      modGain.gain.setValueAtTime(voice.fmIndexHz * (accent ? 1.2 : 1), time);
+      modGain.gain.exponentialRampToValueAtTime(
+        3,
+        time + Math.min(voice.fmDecaySec ?? 0.16, totalDur + 0.04),
+      );
       modOsc.connect(modGain);
-      modGain.connect(osc1.frequency);
+      modGain.connect(primaryOsc.frequency);
+      oscs.push(modOsc);
     }
 
-    // Expressive vibrato on sustained leads
-    let vibOsc: OscillatorNode | null = null;
-    if (voice.vibratoHz && voice.vibratoCents && totalDur >= 0.16) {
-      vibOsc = ctx.createOscillator();
+    // 5. Optional Expressive Vibrato on Sustained Notes
+    if (voice.vibratoHz && voice.vibratoCents && totalDur >= 0.15) {
+      const vibOsc = ctx.createOscillator();
       vibOsc.type = 'sine';
       vibOsc.frequency.setValueAtTime(voice.vibratoHz, time);
       const vibGain = ctx.createGain();
-      const delaySec = Math.min(totalDur * 0.45, voice.vibratoDelaySec ?? 0.12);
+      const delaySec = Math.min(totalDur * 0.42, voice.vibratoDelaySec ?? 0.12);
       vibGain.gain.setValueAtTime(0, time);
       vibGain.gain.setValueAtTime(0, time + delaySec);
-      vibGain.gain.linearRampToValueAtTime(voice.vibratoCents, time + delaySec + 0.08);
+      vibGain.gain.linearRampToValueAtTime(voice.vibratoCents, time + delaySec + 0.085);
       vibOsc.connect(vibGain);
-      vibGain.connect(osc1.detune);
-      if (osc2) vibGain.connect(osc2.detune);
+      for (const target of oscs) {
+        if (target.detune) {
+          vibGain.connect(target.detune);
+        }
+      }
+      oscs.push(vibOsc);
     }
 
+    // 6. Stereo Pan + Delay & Reverb Spatial Sends
     this.connectWithPan(ctx, envGain, voice.pan, mixBus);
+
     if (voice.delaySend && voice.delaySend > 0 && this.delayNode) {
       const send = ctx.createGain();
       send.gain.value = voice.delaySend;
       envGain.connect(send);
       send.connect(this.delayNode);
     }
+    if (voice.reverbSend && voice.reverbSend > 0 && this.reverbNode) {
+      const revSend = ctx.createGain();
+      revSend.gain.value = voice.reverbSend;
+      envGain.connect(revSend);
+      revSend.connect(this.reverbNode);
+    }
 
     const stopAt = releaseEnd + 0.03;
-    osc1.start(time);
-    osc1.stop(stopAt);
-    if (osc2) {
-      osc2.start(time);
-      osc2.stop(stopAt);
-    }
-    if (subOsc) {
-      subOsc.start(time);
-      subOsc.stop(stopAt);
-    }
-    if (modOsc) {
-      modOsc.start(time);
-      modOsc.stop(stopAt);
-    }
-    if (vibOsc) {
-      vibOsc.start(time);
-      vibOsc.stop(stopAt);
+    for (const osc of oscs) {
+      osc.start(time);
+      osc.stop(stopAt);
     }
   }
 
@@ -1684,52 +2602,157 @@ class RetroMusicSequencer {
     const mixBus = this.mixBus;
     if (!ctx || !mixBus) return;
 
+    // Punchy low sub body
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(156, time);
-    osc.frequency.exponentialRampToValueAtTime(42, time + 0.12);
+    osc.frequency.setValueAtTime(152, time);
+    osc.frequency.exponentialRampToValueAtTime(43, time + 0.09);
 
-    gain.gain.setValueAtTime(Math.max(0.01, gainLevel * 1.18), time);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.2);
+    gain.gain.setValueAtTime(Math.max(0.01, gainLevel * 1.24), time);
+    gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.21);
 
     osc.connect(gain);
     gain.connect(mixBus);
     osc.start(time);
-    osc.stop(time + 0.22);
+    osc.stop(time + 0.23);
+
+    // Crisp beater attack transient so the kick cuts cleanly through dense synth mixes
+    const click = ctx.createBufferSource();
+    click.buffer = this.getNoiseBuffer(ctx);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(2200, time);
+    bp.Q.setValueAtTime(1.6, time);
+    const clickGain = ctx.createGain();
+    clickGain.gain.setValueAtTime(Math.max(0.005, gainLevel * 0.42), time);
+    clickGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.018);
+
+    click.connect(bp);
+    bp.connect(clickGain);
+    clickGain.connect(mixBus);
+    click.start(time);
+    click.stop(time + 0.024);
   }
 
-  private triggerSnare(time: number, gainLevel: number): void {
+  private triggerSnare(time: number, gainLevel: number, gated: boolean): void {
     const ctx = this.ctx;
     const mixBus = this.mixBus;
     if (!ctx || !mixBus) return;
 
+    const snareBus = ctx.createGain();
+    snareBus.gain.value = 1;
+    snareBus.connect(mixBus);
+    if (this.reverbNode) {
+      const revSend = ctx.createGain();
+      revSend.gain.value = gated ? 0.58 : 0.24;
+      snareBus.connect(revSend);
+      revSend.connect(this.reverbNode);
+    }
+
+    // Crisp snare wire noise
     const noise = ctx.createBufferSource();
     noise.buffer = this.getNoiseBuffer(ctx);
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(1850, time);
-    filter.Q.setValueAtTime(0.95, time);
-    const noiseGain = ctx.createGain();
-    noiseGain.gain.setValueAtTime(Math.max(0.005, gainLevel), time);
-    noiseGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.17);
-    noise.connect(filter);
-    filter.connect(noiseGain);
-    noiseGain.connect(mixBus);
-    noise.start(time);
-    noise.stop(time + 0.19);
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(950, time);
+    const crack = ctx.createBiquadFilter();
+    crack.type = 'peaking';
+    crack.frequency.setValueAtTime(2550, time);
+    crack.gain.setValueAtTime(4.2, time);
 
+    const noiseGain = ctx.createGain();
+    const wireDur = gated ? 0.21 : 0.16;
+    noiseGain.gain.setValueAtTime(Math.max(0.005, gainLevel * 0.92), time);
+    if (gated) {
+      noiseGain.gain.setValueAtTime(Math.max(0.005, gainLevel * 0.7), time + 0.08);
+    }
+    noiseGain.gain.exponentialRampToValueAtTime(0.0001, time + wireDur);
+
+    noise.connect(hp);
+    hp.connect(crack);
+    crack.connect(noiseGain);
+    noiseGain.connect(snareBus);
+    noise.start(time);
+    noise.stop(time + wireDur + 0.02);
+
+    // Warm pitched snare drum shell body
     const body = ctx.createOscillator();
     body.type = 'triangle';
-    body.frequency.setValueAtTime(218, time);
-    body.frequency.exponentialRampToValueAtTime(108, time + 0.08);
+    body.frequency.setValueAtTime(215, time);
+    body.frequency.exponentialRampToValueAtTime(122, time + 0.075);
     const bodyGain = ctx.createGain();
-    bodyGain.gain.setValueAtTime(Math.max(0.005, gainLevel * 0.58), time);
-    bodyGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.1);
+    bodyGain.gain.setValueAtTime(Math.max(0.005, gainLevel * 0.68), time);
+    bodyGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.11);
     body.connect(bodyGain);
-    bodyGain.connect(mixBus);
+    bodyGain.connect(snareBus);
     body.start(time);
-    body.stop(time + 0.12);
+    body.stop(time + 0.13);
+  }
+
+  private triggerClap(time: number, gainLevel: number): void {
+    const ctx = this.ctx;
+    const mixBus = this.mixBus;
+    if (!ctx || !mixBus) return;
+
+    const clapBus = ctx.createGain();
+    clapBus.gain.value = 1;
+    this.connectWithPan(ctx, clapBus, 0.1, mixBus);
+    if (this.reverbNode) {
+      const revSend = ctx.createGain();
+      revSend.gain.value = 0.36;
+      clapBus.connect(revSend);
+      revSend.connect(this.reverbNode);
+    }
+
+    const offsets = [0, 0.011, 0.022];
+    for (let i = 0; i < offsets.length; i += 1) {
+      const t0 = time + offsets[i];
+      const isLast = i === offsets.length - 1;
+      const noise = ctx.createBufferSource();
+      noise.buffer = this.getNoiseBuffer(ctx);
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(1420, t0);
+      bp.Q.setValueAtTime(1.5, t0);
+
+      const g = ctx.createGain();
+      const dur = isLast ? 0.14 : 0.018;
+      g.gain.setValueAtTime(Math.max(0.004, gainLevel * (isLast ? 0.95 : 0.72)), t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+
+      noise.connect(bp);
+      bp.connect(g);
+      g.connect(clapBus);
+      noise.start(t0);
+      noise.stop(t0 + dur + 0.02);
+    }
+  }
+
+  private triggerRim(time: number, gainLevel: number): void {
+    const ctx = this.ctx;
+    const mixBus = this.mixBus;
+    if (!ctx || !mixBus) return;
+
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1180, time);
+    osc.frequency.exponentialRampToValueAtTime(760, time + 0.028);
+
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(1550, time);
+    bp.Q.setValueAtTime(2.4, time);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(Math.max(0.004, gainLevel * 0.9), time);
+    gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.045);
+
+    osc.connect(bp);
+    bp.connect(gain);
+    this.connectWithPan(ctx, gain, -0.22, mixBus);
+    osc.start(time);
+    osc.stop(time + 0.06);
   }
 
   private triggerHiHat(time: number, gainLevel: number, open: boolean): void {
@@ -1737,20 +2760,38 @@ class RetroMusicSequencer {
     const mixBus = this.mixBus;
     if (!ctx || !mixBus) return;
 
-    const noise = ctx.createBufferSource();
-    noise.buffer = this.getNoiseBuffer(ctx);
+    // 6-oscillator inharmonic metallic shimmer (authentic TR-808/SNES hi-hat) + subtle air
     const hp = ctx.createBiquadFilter();
     hp.type = 'highpass';
-    hp.frequency.setValueAtTime(open ? 6100 : 7600, time);
+    hp.frequency.setValueAtTime(open ? 6400 : 7800, time);
 
-    const gain = ctx.createGain();
-    const dur = open ? 0.18 : 0.045;
-    gain.gain.setValueAtTime(Math.max(0.003, gainLevel), time);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + dur);
+    const env = ctx.createGain();
+    const dur = open ? 0.2 : 0.045;
+    env.gain.setValueAtTime(Math.max(0.003, gainLevel), time);
+    env.gain.exponentialRampToValueAtTime(0.0001, time + dur);
 
-    noise.connect(hp);
-    hp.connect(gain);
-    this.connectWithPan(ctx, gain, 0.14, mixBus);
+    hp.connect(env);
+    this.connectWithPan(ctx, env, 0.16, mixBus);
+
+    const metalFreqs = [312, 468, 594, 774, 966, 1218];
+    const oscGain = ctx.createGain();
+    oscGain.gain.value = 0.24;
+    oscGain.connect(hp);
+    for (const f of metalFreqs) {
+      const osc = ctx.createOscillator();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(f, time);
+      osc.connect(oscGain);
+      osc.start(time);
+      osc.stop(time + dur + 0.02);
+    }
+
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.getNoiseBuffer(ctx);
+    const nGain = ctx.createGain();
+    nGain.gain.value = 0.45;
+    noise.connect(nGain);
+    nGain.connect(hp);
     noise.start(time);
     noise.stop(time + dur + 0.02);
   }
@@ -1760,37 +2801,43 @@ class RetroMusicSequencer {
     const mixBus = this.mixBus;
     if (!ctx || !mixBus) return;
 
-    // Metallic FM anvil / factory gear strike
+    // Metallic industrial anvil / factory strike with crisp resonance + stereo reverb
     const carrier = ctx.createOscillator();
     carrier.type = 'square';
-    carrier.frequency.setValueAtTime(340, time);
+    carrier.frequency.setValueAtTime(310, time);
 
     const mod = ctx.createOscillator();
     mod.type = 'sine';
-    mod.frequency.setValueAtTime(340 * 1.47, time);
+    mod.frequency.setValueAtTime(310 * 1.414, time);
     const modGain = ctx.createGain();
-    modGain.gain.setValueAtTime(420, time);
-    modGain.gain.exponentialRampToValueAtTime(35, time + 0.14);
+    modGain.gain.setValueAtTime(480, time);
+    modGain.gain.exponentialRampToValueAtTime(28, time + 0.16);
     mod.connect(modGain);
     modGain.connect(carrier.frequency);
 
     const bp = ctx.createBiquadFilter();
     bp.type = 'bandpass';
-    bp.frequency.setValueAtTime(2100, time);
-    bp.Q.setValueAtTime(2.6, time);
+    bp.frequency.setValueAtTime(1950, time);
+    bp.Q.setValueAtTime(2.8, time);
 
     const gain = ctx.createGain();
-    gain.gain.setValueAtTime(Math.max(0.004, gainLevel * 0.8), time);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.19);
+    gain.gain.setValueAtTime(Math.max(0.004, gainLevel * 0.85), time);
+    gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.24);
 
     carrier.connect(bp);
     bp.connect(gain);
-    this.connectWithPan(ctx, gain, -0.18, mixBus);
+    this.connectWithPan(ctx, gain, -0.24, mixBus);
+    if (this.reverbNode) {
+      const revSend = ctx.createGain();
+      revSend.gain.value = 0.42;
+      gain.connect(revSend);
+      revSend.connect(this.reverbNode);
+    }
 
     carrier.start(time);
     mod.start(time);
-    carrier.stop(time + 0.21);
-    mod.stop(time + 0.21);
+    carrier.stop(time + 0.26);
+    mod.stop(time + 0.26);
   }
 
   private triggerTom(time: number, freqHz: number, gainLevel: number): void {
@@ -1800,17 +2847,23 @@ class RetroMusicSequencer {
 
     const osc = ctx.createOscillator();
     osc.type = 'triangle';
-    osc.frequency.setValueAtTime(freqHz * 1.38, time);
-    osc.frequency.exponentialRampToValueAtTime(Math.max(45, freqHz * 0.88), time + 0.16);
+    osc.frequency.setValueAtTime(freqHz * 1.36, time);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(42, freqHz * 0.88), time + 0.18);
 
     const gain = ctx.createGain();
     gain.gain.setValueAtTime(Math.max(0.006, gainLevel), time);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.22);
+    gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.28);
 
     osc.connect(gain);
     this.connectWithPan(ctx, gain, 0.1, mixBus);
+    if (this.reverbNode) {
+      const revSend = ctx.createGain();
+      revSend.gain.value = 0.34;
+      gain.connect(revSend);
+      revSend.connect(this.reverbNode);
+    }
     osc.start(time);
-    osc.stop(time + 0.24);
+    osc.stop(time + 0.3);
   }
 
   private triggerCrash(time: number, gainLevel: number): void {
@@ -1818,21 +2871,44 @@ class RetroMusicSequencer {
     const mixBus = this.mixBus;
     if (!ctx || !mixBus) return;
 
-    const noise = ctx.createBufferSource();
-    noise.buffer = this.getNoiseBuffer(ctx);
     const hp = ctx.createBiquadFilter();
     hp.type = 'highpass';
-    hp.frequency.setValueAtTime(4200, time);
+    hp.frequency.setValueAtTime(4400, time);
 
     const gain = ctx.createGain();
-    gain.gain.setValueAtTime(Math.max(0.004, gainLevel * 0.72), time);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.56);
+    gain.gain.setValueAtTime(Math.max(0.004, gainLevel * 0.68), time);
+    gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.68);
 
-    noise.connect(hp);
     hp.connect(gain);
-    this.connectWithPan(ctx, gain, -0.16, mixBus);
+    this.connectWithPan(ctx, gain, -0.18, mixBus);
+    if (this.reverbNode) {
+      const revSend = ctx.createGain();
+      revSend.gain.value = 0.45;
+      gain.connect(revSend);
+      revSend.connect(this.reverbNode);
+    }
+
+    const metalFreqs = [345, 512, 684, 892, 1135, 1480];
+    const oscGain = ctx.createGain();
+    oscGain.gain.value = 0.16;
+    oscGain.connect(hp);
+    for (const f of metalFreqs) {
+      const osc = ctx.createOscillator();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(f, time);
+      osc.connect(oscGain);
+      osc.start(time);
+      osc.stop(time + 0.72);
+    }
+
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.getNoiseBuffer(ctx);
+    const nGain = ctx.createGain();
+    nGain.gain.value = 0.48;
+    noise.connect(nGain);
+    nGain.connect(hp);
     noise.start(time);
-    noise.stop(time + 0.6);
+    noise.stop(time + 0.72);
   }
 }
 

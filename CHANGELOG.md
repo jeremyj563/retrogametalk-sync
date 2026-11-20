@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.17.1] - 2026-11-19
+
+- Overhauled the built-in **Web Audio VGM Synthesizer** (`retroMusicPlayer.ts`) for studio-grade clarity and punch: added procedural stereo hall/plate convolution reverb (`ConvolverNode`), custom `PeriodicWave` harmonic timbres (`pulse25`, `organ`, `brass`, `strings`, `epiano`, `slapbass`, `guitar`), click-free true ADSR envelopes, 3-voice ensemble chorus, pitch-glide expression, per-voice high-pass frequency carving, authentic 4×12 guitar speaker-cabinet EQ + power-chord stacking, and upgraded percussion (beater-click kick, gated reverb snare, triple-burst clap, rimshot, 6-oscillator metallic hi-hats/crashes, FM anvil clangs, and orchestral timpani).
+- Re-composed all **7 original multi-section soundtrack tracks** after direct analysis of the 7 reference tracks—including accurate genre & tempo realignment for *Neon Corridor* (`128 BPM` chiptune breakbeat funk, Starter `0 pts`), *Velvet Machinery* (`118 BPM` 90s FM jazz-fusion slap-bass & Rhodes, `150 pts`), *Celestial Assembly* (`120 BPM` cosmic electro-synthwave, `400 pts`), *Ironworks Sector* (`130 BPM` D-minor industrial bass + sweeping SNES strings climax + bell breakdown, `650 pts`), *Ultra Combo* (`110 BPM` arcade industrial breakbeat + cab-shaped power chords, `950 pts`), *Phobos Gate* (`120 BPM` heavy double-time thrash metal + twin leads, `1,300 pts`), and *Lunar Core: Final Phase* (`152 BPM` gothic pipe-organ prelude + heroic SNES brass & bass/timpani break, `1,650 pts`).
+
 ## [1.17.0] - 2026-11-19
 
 - Upgraded the built-in **Retro Synth Sequencer** (`retroMusicPlayer.ts`) to support multi-bar 8-to-12-bar looping arrangements (`128`–`192` steps), articulated sustained note tuples with expressive pitch vibrato, a 5th harmonic counter-melody channel, soft-clip `WaveShaperNode` overdrive, sub-octave oscillator layering, stereo panning, and expanded percussion (kick, snare, closed/open hats, metallic FM anvil clangs, pitched timpani/toms, and crash cymbals).
