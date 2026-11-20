@@ -27,7 +27,7 @@ import {
   type PartialTransferMeta,
 } from './rangeDownload.ts';
 import type { AdaptiveRateLimiter } from './rateLimiter.ts';
-import { classifyFileRole, decodeHtmlEntities, deriveReleaseTags } from './releaseTags.ts';
+import { classifyFileRole, decodeHtmlEntities, deriveReleaseTags, hasHtmlEntities } from './releaseTags.ts';
 import {
   CANONICAL_SYSTEM_ALIAS_GROUPS,
   canonicalizeSystemSlug,
@@ -42,7 +42,63 @@ import type {
   ScraperConfigInternal,
 } from './types.ts';
 
-export { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
+export { classifyFileRole, decodeHtmlEntities, deriveReleaseTags, hasHtmlEntities } from './releaseTags.ts';
+
+function phpRawUrlEncode(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+/**
+ * Rewrites ONLY the `file=` query parameter of a signed download URL (such as
+ * `download.php?file=Traverse%20-%20Starlight%20%26amp%3B%20Prairie%20%28Japan%29.zip&...`)
+ * when its percent-decoded value contains literal HTML entities (`&amp;`, `&#038;`, etc.).
+ * Uses PHP `rawurlencode()`-compatible RFC 3986 percent-encoding (`%20`, `%28`, `%29`) and
+ * preserves all other query parameters (`id`, `platform`, `exp`, `u`, `w`, `key`) byte-for-byte.
+ * Returns `null` when the URL has no `file=` parameter or no HTML entities to decode.
+ */
+export function buildHtmlEntityDecodedDownloadUrl(rawUrl: string): string | null {
+  const queryStart = rawUrl.indexOf('?');
+  if (queryStart === -1) return null;
+
+  const hashStart = rawUrl.indexOf('#', queryStart + 1);
+  const prefix = rawUrl.slice(0, queryStart + 1);
+  const query = hashStart === -1 ? rawUrl.slice(queryStart + 1) : rawUrl.slice(queryStart + 1, hashStart);
+  const suffix = hashStart === -1 ? '' : rawUrl.slice(hashStart);
+
+  const segments = query.split('&');
+  let changed = false;
+
+  const rewritten = segments.map((segment) => {
+    const eqIdx = segment.indexOf('=');
+    if (eqIdx === -1) return segment;
+    const key = segment.slice(0, eqIdx);
+    if (key.toLowerCase() !== 'file') return segment;
+
+    const rawEncodedValue = segment.slice(eqIdx + 1);
+    let decodedValue: string;
+    try {
+      decodedValue = decodeURIComponent(rawEncodedValue);
+    } catch {
+      return segment;
+    }
+    if (!hasHtmlEntities(decodedValue)) return segment;
+
+    const cleanedValue = decodeHtmlEntities(decodedValue);
+    if (!cleanedValue || cleanedValue === decodedValue) return segment;
+
+    const reencoded = phpRawUrlEncode(cleanedValue);
+    if (reencoded === rawEncodedValue) return segment;
+
+    changed = true;
+    return `${key}=${reencoded}`;
+  });
+
+  if (!changed) return null;
+  return `${prefix}${rewritten.join('&')}${suffix}`;
+}
 
 const DEFAULT_BROWSER_USER_AGENTS = new Set([
   '',
@@ -2699,7 +2755,7 @@ export class RetroGameTalkClient {
       return [];
     }
 
-    const pageTitle = $('h1').first().text().trim() || $('title').first().text().trim();
+    const pageTitle = decodeHtmlEntities($('h1').first().text().trim() || $('title').first().text().trim());
     const pageTime =
       $('time[datetime]').first().attr('datetime') ||
       $('meta[property="article:published_time"]').attr('content') ||
@@ -2812,9 +2868,11 @@ export class RetroGameTalkClient {
         } catch {
           return;
         }
-        const filenameAttr = ajax$(a).siblings('[data-filename]').attr('data-filename');
-        const paramFile = dlUrl.searchParams.get('file');
-        const anchorText = ajax$(a).text().replace(/\s+/g, ' ').trim();
+        const rawFilenameAttr = ajax$(a).siblings('[data-filename]').attr('data-filename');
+        const filenameAttr = rawFilenameAttr ? decodeHtmlEntities(rawFilenameAttr) : '';
+        const rawParamFile = dlUrl.searchParams.get('file');
+        const paramFile = rawParamFile ? decodeHtmlEntities(rawParamFile) : '';
+        const anchorText = decodeHtmlEntities(ajax$(a).text().replace(/\s+/g, ' ').trim());
         const filename = sanitizePathSegment(
           filenameAttr || paramFile || anchorText || `${pageTitle}.zip`,
         );
@@ -2896,9 +2954,11 @@ export class RetroGameTalkClient {
         }
 
         const dlUrl = new URL(dlHref);
-        const btnLabel = btn.text().replace(/\s+/g, ' ').trim();
+        const btnLabel = decodeHtmlEntities(btn.text().replace(/\s+/g, ' ').trim());
+        const rawDlcParamFile = dlUrl.searchParams.get('file');
+        const dlcParamFile = rawDlcParamFile ? decodeHtmlEntities(rawDlcParamFile) : '';
         const filename = sanitizePathSegment(
-          dlUrl.searchParams.get('file') || btnLabel || `row-${row}.zip`,
+          dlcParamFile || btnLabel || `row-${row}.zip`,
         );
         const mirrored = resolveMirroredPaths(config.baseUrl, pageUrl, config.downloadDir, filename);
         results.push({
@@ -3228,7 +3288,9 @@ export class RetroGameTalkClient {
     const maxStreamAttempts = Math.min(4, Math.max(1, (config.maxRetries ?? 2) + 1));
     const configuredChunkConcurrency = Math.max(1, Math.min(4, Math.round(config.downloadChunkConcurrency ?? 1)));
     const chunkThresholdBytes = Math.max(4, Math.min(128, Math.round(config.downloadChunkMinSizeMb ?? 32))) * 1024 * 1024;
-    let effectiveChunks = this.getEffectiveHostChunkConcurrency(release.downloadUrl, configuredChunkConcurrency);
+    let activeDownloadUrl = release.downloadUrl;
+    let triedEntityDecodedFallback = false;
+    let effectiveChunks = this.getEffectiveHostChunkConcurrency(activeDownloadUrl, configuredChunkConcurrency);
     let disableResumeForFreshRestart = false;
     let mirrorBurstTriggeredInTransfer = false;
 
@@ -3239,8 +3301,8 @@ export class RetroGameTalkClient {
 
       let partPath: string | null = null;
       let keepPartialOnError = false;
-      const releaseHostSlot = this.isHostSingleStreamLimited(release.downloadUrl)
-        ? await this.acquireHostStreamSlot(release.downloadUrl, signal)
+      const releaseHostSlot = this.isHostSingleStreamLimited(activeDownloadUrl)
+        ? await this.acquireHostStreamSlot(activeDownloadUrl, signal)
         : null;
 
       try {
@@ -3284,7 +3346,7 @@ export class RetroGameTalkClient {
         log?.(
           'debug',
           `[Download] Starting transfer attempt ${streamAttempt}/${maxStreamAttempts} for "${release.filename}"`,
-          `url=${release.downloadUrl}, chunks=${effectiveChunks}${effectiveChunks < configuredChunkConcurrency ? ` (mirror-capped from ${configuredChunkConcurrency})` : ''}, thresholdMb=${Math.round(chunkThresholdBytes / (1024 * 1024))}, initialRange=${initialRangeHeader ?? 'none'}`,
+          `url=${activeDownloadUrl}, chunks=${effectiveChunks}${effectiveChunks < configuredChunkConcurrency ? ` (mirror-capped from ${configuredChunkConcurrency})` : ''}, thresholdMb=${Math.round(chunkThresholdBytes / (1024 * 1024))}, initialRange=${initialRangeHeader ?? 'none'}`,
         );
 
         const requestHeaders: Record<string, string> = {
@@ -3298,7 +3360,7 @@ export class RetroGameTalkClient {
         }
 
         const { response, finalUrl } = await this.fetchWithRedirects(
-          release.downloadUrl,
+          activeDownloadUrl,
           config,
           {
             method: 'GET',
@@ -3327,8 +3389,22 @@ export class RetroGameTalkClient {
             `[Download] Non-OK HTTP ${response.status} for "${release.filename}"`,
             `finalUrl=${finalUrl}, body=${bodySnippet.replace(/\s+/g, ' ').trim().slice(0, 180)}`,
           );
+          if (response.status === 404 && !triedEntityDecodedFallback) {
+            const decodedFallbackUrl = buildHtmlEntityDecodedDownloadUrl(activeDownloadUrl);
+            if (decodedFallbackUrl && decodedFallbackUrl !== activeDownloadUrl) {
+              triedEntityDecodedFallback = true;
+              activeDownloadUrl = decodedFallbackUrl;
+              streamAttempt -= 1;
+              log?.(
+                'info',
+                `HTTP 404 on HTML-encoded download URL for ${release.filename}; retrying with decoded filename parameter`,
+                decodedFallbackUrl,
+              );
+              continue;
+            }
+          }
           if (this.isCloudflareChallenge(response.status, response.headers, bodySnippet)) {
-            const msg = `Blocked by Cloudflare bot protection (HTTP ${response.status}) downloading ${release.downloadUrl}`;
+            const msg = `Blocked by Cloudflare bot protection (HTTP ${response.status}) downloading ${activeDownloadUrl}`;
             this.setAuthState({
               configured: Boolean(config.username && config.password),
               authenticated: false,
@@ -3336,6 +3412,13 @@ export class RetroGameTalkClient {
               lastMessage: msg,
             });
             throw new Error(msg);
+          }
+          if (triedEntityDecodedFallback) {
+            // Do not invalidate the WordPress session if the mirror rejected the entity-decoded
+            // filename parameter (e.g. HTTP 403 invalid HMAC key or HTTP 404 missing file).
+            throw new Error(
+              `HTTP 404 downloading ${release.downloadUrl} (upstream HTML-encoded filename parameter; decoded fallback returned HTTP ${response.status})`,
+            );
           }
           if (response.status === 401 || response.status === 403) {
             this.setAuthState({
@@ -3345,7 +3428,7 @@ export class RetroGameTalkClient {
               lastMessage: `Download access denied (HTTP ${response.status}) at ${finalUrl}`,
             });
           }
-          throw new Error(`HTTP ${response.status} downloading ${release.downloadUrl}`);
+          throw new Error(`HTTP ${response.status} downloading ${activeDownloadUrl}`);
         }
 
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
@@ -3371,7 +3454,7 @@ export class RetroGameTalkClient {
               mirrorBurstTriggeredInTransfer = true;
             }
             this.recordHostChunkCap(finalUrl, 1);
-            this.recordHostChunkCap(release.downloadUrl, 1);
+            this.recordHostChunkCap(activeDownloadUrl, 1);
             if (fs.existsSync(expectedPartPath)) {
               partPath = expectedPartPath;
               keepPartialOnError = true;
@@ -3483,7 +3566,7 @@ export class RetroGameTalkClient {
         }
 
         if (!response.body) {
-          throw new Error(`Empty response stream for ${release.downloadUrl}`);
+          throw new Error(`Empty response stream for ${activeDownloadUrl}`);
         }
 
         const meter = new RollingThroughputMeter();
@@ -3795,7 +3878,7 @@ export class RetroGameTalkClient {
                         effectiveChunks = 1;
                         mirrorBurstTriggeredInTransfer = true;
                         this.recordHostChunkCap(finalUrl, 1);
-                        this.recordHostChunkCap(release.downloadUrl, 1);
+                        this.recordHostChunkCap(activeDownloadUrl, 1);
                         siblingController.abort(err);
                       } else {
                         waveController.abort(err);
@@ -3837,7 +3920,7 @@ export class RetroGameTalkClient {
                 const steppedDownFromMultiChunk = waveConfiguredChunks > 1 || activeWorkersCount > 1;
                 effectiveChunks = 1;
                 this.recordHostChunkCap(finalUrl, 1);
-                this.recordHostChunkCap(release.downloadUrl, 1);
+                this.recordHostChunkCap(activeDownloadUrl, 1);
                 if (steppedDownFromMultiChunk || throttleErr.isLocalMirrorLimit) {
                   mirrorBurstTriggeredInTransfer = true;
                 }
@@ -4074,7 +4157,7 @@ export class RetroGameTalkClient {
       }
     }
 
-    throw new Error(`Exceeded max stream retries for ${release.downloadUrl}`);
+    throw new Error(`Exceeded max stream retries for ${activeDownloadUrl}`);
   }
 
   /**
@@ -4250,7 +4333,7 @@ export class RetroGameTalkClient {
       post.title && typeof post.title === 'object' && 'rendered' in post.title
         ? decodeHtmlEntities(String((post.title as { rendered?: string }).rendered || ''))
         : '';
-    const acfGameName = typeof acf.game_name === 'string' ? acf.game_name.trim() : '';
+    const acfGameName = typeof acf.game_name === 'string' ? decodeHtmlEntities(acf.game_name) : '';
 
     const genres = new Set<string>();
     const regions = new Set<string>();
@@ -4355,7 +4438,7 @@ export class RetroGameTalkClient {
           const e = entry as { file_name?: string; file_size?: string };
           if (e.file_name) {
             downloadHints.push({
-              filename: String(e.file_name),
+              filename: decodeHtmlEntities(String(e.file_name)),
               fileSize: String(e.file_size || ''),
             });
           }
@@ -4380,7 +4463,9 @@ export class RetroGameTalkClient {
       modifiedGmt,
       title: acfGameName || titleRendered || null,
       originalTitle:
-        typeof acf.original_title === 'string' && acf.original_title.trim() ? acf.original_title.trim() : null,
+        typeof acf.original_title === 'string' && acf.original_title.trim()
+          ? decodeHtmlEntities(acf.original_title)
+          : null,
       publisher: publishers.size > 0 ? Array.from(publishers).join(', ') : null,
       developer: developers.size > 0 ? Array.from(developers).join(', ') : null,
       releaseYear,
@@ -4733,14 +4818,15 @@ export class RetroGameTalkClient {
   ): ReleaseMetadata {
     const $ = loadHtml(html);
 
-    const htmlTitle =
+    const htmlTitle = decodeHtmlEntities(
       $('.rgt-title-name').first().text().trim() ||
-      $('h1.entry-title').first().text().trim() ||
-      $('h1').first().text().trim();
+        $('h1.entry-title').first().text().trim() ||
+        $('h1').first().text().trim(),
+    );
 
-    const title = wpData?.title || htmlTitle || 'Untitled Release';
+    const title = (wpData?.title ? decodeHtmlEntities(wpData.title) : '') || htmlTitle || 'Untitled Release';
 
-    const subtitleRaw = $('.rgt-title-sub').first().text().replace(/\s+/g, ' ').trim();
+    const subtitleRaw = decodeHtmlEntities($('.rgt-title-sub').first().text().replace(/\s+/g, ' ').trim());
     const subtitle = subtitleRaw || null;
 
     let publisher: string | null = wpData?.publisher || null;
