@@ -14,6 +14,7 @@ import {
   SOUNDTRACK_TRACKS,
   STARTER_TRACK_ID,
 } from '../src/shared/soundtrack.ts';
+import { type NoteCell, TRACK_SCORES } from '../src/utils/retroMusicPlayer.ts';
 
 const MAX_TROPHY_POINTS = ACHIEVEMENT_CATALOG.reduce((sum, item) => sum + item.points, 0);
 
@@ -96,4 +97,91 @@ test('Volume clamping and validators guard persisted preference values', () => {
   assert.equal(isValidPlaybackMode('cycle'), true);
   assert.equal(isValidPlaybackMode('shuffle'), true);
   assert.equal(isValidPlaybackMode('repeat_all'), false);
+});
+
+function validateNoteLane(trackId: string, laneName: string, lane: readonly NoteCell[], totalSteps: number) {
+  assert.equal(lane.length, totalSteps, `${trackId} ${laneName} length (${lane.length}) must equal totalSteps (${totalSteps})`);
+  for (let i = 0; i < lane.length; i += 1) {
+    const cell = lane[i];
+    if (cell === null) continue;
+    const midi = typeof cell === 'number' ? cell : cell[0];
+    assert.ok(
+      Number.isInteger(midi) && midi >= 21 && midi <= 108,
+      `${trackId} ${laneName}[${i}] MIDI ${midi} out of valid range [21, 108]`,
+    );
+    if (typeof cell !== 'number') {
+      assert.ok(cell[1] >= 1, `${trackId} ${laneName}[${i}] sustain steps (${cell[1]}) must be >= 1`);
+      if (cell[2] !== undefined) {
+        assert.ok(cell[2] > 0 && cell[2] <= 2, `${trackId} ${laneName}[${i}] velocity (${cell[2]}) out of bounds`);
+      }
+    }
+  }
+}
+
+test('All 7 composed TRACK_SCORES match SOUNDTRACK_TRACKS BPM and have exact bar-aligned lengths & valid steps', () => {
+  for (const meta of SOUNDTRACK_TRACKS) {
+    const score = TRACK_SCORES[meta.id];
+    assert.ok(score, `Missing TRACK_SCORES entry for ${meta.id}`);
+    assert.equal(score.bpm, meta.bpm, `${meta.id} score BPM (${score.bpm}) must match metadata BPM (${meta.bpm})`);
+    assert.ok(
+      score.totalSteps >= 64 && score.totalSteps % 16 === 0,
+      `${meta.id} totalSteps (${score.totalSteps}) must be a multiple of 16 steps (>= 64)`,
+    );
+
+    validateNoteLane(meta.id, 'lead', score.lead, score.totalSteps);
+    validateNoteLane(meta.id, 'arp', score.arp, score.totalSteps);
+    validateNoteLane(meta.id, 'bass', score.bass, score.totalSteps);
+    if (score.counter) {
+      validateNoteLane(meta.id, 'counter', score.counter, score.totalSteps);
+    }
+
+    for (const [stepKey, entry] of Object.entries(score.chords)) {
+      const step = Number(stepKey);
+      assert.ok(
+        Number.isInteger(step) && step >= 0 && step < score.totalSteps,
+        `${meta.id} chord step ${stepKey} out of [0, ${score.totalSteps - 1}]`,
+      );
+      assert.ok(entry, `${meta.id} chord entry at step ${stepKey} must be defined`);
+      const notes: readonly number[] = !Array.isArray(entry) && 'notes' in entry ? entry.notes : (entry as readonly number[]);
+      assert.ok(notes.length >= 2, `${meta.id} chord at step ${stepKey} must have >= 2 notes`);
+      for (const midi of notes) {
+        assert.ok(
+          Number.isInteger(midi) && midi >= 21 && midi <= 108,
+          `${meta.id} chord MIDI ${midi} at step ${stepKey} out of bounds`,
+        );
+      }
+    }
+
+    const drumLanes: Array<[string, readonly number[] | undefined]> = [
+      ['kick', score.kick],
+      ['snare', score.snare],
+      ['hatClosed', score.hatClosed],
+      ['hatOpen', score.hatOpen],
+      ['clang', score.clang],
+      ['crash', score.crash],
+      ['accentSteps', score.accentSteps],
+    ];
+    for (const [name, steps] of drumLanes) {
+      if (!steps) continue;
+      for (const step of steps) {
+        assert.ok(
+          Number.isInteger(step) && step >= 0 && step < score.totalSteps,
+          `${meta.id} ${name} step ${step} out of [0, ${score.totalSteps - 1}]`,
+        );
+      }
+    }
+
+    if (score.toms) {
+      for (const hit of score.toms) {
+        assert.ok(
+          Number.isInteger(hit.step) && hit.step >= 0 && hit.step < score.totalSteps,
+          `${meta.id} tom step ${hit.step} out of [0, ${score.totalSteps - 1}]`,
+        );
+        assert.ok(
+          Number.isInteger(hit.midi) && hit.midi >= 21 && hit.midi <= 108,
+          `${meta.id} tom MIDI ${hit.midi} out of bounds`,
+        );
+      }
+    }
+  }
 });

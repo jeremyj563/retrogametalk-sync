@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.17.0] - 2026-11-19
+
+- Upgraded the built-in **Retro Synth Sequencer** (`retroMusicPlayer.ts`) to support multi-bar 8-to-12-bar looping arrangements (`128`–`192` steps), articulated sustained note tuples with expressive pitch vibrato, a 5th harmonic counter-melody channel, soft-clip `WaveShaperNode` overdrive, sub-octave oscillator layering, stereo panning, and expanded percussion (kick, snare, closed/open hats, metallic FM anvil clangs, pitched timpani/toms, and crash cymbals).
+- Replaced all 7 unlockable background soundtrack compositions with **7 original multi-section VGM-inspired tracks** spanning classic horror ambient, puzzle chiptune, solstice synthwave, 16-bit industrial, arcade industrial, DOS thrash metal, and final boss battle themes: *Hollow Corridor* (88 BPM, Starter `0 pts`), *Clockwork Chamber* (118 BPM, `150 pts`), *Celestial Assembly* (124 BPM, `400 pts`), *Ironworks Sector* (134 BPM, `650 pts`), *Ultra Combo* (116 BPM, `950 pts`), *Phobos Gate* (122 BPM, `1,300 pts`), and *Lunar Core: Final Phase* (156 BPM, `1,650 pts`).
+- Extended `tests/soundtrack.test.ts` to validate score-to-metadata BPM alignment, exact bar-aligned lane lengths, chord voicings, MIDI bounds, and percussion triggers across all 7 compositions.
+
 ## [1.16.0] - 2026-11-19
 
 - Re-architected **Full Sync** and scheduled **Incremental Auto-Sync** around the pre-indexed SQLite catalog via a shared **Sync Rule Matcher** (`Target Consoles` + `Allowed Release Types`) and per-console index freshness tracking (`fresh` / `stale > 12h` / `unindexed`).
