@@ -180,7 +180,7 @@ export function parseSyncStatusHeader(params: {
     };
   }
 
-  // 6. WP REST enumeration & pagination
+  // 6. WP REST enumeration & pagination (must run before generic "<Mode> (n/m): <sys> · <title>" matcher)
   const wpPageFullMatch = phase.match(
     /^(Dry Run \(Full\)|Full Sync)\s+\((\d+\/\d+)\):\s+([^\s·]+)\s+·\s+WP page\s+(\d+\/\d+)$/i,
   );
@@ -191,6 +191,60 @@ export function parseSyncStatusHeader(params: {
       progressLabel: `System ${wpPageFullMatch[2]} · WP ${wpPageFullMatch[4]}`,
       actionPrefix: 'Enumerating',
       subject: `Fetching release catalog page ${wpPageFullMatch[4]}`,
+      subjectKind: 'detail',
+      workerCount: 0,
+    };
+  }
+
+  // 5b. Alternate Index-First Full Sync per-release format: "Full Sync (98/110): nes-roms · Parallel World"
+  const indexFirstReleaseMatch = phase.match(
+    /^(Dry Run \((?:Full|Incremental)\)|Full Sync|Incremental)\s+\((\d+\/\d+)\):\s+([^\s·]+)\s+·\s+(.+)$/,
+  );
+  if (indexFirstReleaseMatch) {
+    return {
+      syncType: indexFirstReleaseMatch[1].trim(),
+      systemName: indexFirstReleaseMatch[3].trim(),
+      progressLabel: indexFirstReleaseMatch[2].trim(),
+      actionPrefix: 'Syncing',
+      subject: indexFirstReleaseMatch[4].trim(),
+      subjectKind: 'title',
+      workerCount: 0,
+    };
+  }
+
+  // 6b. Index-First Phase 1 console indexing & delta checks
+  const indexFirstWpPageMatch = phase.match(
+    /^(Dry Run\s+·\s+)?(Indexing|Delta)\s+([^\s·]+)\s+·\s+WP page\s+(\d+\/\d+)$/i,
+  );
+  if (indexFirstWpPageMatch) {
+    const isDelta = indexFirstWpPageMatch[2].toLowerCase() === 'delta';
+    const isDry = Boolean(indexFirstWpPageMatch[1]);
+    return {
+      syncType: runSyncType ?? (isDry ? 'Dry Run (Full)' : 'Full Sync'),
+      systemName: indexFirstWpPageMatch[3].trim(),
+      progressLabel: `WP ${indexFirstWpPageMatch[4]}`,
+      actionPrefix: isDelta ? 'Checking' : 'Enumerating',
+      subject: isDelta
+        ? `Fetching delta catalog page ${indexFirstWpPageMatch[4]}`
+        : `Fetching release catalog page ${indexFirstWpPageMatch[4]}`,
+      subjectKind: 'detail',
+      workerCount: 0,
+    };
+  }
+
+  const indexFirstConsoleMatch = phase.match(
+    /^(Dry Run\s+·\s+)?(Indexing|Delta check)\s+([^\s(]+)\s+\((\d+\/\d+)\)$/i,
+  );
+  if (indexFirstConsoleMatch) {
+    const isDelta = indexFirstConsoleMatch[2].toLowerCase().startsWith('delta');
+    const isDry = Boolean(indexFirstConsoleMatch[1]);
+    const sys = indexFirstConsoleMatch[3].trim();
+    return {
+      syncType: runSyncType ?? (isDry ? 'Dry Run (Full)' : 'Full Sync'),
+      systemName: sys,
+      progressLabel: `System ${indexFirstConsoleMatch[4]}`,
+      actionPrefix: isDelta ? 'Checking' : 'Enumerating',
+      subject: isDelta ? `Checking ${sys} for recent updates` : `Indexing ${sys} catalog`,
       subjectKind: 'detail',
       workerCount: 0,
     };

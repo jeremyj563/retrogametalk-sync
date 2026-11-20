@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.20.1] - 2026-11-19
+
+- Fixed a regression in **Index-First Full Sync** where the Monitor status header briefly flipped from `Status Full Sync (N/M): <console> · <Game Title>` during release warm-up to `Syncing <Game Title>` once downloading began; Index-First Full Sync now emits and parses the steady **`Syncing <Game Title>`** format consistently from warm-up through download completion (and cleanly formats Phase 1 console indexing/delta status messages).
+
 ## [1.20.0] - 2026-11-19
 
 - Added **In-Place Archive Contents Navigation** across both the **Game Detail Drawer** and **Catalog → Local Disk Tree**, allowing you to browse nested folders and files inside downloaded `.zip`, `.7z`, `.rar`, and `.tar*` archives without unpacking anything to disk.
