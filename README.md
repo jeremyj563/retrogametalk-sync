@@ -9,7 +9,7 @@
 <h3>Always-On Retro ROM Preservation Mirror, Offline Game Catalog &amp; Direct Handheld SD Installer</h3>
 
 <p>
-  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.15.0-38e56b?style=flat-square&labelColor=0b1510" alt="Version 1.15.0" /></a>
+  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.16.0-38e56b?style=flat-square&labelColor=0b1510" alt="Version 1.16.0" /></a>
   <a href="./.github/workflows/docker-publish.yml"><img src="https://img.shields.io/badge/platforms-linux%2Famd64%20%7C%20linux%2Farm64-1f6feb?style=flat-square&labelColor=0b1510" alt="Architectures: linux/amd64 | linux/arm64" /></a>
   <a href="https://ghcr.io/jeremyj563/retrogametalk-sync"><img src="https://img.shields.io/badge/registry-GHCR-238636?style=flat-square&labelColor=0b1510&logo=github" alt="GHCR Container Registry" /></a>
   <!-- TODO: Replace with live Docker Hub badge once DOCKERHUB_USERNAME/DOCKERHUB_TOKEN are configured and first release image is pushed -->
@@ -73,7 +73,7 @@
 
 ## Key Capabilities
 
-- **Decoupled Catalog Indexing & On-Demand Downloads:** Quickly index titles, box art, release tags, taxonomies, and estimated archive sizes via WordPress REST, then queue individual games, multi-select batches, or entire filtered searches on demand—or toggle **Auto-Download New Releases** for hands-free mirroring.
+- **Index-First Sync, Pre-Flight & Catalog Rule Parity:** Index titles, box art, release tags, taxonomies, and estimated sizes once via WordPress REST, preview exact rule matches and stale-console refreshes via live **Pre-Flight** & **Dry Run** summaries before downloading, filter **`Matches Sync Rules`** straight inside Catalog, or let **Full Sync** and **Scheduled Incremental Auto-Sync** mirror eligible releases cleanly without blind HTTP re-crawling.
 - **Resilient Multi-Chunk Transfers & Resume:** Segmented HTTP `Range` downloads with `.part.meta.json` `If-Range` verification cleanly resume interrupted transfers across restarts and gracefully abort on `SIGTERM`.
 - **Rich Offline Catalog & Lazy Detail Hydration:** Filter across every indexed console by **Downloaded / Not Downloaded**, **Installed / Not Installed**, **Genres**, **Regions**, **Languages**, **Sources**, and **ROM Types** (`ANY`/`ALL` tag matching), with on-demand detail and screenshot caching that keeps un-downloaded release folders off your disk.
 - **Direct-to-SD-Card Installer & Prepared ROM Streaming:** Inspect `.zip`/`.7z`/`.rar` contents without pre-unpacking on disk, apply FAT32-safe ROM naming rules, use **Smart ROM Picker** for multi-version archives, and push clean files straight to connected SD cards via customizable console folder mappings.

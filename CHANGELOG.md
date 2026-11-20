@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.16.0] - 2026-11-19
+
+- Re-architected **Full Sync** and scheduled **Incremental Auto-Sync** around the pre-indexed SQLite catalog via a shared **Sync Rule Matcher** (`Target Consoles` + `Allowed Release Types`) and per-console index freshness tracking (`fresh` / `stale > 12h` / `unindexed`).
+- Replaced blind full-site HTTP re-crawling on **Full Sync** with **Index-First Mirroring**: Phase 1 automatically refreshes unindexed or stale target consoles and performs fast WP REST delta checks on fresh consoles (with an explicit `Force Legacy Remote Crawl` fallback), while Phase 2 mirrors rule-matched pending releases straight from SQLite and skips verified local files cleanly.
+- Added `GET /api/sync/preflight`, SQLite migration `v20` (`sync_runs.summary_json`), and structured **Dry Run** execution summaries (`SyncRunSummarySnapshot`) so **Dry Run** previews stay non-mutating and display clear counts (`wouldDownloadCount`, `alreadyOnDiskCount`, `excludedByRulesCount`, estimated size, and console/sample breakdowns).
+- Upgraded the header **Full Sync** confirmation into a live **Pre-Flight Readiness Preview** with console freshness telemetry, a `Refresh Stale/Unindexed` toggle, and a collapsible per-console & sample release breakdown.
+- Connected **Monitor**, **Catalog**, and **Sync Rules** into one cohesive workflow: added a **Sync Rule Readiness** strip (with direct `Queue Pending` and `View in Catalog` actions) and a **Latest Dry Run** action bar inside **Monitor**, a **`Matches Sync Rules`** quick-filter button + active token inside **Catalog**, and stale/unindexed console indicators + **`Preview Matches in Catalog`** inside **Sync Rules**.
+
 ## [1.15.0] - 2026-11-19
 
 - Added an **Unlockable Retro Synth Soundtrack** powered by a zero-dependency Web Audio API lookahead sequencer with **7 seamlessly looping multi-channel compositions**: 1 free starter track (*Phosphor Idle* — CRT Ambient, `0 pts`) plus 6 milestone tracks unlocked via Trophy Points (*Bitplane Bounce* 8-Bit Chiptune at `150 pts`, *Outrun CRT* 80s Synthwave at `400 pts`, *FM Cartridge Drive* 16-Bit FM at `650 pts`, *Subcarrier Pulse* Acid Techno at `950 pts`, *Cyberdeck Horizon* Dark Synth at `1,300 pts`, and *Broadcast Finale* Euro-Synth at `1,650 pts`).

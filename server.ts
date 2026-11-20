@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import {
+  computeSyncPreflightSummary,
   getCatalogStatsSnapshot,
   getPublicConfig,
   getRepositoryItemById,
@@ -156,6 +157,10 @@ async function bootstrap() {
     res.json({ ok: true, cleared });
   });
 
+  app.get('/api/sync/preflight', (_req, res) => {
+    res.json(computeSyncPreflightSummary());
+  });
+
   app.post('/api/runs/start', async (req, res) => {
     const requestedMode = String(req.body?.mode || 'incremental') as RunMode;
     const mode: RunMode = ['incremental', 'full', 'dry_run'].includes(requestedMode)
@@ -163,9 +168,16 @@ async function bootstrap() {
       : 'incremental';
     const dryRun = Boolean(req.body?.dryRun) || mode === 'dry_run';
     const normalizedMode: RunMode = mode === 'dry_run' ? 'incremental' : mode;
+    const refreshStaleIndexes =
+      req.body?.refreshStaleIndexes === undefined ? true : Boolean(req.body.refreshStaleIndexes);
+    const legacyFullCrawl = Boolean(req.body?.legacyFullCrawl);
 
     try {
-      const run = await orchestrator.startRun('manual', normalizedMode, { dryRun });
+      const run = await orchestrator.startRun('manual', normalizedMode, {
+        dryRun,
+        refreshStaleIndexes,
+        legacyFullCrawl,
+      });
       res.status(202).json({ run });
     } catch (err) {
       res.status(409).json({ error: err instanceof Error ? err.message : String(err) });
@@ -195,6 +207,7 @@ async function bootstrap() {
       status: parseQueryFilterParam(req.query.status),
       downloaded: typeof req.query.downloaded === 'string' ? req.query.downloaded : undefined,
       installed: typeof req.query.installed === 'string' ? req.query.installed : undefined,
+      syncRules: req.query.syncRules === 'true' || req.query.syncRules === '1',
       tag: parseQueryFilterParam(req.query.tag),
       tagMode: typeof req.query.tagMode === 'string' ? req.query.tagMode : undefined,
       genre: parseQueryFilterParam(req.query.genre),
@@ -219,6 +232,7 @@ async function bootstrap() {
       status: parseQueryFilterParam(req.query.status),
       downloaded: typeof req.query.downloaded === 'string' ? req.query.downloaded : undefined,
       installed: typeof req.query.installed === 'string' ? req.query.installed : undefined,
+      syncRules: req.query.syncRules === 'true' || req.query.syncRules === '1',
       tag: parseQueryFilterParam(req.query.tag),
       tagMode: typeof req.query.tagMode === 'string' ? req.query.tagMode : undefined,
       genre: parseQueryFilterParam(req.query.genre),
@@ -280,6 +294,7 @@ async function bootstrap() {
           status: parseQueryFilterParam(rawFilters.status),
           downloaded: typeof rawFilters.downloaded === 'string' ? rawFilters.downloaded : undefined,
           installed: typeof rawFilters.installed === 'string' ? rawFilters.installed : undefined,
+          syncRules: Boolean(rawFilters.syncRules),
           tag: parseQueryFilterParam(rawFilters.tag),
           tagMode: typeof rawFilters.tagMode === 'string' ? rawFilters.tagMode : undefined,
           genre: parseQueryFilterParam(rawFilters.genre),

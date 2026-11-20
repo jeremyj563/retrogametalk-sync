@@ -103,6 +103,62 @@ export interface ScraperConfigPublic {
   envOverrides: string[];
 }
 
+export interface DryRunSampleRelease {
+  id?: number;
+  title: string;
+  systemName: string;
+  releaseType: string;
+  fileSizeBytes: number;
+  status: string;
+}
+
+export interface DryRunConsoleBreakdown {
+  systemName: string;
+  pendingCount: number;
+  estimatedBytes: number;
+}
+
+export interface SyncRunSummarySnapshot {
+  strategy: 'index_first' | 'legacy_crawl' | 'incremental_delta';
+  ruleScopeLabel: string;
+  totalRuleMatched: number;
+  wouldDownloadCount: number;
+  alreadyOnDiskCount: number;
+  excludedByRulesCount: number;
+  estimatedDownloadBytes: number;
+  refreshedConsoles: string[];
+  newDeltaDiscoveredCount: number;
+  consoleBreakdown: DryRunConsoleBreakdown[];
+  sampleReleases: DryRunSampleRelease[];
+}
+
+export interface SyncPreflightSummary {
+  generatedAt: string;
+  ruleScopeLabel: string;
+  hasCustomSystemFilter: boolean;
+  hasCustomTypeFilter: boolean;
+  targetSystemsCount: number;
+  targetSystems: string[];
+  freshConsoles: string[];
+  staleConsoles: string[];
+  unindexedConsoles: string[];
+  oldestIndexedAt: string | null;
+  totalCataloged: number;
+  totalRuleMatched: number;
+  pendingDownloadCount: number;
+  availablePendingCount: number;
+  retryablePendingCount: number;
+  queuedCount: number;
+  alreadyDownloadedCount: number;
+  excludedByRulesCount: number;
+  estimatedPendingBytes: number;
+  topPendingConsoles: DryRunConsoleBreakdown[];
+  samplePendingReleases: DryRunSampleRelease[];
+  autoDownloadNewReleases: boolean;
+  lastWatermarkAt: string | null;
+  scheduleEnabled: boolean;
+}
+
 export interface SyncRunRecord {
   id: number;
   triggerType: RunTrigger;
@@ -120,6 +176,7 @@ export interface SyncRunRecord {
   rateLimitHits: number;
   avgDelayMs: number;
   errorSummary: string | null;
+  summary?: SyncRunSummarySnapshot | null;
 }
 
 export interface ReleaseMetadata {
@@ -175,6 +232,7 @@ export interface CatalogFacetCounts {
     installed: number;
     notInstalled: number;
   };
+  syncRulesMatched?: number;
 }
 
 export interface CatalogFacets {

@@ -778,6 +778,17 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `);
     },
   },
+  {
+    version: 20,
+    name: 'sync_run_structured_summary',
+    description:
+      'Persist structured Dry Run and index-first sync run summary snapshots on sync_runs',
+    up: (db) => {
+      if (!tableHasColumn(db, 'sync_runs', 'summary_json')) {
+        db.exec('ALTER TABLE sync_runs ADD COLUMN summary_json TEXT;');
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

@@ -2,7 +2,9 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
+  ChevronDown,
   FlaskConical,
+  RefreshCw,
   Trophy,
 } from 'lucide-react';
 import { BrandMark } from './components/BrandMark';
@@ -60,6 +62,7 @@ import {
 import type {
   ActivityLogRecord,
   ActiveTransferState,
+  CatalogDownloadedFilter,
   ConfigDirtyState,
   ConfigFocusRequest,
   ConfigPanelHandle,
@@ -68,6 +71,7 @@ import type {
   NavSection,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
+  SyncPreflightSummary,
   SyncRunRecord,
   SyncScope,
 } from './types';
@@ -86,7 +90,7 @@ import {
   recordHeaderTap,
   type SecretSearchEffect,
 } from './utils/easterEggs';
-import { formatLocalDateTimeWithAge } from './utils/format';
+import { formatBytes, formatLocalDateTimeWithAge } from './utils/format';
 import { readJsonSafely } from './utils/http';
 import { retroSynth } from './utils/retroSynth';
 
@@ -466,6 +470,15 @@ export default function App() {
   const [config, setConfig] = useState<ScraperConfigPublic | null>(null);
   const [runs, setRuns] = useState<SyncRunRecord[]>([]);
   const [logs, setLogs] = useState<ActivityLogRecord[]>([]);
+  const [preflight, setPreflight] = useState<SyncPreflightSummary | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [refreshStaleIndexesOnFullSync, setRefreshStaleIndexesOnFullSync] = useState(true);
+  const [showFullSyncDetails, setShowFullSyncDetails] = useState(false);
+  const [catalogPresetIntent, setCatalogPresetIntent] = useState<{
+    syncRulesOnly?: boolean;
+    downloadedFilter?: CatalogDownloadedFilter;
+    nonce: number;
+  } | null>(null);
   const [selectedScope, setSelectedScope] = useState<SyncScope>(() => loadInitialSyncScope());
   const [dryRunEnabled, setDryRunEnabled] = useState<boolean>(() => loadInitialDryRunEnabled());
   const [crtSettings, setCrtSettings] = useState<CrtDisplaySettings>(() =>
@@ -897,13 +910,29 @@ export default function App() {
     },
   });
 
+  const loadPreflightSummary = useCallback(async () => {
+    setPreflightLoading(true);
+    try {
+      const res = await fetch('/api/sync/preflight');
+      if (res.ok) {
+        const next = (await res.json()) as SyncPreflightSummary;
+        setPreflight(next);
+      }
+    } catch {
+      // Non-fatal readiness refresh error
+    } finally {
+      setPreflightLoading(false);
+    }
+  }, []);
+
   const loadInitialData = useCallback(async () => {
     try {
-      const [statusRes, configRes, runsRes, logsRes] = await Promise.all([
+      const [statusRes, configRes, runsRes, logsRes, preflightRes] = await Promise.all([
         fetch('/api/status'),
         fetch('/api/config'),
         fetch('/api/runs?limit=20'),
         fetch('/api/logs?limit=300'),
+        fetch('/api/sync/preflight'),
       ]);
 
       let loadedStatus: ServiceStatusSnapshot | null = null;
@@ -937,6 +966,10 @@ export default function App() {
         const d = await logsRes.json();
         setLogs(d.logs || []);
       }
+      if (preflightRes.ok) {
+        const nextPreflight = (await preflightRes.json()) as SyncPreflightSummary;
+        setPreflight(nextPreflight);
+      }
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Failed to connect to scraper service');
     }
@@ -955,6 +988,7 @@ export default function App() {
       catalogBumpTimer = setTimeout(() => {
         catalogBumpTimer = null;
         setCatalogRevision((rev) => rev + 1);
+        void loadPreflightSummary();
       }, 250);
     };
 
@@ -1134,8 +1168,13 @@ export default function App() {
     });
   }, [refreshAchievements, enqueueUnlockedTrophies]);
 
-  const handleStartRun = async (scope: SyncScope, dryRun = dryRunEnabled) => {
+  const handleStartRun = async (
+    scope: SyncScope,
+    dryRun = dryRunEnabled,
+    runOptions?: { refreshStaleIndexes?: boolean; legacyFullCrawl?: boolean },
+  ) => {
     setConfirmingFullSync(false);
+    setShowFullSyncDetails(false);
     setActionPending(true);
     setStopRequested(false);
     setErrorBanner(null);
@@ -1143,7 +1182,13 @@ export default function App() {
       const res = await fetch('/api/runs/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: scope, dryRun }),
+        body: JSON.stringify({
+          mode: scope,
+          dryRun,
+          refreshStaleIndexes:
+            scope === 'full' ? (runOptions?.refreshStaleIndexes ?? refreshStaleIndexesOnFullSync) : undefined,
+          legacyFullCrawl: runOptions?.legacyFullCrawl,
+        }),
       });
       const parsed = await readJsonSafely<{ run?: SyncRunRecord; error?: string }>(res);
       if (!parsed.ok) {
@@ -1450,6 +1495,19 @@ export default function App() {
       const resolvedTarget = target ?? 'auth';
       const targetSection = resolveSectionForTarget(resolvedTarget);
       requestSectionChange(targetSection, resolvedTarget);
+    },
+    [requestSectionChange],
+  );
+
+  const handleOpenRuleMatchesInCatalog = useCallback(
+    (onlyNotDownloaded = true) => {
+      setCatalogPresetIntent((prev) => ({
+        syncRulesOnly: true,
+        downloadedFilter: onlyNotDownloaded ? 'exclude' : 'all',
+        nonce: (prev?.nonce ?? 0) + 1,
+      }));
+      setConfirmingFullSync(false);
+      requestSectionChange('catalog');
     },
     [requestSectionChange],
   );
@@ -1904,7 +1962,13 @@ export default function App() {
                 }
                 onClick={() => {
                   if (selectedScope === 'full' && !dryRunEnabled) {
-                    setConfirmingFullSync((prev) => !prev);
+                    setConfirmingFullSync((prev) => {
+                      const next = !prev;
+                      if (next) {
+                        void loadPreflightSummary();
+                      }
+                      return next;
+                    });
                   } else {
                     void handleStartRun(selectedScope, dryRunEnabled);
                   }
@@ -1924,49 +1988,189 @@ export default function App() {
         </div>
       </header>
 
-      {/* Inline Uncapped Full Sync Confirmation Strip (anchored inside sticky top container) */}
+      {/* Inline Index-First Full Sync Pre-Flight Preview Strip (anchored inside sticky top container) */}
       {showFullSyncConfirm && (
         <div
           role="region"
-          aria-label="Confirm uncapped Full Sync"
-          className="border-b border-crt-amber/50 bg-crt-elevated/95 backdrop-blur px-4 lg:px-6 py-3 shadow-[0_10px_28px_-12px_rgba(0,0,0,0.9)] flex flex-wrap items-center justify-between gap-3"
+          aria-label="Pre-flight Full Sync readiness and confirmation"
+          className="border-b border-crt-amber/50 bg-crt-elevated/95 backdrop-blur px-4 lg:px-6 py-3 shadow-[0_10px_28px_-12px_rgba(0,0,0,0.9)] space-y-2.5"
         >
-          <div className="flex items-center gap-3 text-xs text-crt-text min-w-0">
-            <AlertTriangle className="h-4 w-4 text-crt-amber shrink-0" />
-            <span>
-              <strong className="font-semibold text-crt-amber">Confirm Uncapped Full Sync:</strong>{' '}
-              This run will crawl and mirror every release across {fullSyncScopeSummary} with no page limit. You can run a Full Sync Dry Run first to preview missing archives without writing to disk.
-            </span>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-start gap-3 text-xs text-crt-text min-w-0">
+              <AlertTriangle className="h-4 w-4 text-crt-amber shrink-0 mt-0.5" />
+              <div className="space-y-1 min-w-0">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                  <strong className="font-semibold text-crt-amber">
+                    Pre-Flight Full Sync ({preflight?.ruleScopeLabel || fullSyncScopeSummary})
+                  </strong>
+                  <button
+                    type="button"
+                    onClick={() => void loadPreflightSummary()}
+                    disabled={preflightLoading}
+                    className="inline-flex items-center gap-1 font-mono text-[11px] text-crt-muted hover:text-crt-phosphor transition-colors disabled:opacity-50 cursor-pointer"
+                    title="Recalculate SQLite catalog readiness and console index freshness"
+                  >
+                    <RefreshCw className={`h-3 w-3 ${preflightLoading ? 'animate-spin' : ''}`} />
+                    <span>{preflightLoading ? 'Scanning...' : 'Refresh'}</span>
+                  </button>
+                </div>
+                {preflight ? (
+                  <p className="text-[11px] font-mono text-crt-muted tabular-nums">
+                    <span className="text-crt-text font-medium">
+                      {preflight.pendingDownloadCount.toLocaleString()} pending release{preflight.pendingDownloadCount === 1 ? '' : 's'}
+                    </span>
+                    {preflight.estimatedPendingBytes > 0 && (
+                      <span> (~{formatBytes(preflight.estimatedPendingBytes)})</span>
+                    )}
+                    {' · '}
+                    <span className="text-crt-phosphor">
+                      {preflight.alreadyDownloadedCount.toLocaleString()} already on disk
+                    </span>
+                    {preflight.excludedByRulesCount > 0 && (
+                      <span> · {preflight.excludedByRulesCount.toLocaleString()} excluded by Sync Rules</span>
+                    )}
+                    {' · Index: '}
+                    <span>{preflight.freshConsoles.length} fresh</span>
+                    {preflight.staleConsoles.length > 0 && (
+                      <span className="text-crt-amber"> · {preflight.staleConsoles.length} stale</span>
+                    )}
+                    {preflight.unindexedConsoles.length > 0 && (
+                      <span className="text-crt-amber"> · {preflight.unindexedConsoles.length} unindexed</span>
+                    )}
+                  </p>
+                ) : (
+                  <p className="text-[11px] font-mono text-crt-muted">
+                    Preparing index-first mirror across {fullSyncScopeSummary}...
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0 ml-auto">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={refreshStaleIndexesOnFullSync}
+                onClick={() => setRefreshStaleIndexesOnFullSync((prev) => !prev)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 font-mono text-[11px] border rounded-[5px] transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  refreshStaleIndexesOnFullSync
+                    ? 'border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor'
+                    : 'border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text'
+                }`}
+                title="Refresh unindexed or stale (&gt;12h) consoles plus new delta posts before mirroring pending matches"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`h-3 w-3 rounded-[2px] border flex items-center justify-center shrink-0 ${
+                    refreshStaleIndexesOnFullSync
+                      ? 'border-crt-phosphor bg-crt-phosphor text-crt-bg'
+                      : 'border-crt-border-strong bg-crt-surface'
+                  }`}
+                >
+                  {refreshStaleIndexesOnFullSync && <Check className="h-2 w-2 stroke-[3]" />}
+                </span>
+                <span>Refresh Stale/Unindexed</span>
+              </button>
+
+              {preflight && (preflight.topPendingConsoles.length > 0 || preflight.samplePendingReleases.length > 0) && (
+                <button
+                  type="button"
+                  aria-expanded={showFullSyncDetails}
+                  onClick={() => setShowFullSyncDetails((prev) => !prev)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 font-mono text-[11px] border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded-[5px] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <span>Preview Breakdown</span>
+                  <ChevronDown
+                    className={`h-3 w-3 transition-transform ${showFullSyncDetails ? 'rotate-180' : ''}`}
+                  />
+                </button>
+              )}
+
+              <button
+                type="button"
+                disabled={actionPending}
+                onClick={() => setConfirmingFullSync(false)}
+                className="px-3 py-1.5 font-display text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded-[5px] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={actionPending}
+                onClick={() => {
+                  setDryRunEnabled(true);
+                  void handleStartRun('full', true, {
+                    refreshStaleIndexes: refreshStaleIndexesOnFullSync,
+                  });
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 font-display text-xs font-semibold border border-crt-amber/75 bg-crt-amber/12 text-crt-amber hover:bg-crt-amber/20 rounded-[5px] transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+                title="Simulate Full Sync across all target consoles without downloading archives or modifying catalog rows"
+              >
+                <FlaskConical className="h-3.5 w-3.5 shrink-0" />
+                Dry Run Full
+              </button>
+              <SyncCommandButton
+                mode="full"
+                compact
+                disabled={actionPending}
+                onClick={() =>
+                  void handleStartRun('full', false, {
+                    refreshStaleIndexes: refreshStaleIndexesOnFullSync,
+                  })
+                }
+                label="Start Full Mirror"
+              />
+            </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2.5 shrink-0 ml-auto">
-            <button
-              type="button"
-              disabled={actionPending}
-              onClick={() => setConfirmingFullSync(false)}
-              className="px-3 py-1.5 font-display text-xs font-medium border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded-[5px] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              disabled={actionPending}
-              onClick={() => {
-                setDryRunEnabled(true);
-                void handleStartRun('full', true);
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 font-display text-xs font-semibold border border-crt-amber/75 bg-crt-amber/12 text-crt-amber hover:bg-crt-amber/20 rounded-[5px] transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
-              title="Simulate Full Sync across all target consoles without downloading archives or modifying catalog rows"
-            >
-              <FlaskConical className="h-3.5 w-3.5 shrink-0" />
-              Dry Run Full First
-            </button>
-            <SyncCommandButton
-              mode="full"
-              compact
-              disabled={actionPending}
-              onClick={() => void handleStartRun('full', false)}
-              label="Confirm Full Sync"
-            />
+
+          <div
+            data-open={showFullSyncDetails && Boolean(preflight) ? 'true' : 'false'}
+            inert={!showFullSyncDetails || !preflight ? true : undefined}
+            className="crt-accordion-grid"
+          >
+            <div className="crt-accordion-inner">
+              {preflight && (
+                <div className="pt-2 border-t border-crt-border/70 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2 text-[11px] font-mono">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-crt-muted tabular-nums">
+                    {preflight.topPendingConsoles.slice(0, 5).map((c) => (
+                      <span key={c.systemName}>
+                        <span className="text-crt-text">{c.systemName}</span>:{' '}
+                        <span className="text-crt-phosphor">{c.pendingCount}</span>
+                        {c.estimatedBytes > 0 && ` (~${formatBytes(c.estimatedBytes)})`}
+                      </span>
+                    ))}
+                    {preflight.samplePendingReleases.length > 0 && (
+                      <span className="text-crt-muted/90">
+                        Next: {preflight.samplePendingReleases.slice(0, 3).map((s) => s.title).join(' · ')}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenRuleMatchesInCatalog(true)}
+                      className="text-crt-phosphor hover:underline whitespace-nowrap cursor-pointer"
+                    >
+                      Inspect in Catalog →
+                    </button>
+                    <button
+                      type="button"
+                      disabled={actionPending}
+                      onClick={() =>
+                        void handleStartRun('full', false, {
+                          refreshStaleIndexes: true,
+                          legacyFullCrawl: true,
+                        })
+                      }
+                      className="text-crt-muted hover:text-crt-amber underline whitespace-nowrap cursor-pointer"
+                      title="Force a full remote HTTP WP REST / HTML crawl instead of reading pre-indexed SQLite rows"
+                    >
+                      Force Legacy Remote Crawl
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -2082,6 +2286,7 @@ export default function App() {
                   status={status}
                   runs={runs}
                   logs={logs}
+                  preflight={preflight}
                   logsClearedRevision={logsClearedRevision}
                   catalogRevision={catalogRevision}
                   activeRetryItemId={activeRetryItemId}
@@ -2092,6 +2297,15 @@ export default function App() {
                   onClearLogs={handleClearLogs}
                   onClearRuns={handleClearRuns}
                   onNavigateToOperations={navigateToConfigTarget}
+                  onQueueRuleMatches={async () => {
+                    await handleQueueDownload({
+                      filters: {
+                        syncRules: true,
+                        downloaded: 'exclude',
+                      },
+                    });
+                  }}
+                  onPreviewRuleMatchesInCatalog={handleOpenRuleMatchesInCatalog}
                   onRetryItem={handleRetryItem}
                   onRetryAllFailed={handleRetryAllFailed}
                   onRefreshStatus={loadInitialData}
@@ -2104,6 +2318,7 @@ export default function App() {
                   installer={bulkInstaller}
                   catalogRevision={catalogRevision}
                   activeRetryItemId={activeRetryItemId}
+                  filterPreset={catalogPresetIntent}
                   onRetryItem={handleRetryItem}
                   onQueueDownload={handleQueueDownload}
                   onStartCatalogIndex={handleStartCatalogIndex}
@@ -2117,11 +2332,13 @@ export default function App() {
                   ref={configPanelRef}
                   config={config}
                   status={status}
+                  preflight={preflight}
                   focusRequest={configFocus}
                   onDirtyChange={setConfigDirty}
                   onSaveConfig={handleSaveConfig}
                   onStartCatalogIndex={handleStartCatalogIndex}
                   onStopCatalogIndex={handleStopCatalogIndex}
+                  onPreviewRuleMatchesInCatalog={() => handleOpenRuleMatchesInCatalog(false)}
                   onNavigateToAuth={() => requestSectionChange('settings', 'auth')}
                 />
               )}

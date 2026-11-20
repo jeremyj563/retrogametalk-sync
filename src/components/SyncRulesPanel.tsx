@@ -9,6 +9,7 @@ import {
 } from 'react';
 import {
   AlertTriangle,
+  ArrowRight,
   Check,
   ChevronDown,
   Clock,
@@ -56,6 +57,7 @@ import type {
   ConfigPanelHandle,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
+  SyncPreflightSummary,
 } from '../types';
 import { formatDateTime } from '../utils/format';
 import { ConfigSaveBar } from './ConfigSaveBar';
@@ -64,11 +66,13 @@ import { EnvLockIndicator } from './EnvLockIndicator';
 interface SyncRulesPanelProps {
   config: ScraperConfigPublic;
   status: ServiceStatusSnapshot;
+  preflight?: SyncPreflightSummary | null;
   focusRequest?: ConfigFocusRequest | null;
   onDirtyChange?: (state: ConfigDirtyState) => void;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
   onStartCatalogIndex?: (scope: 'filtered' | 'full') => Promise<void>;
   onStopCatalogIndex?: () => Promise<void>;
+  onPreviewRuleMatchesInCatalog?: () => void;
   onNavigateToAuth?: () => void;
 }
 
@@ -108,11 +112,13 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
     {
       config,
       status,
+      preflight = null,
       focusRequest = null,
       onDirtyChange,
       onSaveConfig,
       onStartCatalogIndex,
       onStopCatalogIndex,
+      onPreviewRuleMatchesInCatalog,
       onNavigateToAuth,
     },
     ref,
@@ -1017,8 +1023,8 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
               </div>
               <p className="text-[11px] text-crt-muted leading-relaxed">
                 {autoDownloadNewReleases
-                  ? 'Scheduled incremental runs index new/modified releases and automatically download items matching your Target Consoles and Allowed Types.'
-                  : 'Scheduled runs only refresh the Catalog index as Available — nothing downloads until you click Download in the Catalog.'}
+                  ? 'Stage 1 indexes new and updated releases into your SQLite catalog; Stage 2 automatically mirrors items matching your Target Consoles and Allowed Types.'
+                  : 'Stage 1 keeps your SQLite catalog fresh as Available during scheduled ticks; nothing downloads until you trigger a Full Sync, Queue Pending in Monitor, or cherry-pick from Catalog.'}
               </p>
             </div>
             <div
@@ -1109,7 +1115,7 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
               </div>
             </div>
 
-            <div className="flex flex-col sm:items-end gap-1 text-xs font-mono text-crt-text tabular-nums shrink-0">
+            <div className="flex flex-col sm:items-end gap-1.5 text-xs font-mono text-crt-text tabular-nums shrink-0">
               <div>
                 Scope:{' '}
                 <span className={selectedSystems.size > 0 ? 'text-crt-amber' : 'text-crt-phosphor'}>
@@ -1117,7 +1123,25 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
                     ? 'All Consoles (Unfiltered)'
                     : `${selectedSystems.size} of ${availableSystems.length} selected`}
                 </span>
+                {preflight && (
+                  <>
+                    <span aria-hidden="true" className="text-crt-muted">{' · '}</span>
+                    <span className="text-crt-muted">
+                      {preflight.pendingDownloadCount.toLocaleString()} pending
+                    </span>
+                  </>
+                )}
               </div>
+              {onPreviewRuleMatchesInCatalog && (
+                <button
+                  type="button"
+                  onClick={onPreviewRuleMatchesInCatalog}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <span>Preview Matches in Catalog</span>
+                  <ArrowRight className="h-3 w-3 shrink-0" />
+                </button>
+              )}
               {filterLockedByEnv && (
                 <EnvLockIndicator
                   envVar="SCRAPER_SYSTEM_FILTER"
@@ -1130,6 +1154,11 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
           {/* Background Catalog Indexer Strip */}
           {(onStartCatalogIndex || onStopCatalogIndex) && status.auth.hasCompletedLogin && status.indexer && (() => {
             const indexer = status.indexer;
+            const staleCount = preflight?.staleConsoles.length ?? 0;
+            const unindexedCount = preflight?.unindexedConsoles.length ?? 0;
+            const readinessIssues: string[] = [];
+            if (unindexedCount > 0) readinessIssues.push(`${unindexedCount} unindexed`);
+            if (staleCount > 0) readinessIssues.push(`${staleCount} stale (>12h)`);
             return (
               <div className="border border-crt-border bg-crt-bg rounded-md px-4 py-3 flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0 flex-1 space-y-1">
@@ -1146,11 +1175,15 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
                           : ''}
                         {` · ${indexer.indexedCount} cataloged`}
                       </span>
+                    ) : readinessIssues.length > 0 ? (
+                      <span className="text-crt-amber">
+                        {readinessIssues.join(' · ')} target console{unindexedCount + staleCount === 1 ? '' : 's'} — auto-refreshed before Full Sync
+                      </span>
                     ) : (
                       <span className="text-crt-muted">
                         {indexer.remainingUnindexedSystems > 0
-                          ? `${indexer.remainingUnindexedSystems} remaining console(s) ready to index`
-                          : 'All discovered consoles indexed'}
+                          ? `All target consoles fresh · ${indexer.remainingUnindexedSystems} extra console(s) unindexed`
+                          : 'All target consoles indexed & fresh'}
                       </span>
                     )}
                   </div>
