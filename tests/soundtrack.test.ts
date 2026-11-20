@@ -142,7 +142,11 @@ test('All 7 composed TRACK_SCORES match SOUNDTRACK_TRACKS BPM and have exact bar
         `${meta.id} chord step ${stepKey} out of [0, ${score.totalSteps - 1}]`,
       );
       assert.ok(entry, `${meta.id} chord entry at step ${stepKey} must be defined`);
-      const notes: readonly number[] = !Array.isArray(entry) && 'notes' in entry ? entry.notes : (entry as readonly number[]);
+      const isRich = !Array.isArray(entry) && 'notes' in entry;
+      const notes: readonly number[] = isRich ? entry.notes : (entry as readonly number[]);
+      if (isRich && entry.altVoice) {
+        assert.ok(score.altPadVoice, `${meta.id} chord at step ${stepKey} requests altVoice but altPadVoice is missing`);
+      }
       assert.ok(notes.length >= 2, `${meta.id} chord at step ${stepKey} must have >= 2 notes`);
       for (const midi of notes) {
         assert.ok(
@@ -155,7 +159,10 @@ test('All 7 composed TRACK_SCORES match SOUNDTRACK_TRACKS BPM and have exact bar
     const drumLanes: Array<[string, readonly number[] | undefined]> = [
       ['kick', score.kick],
       ['snare', score.snare],
+      ['clap', score.clap],
+      ['rim', score.rim],
       ['hatClosed', score.hatClosed],
+      ['hatAccent', score.hatAccent],
       ['hatOpen', score.hatOpen],
       ['clang', score.clang],
       ['crash', score.crash],

@@ -41,35 +41,35 @@ export const DEFAULT_SOUNDTRACK_PREFS: SoundtrackPrefs = {
 export const SOUNDTRACK_TRACKS: readonly MusicTrackDefinition[] = [
   {
     id: 'phosphor_idle',
-    title: 'Hollow Corridor',
+    title: 'Neon Corridor',
     shortTitle: 'Corridor',
-    genre: 'Horror Ambient',
-    bpm: 88,
+    genre: 'Chiptune Breakbeat',
+    bpm: 128,
     requiredPoints: 0,
     description:
-      'Starter soundtrack (Corpse Party Ch. 1 vibe): fragile FM music-box motifs, cold string drones, and haunting hallway tension.',
+      'Starter soundtrack (Corpse Party PSP Ch. 1 vibe): rapid 8-bit chiptune arps dropping into funky electro-breakbeat bass and lush arcade synth-funk.',
     loopsBeforeAdvance: 2,
   },
   {
     id: 'bitplane_bounce',
-    title: 'Clockwork Chamber',
-    shortTitle: 'Clockwork',
-    genre: '8-Bit Puzzle Synth',
+    title: 'Velvet Machinery',
+    shortTitle: 'Machinery',
+    genre: '90s FM Jazz-Fusion',
     bpm: 118,
     requiredPoints: 150,
     description:
-      'Escape Goat: Machinery vibe — interlocking pulse-wave gears, Dorian square leads, bouncy bass, and crisp retro ticks.',
+      'Escape Goat: Machinery vibe — punchy slap-bass pocket, warm DX7 electric piano minor-9ths, sparkly bells, and soulful gliding FM lead.',
     loopsBeforeAdvance: 2,
   },
   {
     id: 'outrun_crt',
     title: 'Celestial Assembly',
     shortTitle: 'Assembly',
-    genre: 'Solstice Synthwave',
-    bpm: 124,
+    genre: 'Cosmic Synthwave',
+    bpm: 120,
     requiredPoints: 400,
     description:
-      'Sea of Stars (Assembly Line vibe): rolling 16-bit synthwave bass arps, soaring chime leads, lush pads, and mechanical snare.',
+      'Sea of Stars (Assembly Line vibe): rubbery electro-funk bass, 80s gated snare & claps, machine-break fills, and soaring cosmic synth pads.',
     loopsBeforeAdvance: 2,
   },
   {
@@ -77,10 +77,10 @@ export const SOUNDTRACK_TRACKS: readonly MusicTrackDefinition[] = [
     title: 'Ironworks Sector',
     shortTitle: 'Ironworks',
     genre: '16-Bit Industrial',
-    bpm: 134,
+    bpm: 130,
     requiredPoints: 650,
     description:
-      'DKC Fear Factory vibe — driving 16-bit E-minor synth bass, heavy metallic anvil clangs, brooding pads, and sharp FM leads.',
+      'DKC Fear Factory vibe — hypnotic D-minor resonant industrial bass, metallic clanks & rimshots, sweeping SNES strings climax, and ethereal bell breakdown.',
     loopsBeforeAdvance: 2,
   },
   {
@@ -88,21 +88,21 @@ export const SOUNDTRACK_TRACKS: readonly MusicTrackDefinition[] = [
     title: 'Ultra Combo',
     shortTitle: 'Ultra Combo',
     genre: 'Arcade Industrial',
-    bpm: 116,
+    bpm: 110,
     requiredPoints: 950,
     description:
-      'Killer Instinct vibe — saturated palm-muted industrial riffs, gritty arcade synth stabs, breakbeat drums, and dark bridges.',
+      'Killer Instinct vibe — swaggering 110 BPM breakbeat, cab-filtered distorted power-chord riffs, bold brass stabs, and dark sci-fi synth pads.',
     loopsBeforeAdvance: 2,
   },
   {
     id: 'cyberdeck_horizon',
     title: 'Phobos Gate',
     shortTitle: 'Phobos Gate',
-    genre: 'OPL2 Thrash Metal',
-    bpm: 122,
+    genre: 'Heavy Thrash Metal',
+    bpm: 120,
     requiredPoints: 1300,
     description:
-      'Doom E1M1 vibe — relentless 16th-note pedal-E overdrive chugs, screaming twin-lead harmonies, and double-kick fury.',
+      'Doom E1M1 vibe — razor-tight cab-shaped 16th-note pedal-E power-chord chugs, subdominant A-minor shift, roaring drums, and twin-lead harmonies.',
     loopsBeforeAdvance: 2,
   },
   {
@@ -110,10 +110,10 @@ export const SOUNDTRACK_TRACKS: readonly MusicTrackDefinition[] = [
     title: 'Lunar Core: Final Phase',
     shortTitle: 'Final Phase',
     genre: '16-Bit Boss Anthem',
-    bpm: 156,
+    bpm: 152,
     requiredPoints: 1650,
     description:
-      'FFIV Zeromus vibe — 12-bar final boss marathon with gothic organ fanfares, frantic 156 BPM leads, harmonic arps, and timpani rolls.',
+      'FFIV Zeromus vibe — gothic drawbar pipe-organ prelude, blazing 16th-note fanfare, heroic SNES brass & strings, and syncopated bass/timpani break.',
     loopsBeforeAdvance: 2,
   },
 ];

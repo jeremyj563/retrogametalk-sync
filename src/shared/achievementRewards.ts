@@ -159,8 +159,8 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
   },
   {
     id: 'track_bitplane_bounce',
-    title: 'Clockwork Chamber (8-Bit Puzzle Synth)',
-    description: 'Escape Goat: Machinery vibe — interlocking pulse-wave gears, Dorian leads, and crisp ticks (118 BPM).',
+    title: 'Velvet Machinery (90s FM Jazz-Fusion)',
+    description: 'Escape Goat: Machinery vibe — slap-bass groove, warm DX7 electric piano chords, bells, and soulful FM lead (118 BPM).',
     kind: 'music_track',
     requiredPoints: 150,
     targetKey: 'bitplane_bounce',
@@ -184,8 +184,8 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
   },
   {
     id: 'track_outrun_crt',
-    title: 'Celestial Assembly (Solstice Synthwave)',
-    description: 'Sea of Stars: Assembly Line vibe — rolling synthwave bass arps, chime leads, and mechanical snare (124 BPM).',
+    title: 'Celestial Assembly (Cosmic Synthwave)',
+    description: 'Sea of Stars: Assembly Line vibe — rubbery electro-funk bass, 80s gated snare, and soaring cosmic synth pads (120 BPM).',
     kind: 'music_track',
     requiredPoints: 400,
     targetKey: 'outrun_crt',
@@ -211,7 +211,7 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
   {
     id: 'track_fm_cartridge_drive',
     title: 'Ironworks Sector (16-Bit Industrial)',
-    description: 'DKC Fear Factory vibe — driving 16-bit E-minor synth bass, metallic anvil clangs, and sharp FM leads (134 BPM).',
+    description: 'DKC Fear Factory vibe — hypnotic D-minor resonant industrial bass, metallic clanks, and sweeping SNES strings (130 BPM).',
     kind: 'music_track',
     requiredPoints: 650,
     targetKey: 'fm_cartridge_drive',
@@ -237,7 +237,7 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
   {
     id: 'track_subcarrier_pulse',
     title: 'Ultra Combo (Arcade Industrial)',
-    description: 'Killer Instinct vibe — saturated palm-muted industrial riffs, arcade synth stabs, and breakbeat drums (116 BPM).',
+    description: 'Killer Instinct vibe — heavy 110 BPM breakbeat, cab-filtered distorted power-chord riffs, and bold brass stabs (110 BPM).',
     kind: 'music_track',
     requiredPoints: 950,
     targetKey: 'subcarrier_pulse',
@@ -261,8 +261,8 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
   },
   {
     id: 'track_cyberdeck_horizon',
-    title: 'Phobos Gate (OPL2 Thrash Metal)',
-    description: 'Doom E1M1 vibe — relentless 16th-note pedal-E overdrive chugs, screaming twin leads, and double-kick fury (122 BPM).',
+    title: 'Phobos Gate (Heavy Thrash Metal)',
+    description: 'Doom E1M1 vibe — razor-tight cab-shaped 16th-note pedal-E power-chord chugs and screaming twin-lead harmonies (120 BPM).',
     kind: 'music_track',
     requiredPoints: 1300,
     targetKey: 'cyberdeck_horizon',
@@ -288,7 +288,7 @@ export const ACHIEVEMENT_REWARDS: readonly AchievementRewardDefinition[] = [
   {
     id: 'track_broadcast_finale',
     title: 'Lunar Core: Final Phase (16-Bit Boss Anthem)',
-    description: 'FFIV Zeromus vibe — 12-bar final boss marathon with gothic organ fanfares, frantic leads, and timpani rolls (156 BPM).',
+    description: 'FFIV Zeromus vibe — gothic drawbar pipe-organ prelude, heroic SNES brass & strings, and timpani/bass breakdown (152 BPM).',
     kind: 'music_track',
     requiredPoints: 1650,
     targetKey: 'broadcast_finale',
