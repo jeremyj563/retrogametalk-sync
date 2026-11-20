@@ -239,6 +239,7 @@ export interface CatalogFacetCounts {
     notInstalled: number;
   };
   syncRulesMatched?: number;
+  queueableFiltered?: number;
 }
 
 export interface CatalogFacets {

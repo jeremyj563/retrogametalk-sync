@@ -47,6 +47,14 @@ import {
   migrateLegacyCatalogDownloadPrefs,
   toggleCatalogDownloadedFilter,
 } from '../shared/catalogDownloadFilter';
+import {
+  deriveStatusMapFromIdsPayload,
+  formatDownloadFilteredTooltip,
+  formatInstallSelectedTooltip,
+  formatQueueSelectedTooltip,
+  isCatalogStatusQueueable,
+  summarizeCatalogSelection,
+} from '../shared/catalogSelection';
 import type { SmartRomFilterContext } from '../shared/smartRomPicker';
 import { formatSyncRuleScopeSummary } from '../shared/syncRuleMatcher';
 import type {
@@ -57,6 +65,7 @@ import type {
   CatalogSortOption,
   FilterMatchMode,
   FsTreeNode,
+  ItemStatus,
   RepositoryItemRecord,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
@@ -599,6 +608,13 @@ export function CatalogPanel({
 
   // Selection state for Indexed Catalog (supports both current-page and cross-page filtered selection)
   const [selectedCatalogIds, setSelectedCatalogIds] = useState<Set<number>>(new Set());
+  const [selectedStatusById, setSelectedStatusById] = useState<Map<number, ItemStatus>>(() => {
+    const map = new Map<number, ItemStatus>();
+    for (const item of initialMatchedCatalog?.items ?? []) {
+      map.set(item.id, item.status);
+    }
+    return map;
+  });
   const [confirmCatalogBulk, setConfirmCatalogBulk] = useState(false);
 
   // On-demand download queueing & background indexer UI state
@@ -858,6 +874,21 @@ export function CatalogPanel({
         };
         setItems(nextItems);
         setTotalItems(nextTotal);
+        setSelectedStatusById((prev) => {
+          let changed = false;
+          for (const item of nextItems) {
+            if (prev.get(item.id) !== item.status) {
+              changed = true;
+              break;
+            }
+          }
+          if (!changed) return prev;
+          const next = new Map(prev);
+          for (const item of nextItems) {
+            next.set(item.id, item.status);
+          }
+          return next;
+        });
         if (data.facets) {
           const nextFacets: CatalogFacets = {
             tags: Array.isArray(data.facets.tags) ? data.facets.tags : [],
@@ -1255,10 +1286,103 @@ export function CatalogPanel({
     return map;
   }, [items, activeDetailItem]);
 
+  const effectiveStatusById = useMemo(() => {
+    const map = new Map<number, ItemStatus>(selectedStatusById);
+    for (const item of items) {
+      map.set(item.id, item.status);
+    }
+    if (activeDetailItem) {
+      map.set(activeDetailItem.id, activeDetailItem.status);
+    }
+    const activeTransfersList =
+      status.activeTransfers && status.activeTransfers.length > 0
+        ? status.activeTransfers
+        : status.activeTransfer
+          ? [status.activeTransfer]
+          : [];
+    for (const transfer of activeTransfersList) {
+      if (typeof transfer.itemId === 'number' && transfer.itemId > 0) {
+        map.set(transfer.itemId, 'downloading');
+      }
+    }
+    return map;
+  }, [selectedStatusById, items, activeDetailItem, status.activeTransfers, status.activeTransfer]);
+
+  const selectionSummary = useMemo(
+    () => summarizeCatalogSelection(selectedCatalogIds, effectiveStatusById),
+    [selectedCatalogIds, effectiveStatusById],
+  );
+
+  const queueableFilteredCount = useMemo(() => {
+    if (typeof facets.counts?.queueableFiltered === 'number') {
+      return facets.counts.queueableFiltered;
+    }
+    return items.filter((item) => isCatalogStatusQueueable(item.status)).length;
+  }, [facets.counts?.queueableFiltered, items]);
+
+  // Auto-collapse the Download Filtered preview strip if live sync finishes all matching items
+  useEffect(() => {
+    if (filteredDownloadConfirm.open && !filteredDownloadConfirm.loading && queueableFilteredCount === 0) {
+      setFilteredDownloadConfirm((prev) => (prev.open ? { ...prev, open: false, error: null } : prev));
+    }
+  }, [filteredDownloadConfirm.open, filteredDownloadConfirm.loading, queueableFilteredCount]);
+
+  // Keep cross-page selection statuses fresh as background downloads complete or queue updates arrive
+  const hasOffPageSelection = useMemo(() => {
+    if (selectedCatalogIds.size === 0) return false;
+    const visibleIdSet = new Set(items.map((i) => i.id));
+    for (const id of selectedCatalogIds) {
+      if (!visibleIdSet.has(id)) return true;
+    }
+    return false;
+  }, [selectedCatalogIds, items]);
+
+  useEffect(() => {
+    if (!hasOffPageSelection || viewMode !== 'catalog') return;
+    let cancelled = false;
+    const qs = buildCatalogSearchParams(1, 0);
+    void fetch(`/api/items/ids?${qs.toString()}`)
+      .then(async (res) => {
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as {
+          ids?: number[];
+          queueableIds?: number[];
+          downloadableIds?: number[];
+          alreadyQueuedIds?: number[];
+        };
+        if (cancelled) return;
+        const derived = deriveStatusMapFromIdsPayload(data);
+        if (derived.size === 0) return;
+        setSelectedStatusById((prev) => {
+          let changed = false;
+          derived.forEach((st, id) => {
+            if (prev.get(id) !== st) changed = true;
+          });
+          if (!changed) return prev;
+          const next = new Map(prev);
+          derived.forEach((st, id) => next.set(id, st));
+          return next;
+        });
+      })
+      .catch(() => {
+        // Non-fatal: visible items still stay synchronized via loadCatalog
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [catalogRevision, hasOffPageSelection, viewMode, buildCatalogSearchParams]);
+
   const handleSelectAllMatching = async () => {
     if (selectingAllMatching || totalItems <= 0) return;
     if (totalItems <= items.length) {
       setConfirmCatalogBulk(false);
+      setSelectedStatusById((prev) => {
+        const next = new Map(prev);
+        for (const item of items) {
+          next.set(item.id, item.status);
+        }
+        return next;
+      });
       setSelectedCatalogIds(new Set(items.map((i) => i.id)));
       return;
     }
@@ -1268,8 +1392,22 @@ export function CatalogPanel({
       const qs = buildCatalogSearchParams(1, 0);
       const res = await fetch(`/api/items/ids?${qs.toString()}`);
       if (res.ok) {
-        const data = (await res.json()) as { ids?: number[] };
+        const data = (await res.json()) as {
+          ids?: number[];
+          queueableIds?: number[];
+          downloadableIds?: number[];
+          alreadyQueuedIds?: number[];
+        };
         if (Array.isArray(data.ids) && data.ids.length > 0) {
+          const derived = deriveStatusMapFromIdsPayload(data);
+          setSelectedStatusById((prev) => {
+            const next = new Map(prev);
+            derived.forEach((st, id) => next.set(id, st));
+            for (const item of items) {
+              next.set(item.id, item.status);
+            }
+            return next;
+          });
           setSelectedCatalogIds(new Set(data.ids));
         }
       }
@@ -2011,19 +2149,18 @@ export function CatalogPanel({
 
           {viewMode === 'catalog' ? (
             <div className="flex flex-wrap items-center gap-2 self-start lg:self-auto">
-              {onQueueDownload && totalItems > 0 && (
+              {onQueueDownload && totalItems > 0 && queueableFilteredCount > 0 && (
                 <button
                   type="button"
                   disabled={!status.auth.hasCompletedLogin}
                   aria-expanded={filteredDownloadConfirm.open}
                   onClick={() => void handleOpenFilteredDownloadConfirm()}
-                  title={
-                    !status.auth.hasCompletedLogin
-                      ? 'Verify login in System Settings before queueing downloads'
-                      : hasActiveFilters
-                        ? `Preview and queue all un-downloaded releases matching your active filters (${totalItems})`
-                        : `Preview and queue all un-downloaded releases in the catalog (${totalItems})`
-                  }
+                  title={formatDownloadFilteredTooltip({
+                    hasCompletedLogin: status.auth.hasCompletedLogin,
+                    hasActiveFilters,
+                    queueableCount: queueableFilteredCount,
+                    totalMatching: totalItems,
+                  })}
                   className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer ${
                     filteredDownloadConfirm.open
                       ? 'border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor'
@@ -2031,7 +2168,11 @@ export function CatalogPanel({
                   }`}
                 >
                   <Download className="h-3.5 w-3.5 shrink-0" />
-                  <span>{hasActiveFilters ? 'Download Filtered' : 'Download All'}</span>
+                  <span className="tabular-nums">
+                    {hasActiveFilters
+                      ? `Download Filtered (${queueableFilteredCount.toLocaleString()})`
+                      : `Download All (${queueableFilteredCount.toLocaleString()})`}
+                  </span>
                 </button>
               )}
               {totalItems > 0 && selectedCatalogIds.size < totalItems && (
@@ -2751,58 +2892,67 @@ export function CatalogPanel({
             <div className="flex flex-wrap items-center gap-2">
               {!confirmCatalogBulk && (
                 <>
-                  {onQueueDownload && (
+                  {onQueueDownload && selectionSummary.queueableIds.length > 0 && (
                     <button
                       type="button"
                       disabled={queueingBulk || !status.auth.hasCompletedLogin}
-                      title={
-                        !status.auth.hasCompletedLogin
-                          ? 'Verify login in System Settings before queueing downloads'
-                          : 'Queue un-downloaded or failed releases in your selection for background download'
-                      }
-                      onClick={() => void handleQueueIds(Array.from(selectedCatalogIds), true)}
+                      title={formatQueueSelectedTooltip(
+                        selectionSummary,
+                        status.auth.hasCompletedLogin,
+                      )}
+                      onClick={() => void handleQueueIds(selectionSummary.queueableIds, true)}
                       className="crt-cta-beam inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                     >
                       <Download className="h-3.5 w-3.5 shrink-0" />
-                      {queueingBulk ? 'Queueing...' : `Queue Downloads (${selectedCatalogIds.size})`}
+                      {queueingBulk
+                        ? 'Queueing...'
+                        : `Queue Downloads (${selectionSummary.queueableIds.length.toLocaleString()})`}
                     </button>
                   )}
-                  <button
-                    type="button"
-                    disabled={installer.isBusy}
-                    title={
-                      installer.isBusy
-                        ? 'A storage installation is currently running in the background'
-                        : 'Mount device if needed, auto-select latest context-matched Primary ROMs, and dump immediately in background'
-                    }
-                    onClick={() =>
-                      void installer.startExpressInstall(
-                        Array.from(selectedCatalogIds),
-                        currentSmartFilterContext,
-                        knownItemMetaMap,
-                      )
-                    }
-                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                  >
-                    <FolderInput className="h-3.5 w-3.5 shrink-0" />
-                    Express Install ({selectedCatalogIds.size})
-                  </button>
-                  <button
-                    type="button"
-                    disabled={installer.isBusy}
-                    title="Open interactive installer queue to review variants or customize filenames before installing"
-                    onClick={() =>
-                      void installer.openReviewQueue(
-                        Array.from(selectedCatalogIds),
-                        currentSmartFilterContext,
-                        knownItemMetaMap,
-                      )
-                    }
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                  >
-                    <HardDrive className="h-3.5 w-3.5 shrink-0" />
-                    Install to Storage Device ({selectedCatalogIds.size})
-                  </button>
+                  {selectionSummary.installableIds.length > 0 && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={installer.isBusy}
+                        title={formatInstallSelectedTooltip(
+                          'express',
+                          selectionSummary,
+                          installer.isBusy,
+                        )}
+                        onClick={() =>
+                          void installer.startExpressInstall(
+                            selectionSummary.installableIds,
+                            currentSmartFilterContext,
+                            knownItemMetaMap,
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        <FolderInput className="h-3.5 w-3.5 shrink-0" />
+                        Express Install ({selectionSummary.installableIds.length.toLocaleString()})
+                      </button>
+                      <button
+                        type="button"
+                        disabled={installer.isBusy}
+                        title={formatInstallSelectedTooltip(
+                          'review',
+                          selectionSummary,
+                          installer.isBusy,
+                        )}
+                        onClick={() =>
+                          void installer.openReviewQueue(
+                            selectionSummary.installableIds,
+                            currentSmartFilterContext,
+                            knownItemMetaMap,
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                        Install to Storage Device ({selectionSummary.installableIds.length.toLocaleString()})
+                      </button>
+                    </>
+                  )}
                   {(selectedCatalogIds.size > items.length ||
                     items.some((i) => selectedCatalogIds.has(i.id) && !i.installedAt)) && (
                     <button

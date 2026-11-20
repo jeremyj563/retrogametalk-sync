@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.21.10] - 2026-11-20
+
+- Made the **Catalog** bulk selection and filter action buttons status-aware:
+  - **`Queue Downloads (N)`** now counts and dispatches only truly un-downloaded/retryable releases (`available`, `failed`, `partial`), hides automatically when zero selected releases need downloading (such as selecting already-downloaded games), and displays already-downloaded/already-queued skip counts in its hover tooltip on mixed selections.
+  - **`Download Filtered (N)` / `Download All (N)`** now reflects the exact server-computed `queueableFiltered` count for the active filter set, hides automatically when zero filtered releases need downloading, and auto-collapses its preview strip if live sync finishes the remaining items.
+  - **`Express Install (M)`** and **`Install to Storage Device (M)`** now count and dispatch only selected releases with ROM archives on disk (`downloaded`, `skipped`, `partial`), hide automatically when zero selected releases are downloaded, and note skipped un-downloaded selections in their hover tooltips.
+  - Added `alreadyQueuedIds` to `/api/items/ids` and live status caching across paginated and cross-page `Select All Filtered` selections so counts stay accurate even when unchecking individual cards or while background downloads finish.
+
 ## [1.21.9] - 2026-11-20
 
 - Eliminated the brief "reload" spinner flash over the **Monitor** Sync Hero Showcase box-art thumbnail when clicking the box art or game title to inspect release details: removed the translucent scrim overlay and placeholder spinner swap from `SyncTargetCoverThumbnail`, replaced button `disabled` toggling with a silent in-flight request guard, and gated the inline `Opening…` cue beside the title behind a **250ms** slow-request threshold so fast local SQLite lookups open the **Game Detail Drawer** cleanly with zero visual flicker.
