@@ -420,22 +420,20 @@ async function clickNavTab(page: PlaywrightPageLike, label: string): Promise<voi
  * via DOM click so React updates the theme in-place with zero page reload, zero
  * blank flash, and zero viewport scroll jump.
  */
-async function switchPaletteInPlace(
+export async function switchPaletteInPlace(
   page: PlaywrightPageLike,
   targetPalette: CrtPalette,
 ): Promise<boolean> {
   const label = CRT_PALETTES[targetPalette].shortLabel;
   const switched = await page.evaluate(
     ({ paletteId, targetLabel }: { paletteId: string; targetLabel: string }) => {
-      const buttons = Array.from(
-        document.querySelectorAll('.crt-tuner-card button'),
-      ) as HTMLButtonElement[];
-      const isEnabled = (btn: HTMLButtonElement) =>
-        !btn.disabled && btn.getAttribute('aria-disabled') !== 'true';
+      const enabledButtons = (
+        Array.from(document.querySelectorAll('.crt-tuner-card button')) as HTMLButtonElement[]
+      ).filter((btn) => !btn.disabled && btn.getAttribute('aria-disabled') !== 'true');
       const swatchBtn =
-        buttons.find((btn) => isEnabled(btn) && btn.dataset.crtPalette === paletteId) ??
-        buttons.find(
-          (btn) => isEnabled(btn) && btn.textContent?.trim().toLowerCase() === targetLabel.toLowerCase(),
+        enabledButtons.find((btn) => btn.dataset.crtPalette === paletteId) ??
+        enabledButtons.find(
+          (btn) => btn.textContent?.trim().toLowerCase() === targetLabel.toLowerCase(),
         );
       if (!swatchBtn) return false;
       swatchBtn.click();

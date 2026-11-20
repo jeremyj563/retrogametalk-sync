@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.21.8] - 2026-11-20
+
+- Fixed `ReferenceError: __name is not defined` during Playwright visual preview capture (`npm run capture:screenshots`): removed the named inner arrow helper inside `switchPaletteInPlace`'s `page.evaluate(...)` callback that `tsx`/esbuild `keepNames` transpiled into a Node-only `__name(...)` wrapper, and added an isolated-scope serialization regression test covering both unlocked and `aria-disabled` locked swatches.
+
 ## [1.21.7] - 2026-11-20
 
 - Redesigned the **CRT Display** sidebar **Phosphor Palette** selector into a **single uniform 7-column hardware swatch strip** so all starter and collector palettes share identical square keycap proportions, crisp active LED highlight halos, and flush alignment with the adjacent `Presets` and `Living UI Motion` rows.
