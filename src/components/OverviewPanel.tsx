@@ -732,15 +732,17 @@ export function OverviewPanel({
             ) : null}
           </div>
 
-          {/* Tier 2: Active Target / Game Title (Steady Prefix + Consistently Highlighted Title Frame) */}
+          {/* Tier 2: Active Target / Game Title (Optional Phase Prefix + Highlighted Title Frame) */}
           <h1
             title={status.currentPhase}
             className="mt-2.5 pt-2.5 border-t border-crt-border/70 min-w-0"
           >
             <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 min-w-0">
-              <span className="font-display text-sm sm:text-[15px] font-medium tracking-tight text-crt-muted whitespace-nowrap shrink-0">
-                {parsedSyncHeader.actionPrefix}
-              </span>
+              {parsedSyncHeader.actionPrefix && (
+                <span className="font-display text-sm sm:text-[15px] font-medium tracking-tight text-crt-muted whitespace-nowrap shrink-0">
+                  {parsedSyncHeader.actionPrefix}
+                </span>
+              )}
 
               {isHighlightedGameTarget ? (
                 <span
