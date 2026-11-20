@@ -29,6 +29,7 @@ export interface SoundtrackPrefs {
 }
 
 export const SOUNDTRACK_PREFS_STORAGE_KEY = 'rgt_soundtrack_prefs_v1';
+export const SOUNDTRACK_SEEN_TRACKS_STORAGE_KEY = 'rgt_soundtrack_seen_tracks_v1';
 export const STARTER_TRACK_ID: MusicTrackId = 'phosphor_idle';
 
 export const DEFAULT_SOUNDTRACK_PREFS: SoundtrackPrefs = {
@@ -226,3 +227,71 @@ export function saveSoundtrackPrefs(prefs: SoundtrackPrefs): void {
     // Ignore storage quota or private-mode errors
   }
 }
+
+export function normalizeTrackIdList(raw: unknown): MusicTrackId[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<MusicTrackId>();
+  const out: MusicTrackId[] = [];
+  for (const item of raw) {
+    if (isValidMusicTrackId(item) && !seen.has(item)) {
+      seen.add(item);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+/**
+ * Returns milestone-unlocked track IDs that the user has not yet seen.
+ * When `seenTrackIds` is `null` (first-time baseline initialization), returns `[]`
+ * so already-owned starter/baseline tracks are not falsely flagged as newly unlocked.
+ */
+export function computeUnseenUnlockedTrackIds(
+  unlockedTrackIds: readonly MusicTrackId[],
+  seenTrackIds: readonly MusicTrackId[] | null,
+): MusicTrackId[] {
+  if (seenTrackIds === null) return [];
+  const seenSet = new Set<MusicTrackId>(seenTrackIds);
+  return unlockedTrackIds.filter((id) => {
+    const meta = SOUNDTRACK_TRACK_BY_ID[id];
+    return Boolean(meta && meta.requiredPoints > 0 && !seenSet.has(id));
+  });
+}
+
+export function mergeSeenTrackIds(
+  currentSeen: readonly MusicTrackId[] | null,
+  additionalIds: readonly MusicTrackId[],
+): MusicTrackId[] {
+  const merged = new Set<MusicTrackId>(currentSeen ?? []);
+  for (const id of additionalIds) {
+    if (isValidMusicTrackId(id)) {
+      merged.add(id);
+    }
+  }
+  return Array.from(merged);
+}
+
+export function loadSeenTrackIds(): MusicTrackId[] | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(SOUNDTRACK_SEEN_TRACKS_STORAGE_KEY);
+    if (raw === null) return null;
+    const parsed = JSON.parse(raw);
+    return normalizeTrackIdList(parsed);
+  } catch {
+    return null;
+  }
+}
+
+export function saveSeenTrackIds(trackIds: readonly MusicTrackId[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      SOUNDTRACK_SEEN_TRACKS_STORAGE_KEY,
+      JSON.stringify(normalizeTrackIdList(trackIds)),
+    );
+  } catch {
+    // Ignore storage quota or private-mode errors
+  }
+}
+

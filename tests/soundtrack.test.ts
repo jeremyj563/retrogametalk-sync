@@ -4,11 +4,14 @@ import { ACHIEVEMENT_REWARDS } from '../src/shared/achievementRewards.ts';
 import { ACHIEVEMENT_CATALOG } from '../src/shared/achievements.ts';
 import {
   clampMusicVolume,
+  computeUnseenUnlockedTrackIds,
   getUnlockedTracks,
   isMusicTrackUnlocked,
   isValidMusicTrackId,
   isValidPlaybackMode,
+  mergeSeenTrackIds,
   type MusicTrackId,
+  normalizeTrackIdList,
   pickNextTrackId,
   resolveEffectiveTrackId,
   SOUNDTRACK_TRACKS,
@@ -97,6 +100,40 @@ test('Volume clamping and validators guard persisted preference values', () => {
   assert.equal(isValidPlaybackMode('cycle'), true);
   assert.equal(isValidPlaybackMode('shuffle'), true);
   assert.equal(isValidPlaybackMode('repeat_all'), false);
+});
+
+test('Unseen unlocked track tracking handles baseline seeding, new milestone unlocks, and dismissal', () => {
+  // Baseline first-load (`seenTrackIds === null`) never falsely flags already-owned tracks
+  assert.deepEqual(
+    computeUnseenUnlockedTrackIds(['phosphor_idle', 'bitplane_bounce'], null),
+    [],
+  );
+
+  // Starter track (0 pts) is never flagged as a new milestone unlock
+  assert.deepEqual(computeUnseenUnlockedTrackIds(['phosphor_idle'], []), []);
+
+  // Newly unlocked milestone tracks after baseline are returned in roster order
+  assert.deepEqual(
+    computeUnseenUnlockedTrackIds(
+      ['phosphor_idle', 'bitplane_bounce', 'outrun_crt'],
+      ['phosphor_idle'],
+    ),
+    ['bitplane_bounce', 'outrun_crt'],
+  );
+
+  // Merging seen IDs dismisses viewed tracks cleanly while keeping deduplicated valid IDs
+  const merged = mergeSeenTrackIds(['phosphor_idle'], ['bitplane_bounce', 'phosphor_idle']);
+  assert.deepEqual(merged, ['phosphor_idle', 'bitplane_bounce']);
+  assert.deepEqual(
+    computeUnseenUnlockedTrackIds(['phosphor_idle', 'bitplane_bounce', 'outrun_crt'], merged),
+    ['outrun_crt'],
+  );
+
+  // Invalid or duplicate values are filtered during normalization
+  assert.deepEqual(
+    normalizeTrackIdList(['phosphor_idle', 'bogus_id', 42, 'outrun_crt', 'phosphor_idle']),
+    ['phosphor_idle', 'outrun_crt'],
+  );
 });
 
 function validateNoteLane(trackId: string, laneName: string, lane: readonly NoteCell[], totalSteps: number) {
