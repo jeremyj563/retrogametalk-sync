@@ -9,6 +9,7 @@ import { AdaptiveRateLimiter } from '../src/server/rateLimiter.ts';
 import { decodeHtmlEntities, hasHtmlEntities } from '../src/server/releaseTags.ts';
 import {
   buildHtmlEntityDecodedDownloadUrl,
+  isDownloadCandidateUrl,
   RetroGameTalkClient,
   type DiscoveredRelease,
 } from '../src/server/rgtClient.ts';
@@ -216,7 +217,7 @@ test('downloadFileAtomic preserves authenticated session if entity-decoded fallb
         new AbortController().signal,
         () => undefined,
       ),
-    /upstream HTML-encoded filename parameter; decoded fallback returned HTTP 403/,
+    /Upstream RetroGameTalk mirror link bug \(HTTP 404\):.*HTTP 403 signature mismatch/,
   );
 
   // WordPress auth state must still be authenticated
@@ -347,6 +348,167 @@ test('SQLite migration v21 decodes stored HTML entities without mutating local_p
   assert.equal(fileRow.display_label, 'Traverse - Starlight & Prairie (Japan).zip');
   assert.equal(fileRow.local_path, originalLocalPath);
   assert.equal(fileRow.filename, 'Traverse - Starlight &amp; Prairie (Japan).zip');
+
+  db.close();
+});
+
+test('isDownloadCandidateUrl and extractLinksFromHtml ignore HTML navigation links whose text says "Download"', () => {
+  // False positive from Populous page: navigation link with "Download" in anchor text
+  assert.equal(
+    isDownloadCandidateUrl(
+      new URL('https://retrogametalk.com/repo/turbografx-16/download-japan/'),
+      'TurboGrafx-16 Japanese Download',
+      false,
+    ),
+    false,
+  );
+  assert.equal(
+    isDownloadCandidateUrl(
+      new URL('https://retrogametalk.com/repository/turbografx-16/download-guide/'),
+      'How to Download',
+      false,
+    ),
+    false,
+  );
+
+  // Genuine download endpoints and archive links must still match
+  assert.equal(
+    isDownloadCandidateUrl(
+      new URL('https://snake.retrogametalk.com/download.php?file=Populous%20%28Japan%29.zip&id=1&key=abc'),
+      'Download',
+      false,
+    ),
+    true,
+  );
+  assert.equal(
+    isDownloadCandidateUrl(
+      new URL('https://retrogametalk.com/files/Populous.zip'),
+      'Populous',
+      false,
+    ),
+    true,
+  );
+  assert.equal(
+    isDownloadCandidateUrl(
+      new URL('https://retrogametalk.com/repository/turbografx-16/populous/?wpdmdl=99'),
+      'Download',
+      false,
+    ),
+    true,
+  );
+
+  const client = new RetroGameTalkClient(makeRateLimiter());
+  const config = makeConfig();
+  const html = `
+    <html>
+      <body>
+        <h1>Populous</h1>
+        <nav>
+          <a href="https://retrogametalk.com/repo/turbografx-16/download-japan/">TurboGrafx-16 Japanese Download</a>
+        </nav>
+        <div class="downloads">
+          <a href="https://snake.retrogametalk.com/download.php?file=Populous%20%28Japan%29.zip&id=123&platform=turbografx-16&key=abc">Download</a>
+        </div>
+      </body>
+    </html>
+  `;
+  const extracted = client.extractLinksFromHtml(
+    html,
+    'https://retrogametalk.com/repository/turbografx-16/populous-japan/',
+    config,
+  );
+  assert.equal(extracted.downloads.length, 1);
+  assert.equal(extracted.downloads[0]?.filename, 'Populous (Japan).zip');
+});
+
+test('SQLite migration v22 prunes false-positive HTML webpage file rows and heals parent release status', () => {
+  const db = new Database(':memory:');
+  const ctx = { dataDir: tempDataDir, defaultDownloadDir: tempDownloadDir };
+
+  for (const migration of SCHEMA_MIGRATIONS.filter((m) => m.version <= 21)) {
+    migration.up(db, ctx);
+  }
+
+  const now = new Date().toISOString();
+  const relInsert = db
+    .prepare(
+      `INSERT INTO catalog_releases (
+        remote_url, remote_path, local_path, system_name, title,
+        status, error_message, file_size_bytes, discovered_at, downloaded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      'https://retrogametalk.com/repository/turbografx-16/populous-japan/',
+      'turbografx-16/populous-japan',
+      '/downloads/turbografx-16/populous-japan',
+      'turbografx-16',
+      'Populous',
+      'partial',
+      'TurboGrafx-16 Japanese Download.zip: Expected archive binary but received HTML',
+      409600,
+      now,
+      now,
+    );
+  const releaseId = Number(relInsert.lastInsertRowid);
+
+  // Real downloaded ROM file
+  db.prepare(
+    `INSERT INTO catalog_release_files (
+      release_id, remote_url, download_url, remote_path, local_path,
+      filename, display_label, file_role, file_size_bytes, status, discovered_at, downloaded_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    releaseId,
+    'https://retrogametalk.com/repository/turbografx-16/populous-japan/#Populous.zip',
+    'https://snake.retrogametalk.com/download.php?file=Populous%20%28Japan%29.zip&id=1&key=abc',
+    'turbografx-16/Populous (Japan).zip',
+    '/downloads/turbografx-16/Populous (Japan).zip',
+    'Populous (Japan).zip',
+    'Populous (Japan).zip',
+    'ROM',
+    409600,
+    'downloaded',
+    now,
+    now,
+  );
+
+  // False-positive failed HTML page link
+  db.prepare(
+    `INSERT INTO catalog_release_files (
+      release_id, remote_url, download_url, remote_path, local_path,
+      filename, display_label, file_role, file_size_bytes, status, error_message, discovered_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    releaseId,
+    'https://retrogametalk.com/repo/turbografx-16/download-japan/',
+    'https://retrogametalk.com/repo/turbografx-16/download-japan/',
+    'turbografx-16/TurboGrafx-16 Japanese Download.zip',
+    '/downloads/turbografx-16/TurboGrafx-16 Japanese Download.zip',
+    'TurboGrafx-16 Japanese Download.zip',
+    'TurboGrafx-16 Japanese Download',
+    'ROM',
+    0,
+    'failed',
+    'Expected archive binary but received HTML (https://retrogametalk.com/repo/turbografx-16/download-japan/); session or nonce may have expired',
+    now,
+  );
+
+  const v22 = SCHEMA_MIGRATIONS.find((m) => m.version === 22);
+  assert.ok(v22, 'migration v22 should exist');
+  v22.up(db, ctx);
+
+  const remainingFiles = db
+    .prepare('SELECT filename, status FROM catalog_release_files WHERE release_id = ?')
+    .all(releaseId) as { filename: string; status: string }[];
+  assert.equal(remainingFiles.length, 1);
+  assert.equal(remainingFiles[0]?.filename, 'Populous (Japan).zip');
+
+  const updatedRelease = db
+    .prepare('SELECT status, error_message, file_size_bytes FROM catalog_releases WHERE id = ?')
+    .get(releaseId) as { status: string; error_message: string | null; file_size_bytes: number };
+  assert.equal(updatedRelease.status, 'downloaded');
+  assert.equal(updatedRelease.error_message, null);
+  assert.equal(updatedRelease.file_size_bytes, 409600);
 
   db.close();
 });

@@ -903,6 +903,142 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 22,
+    name: 'prune_false_positive_html_download_files',
+    description:
+      'Remove non-downloaded false-positive HTML navigation links erroneously queued as .zip files (e.g. /repo/<system>/download-japan/) and recalculate parent release statuses',
+    up: (db) => {
+      const isFalsePositiveHtmlPageUrl = (rawUrl: string): boolean => {
+        if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return false;
+        let parsed: URL;
+        try {
+          parsed = new URL(rawUrl);
+        } catch {
+          return false;
+        }
+        const pathnameLower = parsed.pathname.toLowerCase();
+        const lowerHref = parsed.href.toLowerCase();
+        if (
+          pathnameLower.endsWith('/download.php') ||
+          lowerHref.includes('download.php?') ||
+          parsed.searchParams.has('file') ||
+          parsed.searchParams.has('wpdmdl') ||
+          parsed.searchParams.get('action')?.toLowerCase() === 'download'
+        ) {
+          return false;
+        }
+        const ext = path.extname(pathnameLower);
+        if (ext && ext !== '.html' && ext !== '.htm' && ext !== '.php') {
+          return false;
+        }
+        return (
+          pathnameLower.endsWith('/') ||
+          pathnameLower.endsWith('.html') ||
+          pathnameLower.endsWith('.htm')
+        );
+      };
+
+      const candidateRows = db
+        .prepare(
+          `SELECT id, release_id, download_url, status, error_message
+           FROM catalog_release_files
+           WHERE status IN ('failed', 'queued', 'available', 'pending')`,
+        )
+        .all() as {
+        id: number;
+        release_id: number;
+        download_url: string;
+        status: string;
+        error_message: string | null;
+      }[];
+
+      const deleteStmt = db.prepare('DELETE FROM catalog_release_files WHERE id = ?');
+      const affectedReleaseIds = new Set<number>();
+
+      for (const row of candidateRows) {
+        if (!isFalsePositiveHtmlPageUrl(row.download_url)) continue;
+        deleteStmt.run(row.id);
+        affectedReleaseIds.add(row.release_id);
+      }
+
+      if (affectedReleaseIds.size === 0) return;
+
+      const selectFilesStmt = db.prepare(
+        `SELECT filename, file_size_bytes, status, error_message, downloaded_at
+         FROM catalog_release_files
+         WHERE release_id = ?`,
+      );
+      const selectReleaseStmt = db.prepare(
+        `SELECT status, file_size_bytes, downloaded_at
+         FROM catalog_releases
+         WHERE id = ?`,
+      );
+      const updateReleaseStmt = db.prepare(
+        `UPDATE catalog_releases
+         SET status = ?, error_message = ?, file_size_bytes = ?, downloaded_at = ?
+         WHERE id = ?`,
+      );
+
+      for (const releaseId of affectedReleaseIds) {
+        const rel = selectReleaseStmt.get(releaseId) as
+          | { status: string; file_size_bytes: number; downloaded_at: string | null }
+          | undefined;
+        if (!rel) continue;
+
+        const remaining = selectFilesStmt.all(releaseId) as {
+          filename: string;
+          file_size_bytes: number;
+          status: string;
+          error_message: string | null;
+          downloaded_at: string | null;
+        }[];
+
+        if (remaining.length === 0) continue;
+
+        let totalBytes = 0;
+        let downloadedCount = 0;
+        let failedCount = 0;
+        let downloadingCount = 0;
+        let availableCount = 0;
+        let firstError: string | null = null;
+        let latestDownloadedAt = rel.downloaded_at;
+
+        for (const f of remaining) {
+          if (f.file_size_bytes > 0) totalBytes += f.file_size_bytes;
+          if (f.status === 'downloaded' || f.status === 'skipped') downloadedCount += 1;
+          else if (f.status === 'failed') {
+            failedCount += 1;
+            if (!firstError && f.error_message) firstError = `${f.filename}: ${f.error_message}`;
+          } else if (f.status === 'downloading') {
+            downloadingCount += 1;
+          } else if (f.status === 'available') {
+            availableCount += 1;
+          }
+          if (f.downloaded_at && (!latestDownloadedAt || f.downloaded_at > latestDownloadedAt)) {
+            latestDownloadedAt = f.downloaded_at;
+          }
+        }
+
+        let nextStatus = rel.status;
+        if (downloadingCount > 0) nextStatus = 'downloading';
+        else if (failedCount === remaining.length) nextStatus = 'failed';
+        else if (downloadedCount === remaining.length) nextStatus = 'downloaded';
+        else if (downloadedCount > 0) nextStatus = 'partial';
+        else if (availableCount === remaining.length) nextStatus = 'available';
+        else nextStatus = 'queued';
+
+        const nextBytes =
+          totalBytes > 0
+            ? totalBytes
+            : nextStatus === 'available' || nextStatus === 'queued'
+              ? rel.file_size_bytes
+              : 0;
+
+        updateReleaseStmt.run(nextStatus, firstError, nextBytes, latestDownloadedAt, releaseId);
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
