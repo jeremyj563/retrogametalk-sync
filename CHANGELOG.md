@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.20.4] - 2026-11-20
+
+- Fixed false-positive `.zip` download entries created from regular HTML navigation links whose anchor text contained the word `"Download"` (such as `TurboGrafx-16 Japanese Download` → `/repo/turbografx-16/download-japan/` on *Populous*): tightened `isDownloadCandidateUrl` and guarded dynamic AJAX link extraction so only genuine archive/endpoint links (`download.php`, `?file=`, `?wpdmdl=`, `?action=download`, `<a download>`, or archive extensions) are queued.
+- Added SQLite startup migration **`v22` (`prune_false_positive_html_download_files`)** to remove existing non-downloaded phantom HTML webpage rows from `catalog_release_files` and automatically recalculate parent release statuses (healing `partial` releases whose real archive files are already downloaded back to `downloaded`).
+- Clarified the diagnostic error message when RetroGameTalk's mirror returns HTTP 404 for an upstream HTML-encoded `&amp;` filename and HTTP 403 signature mismatch for the decoded filename, clearly identifying it as an upstream RGT server bug rather than a session expiry or client error.
+
 ## [1.20.3] - 2026-11-20
 
 - Removed duplicate status prefixes on the main **Monitor** sync status bar: Tier 2 now omits the redundant `Standby` prefix when Tier 1 already displays `Standby` and omits the redundant `Syncing` prefix before the highlighted game title when Tier 1 already displays `Sync Active` / `Dry Run Active`, while retaining distinct sub-phase prefixes (`Initializing`, `Authenticating`, `Enumerating`, `Checking`, `Scanning`, `Stopping`).

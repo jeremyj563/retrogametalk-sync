@@ -624,21 +624,33 @@ function inferReleaseType(text: string, urlStr: string): string {
   return classifyFileRole(urlStr, text);
 }
 
-function isDownloadCandidateUrl(url: URL, anchorText: string, hasDownloadAttr: boolean): boolean {
+export function isDownloadCandidateUrl(url: URL, _anchorText: string, hasDownloadAttr: boolean): boolean {
   if (hasDownloadAttr) return true;
-  const ext = path.extname(url.pathname).toLowerCase();
+  const pathnameLower = url.pathname.toLowerCase();
+  const ext = path.extname(pathnameLower);
   if (ARCHIVE_EXTENSIONS.has(ext)) return true;
+
   const lowerUrl = url.href.toLowerCase();
-  const lowerText = anchorText.toLowerCase();
   if (
-    lowerUrl.includes('download.php') ||
-    lowerUrl.includes('/download/') ||
-    lowerUrl.includes('wpdmdl=') ||
-    lowerUrl.includes('action=download') ||
-    (lowerText.includes('download') && !lowerUrl.includes('#'))
+    pathnameLower.endsWith('/download.php') ||
+    lowerUrl.includes('download.php?') ||
+    url.searchParams.has('file') ||
+    url.searchParams.has('wpdmdl') ||
+    url.searchParams.get('action')?.toLowerCase() === 'download'
   ) {
     return true;
   }
+
+  // Only treat /download/<id> endpoints as downloads when they are NOT WordPress
+  // repository navigation pages (e.g. /repo/turbografx-16/download-japan/).
+  if (
+    pathnameLower.includes('/download/') &&
+    !pathnameLower.startsWith('/repo/') &&
+    !pathnameLower.startsWith('/repository/')
+  ) {
+    return true;
+  }
+
   return false;
 }
 
@@ -2873,6 +2885,10 @@ export class RetroGameTalkClient {
         const rawParamFile = dlUrl.searchParams.get('file');
         const paramFile = rawParamFile ? decodeHtmlEntities(rawParamFile) : '';
         const anchorText = decodeHtmlEntities(ajax$(a).text().replace(/\s+/g, ' ').trim());
+        const hasDownloadAttr = ajax$(a).attr('download') !== undefined;
+        if (!filenameAttr && !paramFile && !isDownloadCandidateUrl(dlUrl, anchorText, hasDownloadAttr)) {
+          return;
+        }
         const filename = sanitizePathSegment(
           filenameAttr || paramFile || anchorText || `${pageTitle}.zip`,
         );
@@ -3416,6 +3432,11 @@ export class RetroGameTalkClient {
           if (triedEntityDecodedFallback) {
             // Do not invalidate the WordPress session if the mirror rejected the entity-decoded
             // filename parameter (e.g. HTTP 403 invalid HMAC key or HTTP 404 missing file).
+            if (response.status === 403) {
+              throw new Error(
+                `Upstream RetroGameTalk mirror link bug (HTTP 404): RGT signed an HTML-encoded filename (&amp;) that does not exist on the mirror, and the mirror rejected the decoded filename (HTTP 403 signature mismatch)`,
+              );
+            }
             throw new Error(
               `HTTP 404 downloading ${release.downloadUrl} (upstream HTML-encoded filename parameter; decoded fallback returned HTTP ${response.status})`,
             );
