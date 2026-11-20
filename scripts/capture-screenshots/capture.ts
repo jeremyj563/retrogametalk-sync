@@ -233,6 +233,7 @@ function buildActiveDemoStatus(
     workerKey: 'worker-1',
     itemId: featuredItemId,
     itemTitle: featuredTitle,
+    hasCover: true,
     fileId: 1,
     fileIndex: 1,
     totalFiles: 2,
@@ -253,6 +254,7 @@ function buildActiveDemoStatus(
     workerKey: 'worker-2',
     itemId: featuredItemId + 1,
     itemTitle: 'Starblade Zero 64',
+    hasCover: true,
     fileId: 2,
     fileIndex: 1,
     totalFiles: 1,
@@ -317,6 +319,12 @@ function buildActiveDemoStatus(
       parallelTransfers: [transfer1, transfer2],
     },
     activeTransfers: [transfer1, transfer2],
+    activeSyncItem: {
+      itemId: featuredItemId,
+      title: featuredTitle,
+      systemName: 'snes',
+      hasCover: true,
+    },
     transferHistory: history,
     rateLimiter: {
       ...base.rateLimiter,
@@ -545,7 +553,7 @@ export async function runScreenshotCapture(options: CaptureOptions): Promise<str
     await staticPage.goto(baseUrl!, { waitUntil: 'networkidle' });
     await staticPage.waitForTimeout(1400);
 
-    // 1) Sync Overview & Telemetry (Green · PVM · High Motion · Speed Wave)
+    // 1) Sync Overview & Telemetry (Green · PVM · Low Motion · Speed Wave)
     const syncPng = path.join(tempWorkDir, 'sync-overview.png');
     const syncWebp = path.join(options.outDir, SCREENSHOT_FILENAMES.syncOverview);
     await staticPage.screenshot({ path: syncPng, fullPage: false });

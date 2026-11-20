@@ -19,7 +19,7 @@ test('parseCaptureCliArgs applies sensible defaults and honors CLI/env overrides
   const defaults = parseCaptureCliArgs([], {}, '/tmp/project');
   assert.equal(defaults.baseUrl, null);
   assert.equal(defaults.crtPreset, 'pvm');
-  assert.equal(defaults.uiMotion, 'high');
+  assert.equal(defaults.uiMotion, 'low');
   assert.equal(defaults.skipVideo, false);
   assert.equal(defaults.help, false);
   assert.equal(defaults.outDir, path.resolve('/tmp/project', 'docs', 'assets', 'screenshots'));
@@ -70,10 +70,10 @@ test('parseCaptureCliArgs rejects malformed URLs, unknown flags, and invalid pre
 });
 
 test('buildCaptureCrtSettings applies exact preset optical curves and Speed Wave sync', () => {
-  const greenPvm = buildCaptureCrtSettings('green', 'pvm', 'high');
+  const greenPvm = buildCaptureCrtSettings('green', 'pvm', 'low');
   assert.equal(greenPvm.enabled, true);
   assert.equal(greenPvm.palette, 'green');
-  assert.equal(greenPvm.uiMotion, 'high');
+  assert.equal(greenPvm.uiMotion, 'low');
   assert.equal(greenPvm.syncSpeedWave, true);
   assert.deepEqual(
     {

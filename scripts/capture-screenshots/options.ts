@@ -82,7 +82,7 @@ export function parseCrtPreset(raw: string | undefined, fallback: CrtPresetId = 
 
 export function parseUiMotionLevel(
   raw: string | undefined,
-  fallback: CrtUiMotionLevel = 'high',
+  fallback: CrtUiMotionLevel = 'low',
 ): CrtUiMotionLevel {
   if (!raw || !raw.trim()) return fallback;
   const candidate = raw.trim().toLowerCase() as CrtUiMotionLevel;
@@ -106,7 +106,7 @@ export function parseCaptureCliArgs(
     ? path.resolve(cwd, env.CAPTURE_OUT_DIR.trim())
     : path.resolve(cwd, 'docs', 'assets', 'screenshots');
   let crtPreset = parseCrtPreset(env.CAPTURE_CRT_PRESET, 'pvm');
-  let uiMotion = parseUiMotionLevel(env.CAPTURE_UI_MOTION, 'high');
+  let uiMotion = parseUiMotionLevel(env.CAPTURE_UI_MOTION, 'low');
   let skipVideo = parseBooleanFlag(env.CAPTURE_SKIP_VIDEO);
   let help = false;
 
@@ -202,7 +202,7 @@ export function formatCaptureUsage(): string {
     '  --url <base-url>                 Capture an already-running instance (env: CAPTURE_BASE_URL)',
     '  --out-dir <path>                 Output directory for WebP assets (default: docs/assets/screenshots)',
     '  --preset <subtle|pvm|arcade|bvm> CRT optical preset (default: pvm)',
-    '  --motion <off|low|medium|high|ultra> Living UI Motion level (default: high)',
+    '  --motion <off|low|medium|high|ultra> Living UI Motion level (default: low)',
     '  --skip-video                     Only capture the 4 static screenshots (skip hero walkthrough WebP)',
     '  -h, --help                       Show this help message',
     '',
@@ -211,6 +211,6 @@ export function formatCaptureUsage(): string {
     '  npm run capture:screenshots',
     '',
     '  # Capture your running local homelab instance:',
-    '  npm run capture:screenshots -- --url http://localhost:3000 --preset pvm --motion high',
+    '  npm run capture:screenshots -- --url http://localhost:3000 --preset pvm --motion low',
   ].join('\n');
 }

@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.21.1] - 2026-11-20
+
+- Updated the automated **Playwright + FFmpeg** visual preview pipeline (`scripts/capture-screenshots` and `.github/workflows/update-screenshots.yml`) to default to and enforce the subtle **`Low`** **Living UI Motion** setting so README previews stay clean and understated while leaving the higher intensity tiers as an in-app discovery.
+- Included `activeSyncItem` and `hasCover` in the ephemeral demo capture status payload so the new inline sync status cover thumbnail appears cleanly in captured Monitor previews.
+
 ## [1.21.0] - 2026-11-20
 
 - Added a **compact inline game cover thumbnail** beside the active game title in the main **Monitor** sync status bar whenever a Full Sync, Incremental Sync, Retry run, or Download Queue is operating on a release (including warm-up, active transfers, multi-file handoffs, and Dry Runs).
