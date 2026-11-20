@@ -587,3 +587,11 @@ export function deriveSyncReleaseIdentityKey(
   return `title:${normalizedSystem}:${normalizedTitle}`;
 }
 
+/**
+ * Grace window (in ms) before surfacing the subtle inline "Opening…" cue beside
+ * the Monitor Hero Showcase game title when fetching release details. Local SQLite
+ * lookups settle well below this threshold so normal clicks open cleanly with zero flash.
+ */
+export const HERO_DETAIL_LOADING_DELAY_MS = 250;
+
+
