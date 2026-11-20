@@ -4,6 +4,12 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { LATEST_SCHEMA_VERSION, runDatabaseMigrations } from './migrations.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
+import {
+  isCatalogStatusAlreadyDownloaded,
+  isCatalogStatusAlreadyQueued,
+  isCatalogStatusInstallable,
+  isCatalogStatusQueueable,
+} from '../shared/catalogSelection.ts';
 import { normalizeCatalogSort } from '../shared/catalogSort.ts';
 import { normalizeAllowedReleaseTypes } from '../shared/releaseTypeFilter.ts';
 import {
@@ -2182,6 +2188,7 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   ids: number[];
   downloadableIds: number[];
   queueableIds: number[];
+  alreadyQueuedIds: number[];
   estimatedQueueBytes: number;
   alreadyDownloadedCount: number;
   alreadyQueuedCount: number;
@@ -2203,6 +2210,7 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   const ids: number[] = [];
   const downloadableIds: number[] = [];
   const queueableIds: number[] = [];
+  const alreadyQueuedIds: number[] = [];
   let estimatedQueueBytes = 0;
   let alreadyDownloadedCount = 0;
   let alreadyQueuedCount = 0;
@@ -2210,16 +2218,15 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   for (const row of rows) {
     const numId = Number(row.id);
     ids.push(numId);
-    if (row.status === 'downloaded' || row.status === 'skipped') {
+    if (isCatalogStatusInstallable(row.status)) {
       downloadableIds.push(numId);
+    }
+    if (isCatalogStatusAlreadyDownloaded(row.status)) {
       alreadyDownloadedCount += 1;
-    } else if (row.status === 'queued' || row.status === 'downloading') {
+    } else if (isCatalogStatusAlreadyQueued(row.status)) {
+      alreadyQueuedIds.push(numId);
       alreadyQueuedCount += 1;
-    } else if (row.status === 'partial') {
-      downloadableIds.push(numId);
-      queueableIds.push(numId);
-      estimatedQueueBytes += Number(row.file_size_bytes || 0);
-    } else if (row.status === 'available' || row.status === 'failed') {
+    } else if (isCatalogStatusQueueable(row.status)) {
       queueableIds.push(numId);
       estimatedQueueBytes += Number(row.file_size_bytes || 0);
     }
@@ -2229,6 +2236,7 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
     ids,
     downloadableIds,
     queueableIds,
+    alreadyQueuedIds,
     estimatedQueueBytes,
     alreadyDownloadedCount,
     alreadyQueuedCount,
@@ -2251,6 +2259,7 @@ export function queryRepositoryItems(
   const offset = Math.max(0, params.offset ?? 0);
 
   let total = 0;
+  let queueableFiltered = 0;
   let rows: Record<string, unknown>[] = [];
 
   if (params.syncRules && hasTypeRules) {
@@ -2262,6 +2271,10 @@ export function queryRepositoryItems(
       .all(...args) as RuleFilterRow[];
     const matched = filterCandidateRowsBySyncRules(candidates, cfg, fileRolesMap);
     total = matched.length;
+    queueableFiltered = matched.reduce(
+      (acc, r) => acc + (isCatalogStatusQueueable(r.status) ? 1 : 0),
+      0,
+    );
     const pageIds = matched.slice(offset, offset + limit).map((r) => Number(r.id));
     if (pageIds.length > 0) {
       const placeholders = pageIds.map(() => '?').join(', ');
@@ -2281,6 +2294,13 @@ export function queryRepositoryItems(
       count: number;
     };
     total = Number(countRow.count);
+    const queueableWhere = where
+      ? `${where} AND status IN ('available', 'failed', 'partial')`
+      : `WHERE status IN ('available', 'failed', 'partial')`;
+    const queueableRow = getDb()
+      .prepare(`SELECT COUNT(*) as count FROM catalog_releases ${queueableWhere}`)
+      .get(...args) as { count: number };
+    queueableFiltered = Number(queueableRow.count);
     rows = getDb()
       .prepare(`SELECT * FROM catalog_releases ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
       .all(...args, limit, offset) as Record<string, unknown>[];
@@ -2309,6 +2329,7 @@ export function queryRepositoryItems(
     downloaded: downloadedCounts,
     installed: installedCounts,
     syncRulesMatched,
+    queueableFiltered,
   };
 
   const facets: CatalogFacets = {
