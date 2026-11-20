@@ -8,6 +8,7 @@ interface ConfigSaveBarProps {
   saveMsg: string | null;
   saveErr: string | null;
   validationHint?: string | null;
+  infoHint?: string | null;
   saveDisabled?: boolean;
   onDiscard: () => void;
 }
@@ -19,6 +20,7 @@ export function ConfigSaveBar({
   saveMsg,
   saveErr,
   validationHint = null,
+  infoHint = null,
   saveDisabled = false,
   onDiscard,
 }: ConfigSaveBarProps) {
@@ -63,9 +65,11 @@ export function ConfigSaveBar({
                       · {dirtyState.changedSections.join(', ')}
                     </span>
                   </div>
-                  {validationHint && (
+                  {validationHint ? (
                     <p className="text-[11px] font-mono text-crt-amber/90">{validationHint}</p>
-                  )}
+                  ) : infoHint ? (
+                    <p className="text-[11px] font-mono text-crt-phosphor/90">{infoHint}</p>
+                  ) : null}
                 </div>
               ) : saveMsg ? (
                 <div className="flex items-center gap-2 text-crt-phosphor font-mono">

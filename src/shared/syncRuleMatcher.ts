@@ -176,3 +176,127 @@ export function formatSyncRuleScopeSummary(
 
   return `${sysPart} · ${typePart}`;
 }
+
+export interface LiveSyncReloadReceipt {
+  applied: boolean;
+  runId: number;
+  runMode: 'incremental' | 'full';
+  dryRun: boolean;
+  changeSummary: string;
+  scopeSummary: string;
+}
+
+export interface SyncRuleDiff {
+  changed: boolean;
+  consolesChanged: boolean;
+  releaseTypesChanged: boolean;
+  releaseTypesWidened: boolean;
+  addedConsoles: string[];
+  removedConsoles: string[];
+  scopeSummary: string;
+  changeSummary: string;
+}
+
+export function isConsoleAllowedBySyncRules(
+  systemSlug: string | null | undefined,
+  config: SyncRuleConfigLike,
+): boolean {
+  const targetSystems = normalizeTargetConsoleSlugs(config.systemFilter);
+  if (targetSystems.length === 0) {
+    return true;
+  }
+  const canonical = canonicalizeSystemSlug(String(systemSlug || '')).toLowerCase();
+  if (!canonical) return false;
+  return targetSystems.includes(canonical);
+}
+
+/**
+ * Only Full Sync and Incremental Sync runs (manual or scheduled, including Dry Runs)
+ * participate in live mid-run Sync Rule hot-reloading.
+ * Manual Catalog download queues ('download') and failed-item retries ('retry') stay untouched.
+ */
+export function isSyncRunEligibleForLiveRuleReload(
+  run: { triggerType?: string; mode?: string } | null | undefined,
+): boolean {
+  if (!run) return false;
+  return run.triggerType !== 'download' && run.triggerType !== 'retry';
+}
+
+export function diffSyncRules(
+  prevConfig: SyncRuleConfigLike,
+  nextConfig: SyncRuleConfigLike,
+  discoveredSystems: readonly string[] = [],
+): SyncRuleDiff {
+  const prevExplicit = normalizeTargetConsoleSlugs(prevConfig.systemFilter);
+  const nextExplicit = normalizeTargetConsoleSlugs(nextConfig.systemFilter);
+  const prevResolved = resolveTargetConsoleScope(prevConfig.systemFilter, discoveredSystems);
+  const nextResolved = resolveTargetConsoleScope(nextConfig.systemFilter, discoveredSystems);
+
+  const prevResolvedSet = new Set(prevResolved);
+  const nextResolvedSet = new Set(nextResolved);
+
+  const addedConsoles = nextResolved.filter((slug) => !prevResolvedSet.has(slug));
+  const removedConsoles = prevResolved.filter((slug) => !nextResolvedSet.has(slug));
+
+  const prevExplicitSorted = [...prevExplicit].sort().join(',');
+  const nextExplicitSorted = [...nextExplicit].sort().join(',');
+  const consolesChanged =
+    prevExplicitSorted !== nextExplicitSorted ||
+    addedConsoles.length > 0 ||
+    removedConsoles.length > 0;
+
+  const prevTypes = normalizeAllowedReleaseTypes(prevConfig.allowedReleaseTypes ?? []);
+  const nextTypes = normalizeAllowedReleaseTypes(nextConfig.allowedReleaseTypes ?? []);
+  const prevTypeSet = new Set(prevTypes);
+  const nextTypeSet = new Set(nextTypes);
+
+  const releaseTypesChanged =
+    prevTypes.length !== nextTypes.length ||
+    prevTypes.some((t) => !nextTypeSet.has(t)) ||
+    nextTypes.some((t) => !prevTypeSet.has(t));
+
+  // Widened means: switched from custom allowlist to All Release Types ([]),
+  // OR added at least one new release type key while staying in custom allowlist mode.
+  const releaseTypesWidened =
+    releaseTypesChanged &&
+    ((prevTypes.length > 0 && nextTypes.length === 0) ||
+      (prevTypes.length > 0 && nextTypes.some((t) => !prevTypeSet.has(t))));
+
+  const parts: string[] = [];
+  if (addedConsoles.length > 0) {
+    parts.push(
+      addedConsoles.length <= 3
+        ? `+${addedConsoles.join(', +')}`
+        : `+${addedConsoles.length} consoles`,
+    );
+  }
+  if (removedConsoles.length > 0) {
+    parts.push(
+      removedConsoles.length <= 3
+        ? `-${removedConsoles.join(', -')}`
+        : `-${removedConsoles.length} consoles`,
+    );
+  }
+  if (consolesChanged && addedConsoles.length === 0 && removedConsoles.length === 0) {
+    parts.push(nextExplicit.length === 0 ? 'All consoles enabled' : 'Console scope updated');
+  }
+  if (releaseTypesChanged) {
+    parts.push(
+      nextTypes.length === 0
+        ? 'All release types enabled'
+        : `Types: ${formatAllowedReleaseTypesSummary(nextTypes)}`,
+    );
+  }
+
+  return {
+    changed: consolesChanged || releaseTypesChanged,
+    consolesChanged,
+    releaseTypesChanged,
+    releaseTypesWidened,
+    addedConsoles,
+    removedConsoles,
+    scopeSummary: formatSyncRuleScopeSummary(nextConfig.systemFilter, nextConfig.allowedReleaseTypes),
+    changeSummary: parts.join(' · ') || 'No rule changes',
+  };
+}
+

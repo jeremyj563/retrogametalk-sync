@@ -828,8 +828,8 @@ async function bootstrap() {
   app.put('/api/config', (req, res) => {
     try {
       const body = (req.body || {}) as ConfigUpdateInput;
-      const updated = orchestrator.updateConfiguration(body);
-      res.json({ config: updated });
+      const result = orchestrator.updateConfigurationWithMeta(body);
+      res.json({ config: result.config, liveSyncReload: result.liveSyncReload });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
