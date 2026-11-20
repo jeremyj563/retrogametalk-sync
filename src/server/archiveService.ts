@@ -11,8 +11,12 @@ import {
 } from '../shared/romNaming.ts';
 import { formatErrorDetails, logServer } from './logger.ts';
 import type {
+  ArchiveBrowseEntry,
+  ArchiveBrowseListing,
+  ArchiveEntryCategory,
   ArchiveFormat,
   ArchiveInspectResult,
+  ArchiveTextPreviewResult,
   PlayableExportTarget,
   ReleaseFileRecord,
   RepositoryItemRecord,
@@ -23,6 +27,15 @@ interface RawArchiveEntry {
   sizeBytes: number;
   isDir: boolean;
 }
+
+const TEXT_PREVIEW_EXTENSIONS = new Set([
+  '.txt', '.md', '.markdown', '.nfo', '.diz', '.cue', '.gdi', '.ccd', '.m3u',
+  '.ini', '.cfg', '.json', '.xml', '.sfv', '.md5', '.sha1', '.sha256', '.log',
+  '.url', '.webloc', '.rtf', '.html', '.htm', '.csv', '.yaml', '.yml',
+]);
+
+const MAX_TEXT_PREVIEW_FILE_BYTES = 512 * 1024;
+const DEFAULT_TEXT_PREVIEW_READ_BYTES = 128 * 1024;
 
 const ARCHIVE_EXTENSIONS = new Set(['.zip', '.7z', '.rar', '.tar', '.gz', '.tgz', '.xz', '.bz2']);
 
@@ -232,6 +245,59 @@ function getExtLower(filePath: string): string {
   const base = path.posix.basename(filePath);
   const idx = base.lastIndexOf('.');
   return idx >= 0 ? base.slice(idx).toLowerCase() : '';
+}
+
+export function classifyArchiveEntry(entryPath: string, sizeBytes: number): ArchiveBrowseEntry {
+  const normalized = entryPath.replace(/\\/g, '/').replace(/^\/+/, '');
+  const name = path.posix.basename(normalized);
+  const ext = getExtLower(normalized);
+
+  let category: ArchiveEntryCategory = 'other';
+  if (DISC_DESCRIPTOR_EXTENSIONS.has(ext) || SINGLE_DISC_EXTENSIONS.has(ext) || DISC_TRACK_EXTENSIONS.has(ext)) {
+    category = 'disc';
+  } else if (PLAYABLE_ROM_EXTENSIONS.has(ext)) {
+    category = 'rom';
+  } else if (PATCH_EXTENSIONS.has(ext)) {
+    category = 'patch';
+  } else if (ARCHIVE_EXTENSIONS.has(ext)) {
+    category = 'archive';
+  } else if (CLUTTER_EXTENSIONS.has(ext)) {
+    category = 'doc';
+  }
+
+  const previewableText =
+    TEXT_PREVIEW_EXTENSIONS.has(ext) && sizeBytes <= MAX_TEXT_PREVIEW_FILE_BYTES;
+
+  return {
+    path: normalized,
+    name,
+    sizeBytes,
+    extension: ext,
+    category,
+    previewableText,
+  };
+}
+
+export async function browseArchiveAtPath(archiveAbsPath: string): Promise<ArchiveBrowseListing> {
+  const st = fs.statSync(archiveAbsPath);
+  const { format, entries } = await listArchiveEntries(archiveAbsPath);
+
+  const browseEntries = entries
+    .map((entry) => classifyArchiveEntry(entry.entryPath, entry.sizeBytes))
+    .sort((a, b) =>
+      a.path.localeCompare(b.path, undefined, { sensitivity: 'base', numeric: true }),
+    );
+
+  const totalUncompressedBytes = browseEntries.reduce((sum, e) => sum + e.sizeBytes, 0);
+
+  return {
+    sourceFilename: path.basename(archiveAbsPath),
+    archiveFormat: format,
+    archiveSizeBytes: st.size,
+    totalFiles: browseEntries.length,
+    totalUncompressedBytes,
+    entries: browseEntries,
+  };
 }
 
 function cleanVariantDistinguisher(entryPath: string, totalVariants: number): string | null {
@@ -605,6 +671,87 @@ async function openEntryReadableStream(archivePath: string, entryPath: string): 
   }
 
   throw new Error(`Cannot extract ${format.toUpperCase()} archive without 7-Zip binary.`);
+}
+
+export async function readArchiveTextPreview(
+  archivePath: string,
+  entryPath: string,
+  maxBytes = DEFAULT_TEXT_PREVIEW_READ_BYTES,
+): Promise<ArchiveTextPreviewResult> {
+  if (!isSafeArchiveEntryPath(entryPath)) {
+    throw new Error('Invalid archive entry path');
+  }
+  const { entries } = await listArchiveEntries(archivePath);
+  const normalizedTarget = entryPath.replace(/\\/g, '/').replace(/^\/+/, '');
+  const matched = entries.find(
+    (e) => e.entryPath.replace(/\\/g, '/').replace(/^\/+/, '') === normalizedTarget,
+  );
+  if (!matched) {
+    throw new Error('Entry not found inside archive');
+  }
+  const ext = getExtLower(matched.entryPath);
+  if (!TEXT_PREVIEW_EXTENSIONS.has(ext)) {
+    throw new Error(`Preview is not supported for ${ext || 'binary'} files`);
+  }
+
+  const stream = await openEntryReadableStream(archivePath, matched.entryPath);
+  const chunks: Buffer[] = [];
+  let bytesRead = 0;
+  let truncated = false;
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const done = (err?: unknown) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve();
+    };
+
+    stream.on('data', (chunk: Buffer | string) => {
+      if (settled) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (bytesRead + buf.length > maxBytes) {
+        const remaining = Math.max(0, maxBytes - bytesRead);
+        if (remaining > 0) {
+          chunks.push(buf.subarray(0, remaining));
+          bytesRead += remaining;
+        }
+        truncated = true;
+        if ('destroy' in stream && typeof stream.destroy === 'function') {
+          stream.destroy();
+        }
+        done();
+        return;
+      }
+      chunks.push(buf);
+      bytesRead += buf.length;
+    });
+
+    stream.on('error', (err) => {
+      if (truncated) {
+        done();
+      } else {
+        done(err);
+      }
+    });
+    stream.on('end', () => done());
+    stream.on('close', () => done());
+  });
+
+  const combined = Buffer.concat(chunks);
+  // Guard against binary files disguised with text extensions
+  if (combined.includes(0)) {
+    throw new Error('File appears to contain binary data and cannot be previewed as text.');
+  }
+
+  return {
+    entryPath: normalizedTarget,
+    filename: path.posix.basename(normalizedTarget),
+    text: combined.toString('utf8'),
+    truncated,
+    bytesRead,
+  };
 }
 
 export async function streamExtractedEntryToResponse(

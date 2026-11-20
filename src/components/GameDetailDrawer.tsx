@@ -9,6 +9,7 @@ import {
   ExternalLink,
   FileArchive,
   FlaskConical,
+  FolderOpen,
   Gamepad2,
   HardDrive,
   Image as ImageIcon,
@@ -22,7 +23,14 @@ import {
   XCircle,
   ZoomIn,
 } from 'lucide-react';
-import type { ActiveTransferState, ArchiveInspectResult, RepositoryItemRecord } from '../types';
+import { isBrowsableArchiveName } from '../shared/archiveTree';
+import type {
+  ActiveTransferState,
+  ArchiveBrowseListing,
+  ArchiveInspectResult,
+  RepositoryItemRecord,
+} from '../types';
+import { ArchiveExplorer } from './ArchiveExplorer';
 import { formatBytes, formatDateTime } from '../utils/format';
 import {
   getDrawerCloseDurationMs,
@@ -282,11 +290,19 @@ export function GameDetailDrawer({
   const [inspection, setInspection] = useState<ArchiveInspectResult | null>(null);
   const [inspectError, setInspectError] = useState<string | null>(null);
   const [preparedNames, setPreparedNames] = useState<Record<string, string>>({});
+  const [browsingFileId, setBrowsingFileId] = useState<number | null>(null);
+  const [archiveBrowse, setArchiveBrowse] = useState<{
+    fileId: number;
+    listing: ArchiveBrowseListing;
+  } | null>(null);
+  const [archiveBrowseSubpath, setArchiveBrowseSubpath] = useState('');
+  const [archiveBrowseError, setArchiveBrowseError] = useState<string | null>(null);
   const [togglingInstalled, setTogglingInstalled] = useState(false);
 
   const autoUpgradedIdsRef = useRef<Set<number>>(new Set());
   const autoHydratedIdsRef = useRef<Set<number>>(new Set());
   const bodyScrollRef = useRef<HTMLDivElement | null>(null);
+  const archivePanelRef = useRef<HTMLDivElement | null>(null);
   const lightboxImgRef = useRef<HTMLImageElement | null>(null);
   const pendingSwapDirRef = useRef<DrawerSwapDirection>('none');
   const prevRenderedIdRef = useRef<number | null>(activeItem?.id ?? null);
@@ -520,6 +536,10 @@ export function GameDetailDrawer({
     setInspection(null);
     setInspectError(null);
     setPreparedNames({});
+    setBrowsingFileId(null);
+    setArchiveBrowse(null);
+    setArchiveBrowseSubpath('');
+    setArchiveBrowseError(null);
     setTogglingInstalled(false);
     setQueueingDownload(false);
     bodyScrollRef.current?.scrollTo({ top: 0, behavior: 'auto' });
@@ -1020,6 +1040,8 @@ export function GameDetailDrawer({
     if (!activeItem) return;
     setInspectingFileId(fileId);
     setInspectError(null);
+    setArchiveBrowse(null);
+    setArchiveBrowseError(null);
     try {
       const res = await fetch(`/api/items/${item.id}/inspect?fileId=${encodeURIComponent(String(fileId))}`);
       const parsed = await readJsonSafely<{ inspection?: ArchiveInspectResult; error?: string }>(res);
@@ -1040,6 +1062,44 @@ export function GameDetailDrawer({
       setInspection(null);
     } finally {
       setInspectingFileId(null);
+    }
+  };
+
+  const handleBrowseArchive = async (fileId: number) => {
+    if (!activeItem) return;
+    if (archiveBrowse?.fileId === fileId) {
+      setArchiveBrowse(null);
+      setArchiveBrowseError(null);
+      setArchiveBrowseSubpath('');
+      return;
+    }
+    setBrowsingFileId(fileId);
+    setArchiveBrowseError(null);
+    setInspection(null);
+    setInspectError(null);
+    try {
+      const res = await fetch(`/api/items/${item.id}/archive?fileId=${encodeURIComponent(String(fileId))}`);
+      const parsed = await readJsonSafely<{
+        itemId?: number;
+        fileId?: number;
+        listing?: ArchiveBrowseListing;
+        error?: string;
+      }>(res);
+      if (!parsed.ok || !parsed.data?.listing) {
+        setArchiveBrowseError(parsed.errorMessage || `Unable to browse archive (HTTP ${res.status})`);
+        setArchiveBrowse(null);
+        return;
+      }
+      setArchiveBrowseSubpath('');
+      setArchiveBrowse({ fileId, listing: parsed.data.listing });
+      window.requestAnimationFrame(() => {
+        archivePanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    } catch (err) {
+      setArchiveBrowseError(err instanceof Error ? err.message : String(err));
+      setArchiveBrowse(null);
+    } finally {
+      setBrowsingFileId(null);
     }
   };
 
@@ -1713,11 +1773,31 @@ export function GameDetailDrawer({
                               disabled={inspectingFileId === file.id}
                               onClick={() => void handleInspectPreparedRom(file.id)}
                               title="Inspect archive, strip readme/doc clutter, and download pre-renamed ROM"
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
                             >
                               <Download className="h-3.5 w-3.5" />
                               {inspectingFileId === file.id ? 'Inspecting...' : 'Prepared ROM'}
                             </button>
+                            {isBrowsableArchiveName(file.filename) && (
+                              <button
+                                type="button"
+                                disabled={browsingFileId === file.id}
+                                onClick={() => void handleBrowseArchive(file.id)}
+                                title="Navigate files and folders inside this archive without unpacking to disk"
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer ${
+                                  archiveBrowse?.fileId === file.id
+                                    ? 'border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor'
+                                    : 'border-crt-border hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor'
+                                }`}
+                              >
+                                <FolderOpen className="h-3.5 w-3.5" />
+                                {browsingFileId === file.id
+                                  ? 'Opening...'
+                                  : archiveBrowse?.fileId === file.id
+                                    ? 'Hide Contents'
+                                    : 'Inspect Archive'}
+                              </button>
+                            )}
                             <a
                               href={`/api/items/${item.id}/download?fileId=${file.id}`}
                               download={file.filename}
@@ -1792,6 +1872,37 @@ export function GameDetailDrawer({
                 {inspectError}
               </div>
             )}
+
+            <div ref={archivePanelRef} className="space-y-3">
+              {archiveBrowseError && (
+                <div className="border border-crt-crimson/50 bg-crt-crimson/10 rounded-md px-4 py-3 text-xs font-mono text-crt-crimson">
+                  {archiveBrowseError}
+                </div>
+              )}
+
+              {archiveBrowse && (
+                <ArchiveExplorer
+                  mode="drawer"
+                  listing={archiveBrowse.listing}
+                  subpath={archiveBrowseSubpath}
+                  onSubpathChange={setArchiveBrowseSubpath}
+                  buildEntryDownloadUrl={(entryPath) =>
+                    `/api/items/${item.id}/archive/entry?fileId=${encodeURIComponent(
+                      String(archiveBrowse.fileId),
+                    )}&entry=${encodeURIComponent(entryPath)}`
+                  }
+                  buildEntryPreviewUrl={(entryPath) =>
+                    `/api/items/${item.id}/archive/preview?fileId=${encodeURIComponent(
+                      String(archiveBrowse.fileId),
+                    )}&entry=${encodeURIComponent(entryPath)}`
+                  }
+                  onClose={() => {
+                    setArchiveBrowse(null);
+                    setArchiveBrowseSubpath('');
+                  }}
+                />
+              )}
+            </div>
 
             {inspection && (
               <div className="border border-crt-phosphor/50 bg-crt-bg rounded-md p-4 space-y-3">
@@ -2011,11 +2122,26 @@ export function GameDetailDrawer({
                   type="button"
                   disabled={inspectingFileId === primaryDownloadFile.id}
                   onClick={() => void handleInspectPreparedRom(primaryDownloadFile.id)}
-                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50"
+                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
                 >
                   <Download className="h-3.5 w-3.5" />
                   {inspectingFileId === primaryDownloadFile.id ? 'Inspecting...' : 'Prepared ROM'}
                 </button>
+                {isBrowsableArchiveName(primaryDownloadFile.filename) && (
+                  <button
+                    type="button"
+                    disabled={browsingFileId === primaryDownloadFile.id}
+                    onClick={() => void handleBrowseArchive(primaryDownloadFile.id)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer ${
+                      archiveBrowse?.fileId === primaryDownloadFile.id
+                        ? 'border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor'
+                        : 'border-crt-border text-crt-text hover:border-crt-phosphor hover:text-crt-phosphor'
+                    }`}
+                  >
+                    <FolderOpen className="h-3.5 w-3.5" />
+                    {browsingFileId === primaryDownloadFile.id ? 'Opening...' : 'Inspect Archive'}
+                  </button>
+                )}
                 {onExportToSdCard && (
                   <button
                     type="button"

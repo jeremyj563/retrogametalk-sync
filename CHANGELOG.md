@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.20.0] - 2026-11-19
+
+- Added **In-Place Archive Contents Navigation** across both the **Game Detail Drawer** and **Catalog → Local Disk Tree**, allowing you to browse nested folders and files inside downloaded `.zip`, `.7z`, `.rar`, and `.tar*` archives without unpacking anything to disk.
+- **Game Detail Drawer**: Added an explicit **`Inspect Archive`** action on downloaded archive files (and in the sticky footer) opening a CRT archive explorer with breadcrumb folder navigation, deep entry search, file category badges (`ROM`, `DISC`, `PATCH`, `DOC`, `ARCHIVE`), uncompressed sizes, inline UTF-8 text preview for `.txt`/`.nfo`/`.md`/`.cue`/`.m3u` files (with copy button and 128 KB truncation guard), and single-entry streaming downloads.
+- **Local Disk Tree**: Archive files now display format badges (`ZIP`, `7Z`, `RAR`, `TAR`) and open directly like folders on click (or via **`Inspect`**), extending the disk breadcrumb trail seamlessly into the archive's internal folder tree with live archive filtering, text previews, and single-entry downloads—and unlocking the **Inside the Archive** trophy from either view.
+
 ## [1.19.0] - 2026-11-19
 
 - Added **Live Mid-Run Sync Rule Hot-Reloading**: saving changes to **Target Consoles** or **Allowed Release Types** in **Sync Rules** now applies immediately to any active **Full Sync** or **Incremental Sync** (including Dry Runs) without waiting for the next run.

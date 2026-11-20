@@ -461,9 +461,17 @@ export interface FsTreeNode {
   sizeBytes: number;
   modifiedAt: string;
   childrenCount?: number;
+  isArchive?: boolean;
+  archiveFormat?: ArchiveFormat;
 }
 
 export type ArchiveFormat = 'zip' | '7z' | 'rar' | 'tar' | 'raw';
+export type {
+  ArchiveBrowseEntry,
+  ArchiveBrowseListing,
+  ArchiveEntryCategory,
+  ArchiveTextPreviewResult,
+} from './shared/archiveTree';
 
 export interface PlayableExportTarget {
   id: string;

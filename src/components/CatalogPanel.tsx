@@ -12,6 +12,7 @@ import {
   FileArchive,
   Folder,
   FolderInput,
+  FolderOpen,
   Gamepad2,
   HardDrive,
   LayoutGrid,
@@ -33,6 +34,10 @@ import type {
   BulkStorageInstallerController,
 } from '../hooks/useBulkStorageInstaller';
 import {
+  isBrowsableArchiveName,
+  listArchiveDirectoryAtPath,
+} from '../shared/archiveTree';
+import {
   CATALOG_SORT_OPTIONS,
   DEFAULT_CATALOG_SORT,
   normalizeCatalogSort,
@@ -45,6 +50,7 @@ import {
 import type { SmartRomFilterContext } from '../shared/smartRomPicker';
 import { formatSyncRuleScopeSummary } from '../shared/syncRuleMatcher';
 import type {
+  ArchiveBrowseListing,
   CatalogDownloadedFilter,
   CatalogFacets,
   CatalogInstalledFilter,
@@ -55,6 +61,7 @@ import type {
   ScraperConfigPublic,
   ServiceStatusSnapshot,
 } from '../types';
+import { ArchiveExplorer } from './ArchiveExplorer';
 import { formatBytes, formatDateTime } from '../utils/format';
 import { reportAchievementEvent } from '../utils/achievementsClient';
 import {
@@ -619,13 +626,19 @@ export function CatalogPanel({
 
   const { sdRootHandle } = installer;
 
-  // Local Disk Tree state + search filter + selection
+  // Local Disk Tree state + search filter + selection + in-place archive browsing
   const [fsPath, setFsPath] = useState(() => memoryCatalogViewPrefs.fsPath);
   const [fsSearch, setFsSearch] = useState(() => memoryCatalogViewPrefs.fsSearch);
   const [fsNodes, setFsNodes] = useState<FsTreeNode[]>(() => initialMatchedFs?.nodes ?? []);
   const [fsLoading, setFsLoading] = useState(false);
   const [selectedFsPaths, setSelectedFsPaths] = useState<Set<string>>(new Set());
   const [confirmFsBulk, setConfirmFsBulk] = useState(false);
+  const [fsArchivePath, setFsArchivePath] = useState<string | null>(null);
+  const [fsArchiveListing, setFsArchiveListing] = useState<ArchiveBrowseListing | null>(null);
+  const [fsArchiveSubpath, setFsArchiveSubpath] = useState('');
+  const [fsArchiveLoading, setFsArchiveLoading] = useState(false);
+  const [fsArchiveError, setFsArchiveError] = useState<string | null>(null);
+  const fsArchiveReqSeqRef = useRef(0);
 
   const filterSelectionKey = useMemo(
     () =>
@@ -955,6 +968,53 @@ export function CatalogPanel({
     } finally {
       if (reqId === fsReqSeqRef.current) {
         setFsLoading(false);
+      }
+    }
+  }, []);
+
+  const exitFsArchive = useCallback((nextDiskPath?: string) => {
+    fsArchiveReqSeqRef.current += 1;
+    setFsArchivePath(null);
+    setFsArchiveListing(null);
+    setFsArchiveSubpath('');
+    setFsArchiveLoading(false);
+    setFsArchiveError(null);
+    setFsSearch('');
+    if (nextDiskPath !== undefined) {
+      setFsPath(nextDiskPath);
+    }
+  }, []);
+
+  const openFsArchive = useCallback(async (relativePath: string) => {
+    const reqId = ++fsArchiveReqSeqRef.current;
+    setFsArchivePath(relativePath);
+    setFsArchiveSubpath('');
+    setFsArchiveError(null);
+    setFsArchiveLoading(true);
+    setFsSearch('');
+    setSelectedFsPaths(new Set());
+    setConfirmFsBulk(false);
+    try {
+      const res = await fetch(`/api/fs/archive?path=${encodeURIComponent(relativePath)}`);
+      const parsed = await readJsonSafely<{
+        relativePath?: string;
+        listing?: ArchiveBrowseListing;
+        error?: string;
+      }>(res);
+      if (reqId !== fsArchiveReqSeqRef.current) return;
+      if (!parsed.ok || !parsed.data?.listing) {
+        setFsArchiveListing(null);
+        setFsArchiveError(parsed.errorMessage || `Unable to inspect archive (HTTP ${res.status})`);
+        return;
+      }
+      setFsArchiveListing(parsed.data.listing);
+    } catch (err) {
+      if (reqId !== fsArchiveReqSeqRef.current) return;
+      setFsArchiveListing(null);
+      setFsArchiveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (reqId === fsArchiveReqSeqRef.current) {
+        setFsArchiveLoading(false);
       }
     }
   }, []);
@@ -2031,7 +2091,7 @@ export function CatalogPanel({
                   type="text"
                   value={fsSearch}
                   onChange={(e) => setFsSearch(e.target.value)}
-                  placeholder="Filter current folder..."
+                  placeholder={fsArchivePath ? 'Filter archive contents...' : 'Filter current folder...'}
                   className={`pl-8 ${fsSearch ? 'pr-7' : 'pr-3'} py-1.5 text-xs bg-crt-bg border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-56 ${
                     fsSearch.trim() ? 'border-crt-phosphor/60' : 'border-crt-border'
                   }`}
@@ -2040,7 +2100,7 @@ export function CatalogPanel({
                   <button
                     type="button"
                     onClick={() => setFsSearch('')}
-                    aria-label="Clear folder filter"
+                    aria-label={fsArchivePath ? 'Clear archive filter' : 'Clear folder filter'}
                     className="absolute right-2 top-1/2 -translate-y-1/2 text-crt-muted hover:text-crt-text p-0.5 rounded"
                   >
                     <X className="h-3.5 w-3.5" />
@@ -2052,8 +2112,14 @@ export function CatalogPanel({
               </span>
               <button
                 type="button"
-                onClick={() => void loadFsTree(fsPath)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-sans border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap"
+                onClick={() => {
+                  if (fsArchivePath) {
+                    void openFsArchive(fsArchivePath);
+                  } else {
+                    void loadFsTree(fsPath);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-sans border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap cursor-pointer"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
                 Rescan
@@ -2804,7 +2870,7 @@ export function CatalogPanel({
         )}
 
         {/* Contextual Bulk Selection Bar (Local Disk Tree) */}
-        {viewMode === 'filesystem' && selectedFsPaths.size > 0 && (
+        {viewMode === 'filesystem' && !fsArchivePath && selectedFsPaths.size > 0 && (
           <div className="pt-3 border-t border-crt-border flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
             <span className="text-crt-phosphor tabular-nums">
               {selectedFsPaths.size} disk entr{selectedFsPaths.size === 1 ? 'y' : 'ies'} selected
@@ -3589,135 +3655,274 @@ export function CatalogPanel({
             <span />
           </div>
           {/* Breadcrumbs + Select All Header */}
-          <div className="px-4 py-2.5 border-b border-crt-border bg-crt-bg flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
-            <div className="flex flex-wrap items-center gap-2">
-              {filteredFsNodes.length > 0 && (
-                <input
-                  type="checkbox"
-                  checked={allFsSelected}
-                  onChange={toggleAllFs}
-                  aria-label="Select all visible filesystem entries"
-                  className="accent-crt-phosphor cursor-pointer mr-1"
-                />
-              )}
-              <button
-                type="button"
-                onClick={() => setFsPath('')}
-                className="text-crt-phosphor hover:underline"
-              >
-                repository
-              </button>
-              {breadcrumbs.map((seg, i) => {
-                const target = breadcrumbs.slice(0, i + 1).join('/');
-                return (
-                  <span key={target} className="inline-flex items-center gap-1.5">
-                    <ChevronRight className="h-3 w-3 text-crt-muted" />
-                    <button
-                      type="button"
-                      onClick={() => setFsPath(target)}
-                      className="text-crt-text hover:text-crt-phosphor hover:underline"
-                    >
-                      {seg}
-                    </button>
-                  </span>
-                );
-              })}
-            </div>
-            <span className="text-crt-muted tabular-nums">
-              {filteredFsNodes.length} visible
-            </span>
-          </div>
+          {(() => {
+            const archiveDirView =
+              fsArchivePath && fsArchiveListing
+                ? listArchiveDirectoryAtPath(fsArchiveListing.entries, fsArchiveSubpath)
+                : null;
+            const archiveLeafName = fsArchivePath
+              ? fsArchivePath.split('/').filter(Boolean).pop() || fsArchivePath
+              : null;
 
-          {fsLoading ? (
-            <div className="p-6 space-y-2">
-              {[0, 1, 2].map((i) => (
-                <div key={i} className="h-9 bg-crt-bg border border-crt-border rounded animate-pulse" />
-              ))}
-            </div>
-          ) : filteredFsNodes.length === 0 ? (
-            <div className="p-12 text-center space-y-3">
-              <Folder className="h-6 w-6 text-crt-muted mx-auto" />
-              <p className="text-sm font-medium text-crt-text">
-                {fsNodes.length === 0 ? 'Directory is empty' : 'No files or folders match your filter'}
-              </p>
-              <p className="text-xs text-crt-muted">
-                {fsNodes.length === 0
-                  ? 'Downloaded ROMs, hacks, translations, and ports will appear here mirroring the exact remote hierarchy.'
-                  : 'Clear the folder filter input to view all entries in this directory.'}
-              </p>
-              {fsNodes.length > 0 && fsSearch && (
-                <div className="pt-1">
-                  <button
-                    type="button"
-                    onClick={() => setFsSearch('')}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                    Clear Folder Filter
-                  </button>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="divide-y divide-crt-border">
-              {filteredFsNodes.map((node) => {
-                const checked = selectedFsPaths.has(node.relativePath);
-                const isDeletingThis = deletingKey === `fs-${node.relativePath}`;
-                return (
-                  <div
-                    key={node.relativePath}
-                    className={`crt-table-row h-10 px-4 flex items-center justify-between gap-4 transition-colors text-xs font-mono ${
-                      checked ? 'bg-crt-phosphor/5' : 'hover:bg-crt-elevated'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
+            return (
+              <>
+                <div className="px-4 py-2.5 border-b border-crt-border bg-crt-bg flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {!fsArchivePath && filteredFsNodes.length > 0 && (
                       <input
                         type="checkbox"
-                        checked={checked}
-                        onChange={() => toggleFsNode(node.relativePath)}
-                        aria-label={`Select ${node.name}`}
-                        className="accent-crt-phosphor cursor-pointer shrink-0"
+                        checked={allFsSelected}
+                        onChange={toggleAllFs}
+                        aria-label="Select all visible filesystem entries"
+                        className="accent-crt-phosphor cursor-pointer mr-1"
                       />
-                      {node.type === 'directory' ? (
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (fsArchivePath) {
+                          exitFsArchive('');
+                        } else {
+                          setFsPath('');
+                        }
+                      }}
+                      className="text-crt-phosphor hover:underline cursor-pointer"
+                    >
+                      repository
+                    </button>
+                    {breadcrumbs.map((seg, i) => {
+                      const target = breadcrumbs.slice(0, i + 1).join('/');
+                      return (
+                        <span key={target} className="inline-flex items-center gap-1.5">
+                          <ChevronRight className="h-3 w-3 text-crt-muted" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (fsArchivePath) {
+                                exitFsArchive(target);
+                              } else {
+                                setFsPath(target);
+                              }
+                            }}
+                            className="text-crt-text hover:text-crt-phosphor hover:underline cursor-pointer"
+                          >
+                            {seg}
+                          </button>
+                        </span>
+                      );
+                    })}
+                    {fsArchivePath && archiveLeafName && (
+                      <span className="inline-flex items-center gap-1.5">
+                        <ChevronRight className="h-3 w-3 text-crt-muted" />
                         <button
                           type="button"
-                          onClick={() => setFsPath(node.relativePath)}
-                          className="flex items-center gap-2.5 text-crt-text hover:text-crt-phosphor text-left min-w-0"
+                          onClick={() => setFsArchiveSubpath('')}
+                          className="inline-flex items-center gap-1.5 text-crt-phosphor hover:underline cursor-pointer"
+                          title="Jump to archive root"
                         >
-                          <Folder className="h-4 w-4 text-crt-amber shrink-0" />
-                          <span className="truncate">{node.name}/</span>
+                          <FileArchive className="h-3.5 w-3.5 shrink-0" />
+                          <span>{archiveLeafName}</span>
                         </button>
-                      ) : (
-                        <div className="flex items-center gap-2.5 text-crt-text min-w-0">
-                          <FileArchive className="h-4 w-4 text-crt-phosphor shrink-0" />
-                          <span className="truncate">{node.name}</span>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-5 text-crt-muted tabular-nums shrink-0">
-                      <span>
-                        {node.type === 'directory'
-                          ? `${node.childrenCount ?? 0} entries`
-                          : formatBytes(node.sizeBytes)}
                       </span>
-                      <span className="hidden sm:inline">{formatDateTime(node.modifiedAt)}</span>
+                    )}
+                    {archiveDirView?.breadcrumbs.map((crumb) => (
+                      <span key={crumb.path} className="inline-flex items-center gap-1.5">
+                        <ChevronRight className="h-3 w-3 text-crt-muted" />
+                        <button
+                          type="button"
+                          onClick={() => setFsArchiveSubpath(crumb.path)}
+                          className="text-crt-text hover:text-crt-phosphor hover:underline cursor-pointer"
+                        >
+                          {crumb.label}
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <span className="text-crt-muted tabular-nums">
+                    {fsArchivePath
+                      ? archiveDirView
+                        ? `${archiveDirView.folders.length + archiveDirView.files.length} in folder`
+                        : 'inspecting...'
+                      : `${filteredFsNodes.length} visible`}
+                  </span>
+                </div>
+
+                {fsArchivePath ? (
+                  fsArchiveLoading ? (
+                    <div className="p-6 space-y-2">
+                      {[0, 1, 2].map((i) => (
+                        <div
+                          key={i}
+                          className="h-9 bg-crt-bg border border-crt-border rounded animate-pulse"
+                        />
+                      ))}
+                    </div>
+                  ) : fsArchiveError ? (
+                    <div className="p-8 text-center space-y-3 text-xs font-mono">
+                      <AlertCircle className="h-6 w-6 text-crt-crimson mx-auto" />
+                      <p className="text-crt-crimson">{fsArchiveError}</p>
                       <button
                         type="button"
-                        disabled={isDeletingThis}
-                        onClick={() => void handleDeleteFsPaths([node.relativePath])}
-                        aria-label={`Delete ${node.name}`}
-                        title={node.type === 'directory' ? 'Delete directory and all contents' : 'Delete file'}
-                        className="p-1.5 border border-crt-border hover:border-crt-crimson text-crt-muted hover:text-crt-crimson rounded transition-colors disabled:opacity-50"
+                        onClick={() => exitFsArchive()}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border text-crt-text hover:border-crt-phosphor rounded transition-colors cursor-pointer"
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        Back to Disk Folder
                       </button>
                     </div>
+                  ) : fsArchiveListing ? (
+                    <ArchiveExplorer
+                      mode="inline"
+                      listing={fsArchiveListing}
+                      subpath={fsArchiveSubpath}
+                      onSubpathChange={setFsArchiveSubpath}
+                      externalSearch={fsSearch}
+                      onClearExternalSearch={() => setFsSearch('')}
+                      buildEntryDownloadUrl={(entryPath) =>
+                        `/api/fs/archive/entry?path=${encodeURIComponent(
+                          fsArchivePath,
+                        )}&entry=${encodeURIComponent(entryPath)}`
+                      }
+                      buildEntryPreviewUrl={(entryPath) =>
+                        `/api/fs/archive/preview?path=${encodeURIComponent(
+                          fsArchivePath,
+                        )}&entry=${encodeURIComponent(entryPath)}`
+                      }
+                      onExitArchive={() => exitFsArchive()}
+                    />
+                  ) : null
+                ) : fsLoading ? (
+                  <div className="p-6 space-y-2">
+                    {[0, 1, 2].map((i) => (
+                      <div key={i} className="h-9 bg-crt-bg border border-crt-border rounded animate-pulse" />
+                    ))}
                   </div>
-                );
-              })}
-            </div>
-          )}
+                ) : filteredFsNodes.length === 0 ? (
+                  <div className="p-12 text-center space-y-3">
+                    <Folder className="h-6 w-6 text-crt-muted mx-auto" />
+                    <p className="text-sm font-medium text-crt-text">
+                      {fsNodes.length === 0 ? 'Directory is empty' : 'No files or folders match your filter'}
+                    </p>
+                    <p className="text-xs text-crt-muted">
+                      {fsNodes.length === 0
+                        ? 'Downloaded ROMs, hacks, translations, and ports will appear here mirroring the exact remote hierarchy.'
+                        : 'Clear the folder filter input to view all entries in this directory.'}
+                    </p>
+                    {fsNodes.length > 0 && fsSearch && (
+                      <div className="pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setFsSearch('')}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                          Clear Folder Filter
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="divide-y divide-crt-border">
+                    {filteredFsNodes.map((node) => {
+                      const checked = selectedFsPaths.has(node.relativePath);
+                      const isDeletingThis = deletingKey === `fs-${node.relativePath}`;
+                      const browsableArchive =
+                        node.type === 'file' &&
+                        (Boolean(node.isArchive) || isBrowsableArchiveName(node.name));
+                      const formatLabel =
+                        node.archiveFormat && node.archiveFormat !== 'raw'
+                          ? node.archiveFormat.toUpperCase()
+                          : null;
+
+                      return (
+                        <div
+                          key={node.relativePath}
+                          className={`crt-table-row h-10 px-4 flex items-center justify-between gap-4 transition-colors text-xs font-mono ${
+                            checked ? 'bg-crt-phosphor/5' : 'hover:bg-crt-elevated'
+                          }`}
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleFsNode(node.relativePath)}
+                              aria-label={`Select ${node.name}`}
+                              className="accent-crt-phosphor cursor-pointer shrink-0"
+                            />
+                            {node.type === 'directory' ? (
+                              <button
+                                type="button"
+                                onClick={() => setFsPath(node.relativePath)}
+                                className="flex items-center gap-2.5 text-crt-text hover:text-crt-phosphor text-left min-w-0 cursor-pointer"
+                              >
+                                <Folder className="h-4 w-4 text-crt-amber shrink-0" />
+                                <span className="truncate">{node.name}/</span>
+                              </button>
+                            ) : browsableArchive ? (
+                              <button
+                                type="button"
+                                onClick={() => void openFsArchive(node.relativePath)}
+                                title={`Browse contents of ${node.name} without unpacking to disk`}
+                                className="flex items-center gap-2.5 text-crt-text hover:text-crt-phosphor text-left min-w-0 cursor-pointer group"
+                              >
+                                <FileArchive className="h-4 w-4 text-crt-phosphor shrink-0" />
+                                <span className="truncate group-hover:underline">{node.name}</span>
+                                {formatLabel && (
+                                  <span className="px-1.5 py-0.5 text-[10px] leading-none border border-crt-phosphor/40 bg-crt-phosphor/10 text-crt-phosphor rounded shrink-0">
+                                    {formatLabel}
+                                  </span>
+                                )}
+                              </button>
+                            ) : (
+                              <div className="flex items-center gap-2.5 text-crt-text min-w-0">
+                                <FileArchive className="h-4 w-4 text-crt-muted shrink-0" />
+                                <span className="truncate">{node.name}</span>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-3 sm:gap-5 text-crt-muted tabular-nums shrink-0">
+                            <span>
+                              {node.type === 'directory'
+                                ? `${node.childrenCount ?? 0} entries`
+                                : formatBytes(node.sizeBytes)}
+                            </span>
+                            <span className="hidden sm:inline">{formatDateTime(node.modifiedAt)}</span>
+                            <div className="flex items-center gap-1.5">
+                              {browsableArchive && (
+                                <button
+                                  type="button"
+                                  onClick={() => void openFsArchive(node.relativePath)}
+                                  title={`Inspect contents of ${node.name} without unpacking`}
+                                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] border border-crt-border hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors cursor-pointer whitespace-nowrap"
+                                >
+                                  <FolderOpen className="h-3 w-3 shrink-0" />
+                                  <span className="hidden sm:inline">Inspect</span>
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                disabled={isDeletingThis}
+                                onClick={() => void handleDeleteFsPaths([node.relativePath])}
+                                aria-label={`Delete ${node.name}`}
+                                title={
+                                  node.type === 'directory'
+                                    ? 'Delete directory and all contents'
+                                    : 'Delete file'
+                                }
+                                className="p-1.5 border border-crt-border hover:border-crt-crimson text-crt-muted hover:text-crt-crimson rounded transition-colors disabled:opacity-50 cursor-pointer"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
 

@@ -17,6 +17,7 @@ import {
 } from './src/server/db.ts';
 import {
   buildContentDispositionAttachment,
+  listArchiveEntries,
   streamCleanDiscZipToResponse,
   streamExtractedEntryToResponse,
 } from './src/server/archiveService.ts';
@@ -457,6 +458,108 @@ async function bootstrap() {
     }
   });
 
+  app.get('/api/items/:id/archive', async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    const rawFileId = req.query.fileId;
+    const fileId = rawFileId !== undefined ? Number(rawFileId) : undefined;
+    if (fileId !== undefined && (!Number.isInteger(fileId) || fileId <= 0)) {
+      res.status(400).json({ error: 'Invalid fileId' });
+      return;
+    }
+    try {
+      const result = await orchestrator.browseItemArchive(itemId, fileId);
+      if (!result) {
+        res.status(404).json({ error: 'Mirrored archive not found on disk' });
+        return;
+      }
+      orchestrator.recordServerAchievementCounter('archive_inspections', 1, 'increment');
+      res.json(result);
+    } catch (err) {
+      logServer('HTTP', 'debug', `Archive browse error for itemId=${itemId}`, formatErrorDetails(err));
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get('/api/items/:id/archive/preview', async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    const rawFileId = req.query.fileId;
+    const fileId = rawFileId !== undefined ? Number(rawFileId) : undefined;
+    if (fileId !== undefined && (!Number.isInteger(fileId) || fileId <= 0)) {
+      res.status(400).json({ error: 'Invalid fileId' });
+      return;
+    }
+    const entryPath = typeof req.query.entry === 'string' ? req.query.entry.trim() : '';
+    if (!entryPath) {
+      res.status(400).json({ error: 'Missing entry query parameter' });
+      return;
+    }
+    try {
+      const preview = await orchestrator.previewItemArchiveEntry(itemId, entryPath, fileId);
+      if (!preview) {
+        res.status(404).json({ error: 'Mirrored archive not found on disk' });
+        return;
+      }
+      res.json({ preview });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get('/api/items/:id/archive/entry', async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    const rawFileId = req.query.fileId;
+    const fileId = rawFileId !== undefined ? Number(rawFileId) : undefined;
+    if (fileId !== undefined && (!Number.isInteger(fileId) || fileId <= 0)) {
+      res.status(400).json({ error: 'Invalid fileId' });
+      return;
+    }
+    const entryPath = typeof req.query.entry === 'string' ? req.query.entry.trim() : '';
+    if (!entryPath) {
+      res.status(400).json({ error: 'Missing entry query parameter' });
+      return;
+    }
+    try {
+      const resolved = orchestrator.resolveItemRomFile(itemId, fileId);
+      if (!resolved) {
+        res.status(404).json({ error: 'Mirrored archive not found on disk' });
+        return;
+      }
+      const { entries } = await listArchiveEntries(resolved.absPath);
+      const normalizedTarget = entryPath.replace(/\\/g, '/').replace(/^\/+/, '');
+      const matched = entries.find(
+        (e) => e.entryPath.replace(/\\/g, '/').replace(/^\/+/, '') === normalizedTarget,
+      );
+      if (!matched) {
+        res.status(404).json({ error: 'Entry not found inside archive' });
+        return;
+      }
+      const leafName = path.posix.basename(matched.entryPath) || 'archive-entry';
+      await streamExtractedEntryToResponse(
+        resolved.absPath,
+        matched.entryPath,
+        leafName,
+        res,
+        matched.sizeBytes,
+      );
+    } catch (err) {
+      if (!res.headersSent) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  });
+
   app.post('/api/items/inspect-batch', async (req, res) => {
     const rawIds: unknown[] = Array.isArray(req.body?.ids) ? req.body.ids : [];
     const ids: number[] = Array.from(
@@ -773,6 +876,65 @@ async function bootstrap() {
       res.json(orchestrator.listFsTree(subpath));
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get('/api/fs/archive', async (req, res) => {
+    const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+    try {
+      const result = await orchestrator.browseFsArchive(relPath);
+      orchestrator.recordServerAchievementCounter('archive_inspections', 1, 'increment');
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get('/api/fs/archive/preview', async (req, res) => {
+    const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+    const entryPath = typeof req.query.entry === 'string' ? req.query.entry.trim() : '';
+    if (!entryPath) {
+      res.status(400).json({ error: 'Missing entry query parameter' });
+      return;
+    }
+    try {
+      const preview = await orchestrator.previewFsArchiveEntry(relPath, entryPath);
+      res.json({ preview });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get('/api/fs/archive/entry', async (req, res) => {
+    const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+    const entryPath = typeof req.query.entry === 'string' ? req.query.entry.trim() : '';
+    if (!entryPath) {
+      res.status(400).json({ error: 'Missing entry query parameter' });
+      return;
+    }
+    try {
+      const resolved = orchestrator.resolveFsArchivePath(relPath);
+      const { entries } = await listArchiveEntries(resolved.absPath);
+      const normalizedTarget = entryPath.replace(/\\/g, '/').replace(/^\/+/, '');
+      const matched = entries.find(
+        (e) => e.entryPath.replace(/\\/g, '/').replace(/^\/+/, '') === normalizedTarget,
+      );
+      if (!matched) {
+        res.status(404).json({ error: 'Entry not found inside archive' });
+        return;
+      }
+      const leafName = path.posix.basename(matched.entryPath) || 'archive-entry';
+      await streamExtractedEntryToResponse(
+        resolved.absPath,
+        matched.entryPath,
+        leafName,
+        res,
+        matched.sizeBytes,
+      );
+    } catch (err) {
+      if (!res.headersSent) {
+        res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+      }
     }
   });
 
