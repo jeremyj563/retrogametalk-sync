@@ -22,6 +22,7 @@ import {
   RotateCcw,
   Search,
   SkipForward,
+  SlidersHorizontal,
   Trash2,
   X,
   XCircle,
@@ -42,6 +43,7 @@ import {
   toggleCatalogDownloadedFilter,
 } from '../shared/catalogDownloadFilter';
 import type { SmartRomFilterContext } from '../shared/smartRomPicker';
+import { formatSyncRuleScopeSummary } from '../shared/syncRuleMatcher';
 import type {
   CatalogDownloadedFilter,
   CatalogFacets,
@@ -71,6 +73,11 @@ interface CatalogPanelProps {
   installer: BulkStorageInstallerController;
   catalogRevision?: number;
   activeRetryItemId?: number | null;
+  filterPreset?: {
+    syncRulesOnly?: boolean;
+    downloadedFilter?: CatalogDownloadedFilter;
+    nonce: number;
+  } | null;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onQueueDownload?: (payload: {
     ids?: number[];
@@ -250,6 +257,7 @@ interface CatalogViewPrefs {
   statuses: string[];
   downloadedFilter: CatalogDownloadedFilter;
   installedFilter: CatalogInstalledFilter;
+  syncRulesOnly: boolean;
   tags: string[];
   tagsMode: FilterMatchMode;
   genres: string[];
@@ -282,6 +290,7 @@ const DEFAULT_CATALOG_VIEW_PREFS: CatalogViewPrefs = {
   statuses: [],
   downloadedFilter: 'all',
   installedFilter: 'all',
+  syncRulesOnly: false,
   tags: [],
   tagsMode: 'any',
   genres: [],
@@ -366,6 +375,7 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
       statuses,
       downloadedFilter,
       installedFilter: sanitizeStoredInstalledFilter(parsed.installedFilter),
+      syncRulesOnly: Boolean(parsed.syncRulesOnly),
       tags: sanitizeStoredList(parsed.tags, parsed.tagFilter),
       tagsMode: sanitizeStoredMatchMode(parsed.tagsMode),
       genres: sanitizeStoredList(parsed.genres, parsed.genreFilter),
@@ -394,6 +404,7 @@ function buildCatalogQueryKey(
     | 'statuses'
     | 'downloadedFilter'
     | 'installedFilter'
+    | 'syncRulesOnly'
     | 'tags'
     | 'tagsMode'
     | 'genres'
@@ -414,6 +425,7 @@ function buildCatalogQueryKey(
     prefs.statuses,
     prefs.downloadedFilter,
     prefs.installedFilter,
+    prefs.syncRulesOnly,
     prefs.tags,
     prefs.tags.length > 1 ? prefs.tagsMode : 'any',
     prefs.genres,
@@ -426,6 +438,8 @@ function buildCatalogQueryKey(
     prefs.sources.length > 1 ? prefs.sourcesMode : 'any',
   ]);
 }
+
+let lastHandledFilterPresetNonce = 0;
 
 let memoryCatalogViewPrefs: CatalogViewPrefs = loadInitialCatalogViewPrefs();
 let memoryCatalogFacets: CatalogFacets = {
@@ -451,6 +465,7 @@ export function CatalogPanel({
   installer,
   catalogRevision = 0,
   activeRetryItemId = null,
+  filterPreset = null,
   onRetryItem,
   onQueueDownload,
   onStartCatalogIndex,
@@ -524,6 +539,9 @@ export function CatalogPanel({
   const [installedFilter, setInstalledFilter] = useState<CatalogInstalledFilter>(
     () => memoryCatalogViewPrefs.installedFilter,
   );
+  const [syncRulesOnly, setSyncRulesOnly] = useState<boolean>(
+    () => memoryCatalogViewPrefs.syncRulesOnly,
+  );
   const [tags, setTags] = useState<string[]>(() => memoryCatalogViewPrefs.tags);
   const [tagsMode, setTagsMode] = useState<FilterMatchMode>(() => memoryCatalogViewPrefs.tagsMode);
   const [genres, setGenres] = useState<string[]>(() => memoryCatalogViewPrefs.genres);
@@ -535,6 +553,21 @@ export function CatalogPanel({
   const [sources, setSources] = useState<string[]>(() => memoryCatalogViewPrefs.sources);
   const [sourcesMode, setSourcesMode] = useState<FilterMatchMode>(() => memoryCatalogViewPrefs.sourcesMode);
   const [openFilterId, setOpenFilterId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!filterPreset || filterPreset.nonce === lastHandledFilterPresetNonce) return;
+    lastHandledFilterPresetNonce = filterPreset.nonce;
+    setViewMode('catalog');
+    if (typeof filterPreset.syncRulesOnly === 'boolean') {
+      setSyncRulesOnly(filterPreset.syncRulesOnly);
+    }
+    if (filterPreset.downloadedFilter) {
+      setDownloadedFilter(filterPreset.downloadedFilter);
+      if (filterPreset.downloadedFilter === 'only') {
+        setStatuses([]);
+      }
+    }
+  }, [filterPreset]);
   const [items, setItems] = useState<RepositoryItemRecord[]>(() => initialMatchedCatalog?.items ?? []);
   const [facets, setFacets] = useState<CatalogFacets>(() => memoryCatalogFacets);
   const [totalItems, setTotalItems] = useState(() => initialMatchedCatalog?.totalItems ?? 0);
@@ -602,6 +635,7 @@ export function CatalogPanel({
         statuses,
         downloadedFilter,
         installedFilter,
+        syncRulesOnly,
         tags,
         tags.length > 1 ? tagsMode : 'any',
         genres,
@@ -619,6 +653,7 @@ export function CatalogPanel({
       statuses,
       downloadedFilter,
       installedFilter,
+      syncRulesOnly,
       tags,
       tagsMode,
       genres,
@@ -657,6 +692,7 @@ export function CatalogPanel({
       statuses,
       downloadedFilter,
       installedFilter,
+      syncRulesOnly,
       tags,
       tagsMode,
       genres,
@@ -685,6 +721,7 @@ export function CatalogPanel({
     statuses,
     downloadedFilter,
     installedFilter,
+    syncRulesOnly,
     tags,
     tagsMode,
     genres,
@@ -727,6 +764,7 @@ export function CatalogPanel({
       for (const st of statuses) qs.append('status', st);
       if (downloadedFilter !== 'all') qs.set('downloaded', downloadedFilter);
       if (installedFilter !== 'all') qs.set('installed', installedFilter);
+      if (syncRulesOnly) qs.set('syncRules', 'true');
       for (const t of tags) qs.append('tag', t);
       if (tags.length > 1) qs.set('tagMode', tagsMode);
       for (const g of genres) qs.append('genre', g);
@@ -746,6 +784,7 @@ export function CatalogPanel({
       statuses,
       downloadedFilter,
       installedFilter,
+      syncRulesOnly,
       tags,
       tagsMode,
       genres,
@@ -789,6 +828,7 @@ export function CatalogPanel({
             statuses,
             downloadedFilter,
             installedFilter,
+            syncRulesOnly,
             tags,
             tagsMode,
             genres,
@@ -875,6 +915,7 @@ export function CatalogPanel({
       statuses,
       downloadedFilter,
       installedFilter,
+      syncRulesOnly,
       tags,
       tagsMode,
       genres,
@@ -930,6 +971,7 @@ export function CatalogPanel({
           statuses,
           downloadedFilter,
           installedFilter,
+          syncRulesOnly,
           tags,
           tagsMode,
           genres,
@@ -957,6 +999,7 @@ export function CatalogPanel({
     statuses,
     downloadedFilter,
     installedFilter,
+    syncRulesOnly,
     tags,
     tagsMode,
     genres,
@@ -1231,6 +1274,7 @@ export function CatalogPanel({
       status: statuses,
       downloaded: downloadedFilter !== 'all' ? downloadedFilter : undefined,
       installed: installedFilter !== 'all' ? installedFilter : undefined,
+      syncRules: syncRulesOnly || undefined,
       tag: tags,
       tagMode: tags.length > 1 ? tagsMode : undefined,
       genre: genres,
@@ -1249,6 +1293,7 @@ export function CatalogPanel({
     statuses,
     downloadedFilter,
     installedFilter,
+    syncRulesOnly,
     tags,
     tagsMode,
     genres,
@@ -1743,6 +1788,16 @@ export function CatalogPanel({
       });
     }
 
+    if (syncRulesOnly) {
+      tokens.push({
+        key: 'syncRules',
+        groupLabel: 'Sync Rules',
+        valueLabel: formatSyncRuleScopeSummary(config.systemFilter, config.allowedReleaseTypes),
+        matchAll: false,
+        onRemove: () => setSyncRulesOnly(false),
+      });
+    }
+
     return tokens;
   }, [
     search,
@@ -1760,6 +1815,9 @@ export function CatalogPanel({
     downloadedFilter,
     statuses,
     installedFilter,
+    syncRulesOnly,
+    config.systemFilter,
+    config.allowedReleaseTypes,
   ]);
 
   const activeFilterCount = activeFilterTokens.length;
@@ -1782,6 +1840,7 @@ export function CatalogPanel({
     setStatuses([]);
     setDownloadedFilter('all');
     setInstalledFilter('all');
+    setSyncRulesOnly(false);
     setTags([]);
     setTagsMode('any');
     setGenres([]);
@@ -2287,6 +2346,43 @@ export function CatalogPanel({
                     )}
                   </button>
                 </div>
+
+                <span
+                  aria-hidden="true"
+                  className="hidden sm:inline-block h-4 w-px bg-crt-border mx-0.5 shrink-0"
+                />
+
+                <button
+                  type="button"
+                  aria-pressed={syncRulesOnly}
+                  onClick={() => setSyncRulesOnly((prev) => !prev)}
+                  title={
+                    syncRulesOnly
+                      ? 'Click to clear Sync Rules filter and show all consoles and release types'
+                      : `Show only releases matching active Sync Rules (${formatSyncRuleScopeSummary(config.systemFilter, config.allowedReleaseTypes)})`
+                  }
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    syncRulesOnly
+                      ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
+                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                  }`}
+                >
+                  <SlidersHorizontal
+                    className={`h-3.5 w-3.5 shrink-0 ${
+                      syncRulesOnly ? 'text-crt-phosphor' : 'text-crt-muted'
+                    }`}
+                  />
+                  <span>Matches Sync Rules</span>
+                  {typeof facets.counts?.syncRulesMatched === 'number' && (
+                    <span
+                      className={`font-mono text-[11px] tabular-nums ${
+                        syncRulesOnly ? 'text-crt-phosphor/90' : 'text-crt-muted'
+                      }`}
+                    >
+                      ({facets.counts.syncRulesMatched.toLocaleString()})
+                    </span>
+                  )}
+                </button>
               </div>
 
               <select

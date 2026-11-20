@@ -16,6 +16,13 @@ import {
   filterValidSystemSlugs,
   sanitizeSystemFilterString,
 } from '../shared/systemCatalog.ts';
+import {
+  classifySystemIndexFreshness,
+  doesCatalogReleaseMatchSyncRules,
+  formatSyncRuleScopeSummary,
+  normalizeTargetConsoleSlugs,
+  resolveTargetConsoleScope,
+} from '../shared/syncRuleMatcher.ts';
 import type {
   ActivityLogRecord,
   CatalogFacetCounts,
@@ -28,6 +35,8 @@ import type {
   DatabaseMigrationReport,
   DownloadTrendDailyPoint,
   DownloadTrendRunPoint,
+  DryRunConsoleBreakdown,
+  DryRunSampleRelease,
   FileItemStatus,
   FilterMatchMode,
   ItemStatus,
@@ -42,7 +51,9 @@ import type {
   ScraperConfigInternal,
   ScraperConfigPublic,
   SizeBucketStat,
+  SyncPreflightSummary,
   SyncRunRecord,
+  SyncRunSummarySnapshot,
   SystemBreakdown,
   SystemCoverageStat,
   SystemIndexCursor,
@@ -781,10 +792,16 @@ export function updateSyncRun(
     rateLimitHits: number;
     avgDelayMs: number;
     errorSummary: string | null;
+    summary: SyncRunSummarySnapshot | null;
   }>,
 ): SyncRunRecord | null {
   const existing = getSyncRunById(id);
   if (!existing) return null;
+
+  const nextSummaryJson =
+    patch.summary !== undefined
+      ? (patch.summary ? JSON.stringify(patch.summary) : null)
+      : (existing.summary ? JSON.stringify(existing.summary) : null);
 
   getDb().prepare(`
     UPDATE sync_runs SET
@@ -798,7 +815,8 @@ export function updateSyncRun(
       bytes_downloaded = ?,
       rate_limit_hits = ?,
       avg_delay_ms = ?,
-      error_summary = ?
+      error_summary = ?,
+      summary_json = ?
     WHERE id = ?
   `).run(
     patch.status ?? existing.status,
@@ -812,6 +830,7 @@ export function updateSyncRun(
     patch.rateLimitHits ?? existing.rateLimitHits,
     patch.avgDelayMs ?? existing.avgDelayMs,
     patch.errorSummary !== undefined ? patch.errorSummary : existing.errorSummary,
+    nextSummaryJson,
     id,
   );
 
@@ -826,6 +845,14 @@ export function listSyncRuns(limit = 25): SyncRunRecord[] {
 function mapRunRow(row: Record<string, unknown>): SyncRunRecord {
   const rawMode = String(row.mode);
   const isLegacyDry = rawMode === 'dry_run';
+  let summary: SyncRunSummarySnapshot | null = null;
+  if (row.summary_json) {
+    try {
+      summary = JSON.parse(String(row.summary_json)) as SyncRunSummarySnapshot;
+    } catch {
+      summary = null;
+    }
+  }
   return {
     id: Number(row.id),
     triggerType: String(row.trigger_type) as RunTrigger,
@@ -843,6 +870,7 @@ function mapRunRow(row: Record<string, unknown>): SyncRunRecord {
     rateLimitHits: Number(row.rate_limit_hits),
     avgDelayMs: Number(row.avg_delay_ms),
     errorSummary: row.error_summary ? String(row.error_summary) : null,
+    summary,
   };
 }
 
@@ -1806,15 +1834,89 @@ function listStatusFacetCounts(): Record<string, number> {
   };
 }
 
-function listDownloadedFacetCounts(params: CatalogQueryFilterParams): {
+function loadAllReleaseFileRolesMap(): Map<number, string[]> {
+  const rows = getDb()
+    .prepare('SELECT release_id, file_role FROM catalog_release_files')
+    .all() as { release_id: number; file_role: string | null }[];
+  const map = new Map<number, string[]>();
+  for (const row of rows) {
+    const rid = Number(row.release_id);
+    const role = String(row.file_role || '').trim();
+    if (!role) continue;
+    const list = map.get(rid);
+    if (list) {
+      list.push(role);
+    } else {
+      map.set(rid, [role]);
+    }
+  }
+  return map;
+}
+
+interface RuleFilterRow {
+  id: number;
+  title?: string;
+  system_name: string;
+  release_type: string | null;
+  release_tags_json: string | null;
+  status: string;
+  file_size_bytes: number;
+  installed_at?: string | null;
+}
+
+function filterCandidateRowsBySyncRules<T extends RuleFilterRow>(
+  rows: T[],
+  cfg: ScraperConfigPublic,
+  fileRolesMap?: Map<number, string[]>,
+): T[] {
+  const allowedTypes = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes);
+  const targetSystems = normalizeTargetConsoleSlugs(cfg.systemFilter);
+  if (allowedTypes.length === 0 && targetSystems.length === 0) {
+    return rows;
+  }
+  const rolesLookup = allowedTypes.length > 0 ? (fileRolesMap ?? loadAllReleaseFileRolesMap()) : null;
+  return rows.filter((row) =>
+    doesCatalogReleaseMatchSyncRules(
+      {
+        systemName: String(row.system_name || ''),
+        releaseType: row.release_type ? String(row.release_type) : null,
+        releaseTags: parseJsonStringArray(row.release_tags_json),
+        fileRoles: rolesLookup?.get(Number(row.id)) ?? undefined,
+      },
+      cfg,
+    ),
+  );
+}
+
+function listDownloadedFacetCounts(
+  params: CatalogQueryFilterParams,
+  cfg?: ScraperConfigPublic,
+  fileRolesMap?: Map<number, string[]>,
+): {
   downloaded: number;
   notDownloaded: number;
 } {
-  const { where, args } = buildCatalogWhereAndOrder({
+  const scopedParams: CatalogQueryFilterParams = {
     ...params,
     downloaded: undefined,
     status: undefined,
-  });
+  };
+  const resolvedCfg = cfg ?? (scopedParams.syncRules ? getPublicConfig() : undefined);
+  const { where, args } = buildCatalogWhereAndOrder(scopedParams, resolvedCfg);
+
+  if (scopedParams.syncRules && resolvedCfg && normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes).length > 0) {
+    const candidateRows = getDb()
+      .prepare(`SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes FROM catalog_releases ${where}`)
+      .all(...args) as RuleFilterRow[];
+    const matched = filterCandidateRowsBySyncRules(candidateRows, resolvedCfg, fileRolesMap);
+    let downloaded = 0;
+    let notDownloaded = 0;
+    for (const row of matched) {
+      if (row.status === 'downloaded' || row.status === 'skipped') downloaded += 1;
+      else notDownloaded += 1;
+    }
+    return { downloaded, notDownloaded };
+  }
 
   const row = getDb()
     .prepare(
@@ -1831,14 +1933,34 @@ function listDownloadedFacetCounts(params: CatalogQueryFilterParams): {
   };
 }
 
-function listInstalledFacetCounts(params: CatalogQueryFilterParams): {
+function listInstalledFacetCounts(
+  params: CatalogQueryFilterParams,
+  cfg?: ScraperConfigPublic,
+  fileRolesMap?: Map<number, string[]>,
+): {
   installed: number;
   notInstalled: number;
 } {
-  const { where, args } = buildCatalogWhereAndOrder({
+  const scopedParams: CatalogQueryFilterParams = {
     ...params,
     installed: undefined,
-  });
+  };
+  const resolvedCfg = cfg ?? (scopedParams.syncRules ? getPublicConfig() : undefined);
+  const { where, args } = buildCatalogWhereAndOrder(scopedParams, resolvedCfg);
+
+  if (scopedParams.syncRules && resolvedCfg && normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes).length > 0) {
+    const candidateRows = getDb()
+      .prepare(`SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, installed_at FROM catalog_releases ${where}`)
+      .all(...args) as RuleFilterRow[];
+    const matched = filterCandidateRowsBySyncRules(candidateRows, resolvedCfg, fileRolesMap);
+    let installed = 0;
+    let notInstalled = 0;
+    for (const row of matched) {
+      if (row.installed_at) installed += 1;
+      else notInstalled += 1;
+    }
+    return { installed, notInstalled };
+  }
 
   const row = getDb()
     .prepare(
@@ -1853,6 +1975,28 @@ function listInstalledFacetCounts(params: CatalogQueryFilterParams): {
     installed: Number(row?.installed_cnt || 0),
     notInstalled: Number(row?.not_installed_cnt || 0),
   };
+}
+
+function listSyncRulesMatchedFacetCount(
+  params: CatalogQueryFilterParams,
+  cfg: ScraperConfigPublic,
+  fileRolesMap?: Map<number, string[]>,
+): number {
+  const scopedParams: CatalogQueryFilterParams = {
+    ...params,
+    syncRules: true,
+  };
+  const { where, args } = buildCatalogWhereAndOrder(scopedParams, cfg);
+  if (normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes).length === 0) {
+    const row = getDb()
+      .prepare(`SELECT COUNT(*) AS cnt FROM catalog_releases ${where}`)
+      .get(...args) as { cnt: number };
+    return Number(row.cnt || 0);
+  }
+  const candidateRows = getDb()
+    .prepare(`SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes FROM catalog_releases ${where}`)
+    .all(...args) as RuleFilterRow[];
+  return filterCandidateRowsBySyncRules(candidateRows, cfg, fileRolesMap).length;
 }
 
 function normalizeFilterList(raw: string | string[] | undefined): string[] {
@@ -1920,6 +2064,7 @@ export interface CatalogQueryFilterParams {
   status?: string | string[];
   downloaded?: string;
   installed?: string;
+  syncRules?: boolean;
   tag?: string | string[];
   tagMode?: string;
   genre?: string | string[];
@@ -1933,7 +2078,10 @@ export interface CatalogQueryFilterParams {
   sort?: string;
 }
 
-function buildCatalogWhereAndOrder(params: CatalogQueryFilterParams): {
+function buildCatalogWhereAndOrder(
+  params: CatalogQueryFilterParams,
+  cfgOverride?: ScraperConfigPublic,
+): {
   where: string;
   args: unknown[];
   orderBy: string;
@@ -1964,6 +2112,22 @@ function buildCatalogWhereAndOrder(params: CatalogQueryFilterParams): {
   } else if (systems.length > 1) {
     conditions.push(`system_name IN (${systems.map(() => '?').join(', ')})`);
     args.push(...systems);
+  }
+
+  if (params.syncRules) {
+    const ruleCfg = cfgOverride ?? getPublicConfig();
+    const ruleSystemSlugs = normalizeTargetConsoleSlugs(ruleCfg.systemFilter);
+    if (ruleSystemSlugs.length > 0) {
+      const ruleExpanded = expandSystemAliases(ruleSystemSlugs);
+      if (ruleExpanded.length === 1) {
+        conditions.push('LOWER(system_name) = ?');
+        args.push(ruleExpanded[0].toLowerCase());
+      } else if (ruleExpanded.length > 1) {
+        const lowerExpanded = ruleExpanded.map((s) => s.toLowerCase());
+        conditions.push(`LOWER(system_name) IN (${lowerExpanded.map(() => '?').join(', ')})`);
+        args.push(...lowerExpanded);
+      }
+    }
   }
 
   const rawStatuses = normalizeFilterList(params.status);
@@ -2023,10 +2187,18 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   alreadyQueuedCount: number;
   total: number;
 } {
-  const { where, args, orderBy } = buildCatalogWhereAndOrder(params);
-  const rows = getDb()
-    .prepare(`SELECT id, status, file_size_bytes FROM catalog_releases ${where} ORDER BY ${orderBy}`)
-    .all(...args) as { id: number; status: string; file_size_bytes: number }[];
+  const cfg = params.syncRules ? getPublicConfig() : undefined;
+  const { where, args, orderBy } = buildCatalogWhereAndOrder(params, cfg);
+  let rows = getDb()
+    .prepare(
+      `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes
+       FROM catalog_releases ${where} ORDER BY ${orderBy}`,
+    )
+    .all(...args) as RuleFilterRow[];
+
+  if (params.syncRules && cfg && normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes).length > 0) {
+    rows = filterCandidateRowsBySyncRules(rows, cfg);
+  }
 
   const ids: number[] = [];
   const downloadableIds: number[] = [];
@@ -2070,16 +2242,49 @@ export function queryRepositoryItems(
     offset?: number;
   },
 ): { items: RepositoryItemRecord[]; total: number; facets: CatalogFacets } {
-  const { where, args, orderBy } = buildCatalogWhereAndOrder(params);
+  const cfg = getPublicConfig();
+  const hasTypeRules = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes).length > 0;
+  const fileRolesMap = hasTypeRules ? loadAllReleaseFileRolesMap() : undefined;
+
+  const { where, args, orderBy } = buildCatalogWhereAndOrder(params, cfg);
   const limit = Math.min(200, Math.max(1, params.limit ?? 50));
   const offset = Math.max(0, params.offset ?? 0);
 
-  const countRow = getDb().prepare(`SELECT COUNT(*) as count FROM catalog_releases ${where}`).get(...args) as {
-    count: number;
-  };
-  const rows = getDb()
-    .prepare(`SELECT * FROM catalog_releases ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
-    .all(...args, limit, offset) as Record<string, unknown>[];
+  let total = 0;
+  let rows: Record<string, unknown>[] = [];
+
+  if (params.syncRules && hasTypeRules) {
+    const candidates = getDb()
+      .prepare(
+        `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes
+         FROM catalog_releases ${where} ORDER BY ${orderBy}`,
+      )
+      .all(...args) as RuleFilterRow[];
+    const matched = filterCandidateRowsBySyncRules(candidates, cfg, fileRolesMap);
+    total = matched.length;
+    const pageIds = matched.slice(offset, offset + limit).map((r) => Number(r.id));
+    if (pageIds.length > 0) {
+      const placeholders = pageIds.map(() => '?').join(', ');
+      const fetched = getDb()
+        .prepare(`SELECT * FROM catalog_releases WHERE id IN (${placeholders})`)
+        .all(...pageIds) as Record<string, unknown>[];
+      const byId = new Map<number, Record<string, unknown>>();
+      for (const r of fetched) {
+        byId.set(Number(r.id), r);
+      }
+      rows = pageIds
+        .map((id) => byId.get(id))
+        .filter((r): r is Record<string, unknown> => Boolean(r));
+    }
+  } else {
+    const countRow = getDb().prepare(`SELECT COUNT(*) as count FROM catalog_releases ${where}`).get(...args) as {
+      count: number;
+    };
+    total = Number(countRow.count);
+    rows = getDb()
+      .prepare(`SELECT * FROM catalog_releases ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
+      .all(...args, limit, offset) as Record<string, unknown>[];
+  }
 
   const releaseIds = rows.map((r) => Number(r.id));
   const filesMap = loadFilesByReleaseIds(releaseIds);
@@ -2090,8 +2295,9 @@ export function queryRepositoryItems(
   const languagesFacet = listDistinctJsonFacetWithCounts('languages_json');
   const sourcesFacet = listDistinctJsonFacetWithCounts('sources_json');
   const statusCounts = listStatusFacetCounts();
-  const downloadedCounts = listDownloadedFacetCounts(params);
-  const installedCounts = listInstalledFacetCounts(params);
+  const downloadedCounts = listDownloadedFacetCounts(params, cfg, fileRolesMap);
+  const installedCounts = listInstalledFacetCounts(params, cfg, fileRolesMap);
+  const syncRulesMatched = listSyncRulesMatchedFacetCount(params, cfg, fileRolesMap);
 
   const counts: CatalogFacetCounts = {
     tags: tagsFacet.counts,
@@ -2102,6 +2308,7 @@ export function queryRepositoryItems(
     statuses: statusCounts,
     downloaded: downloadedCounts,
     installed: installedCounts,
+    syncRulesMatched,
   };
 
   const facets: CatalogFacets = {
@@ -2115,8 +2322,174 @@ export function queryRepositoryItems(
 
   return {
     items: rows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || [])),
-    total: Number(countRow.count),
+    total,
     facets,
+  };
+}
+
+export function listCatalogReleasesForRuleSync(
+  cfgOverride?: ScraperConfigPublic,
+): {
+  matched: RepositoryItemRecord[];
+  excludedByRulesCount: number;
+  totalCataloged: number;
+} {
+  const cfg = cfgOverride ?? getPublicConfig();
+  const allRows = getDb()
+    .prepare('SELECT * FROM catalog_releases ORDER BY system_name COLLATE NOCASE ASC, title COLLATE NOCASE ASC, id ASC')
+    .all() as Record<string, unknown>[];
+  const fileRolesMap = loadAllReleaseFileRolesMap();
+  const matchedRows: Record<string, unknown>[] = [];
+  let excludedByRulesCount = 0;
+
+  for (const row of allRows) {
+    const rid = Number(row.id);
+    const matches = doesCatalogReleaseMatchSyncRules(
+      {
+        systemName: String(row.system_name || ''),
+        releaseType: row.release_type ? String(row.release_type) : null,
+        releaseTags: parseJsonStringArray(row.release_tags_json),
+        fileRoles: fileRolesMap.get(rid) ?? undefined,
+      },
+      cfg,
+    );
+    if (matches) {
+      matchedRows.push(row);
+    } else {
+      excludedByRulesCount += 1;
+    }
+  }
+
+  const filesMap = loadFilesByReleaseIds(matchedRows.map((r) => Number(r.id)));
+  const matched = matchedRows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || []));
+  return {
+    matched,
+    excludedByRulesCount,
+    totalCataloged: allRows.length,
+  };
+}
+
+export function computeSyncPreflightSummary(): SyncPreflightSummary {
+  const cfg = getPublicConfig();
+  const explicitConsoles = normalizeTargetConsoleSlugs(cfg.systemFilter);
+  const allowedTypes = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes);
+  const targetSystems = resolveTargetConsoleScope(cfg.systemFilter, cfg.discoveredSystems);
+  const freshness = classifySystemIndexFreshness(targetSystems, cfg.systemIndexState);
+
+  const rows = getDb()
+    .prepare(
+      `SELECT id, title, system_name, release_type, release_tags_json, status, file_size_bytes
+       FROM catalog_releases
+       ORDER BY COALESCE(published_at, remote_updated_at, discovered_at) DESC, id DESC`,
+    )
+    .all() as RuleFilterRow[];
+
+  const fileRolesMap = allowedTypes.length > 0 ? loadAllReleaseFileRolesMap() : undefined;
+
+  let totalCataloged = 0;
+  let totalRuleMatched = 0;
+  let pendingDownloadCount = 0;
+  let availablePendingCount = 0;
+  let retryablePendingCount = 0;
+  let queuedCount = 0;
+  let alreadyDownloadedCount = 0;
+  let excludedByRulesCount = 0;
+  let estimatedPendingBytes = 0;
+
+  const consoleMap = new Map<string, DryRunConsoleBreakdown>();
+  const samplePendingReleases: DryRunSampleRelease[] = [];
+
+  for (const row of rows) {
+    totalCataloged += 1;
+    const rid = Number(row.id);
+    const matches = doesCatalogReleaseMatchSyncRules(
+      {
+        systemName: String(row.system_name || ''),
+        releaseType: row.release_type ? String(row.release_type) : null,
+        releaseTags: parseJsonStringArray(row.release_tags_json),
+        fileRoles: fileRolesMap?.get(rid) ?? undefined,
+      },
+      cfg,
+    );
+
+    if (!matches) {
+      excludedByRulesCount += 1;
+      continue;
+    }
+
+    totalRuleMatched += 1;
+    const status = String(row.status || 'available');
+    const sizeBytes = Math.max(0, Number(row.file_size_bytes || 0));
+
+    if (status === 'downloaded' || status === 'skipped') {
+      alreadyDownloadedCount += 1;
+      continue;
+    }
+
+    pendingDownloadCount += 1;
+    estimatedPendingBytes += sizeBytes;
+    if (status === 'available') {
+      availablePendingCount += 1;
+    } else if (status === 'partial' || status === 'failed') {
+      retryablePendingCount += 1;
+    } else if (status === 'queued' || status === 'downloading') {
+      queuedCount += 1;
+    }
+
+    const canonicalSys = (canonicalizeSystemSlug(String(row.system_name || '')) || String(row.system_name || '')).toLowerCase();
+    const existingConsole = consoleMap.get(canonicalSys);
+    if (existingConsole) {
+      existingConsole.pendingCount += 1;
+      existingConsole.estimatedBytes += sizeBytes;
+    } else {
+      consoleMap.set(canonicalSys, {
+        systemName: canonicalSys,
+        pendingCount: 1,
+        estimatedBytes: sizeBytes,
+      });
+    }
+
+    if (samplePendingReleases.length < 8) {
+      samplePendingReleases.push({
+        id: rid,
+        title: String(row.title || ''),
+        systemName: canonicalSys,
+        releaseType: String(row.release_type || 'Retail ROM'),
+        fileSizeBytes: sizeBytes,
+        status,
+      });
+    }
+  }
+
+  const topPendingConsoles = Array.from(consoleMap.values())
+    .sort((a, b) => b.pendingCount - a.pendingCount || b.estimatedBytes - a.estimatedBytes)
+    .slice(0, 8);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    ruleScopeLabel: formatSyncRuleScopeSummary(cfg.systemFilter, cfg.allowedReleaseTypes),
+    hasCustomSystemFilter: explicitConsoles.length > 0,
+    hasCustomTypeFilter: allowedTypes.length > 0,
+    targetSystemsCount: targetSystems.length,
+    targetSystems,
+    freshConsoles: freshness.fresh,
+    staleConsoles: freshness.stale,
+    unindexedConsoles: freshness.unindexed,
+    oldestIndexedAt: freshness.oldestIndexedAt,
+    totalCataloged,
+    totalRuleMatched,
+    pendingDownloadCount,
+    availablePendingCount,
+    retryablePendingCount,
+    queuedCount,
+    alreadyDownloadedCount,
+    excludedByRulesCount,
+    estimatedPendingBytes,
+    topPendingConsoles,
+    samplePendingReleases,
+    autoDownloadNewReleases: Boolean(cfg.autoDownloadNewReleases),
+    lastWatermarkAt: cfg.lastWatermarkAt,
+    scheduleEnabled: Boolean(cfg.scheduleEnabled),
   };
 }
 

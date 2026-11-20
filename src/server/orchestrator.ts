@@ -23,6 +23,7 @@ import {
   getRepositoryItemByRemoteUrl,
   getSchemaMigrationReport,
   getSystemIndexState,
+  listCatalogReleasesForRuleSync,
   listReleasesNeedingRetry,
   listSyncRuns,
   markCatalogItemsQueuedDetailed,
@@ -55,6 +56,7 @@ import {
 import type { ClientAchievementEventPayload } from '../shared/achievements.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import {
+  defaultFileExistsWithBytes,
   evaluateReleaseFastSkip,
   partitionAlreadyDownloadedFiles,
 } from './syncFastSkip.ts';
@@ -66,6 +68,11 @@ import {
   formatAllowedReleaseTypesSummary,
   normalizeAllowedReleaseTypes,
 } from '../shared/releaseTypeFilter.ts';
+import {
+  classifySystemIndexFreshness,
+  doesCatalogReleaseMatchSyncRules,
+  formatSyncRuleScopeSummary,
+} from '../shared/syncRuleMatcher.ts';
 import { normalizeGitRepoUrl } from '../shared/gitUrl.ts';
 import { canonicalizeSystemSlug, filterValidSystemSlugs } from '../shared/systemCatalog.ts';
 import {
@@ -84,6 +91,8 @@ import type {
   AuthTestResult,
   CatalogIndexerStatus,
   ConfigUpdateInput,
+  DryRunConsoleBreakdown,
+  DryRunSampleRelease,
   FsTreeNode,
   LogLevel,
   ReleaseFileRecord,
@@ -96,6 +105,7 @@ import type {
   ServiceStatusSnapshot,
   StorageStats,
   SyncRunRecord,
+  SyncRunSummarySnapshot,
   TransferSpeedSample,
 } from './types.ts';
 
@@ -2569,7 +2579,11 @@ export class ScraperOrchestrator extends EventEmitter {
   async startRun(
     trigger: RunTrigger,
     mode: RunMode,
-    options?: { dryRun?: boolean },
+    options?: {
+      dryRun?: boolean;
+      refreshStaleIndexes?: boolean;
+      legacyFullCrawl?: boolean;
+    },
   ): Promise<SyncRunRecord> {
     if (this.activeRun) {
       throw new Error(`Sync run #${this.activeRun.id} is already in progress`);
@@ -2592,7 +2606,7 @@ export class ScraperOrchestrator extends EventEmitter {
     const modeLabel = isDryRun
       ? `Dry Run · ${effectiveScope === 'full' ? 'Full Sync' : 'Incremental'}`
       : effectiveScope === 'full'
-        ? 'Full Sync'
+        ? (options?.legacyFullCrawl ? 'Full Sync (Legacy Crawl)' : 'Full Sync')
         : 'Incremental';
 
     this.activeRun = run;
@@ -2611,7 +2625,7 @@ export class ScraperOrchestrator extends EventEmitter {
     );
     this.emitStatus();
 
-    void this.executeRun(run, cfg, lockKey);
+    void this.executeRun(run, cfg, lockKey, options);
     return run;
   }
 
@@ -3290,7 +3304,16 @@ export class ScraperOrchestrator extends EventEmitter {
     return true;
   }
 
-  private async executeRun(run: SyncRunRecord, cfg: ScraperConfigInternal, lockKey: string): Promise<void> {
+  private async executeRun(
+    run: SyncRunRecord,
+    cfg: ScraperConfigInternal,
+    lockKey: string,
+    options?: {
+      dryRun?: boolean;
+      refreshStaleIndexes?: boolean;
+      legacyFullCrawl?: boolean;
+    },
+  ): Promise<void> {
     const signal = this.abortController!.signal;
     const runLogger: LoggerFn = (level, msg, detail) => this.log(level, msg, detail ?? null, run.id);
     const startRateHits = this.rateLimiter.getTelemetry().rateLimitHits;
@@ -3305,6 +3328,7 @@ export class ScraperOrchestrator extends EventEmitter {
     let failedCount = 0;
     let bytesDownloaded = 0;
     let newestReleaseIso: string | null = null;
+    let runSummarySnapshot: SyncRunSummarySnapshot | null = null;
     const allowedReleaseTypes = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes);
     const hasReleaseTypeFilter = allowedReleaseTypes.length > 0;
 
@@ -4037,18 +4061,363 @@ export class ScraperOrchestrator extends EventEmitter {
         `systems=[${targetSystems.join(', ')}], mode=${run.mode}, dryRun=${isDryRun}, cutoff=${effectiveCutoffIso ?? 'none'}`,
       );
 
+      const buildWpMetaHintFromItem = (item: RepositoryItemRecord): WpPostMetadata | undefined => {
+        if (!item.wpPostId && !item.metadata) return undefined;
+        return {
+          wpPostId: item.wpPostId ?? item.metadata?.wpPostId ?? 0,
+          wpPostType: item.wpPostType ?? item.metadata?.wpPostType ?? item.systemName,
+          link: item.remoteUrl,
+          title: item.title,
+          originalTitle: item.metadata?.subtitle || null,
+          dateGmt: item.publishedAt,
+          modifiedGmt: item.remoteUpdatedAt,
+          descriptionHtml: item.metadata?.descriptionHtml || '',
+          genres: item.genres || [],
+          regions: item.regions || [],
+          languages: item.languages || [],
+          sources: item.sources || [],
+          formats: item.metadata?.formats || [],
+          publisher: item.publisher,
+          developer: item.developer,
+          releaseYear: item.releaseYear,
+          coverUrl: item.metadata?.coverUrl || null,
+          screenshotUrls: item.metadata?.screenshotUrls || [],
+          downloadHints: item.metadata?.downloadHints || [],
+        };
+      };
+
+      const isIndexFirstFullSync = !isDeltaMode && !options?.legacyFullCrawl && targetSystems.length > 0;
+
       if (targetSystems.length === 0) {
         await crawlHtmlScope([cfg.baseUrl], null, preloadedRootPage);
+      } else if (isIndexFirstFullSync) {
+        if (preloadedRootPage) {
+          visitedPages.add(preloadedRootPage.url);
+          visitedPages.add(preloadedRootPage.finalUrl);
+        }
+
+        const shouldRefreshIndexes = options?.refreshStaleIndexes !== false;
+        const refreshedConsoles: string[] = [];
+        let newDeltaDiscoveredCount = 0;
+        const htmlFallbackSystems: string[] = [];
+        const dryRunSimulatedPosts: { systemSlug: string; post: WpPostMetadata }[] = [];
+
+        const systemIndexState = getSystemIndexState();
+        const freshness = classifySystemIndexFreshness(targetSystems, systemIndexState);
+        const unindexedOrStaleSet = new Set([...freshness.unindexed, ...freshness.stale]);
+
+        runLogger(
+          'info',
+          `${isDryRun ? '[Dry Run · Index-First Full] ' : ''}Index-first mirror across ${targetSystems.length} target console(s)`,
+          `${freshness.fresh.length} fresh · ${freshness.stale.length} stale · ${freshness.unindexed.length} unindexed · refreshStale=${shouldRefreshIndexes}`,
+        );
+
+        // Phase 1: Ensure unindexed/stale consoles are indexed + quick delta refresh for fresh consoles
+        if (shouldRefreshIndexes) {
+          const scannedRestBases = new Set<string>();
+          for (let sysIdx = 0; sysIdx < targetSystems.length; sysIdx += 1) {
+            if (signal.aborted) break;
+            const systemSlug = targetSystems[sysIdx];
+            const canonicalSlug = canonicalizeSystemSlug(systemSlug).toLowerCase();
+            const needsFullIndex = unindexedOrStaleSet.has(canonicalSlug);
+            const existingCursor = systemIndexState[canonicalSlug] ?? systemIndexState[systemSlug];
+            const deltaCutoffIso = !needsFullIndex && existingCursor?.lastIndexedAt ? existingCursor.lastIndexedAt : null;
+
+            const resolvedRestBase = await this.client.resolveWpRestBaseForSystem(systemSlug, cfg, signal, runLogger);
+            if (resolvedRestBase) {
+              const restBaseKey = resolvedRestBase.toLowerCase();
+              if (scannedRestBases.has(restBaseKey)) {
+                continue;
+              }
+              scannedRestBases.add(restBaseKey);
+            }
+
+            this.currentPhase = needsFullIndex
+              ? `${isDryRun ? 'Dry Run · ' : ''}Indexing ${systemSlug} (${sysIdx + 1}/${targetSystems.length})`
+              : `${isDryRun ? 'Dry Run · ' : ''}Delta check ${systemSlug} (${sysIdx + 1}/${targetSystems.length})`;
+            this.emitStatus();
+
+            const wpRes = await this.client.listConsoleReleasesViaWpRest(systemSlug, cfg, {
+              modifiedAfterIso: deltaCutoffIso,
+              signal,
+              log: runLogger,
+              onPageFetched: (wpPage, wpTotalPages) => {
+                pagesCrawled += 1;
+                successfulPages += 1;
+                this.currentPhase = needsFullIndex
+                  ? `${isDryRun ? 'Dry Run · ' : ''}Indexing ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`
+                  : `${isDryRun ? 'Dry Run · ' : ''}Delta ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`;
+                persistCounters();
+              },
+            });
+
+            if (wpRes.supported) {
+              successfulPages += 1;
+              if (needsFullIndex && wpRes.posts.length === 0) {
+                htmlFallbackSystems.push(systemSlug);
+              } else {
+                for (const post of wpRes.posts) {
+                  recordObservedTimestamp(post.dateGmt);
+                  recordObservedTimestamp(post.modifiedGmt);
+                }
+                if (isDryRun) {
+                  for (const post of wpRes.posts) {
+                    if (post.link) {
+                      dryRunSimulatedPosts.push({ systemSlug: canonicalSlug, post });
+                    }
+                  }
+                  if (needsFullIndex || wpRes.posts.length > 0) {
+                    refreshedConsoles.push(canonicalSlug);
+                  }
+                } else {
+                  let upsertedForConsole = 0;
+                  for (const post of wpRes.posts) {
+                    if (!post.link) continue;
+                    const existingItem = getRepositoryItemByRemoteUrl(post.link.split('#')[0]);
+                    upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, cfg, run.id));
+                    if (!existingItem) {
+                      upsertedForConsole += 1;
+                    }
+                  }
+                  if (upsertedForConsole > 0) {
+                    newDeltaDiscoveredCount += upsertedForConsole;
+                    this.emitCatalogUpdated('sync_indexed');
+                  }
+                  const nowIso = new Date().toISOString();
+                  updateSystemIndexCursor(canonicalSlug, {
+                    lastIndexedAt: nowIso,
+                    totalWpPosts: needsFullIndex ? wpRes.posts.length : (existingCursor?.totalWpPosts ?? 0) + upsertedForConsole,
+                    totalPages: needsFullIndex ? wpRes.totalPages : (existingCursor?.totalPages ?? wpRes.totalPages),
+                    pagesIndexed: needsFullIndex ? wpRes.totalPages : (existingCursor?.pagesIndexed ?? wpRes.totalPages),
+                    fullyIndexed: true,
+                    scope: explicitFilters.length > 0 ? 'filtered' : 'full',
+                  });
+                  if (needsFullIndex || wpRes.posts.length > 0) {
+                    refreshedConsoles.push(canonicalSlug);
+                  }
+                }
+              }
+            } else {
+              htmlFallbackSystems.push(systemSlug);
+            }
+          }
+        }
+
+        // Phase 2: Mirror rule-matched releases directly from SQLite catalog
+        const { matched, excludedByRulesCount, totalCataloged } = listCatalogReleasesForRuleSync(cfg);
+        if (totalCataloged > 0) {
+          successfulPages = Math.max(successfulPages, 1);
+        }
+
+        let summaryTotalRuleMatched = matched.length;
+        let summaryExcludedByRules = excludedByRulesCount;
+        let summaryAlreadyOnDisk = 0;
+        let summaryWouldDownload = 0;
+        let dryRunEstimatedBytes = 0;
+        const consoleBreakdownMap = new Map<string, DryRunConsoleBreakdown>();
+        const sampleReleases: DryRunSampleRelease[] = [];
+
+        const recordPendingSummaryItem = (
+          sysSlug: string,
+          sample: DryRunSampleRelease,
+          estBytes: number,
+        ) => {
+          dryRunEstimatedBytes += estBytes;
+          const key = (canonicalizeSystemSlug(sysSlug) || sysSlug).toLowerCase();
+          const cur = consoleBreakdownMap.get(key);
+          if (cur) {
+            cur.pendingCount += 1;
+            cur.estimatedBytes += estBytes;
+          } else {
+            consoleBreakdownMap.set(key, {
+              systemName: key,
+              pendingCount: 1,
+              estimatedBytes: estBytes,
+            });
+          }
+          if (sampleReleases.length < 12) {
+            sampleReleases.push(sample);
+          }
+        };
+
+        const seenMatchedUrls = new Set(matched.map((item) => item.remoteUrl.split('#')[0]));
+        const pendingLiveItems: RepositoryItemRecord[] = [];
+
+        for (const item of matched) {
+          if (signal.aborted) break;
+          const files = item.files || [];
+          const hasAllFilesOnDisk =
+            item.status === 'skipped' ||
+            (item.status === 'downloaded' &&
+              files.length > 0 &&
+              files.every(
+                (f) =>
+                  (f.status === 'downloaded' || f.status === 'skipped') &&
+                  Boolean(f.localPath) &&
+                  defaultFileExistsWithBytes(f.localPath),
+              ));
+
+          if (hasAllFilesOnDisk) {
+            const countUnits = Math.max(1, files.length);
+            newFound += countUnits;
+            skippedCount += countUnits;
+            summaryAlreadyOnDisk += 1;
+            continue;
+          }
+
+          if (isDryRun) {
+            const estBytes =
+              item.fileSizeBytes > 0
+                ? item.fileSizeBytes
+                : estimateDownloadHintsBytes(item.metadata?.downloadHints);
+            newFound += 1;
+            summaryWouldDownload += 1;
+            recordPendingSummaryItem(
+              item.systemName,
+              {
+                id: item.id,
+                title: item.title,
+                systemName: (canonicalizeSystemSlug(item.systemName) || item.systemName).toLowerCase(),
+                releaseType: item.releaseType || 'Retail ROM',
+                fileSizeBytes: estBytes,
+                status: item.status,
+              },
+              estBytes,
+            );
+          } else {
+            pendingLiveItems.push(item);
+          }
+        }
+
+        // Include simulated newly refreshed remote posts in Dry Run without writing to SQLite
+        if (isDryRun && dryRunSimulatedPosts.length > 0) {
+          for (const sim of dryRunSimulatedPosts) {
+            if (!sim.post.link) continue;
+            const canonicalUrl = sim.post.link.split('#')[0];
+            if (seenMatchedUrls.has(canonicalUrl)) continue;
+            seenMatchedUrls.add(canonicalUrl);
+            if (getRepositoryItemByRemoteUrl(canonicalUrl)) continue;
+
+            const hintRoles = (sim.post.downloadHints || []).map((h) =>
+              classifyFileRole(h.filename, '', {
+                genres: sim.post.genres,
+                languages: sim.post.languages,
+                sources: sim.post.sources,
+                title: sim.post.title || undefined,
+                systemName: sim.systemSlug,
+              }),
+            );
+            const wpTags = deriveReleaseTags(
+              {
+                genres: sim.post.genres,
+                languages: sim.post.languages,
+                sources: sim.post.sources,
+                systemName: sim.systemSlug,
+              },
+              hintRoles,
+            );
+            const matches = doesCatalogReleaseMatchSyncRules(
+              {
+                systemName: sim.systemSlug,
+                releaseType: wpTags[0] || 'Retail ROM',
+                releaseTags: wpTags,
+                fileRoles: hintRoles,
+              },
+              cfg,
+            );
+            if (!matches) {
+              summaryExcludedByRules += 1;
+              continue;
+            }
+            summaryTotalRuleMatched += 1;
+            newDeltaDiscoveredCount += 1;
+            const estBytes = estimateDownloadHintsBytes(sim.post.downloadHints);
+            newFound += 1;
+            summaryWouldDownload += 1;
+            recordPendingSummaryItem(
+              sim.systemSlug,
+              {
+                title: sim.post.title || canonicalUrl,
+                systemName: sim.systemSlug,
+                releaseType: wpTags[0] || 'Retail ROM',
+                fileSizeBytes: estBytes,
+                status: 'available',
+              },
+              estBytes,
+            );
+          }
+        }
+
+        if (summaryAlreadyOnDisk > 0) {
+          runLogger(
+            'info',
+            `${isDryRun ? '[Dry Run · Index-First] ' : ''}Verified ${summaryAlreadyOnDisk} already-downloaded rule-matched release(s) on disk`,
+          );
+        }
+
+        if (!isDryRun && pendingLiveItems.length > 0) {
+          runLogger(
+            'info',
+            `Full Sync mirroring ${pendingLiveItems.length} pending rule-matched release(s) from SQLite catalog`,
+            summaryExcludedByRules > 0 ? `${summaryExcludedByRules} cataloged release(s) excluded by Sync Rules` : null,
+          );
+          for (let pIdx = 0; pIdx < pendingLiveItems.length; pIdx += 1) {
+            if (signal.aborted) break;
+            const item = pendingLiveItems[pIdx];
+            if (!item.remoteUrl || !item.remoteUrl.startsWith('http')) continue;
+            this.currentPhase = `Full Sync (${pIdx + 1}/${pendingLiveItems.length}): ${item.systemName} · ${item.title}`;
+            this.emitStatus();
+            await inspectAndProcessReleasePage(item.remoteUrl, buildWpMetaHintFromItem(item), null);
+          }
+        }
+
+        // Fallback HTML crawl for consoles without WP REST CPT support
+        for (const fallbackSlug of htmlFallbackSystems) {
+          if (signal.aborted) break;
+          const consoleHtmlUrl = new URL(`${encodeURIComponent(fallbackSlug)}/`, baseWithSlash).toString();
+          runLogger('debug', `[Crawl] "${fallbackSlug}" falling back to HTML Full Sync crawl`, consoleHtmlUrl);
+          await crawlHtmlScope([consoleHtmlUrl], fallbackSlug);
+        }
+
+        skippedByTypeCount += summaryExcludedByRules;
+        runSummarySnapshot = {
+          strategy: 'index_first',
+          ruleScopeLabel: formatSyncRuleScopeSummary(cfg.systemFilter, cfg.allowedReleaseTypes),
+          totalRuleMatched: summaryTotalRuleMatched,
+          wouldDownloadCount: isDryRun ? summaryWouldDownload : downloadedCount,
+          alreadyOnDiskCount: summaryAlreadyOnDisk,
+          excludedByRulesCount: summaryExcludedByRules,
+          estimatedDownloadBytes: dryRunEstimatedBytes,
+          refreshedConsoles,
+          newDeltaDiscoveredCount,
+          consoleBreakdown: Array.from(consoleBreakdownMap.values())
+            .sort((a, b) => b.pendingCount - a.pendingCount || b.estimatedBytes - a.estimatedBytes)
+            .slice(0, 10),
+          sampleReleases,
+        };
+
+        persistCounters();
       } else {
         if (preloadedRootPage) {
           visitedPages.add(preloadedRootPage.url);
           visitedPages.add(preloadedRootPage.finalUrl);
         }
 
+        const refreshedDeltaConsoles: string[] = [];
+        let deltaNewDiscoveredCount = 0;
+        let deltaMatchedCount = 0;
+        let deltaAlreadyOnDiskCount = 0;
+        let deltaWouldDownloadCount = 0;
+        let deltaEstimatedBytes = 0;
+        const deltaConsoleMap = new Map<string, DryRunConsoleBreakdown>();
+        const deltaSamples: DryRunSampleRelease[] = [];
+
+        const existingIndexState = getSystemIndexState();
         const scannedRestBases = new Set<string>();
         for (let sysIdx = 0; sysIdx < targetSystems.length; sysIdx += 1) {
           if (signal.aborted) break;
           const systemSlug = targetSystems[sysIdx];
+          const canonicalSlug = canonicalizeSystemSlug(systemSlug).toLowerCase();
           const scopeLabel = `${sysIdx + 1}/${targetSystems.length}`;
           const prevNewFound = newFound;
           const prevSkipped = skippedCount;
@@ -4131,7 +4500,7 @@ export class ScraperOrchestrator extends EventEmitter {
           let fastSkippedFilesCount = 0;
 
           if (wpRes.supported) {
-            // Capture pre-upsert catalog state BEFORE WP indexing updates remote_updated_at
+            successfulPages += 1;
             const preUpsertExistingByUrl = new Map<string, RepositoryItemRecord | null>();
             for (const post of wpRes.posts) {
               if (!post.link) continue;
@@ -4147,9 +4516,34 @@ export class ScraperOrchestrator extends EventEmitter {
             if (!isDryRun && wpRes.posts.length > 0) {
               for (const post of wpRes.posts) {
                 if (!post.link) continue;
+                const canonicalLink = post.link.split('#')[0];
+                if (!preUpsertExistingByUrl.get(canonicalLink)) {
+                  deltaNewDiscoveredCount += 1;
+                }
                 upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, cfg, run.id));
               }
               this.emitCatalogUpdated('sync_indexed');
+            } else if (isDryRun && wpRes.posts.length > 0) {
+              for (const post of wpRes.posts) {
+                if (!post.link) continue;
+                if (!preUpsertExistingByUrl.get(post.link.split('#')[0])) {
+                  deltaNewDiscoveredCount += 1;
+                }
+              }
+            }
+
+            if (!isDryRun) {
+              const prevCursor = existingIndexState[canonicalSlug] ?? existingIndexState[systemSlug];
+              if (prevCursor?.fullyIndexed) {
+                updateSystemIndexCursor(canonicalSlug, {
+                  ...prevCursor,
+                  lastIndexedAt: new Date().toISOString(),
+                  totalWpPosts: (prevCursor.totalWpPosts ?? 0) + (wpRes.posts.length > 0 ? wpRes.posts.length : 0),
+                });
+              }
+              if (wpRes.posts.length > 0) {
+                refreshedDeltaConsoles.push(canonicalSlug);
+              }
             }
 
             const tryFastSkipWpPost = (post: WpPostMetadata): boolean => {
@@ -4176,6 +4570,7 @@ export class ScraperOrchestrator extends EventEmitter {
               skippedCount += check.verifiedFilesCount;
               fastSkippedReleasesCount += 1;
               fastSkippedFilesCount += check.verifiedFilesCount;
+              deltaAlreadyOnDiskCount += 1;
               runLogger(
                 'debug',
                 `[Fast Skip] Already downloaded & verified on disk: ${post.title || canonicalLink} (${check.verifiedFilesCount} file(s))`,
@@ -4217,8 +4612,34 @@ export class ScraperOrchestrator extends EventEmitter {
                   persistCounters();
                   continue;
                 }
+                deltaMatchedCount += 1;
                 if (tryFastSkipWpPost(post)) {
                   continue;
+                }
+                if (isDryRun) {
+                  const estBytes = estimateDownloadHintsBytes(post.downloadHints);
+                  deltaWouldDownloadCount += 1;
+                  deltaEstimatedBytes += estBytes;
+                  const cEntry = deltaConsoleMap.get(canonicalSlug);
+                  if (cEntry) {
+                    cEntry.pendingCount += 1;
+                    cEntry.estimatedBytes += estBytes;
+                  } else {
+                    deltaConsoleMap.set(canonicalSlug, {
+                      systemName: canonicalSlug,
+                      pendingCount: 1,
+                      estimatedBytes: estBytes,
+                    });
+                  }
+                  if (deltaSamples.length < 12) {
+                    deltaSamples.push({
+                      title: post.title || post.link,
+                      systemName: canonicalSlug,
+                      releaseType: 'Delta Release',
+                      fileSizeBytes: estBytes,
+                      status: 'available',
+                    });
+                  }
                 }
                 this.currentPhase = `${isDryRun ? 'Dry Run (Incremental)' : 'Incremental'} · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
                 this.emitStatus();
@@ -4241,6 +4662,7 @@ export class ScraperOrchestrator extends EventEmitter {
                   persistCounters();
                   continue;
                 }
+                deltaMatchedCount += 1;
                 if (tryFastSkipWpPost(post)) {
                   continue;
                 }
@@ -4249,7 +4671,6 @@ export class ScraperOrchestrator extends EventEmitter {
                 await inspectAndProcessReleasePage(post.link, post, null);
               }
             } else {
-              // Console CPT returned 0 posts; verify HTML listing in Full Sync in case of static links
               const consoleHtmlUrl = new URL(`${encodeURIComponent(systemSlug)}/`, baseWithSlash).toString();
               runLogger('debug', `[Crawl] "${systemSlug}" WP REST returned 0 posts in Full Sync; falling back to HTML`, consoleHtmlUrl);
               await crawlHtmlScope([consoleHtmlUrl], systemSlug);
@@ -4278,6 +4699,24 @@ export class ScraperOrchestrator extends EventEmitter {
           }
 
           persistCounters();
+        }
+
+        if (isDeltaMode || options?.legacyFullCrawl) {
+          runSummarySnapshot = {
+            strategy: options?.legacyFullCrawl ? 'legacy_crawl' : 'incremental_delta',
+            ruleScopeLabel: formatSyncRuleScopeSummary(cfg.systemFilter, cfg.allowedReleaseTypes),
+            totalRuleMatched: deltaMatchedCount,
+            wouldDownloadCount: isDryRun ? Math.max(deltaWouldDownloadCount, Math.max(0, newFound - skippedCount)) : downloadedCount,
+            alreadyOnDiskCount: deltaAlreadyOnDiskCount,
+            excludedByRulesCount: skippedByTypeCount,
+            estimatedDownloadBytes: deltaEstimatedBytes,
+            refreshedConsoles: refreshedDeltaConsoles,
+            newDeltaDiscoveredCount: deltaNewDiscoveredCount,
+            consoleBreakdown: Array.from(deltaConsoleMap.values())
+              .sort((a, b) => b.pendingCount - a.pendingCount || b.estimatedBytes - a.estimatedBytes)
+              .slice(0, 10),
+            sampleReleases: deltaSamples,
+          };
         }
       }
 
@@ -4313,6 +4752,7 @@ export class ScraperOrchestrator extends EventEmitter {
         bytesDownloaded,
         rateLimitHits: Math.max(0, rl.rateLimitHits - startRateHits),
         avgDelayMs: rl.currentDelayMs,
+        summary: runSummarySnapshot,
       });
 
       const typeSkipDetail = skippedByTypeCount > 0 ? ` (${skippedByTypeCount} filtered by type)` : '';

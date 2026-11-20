@@ -7,6 +7,7 @@ import {
   ChevronUp,
   Clock,
   Download,
+  FlaskConical,
   Pause,
   Trash2,
   XCircle,
@@ -27,6 +28,7 @@ import type {
   OperationsSectionTarget,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
+  SyncPreflightSummary,
   SyncRunRecord,
 } from '../types';
 import {
@@ -47,6 +49,7 @@ interface OverviewPanelProps {
   status: ServiceStatusSnapshot;
   runs: SyncRunRecord[];
   logs: ActivityLogRecord[];
+  preflight?: SyncPreflightSummary | null;
   logsClearedRevision?: number;
   catalogRevision: number;
   activeRetryItemId?: number | null;
@@ -57,6 +60,8 @@ interface OverviewPanelProps {
   onClearLogs: (level: 'all' | LogLevel) => Promise<void>;
   onClearRuns: () => Promise<void>;
   onNavigateToOperations: (target?: OperationsSectionTarget) => void;
+  onQueueRuleMatches?: () => Promise<void>;
+  onPreviewRuleMatchesInCatalog?: (onlyNotDownloaded?: boolean) => void;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onRetryAllFailed: (options?: { system?: string; ids?: number[]; dryRun?: boolean }) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
@@ -159,6 +164,7 @@ export function OverviewPanel({
   status,
   runs,
   logs,
+  preflight = null,
   logsClearedRevision = 0,
   catalogRevision,
   activeRetryItemId = null,
@@ -169,6 +175,8 @@ export function OverviewPanel({
   onClearLogs,
   onClearRuns,
   onNavigateToOperations,
+  onQueueRuleMatches,
+  onPreviewRuleMatchesInCatalog,
   onRetryItem,
   onRetryAllFailed,
   onRefreshStatus,
@@ -187,8 +195,34 @@ export function OverviewPanel({
   const [cutoffError, setCutoffError] = useState<string | null>(null);
   const [cutoffSavedNotice, setCutoffSavedNotice] = useState<string | null>(null);
   const [transferDetailsOpen, setTransferDetailsOpen] = useState(false);
+  const [queueingRuleMatches, setQueueingRuleMatches] = useState(false);
+  const [confirmQueueRuleMatches, setConfirmQueueRuleMatches] = useState(false);
+  const [monitorQueueNotice, setMonitorQueueNotice] = useState<string | null>(null);
   const [, setTick] = useState(0);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const latestDryRunWithSummary = useMemo(
+    () =>
+      runs.find(
+        (r) => r.status !== 'running' && (r.dryRun || r.mode === 'dry_run') && Boolean(r.summary),
+      ) ?? null,
+    [runs],
+  );
+
+  const handleQueueRuleMatchesAction = async () => {
+    if (!onQueueRuleMatches || queueingRuleMatches) return;
+    setQueueingRuleMatches(true);
+    setConfirmQueueRuleMatches(false);
+    setMonitorQueueNotice(null);
+    try {
+      await onQueueRuleMatches();
+      setMonitorQueueNotice('Queued pending Sync Rule matches into download worker queue.');
+    } catch (err) {
+      setMonitorQueueNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQueueingRuleMatches(false);
+    }
+  };
 
   // Refresh countdown clock every second while idle/running
   useEffect(() => {
@@ -1208,6 +1242,146 @@ export function OverviewPanel({
             </div>
           </div>
         </div>
+
+        {/* Zone 3.5: Catalog Index Readiness & Direct Rule Queue Strip */}
+        {preflight && (
+          <div className="mt-3.5 pt-3 border-t border-crt-border flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0 space-y-0.5">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
+                <span className="text-crt-muted">Sync Rule Readiness</span>
+                <span className="font-mono text-crt-text truncate max-w-md" title={preflight.ruleScopeLabel}>
+                  · {preflight.ruleScopeLabel}
+                </span>
+              </div>
+              <p className="text-xs font-mono text-crt-muted tabular-nums">
+                <span className={preflight.pendingDownloadCount > 0 ? 'text-crt-phosphor font-medium' : 'text-crt-text'}>
+                  {preflight.pendingDownloadCount.toLocaleString()} pending
+                </span>
+                {preflight.estimatedPendingBytes > 0 && (
+                  <span> (~{formatBytes(preflight.estimatedPendingBytes)})</span>
+                )}
+                {' · '}
+                <span>{preflight.alreadyDownloadedCount.toLocaleString()} on disk</span>
+                {preflight.excludedByRulesCount > 0 && (
+                  <span> · {preflight.excludedByRulesCount.toLocaleString()} excluded</span>
+                )}
+                {' · '}
+                <span>
+                  Index {preflight.freshConsoles.length}/{preflight.targetSystemsCount} fresh
+                </span>
+                {preflight.unindexedConsoles.length > 0 && (
+                  <span className="text-crt-amber"> · {preflight.unindexedConsoles.length} unindexed</span>
+                )}
+                {preflight.staleConsoles.length > 0 && (
+                  <span className="text-crt-amber"> · {preflight.staleConsoles.length} stale</span>
+                )}
+              </p>
+              {monitorQueueNotice && (
+                <p className="text-[11px] font-mono text-crt-phosphor">{monitorQueueNotice}</p>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {onPreviewRuleMatchesInCatalog && (
+                <button
+                  type="button"
+                  onClick={() => onPreviewRuleMatchesInCatalog(true)}
+                  className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  View in Catalog
+                </button>
+              )}
+              {onQueueRuleMatches && preflight.pendingDownloadCount > 0 && (
+                confirmQueueRuleMatches ? (
+                  <div className="inline-flex items-center gap-1.5 shrink-0">
+                    <span className="text-[11px] font-mono text-crt-amber tabular-nums">
+                      Queue {preflight.pendingDownloadCount.toLocaleString()}?
+                    </span>
+                    <button
+                      type="button"
+                      disabled={queueingRuleMatches}
+                      onClick={() => void handleQueueRuleMatchesAction()}
+                      className="px-2.5 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+                    >
+                      {queueingRuleMatches ? 'Queueing...' : 'Confirm'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmQueueRuleMatches(false)}
+                      className="px-2 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={
+                      queueingRuleMatches ||
+                      Boolean(status.activeRun && status.activeRun.triggerType !== 'download')
+                    }
+                    onClick={() => {
+                      if (preflight.pendingDownloadCount > 25) {
+                        setConfirmQueueRuleMatches(true);
+                      } else {
+                        void handleQueueRuleMatchesAction();
+                      }
+                    }}
+                    title="Queue all cataloged releases matching active Sync Rules that are not yet downloaded"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      {queueingRuleMatches
+                        ? 'Queueing...'
+                        : `Queue Pending (${preflight.pendingDownloadCount.toLocaleString()})`}
+                    </span>
+                  </button>
+                )
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Latest Structured Dry Run Result Callout */}
+        {latestDryRunWithSummary?.summary && (
+          <div className="mt-3 pt-3 border-t border-crt-border flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5 min-w-0">
+              <FlaskConical className="h-4 w-4 text-crt-amber shrink-0 mt-0.5" />
+              <div className="space-y-0.5 min-w-0">
+                <div className="text-[11px] font-mono text-crt-amber tabular-nums">
+                  Latest Dry Run (#{latestDryRunWithSummary.id} ·{' '}
+                  {latestDryRunWithSummary.mode === 'full' ? 'Index-First Full' : 'Incremental Delta'})
+                </div>
+                <p className="text-xs font-mono text-crt-muted tabular-nums">
+                  <span className="text-crt-text font-medium">
+                    {latestDryRunWithSummary.summary.wouldDownloadCount.toLocaleString()} would download
+                  </span>
+                  {latestDryRunWithSummary.summary.estimatedDownloadBytes > 0 && (
+                    <span> (~{formatBytes(latestDryRunWithSummary.summary.estimatedDownloadBytes)})</span>
+                  )}
+                  {' · '}
+                  <span>{latestDryRunWithSummary.summary.alreadyOnDiskCount.toLocaleString()} on disk</span>
+                  {latestDryRunWithSummary.summary.excludedByRulesCount > 0 && (
+                    <span> · {latestDryRunWithSummary.summary.excludedByRulesCount.toLocaleString()} rule-excluded</span>
+                  )}
+                  {latestDryRunWithSummary.summary.refreshedConsoles.length > 0 && (
+                    <span> · {latestDryRunWithSummary.summary.refreshedConsoles.length} console index(es) checked</span>
+                  )}
+                </p>
+              </div>
+            </div>
+            {latestDryRunWithSummary.summary.wouldDownloadCount > 0 && onPreviewRuleMatchesInCatalog && (
+              <button
+                type="button"
+                onClick={() => onPreviewRuleMatchesInCatalog(true)}
+                className="px-2.5 py-1 text-xs font-mono border border-crt-amber/50 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Inspect Pending Matches
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Inline Incremental Cutoff Timestamp Editor (Smooth Accordion Disclosure) */}
         <div
