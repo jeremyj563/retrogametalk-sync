@@ -425,17 +425,24 @@ async function switchPaletteInPlace(
   targetPalette: CrtPalette,
 ): Promise<boolean> {
   const label = CRT_PALETTES[targetPalette].shortLabel;
-  const switched = await page.evaluate((targetLabel: string) => {
-    const buttons = Array.from(
-      document.querySelectorAll('.crt-tuner-card button'),
-    ) as HTMLButtonElement[];
-    const swatchBtn = buttons.find(
-      (btn) => !btn.disabled && btn.textContent?.trim().toLowerCase() === targetLabel.toLowerCase(),
-    );
-    if (!swatchBtn) return false;
-    swatchBtn.click();
-    return true;
-  }, label);
+  const switched = await page.evaluate(
+    ({ paletteId, targetLabel }: { paletteId: string; targetLabel: string }) => {
+      const buttons = Array.from(
+        document.querySelectorAll('.crt-tuner-card button'),
+      ) as HTMLButtonElement[];
+      const isEnabled = (btn: HTMLButtonElement) =>
+        !btn.disabled && btn.getAttribute('aria-disabled') !== 'true';
+      const swatchBtn =
+        buttons.find((btn) => isEnabled(btn) && btn.dataset.crtPalette === paletteId) ??
+        buttons.find(
+          (btn) => isEnabled(btn) && btn.textContent?.trim().toLowerCase() === targetLabel.toLowerCase(),
+        );
+      if (!swatchBtn) return false;
+      swatchBtn.click();
+      return true;
+    },
+    { paletteId: targetPalette, targetLabel: label },
+  );
 
   if (!switched) {
     console.warn(`[capture] Could not locate "${label}" swatch inside .crt-tuner-card`);

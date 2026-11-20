@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react';
+import { type CSSProperties, useState } from 'react';
 import { Lock, Monitor, RotateCcw, Waves } from 'lucide-react';
 import {
   BVM_PRESET_REQUIRED_POINTS,
@@ -28,6 +28,13 @@ interface CrtDisplayControlProps {
   onChange: (next: CrtDisplaySettings) => void;
 }
 
+const ALL_CRT_PALETTES: readonly CrtPalette[] = [
+  ...CRT_CORE_PALETTES,
+  ...CRT_BONUS_PALETTES,
+];
+
+const PALETTE_POINTS_BY_ID: Partial<Record<CrtPalette, number>> = PALETTE_REQUIRED_POINTS;
+
 const SLIDER_FIELDS: {
   key: keyof CrtFxValues;
   label: string;
@@ -49,11 +56,16 @@ export function CrtDisplayControl({
   earnedPoints = 0,
   onChange,
 }: CrtDisplayControlProps) {
+  const [previewPalette, setPreviewPalette] = useState<CrtPalette | null>(null);
   const bvmUnlocked = isBvmPresetUnlocked(earnedPoints);
   const activePreset = detectActiveCrtPreset(settings);
   const savedCustom =
     activePreset === 'custom' ? extractCrtFxValues(settings) : settings.customValues;
   const canRestoreCustom = activePreset !== 'custom' && Boolean(savedCustom);
+  const headerPaletteId = previewPalette ?? settings.palette;
+  const headerPalette = CRT_PALETTES[headerPaletteId];
+  const headerPaletteUnlocked = isPaletteUnlocked(headerPaletteId, earnedPoints);
+  const headerPaletteReqPts = PALETTE_POINTS_BY_ID[headerPaletteId] ?? 0;
 
   const presetStatus = !settings.enabled
     ? 'Bypassed'
@@ -213,76 +225,88 @@ export function CrtDisplayControl({
           </div>
         </div>
 
-        {/* Phosphor Palette Selector */}
+        {/* Phosphor Palette Selector — Uniform 7-Swatch Hardware Strip */}
         <div className="space-y-1.5">
-          <div className="text-[10px] font-mono text-crt-muted">Phosphor Palette</div>
-          <div className="grid grid-cols-3 gap-1">
-            {CRT_CORE_PALETTES.map((id) => {
-              const pal = CRT_PALETTES[id];
-              const active = settings.palette === id;
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => handleSelectPalette(id)}
-                  className={`inline-flex items-center justify-center gap-1.5 px-1.5 py-1 text-[11px] font-mono rounded border transition-colors whitespace-nowrap cursor-pointer ${
-                    active
-                      ? 'border-crt-phosphor/60 bg-crt-elevated text-crt-text font-medium'
-                      : 'border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
-                  }`}
-                >
-                  <span
-                    aria-hidden="true"
-                    className={`w-2 h-2 rounded-full shrink-0 ${pal.swatchClass}`}
-                  />
-                  <span>{pal.shortLabel}</span>
-                </button>
-              );
-            })}
+          <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-crt-muted">
+            <span className="shrink-0">Phosphor Palette</span>
+            <span
+              className={`inline-flex items-center gap-1 min-w-0 truncate ${
+                headerPaletteUnlocked ? 'text-crt-text/85' : 'text-crt-muted/75'
+              }`}
+            >
+              {!headerPaletteUnlocked && <Lock className="h-2.5 w-2.5 shrink-0" />}
+              <span className="truncate">
+                {headerPaletteUnlocked
+                  ? headerPalette.label
+                  : `${headerPalette.label} · ${headerPaletteReqPts.toLocaleString()} pts`}
+              </span>
+            </span>
           </div>
-
-          {/* Point-Unlocked Collector Palettes */}
-          <div className="grid grid-cols-2 gap-1">
-            {CRT_BONUS_PALETTES.map((id) => {
+          <div
+            className="grid grid-cols-7 gap-1"
+            role="group"
+            aria-label="CRT Phosphor Palette"
+          >
+            {ALL_CRT_PALETTES.map((id) => {
               const pal = CRT_PALETTES[id];
-              const reqPts = PALETTE_REQUIRED_POINTS[id] ?? 0;
+              const reqPts = PALETTE_POINTS_BY_ID[id] ?? 0;
               const unlocked = isPaletteUnlocked(id, earnedPoints);
               const active = unlocked && settings.palette === id;
+              const swatchStyle = {
+                '--crt-swatch-rgb': pal.rgb,
+              } as CSSProperties;
+              const tooltip = unlocked
+                ? reqPts > 0
+                  ? `${pal.label} · Collector phosphor palette`
+                  : `${pal.label} phosphor palette`
+                : `${pal.label} · Unlock at ${reqPts.toLocaleString()} trophy pts`;
+
               return (
                 <button
                   key={id}
                   type="button"
-                  disabled={!unlocked}
+                  data-crt-palette={id}
                   aria-pressed={active}
-                  onClick={() => handleSelectPalette(id)}
-                  title={
+                  aria-disabled={!unlocked}
+                  aria-label={
                     unlocked
-                      ? `${pal.label} · Collector phosphor palette`
-                      : `${pal.label} · Unlock at ${reqPts.toLocaleString()} trophy pts`
+                      ? `${pal.label} phosphor palette`
+                      : `${pal.label} phosphor palette, locked until ${reqPts.toLocaleString()} trophy points`
                   }
-                  className={`inline-flex items-center justify-between gap-1 px-1.5 py-1 text-[10px] font-mono rounded border transition-colors whitespace-nowrap ${
+                  onClick={() => handleSelectPalette(id)}
+                  onMouseEnter={() => setPreviewPalette(id)}
+                  onMouseLeave={() => setPreviewPalette((curr) => (curr === id ? null : curr))}
+                  onFocus={() => setPreviewPalette(id)}
+                  onBlur={() => setPreviewPalette((curr) => (curr === id ? null : curr))}
+                  title={tooltip}
+                  style={swatchStyle}
+                  className={`group relative inline-flex h-7 w-full items-center justify-center rounded border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-crt-phosphor/80 focus-visible:ring-offset-1 focus-visible:ring-offset-crt-bg ${
                     !unlocked
-                      ? 'border-crt-border/65 bg-crt-bg/45 text-crt-muted/50 cursor-not-allowed'
+                      ? 'border-crt-border/65 bg-crt-bg/45 text-crt-muted/65 hover:border-crt-border-strong/75 cursor-not-allowed'
                       : active
-                        ? 'border-crt-phosphor/65 bg-crt-elevated text-crt-text font-medium cursor-pointer'
-                        : 'border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong cursor-pointer'
+                        ? 'crt-palette-key-active border-crt-phosphor/75 bg-crt-elevated cursor-pointer'
+                        : 'border-crt-border bg-crt-surface hover:border-crt-border-strong hover:bg-crt-elevated/65 cursor-pointer'
                   }`}
                 >
-                  <span className="inline-flex items-center gap-1.5 min-w-0">
+                  <span className="sr-only">{pal.shortLabel}</span>
+                  {unlocked ? (
                     <span
                       aria-hidden="true"
-                      className={`w-2 h-2 rounded-full shrink-0 ${pal.swatchClass} ${
-                        unlocked ? '' : 'opacity-45'
-                      }`}
+                      className={`w-2.5 h-2.5 rounded-full shrink-0 transition-transform duration-150 motion-reduce:transition-none ${
+                        pal.swatchClass
+                      } ${active ? 'crt-palette-swatch-active scale-110' : 'group-hover:scale-110'}`}
                     />
-                    <span className="truncate">{pal.shortLabel}</span>
-                  </span>
-                  {!unlocked && (
-                    <span className="inline-flex items-center gap-0.5 text-[9px] text-crt-muted/60 shrink-0 tabular-nums">
-                      <Lock className="h-2.5 w-2.5" />
-                      {reqPts}
-                    </span>
+                  ) : (
+                    <>
+                      <span
+                        aria-hidden="true"
+                        className={`w-3.5 h-3.5 rounded-full opacity-25 ${pal.swatchClass}`}
+                      />
+                      <Lock
+                        aria-hidden="true"
+                        className="absolute h-2.5 w-2.5 text-crt-muted/80"
+                      />
+                    </>
                   )}
                 </button>
               );

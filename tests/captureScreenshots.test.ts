@@ -319,4 +319,9 @@ test('WALKTHROUGH_TIMINGS_MS dwells on drawer details, in-drawer screenshot thum
     false,
     'Walkthrough capture must switch CRT palettes in-place without reloading the page',
   );
+  assert.equal(
+    captureSource.includes('dataset.crtPalette'),
+    true,
+    'Walkthrough capture should target the uniform data-crt-palette swatch attribute',
+  );
 });
