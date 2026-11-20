@@ -16,7 +16,11 @@ import {
 } from 'lucide-react';
 import type { SoundtrackController } from '../hooks/useSoundtrackPlayer';
 import type { CrtUiMotionLevel } from '../shared/crtDisplay';
-import { isMusicTrackUnlocked, type MusicPlaybackMode } from '../shared/soundtrack';
+import {
+  isMusicTrackUnlocked,
+  type MusicPlaybackMode,
+  type MusicTrackId,
+} from '../shared/soundtrack';
 
 interface HeaderSoundDeckProps {
   controller: SoundtrackController;
@@ -29,6 +33,34 @@ function prefersReducedMotion(): boolean {
     return false;
   }
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+/**
+ * Matches wide deck layout windows where 12-bar equalizer + 2-line LCD readout have ample width:
+ * - Wide desktop (xl+ >= 1280px) where center-stage slot is 360px-440px
+ * - Tablet/small-row full-width deck (640px..1023px) where deck spans its own row
+ */
+function useWideDeckVisualizer(): boolean {
+  const query = '(min-width: 1280px), (min-width: 640px) and (max-width: 1023px)';
+  const [isWide, setIsWide] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return true;
+    }
+    return window.matchMedia(query).matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const mql = window.matchMedia(query);
+    const onChange = (ev: MediaQueryListEvent) => setIsWide(ev.matches);
+    setIsWide(mql.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+
+  return isWide;
 }
 
 const STATIC_PLAYING_BARS_6 = [0.38, 0.72, 0.56, 0.86, 0.48, 0.64];
@@ -148,12 +180,32 @@ export function HeaderSoundDeck({
   onOpenRewards,
 }: HeaderSoundDeckProps) {
   const [open, setOpen] = useState(false);
+  const [sessionHighlightedNewIds, setSessionHighlightedNewIds] = useState<MusicTrackId[]>([]);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
+  const isWideDeck = useWideDeckVisualizer();
   const animateVisualizer = uiMotion !== 'off' && !prefersReducedMotion();
   const canStepTracks = controller.unlockedTracks.length > 1;
   const modeMeta = getPlaybackModeMeta(controller.playbackMode);
   const effectiveVolumePct = controller.muted ? 0 : controller.volume;
+  const unseenCount = controller.unseenUnlockedTrackIds.length;
+
+  const handleTogglePopover = () => {
+    setOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        if (controller.unseenUnlockedTrackIds.length > 0) {
+          setSessionHighlightedNewIds([...controller.unseenUnlockedTrackIds]);
+          controller.markAllUnlockedTracksSeen();
+        } else {
+          setSessionHighlightedNewIds([]);
+        }
+      } else {
+        setSessionHighlightedNewIds([]);
+      }
+      return next;
+    });
+  };
 
   // Close popover on outside click or Escape key
   useEffect(() => {
@@ -161,12 +213,14 @@ export function HeaderSoundDeck({
     const handlePointerDown = (ev: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(ev.target as Node)) {
         setOpen(false);
+        setSessionHighlightedNewIds([]);
       }
     };
     const handleKeyDown = (ev: KeyboardEvent) => {
       if (ev.key === 'Escape') {
         ev.preventDefault();
         setOpen(false);
+        setSessionHighlightedNewIds([]);
       }
     };
     document.addEventListener('mousedown', handlePointerDown);
@@ -177,64 +231,149 @@ export function HeaderSoundDeck({
     };
   }, [open]);
 
-  return (
-    <div ref={containerRef} className="relative shrink-0">
-      {/* Compact Header Sound Deck Split Control */}
-      <div
-        className={`inline-flex items-stretch rounded-[5px] border font-mono text-xs transition-colors overflow-hidden ${
-          controller.isPlaying
-            ? 'border-crt-phosphor/65 bg-crt-phosphor/10 text-crt-phosphor'
-            : open
-              ? 'border-crt-border-strong bg-crt-elevated text-crt-text'
-              : 'border-crt-border bg-crt-bg text-crt-muted hover:border-crt-border-strong'
-        }`}
-      >
-        <button
-          type="button"
-          onClick={controller.togglePlay}
-          aria-label={
-            controller.isPlaying
-              ? `Pause soundtrack: ${controller.activeTrack.title}`
-              : `Play soundtrack: ${controller.activeTrack.title}`
-          }
-          title={
-            controller.isPlaying
-              ? `Pause ${controller.activeTrack.title} (${controller.activeTrack.genre})`
-              : `Play ${controller.activeTrack.title} (${controller.activeTrack.genre})`
-          }
-          className="inline-flex items-center justify-center px-2 py-1.5 hover:bg-crt-phosphor/15 hover:text-crt-phosphor transition-colors cursor-pointer"
-        >
-          {controller.isPlaying ? (
-            <Pause className="h-3.5 w-3.5 fill-current" />
-          ) : (
-            <Play className="h-3.5 w-3.5 fill-current" />
-          )}
-        </button>
+  const lcdSubline = controller.muted
+    ? `MUTED · ${controller.activeTrack.genre} · ${controller.activeTrack.bpm} BPM`
+    : controller.autoPausedForTab
+      ? `PAUSED · ${controller.activeTrack.genre} · ${controller.activeTrack.bpm} BPM`
+      : `${controller.activeTrack.genre} · ${controller.activeTrack.bpm} BPM`;
 
+  return (
+    <div
+      ref={containerRef}
+      className="relative w-full lg:max-w-[360px] xl:max-w-[436px] min-w-0"
+    >
+      {/* Center-Stage Recessed CRT Stereo Receiver Deck */}
+      <div
+        role="region"
+        aria-label="CRT Stereo Sound Deck"
+        data-playing={controller.isPlaying ? 'true' : 'false'}
+        data-has-new={unseenCount > 0 ? 'true' : 'false'}
+        className="crt-sound-deck flex items-stretch w-full rounded-[6px] border p-1 gap-1.5 font-mono text-xs"
+      >
+        {/* Left Bay: Tactile Inline Transport Controls (Prev / Play-Pause / Next) */}
+        <div
+          role="group"
+          aria-label="Soundtrack transport controls"
+          className="flex items-stretch shrink-0 rounded-[4px] border border-crt-border/80 bg-crt-bg/90 overflow-hidden divide-x divide-crt-border/70"
+        >
+          <button
+            type="button"
+            disabled={!canStepTracks}
+            onClick={controller.prevTrack}
+            aria-label="Previous unlocked track"
+            title={
+              canStepTracks
+                ? 'Previous unlocked track'
+                : 'Unlock more tracks via Trophy Points to skip'
+            }
+            className="inline-flex items-center justify-center w-7 text-crt-muted hover:text-crt-text hover:bg-crt-elevated/80 transition-colors disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-crt-phosphor"
+          >
+            <SkipBack className="h-3.5 w-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={controller.togglePlay}
+            aria-label={
+              controller.isPlaying
+                ? `Pause soundtrack: ${controller.activeTrack.title}`
+                : `Play soundtrack: ${controller.activeTrack.title}`
+            }
+            title={
+              controller.isPlaying
+                ? `Pause ${controller.activeTrack.title} (${controller.activeTrack.genre})`
+                : `Play ${controller.activeTrack.title} (${controller.activeTrack.genre})`
+            }
+            className={`inline-flex items-center justify-center w-8 transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-crt-phosphor ${
+              controller.isPlaying
+                ? 'bg-crt-phosphor/18 text-crt-phosphor hover:bg-crt-phosphor/28'
+                : 'text-crt-text hover:bg-crt-phosphor/15 hover:text-crt-phosphor'
+            }`}
+          >
+            {controller.isPlaying ? (
+              <Pause className="h-3.5 w-3.5 fill-current" />
+            ) : (
+              <Play className="h-3.5 w-3.5 fill-current" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            disabled={!canStepTracks}
+            onClick={controller.nextTrack}
+            aria-label="Next unlocked track"
+            title={
+              canStepTracks
+                ? 'Next unlocked track'
+                : 'Unlock more tracks via Trophy Points to skip'
+            }
+            className="inline-flex items-center justify-center w-7 text-crt-muted hover:text-crt-text hover:bg-crt-elevated/80 transition-colors disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-crt-phosphor"
+          >
+            <SkipForward className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        {/* Right Bay: Recessed CRT LCD Track Readout + Live Spectrum Visualizer + Track Selector Trigger */}
         <button
           type="button"
-          onClick={() => setOpen((prev) => !prev)}
+          onClick={handleTogglePopover}
           aria-expanded={open}
           aria-haspopup="dialog"
-          aria-label="Open CRT Sound Deck"
-          title={`Sound Deck · ${controller.activeTrack.title} (${controller.unlockedTracks.length}/${controller.allTracks.length} unlocked)`}
-          className="inline-flex items-center gap-1.5 pl-1.5 pr-2 py-1.5 border-l border-crt-border/70 hover:text-crt-text transition-colors whitespace-nowrap cursor-pointer"
+          aria-label={`Open CRT Sound Deck track list (${controller.activeTrack.title}, ${controller.unlockedTracks.length} of ${controller.allTracks.length} tracks unlocked${unseenCount > 0 ? `, ${unseenCount} newly unlocked` : ''})`}
+          title={`Open Sound Deck · ${controller.activeTrack.title} (${controller.activeTrack.genre} · ${controller.activeTrack.bpm} BPM · ${controller.unlockedTracks.length}/${controller.allTracks.length} unlocked)`}
+          className="crt-sound-deck-lcd flex-1 min-w-0 flex items-center justify-between gap-2.5 px-2.5 py-1 rounded-[4px] text-left cursor-pointer group focus:outline-none focus-visible:ring-1 focus-visible:ring-crt-phosphor"
         >
-          <SpectrumBars
-            barCount={6}
-            isPlaying={controller.isPlaying}
-            muted={controller.muted}
-            volume={controller.volume}
-            animate={animateVisualizer}
-            heightClass="h-3.5"
-            barWidthClass="w-[2px]"
-            getSpectrumLevels={controller.getSpectrumLevels}
-          />
-          <ChevronDown
-            className={`h-3 w-3 shrink-0 transition-transform duration-150 ${
-              open ? 'rotate-180 text-crt-phosphor' : 'text-crt-muted'
-            }`}
-          />
+          {/* LCD Now Playing Readout */}
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Disc3
+                className={`h-3 w-3 shrink-0 transition-colors ${
+                  controller.isPlaying
+                    ? 'text-crt-phosphor'
+                    : 'text-crt-muted/80 group-hover:text-crt-text'
+                }`}
+              />
+              <span
+                className={`font-display text-[12px] sm:text-[13px] font-semibold leading-tight tracking-wide truncate transition-colors ${
+                  controller.isPlaying
+                    ? 'text-crt-phosphor'
+                    : 'text-crt-text group-hover:text-crt-phosphor'
+                }`}
+              >
+                {controller.activeTrack.title}
+              </span>
+              {unseenCount > 0 && (
+                <span className="px-1.5 py-[1px] rounded-[3px] border border-crt-phosphor/70 bg-crt-phosphor/15 text-[9px] font-mono font-semibold uppercase tracking-wider text-crt-phosphor tabular-nums whitespace-nowrap shrink-0">
+                  {unseenCount === 1 ? 'NEW' : `+${unseenCount} NEW`}
+                </span>
+              )}
+            </div>
+
+            <div className="hidden sm:block lg:hidden xl:block text-[10px] font-mono text-crt-muted/90 tabular-nums leading-tight truncate mt-0.5 uppercase tracking-wider">
+              {lcdSubline}
+            </div>
+          </div>
+
+          {/* Live CRT Spectrum Equalizer + Drawer Chevron */}
+          <div className="flex items-center gap-2 shrink-0">
+            <SpectrumBars
+              barCount={isWideDeck ? 12 : 6}
+              isPlaying={controller.isPlaying}
+              muted={controller.muted}
+              volume={controller.volume}
+              animate={animateVisualizer}
+              heightClass={isWideDeck ? 'h-5' : 'h-4'}
+              barWidthClass={isWideDeck ? 'w-[3px]' : 'w-[2px]'}
+              getSpectrumLevels={controller.getSpectrumLevels}
+            />
+            <ChevronDown
+              className={`h-3.5 w-3.5 shrink-0 transition-transform duration-150 ${
+                open
+                  ? 'rotate-180 text-crt-phosphor'
+                  : 'text-crt-muted group-hover:text-crt-text'
+              }`}
+            />
+          </div>
         </button>
       </div>
 
@@ -243,7 +382,7 @@ export function HeaderSoundDeck({
         <div
           role="dialog"
           aria-label="CRT Sound Deck"
-          className="absolute right-0 top-full mt-2 z-50 w-[328px] max-w-[calc(100vw-1.5rem)] rounded-[6px] border border-crt-border-strong bg-crt-surface shadow-2xl overflow-hidden"
+          className="absolute left-1/2 -translate-x-1/2 top-full mt-2 z-50 w-[340px] max-w-[calc(100vw-1.5rem)] rounded-[6px] border border-crt-border-strong bg-crt-surface shadow-2xl overflow-hidden"
         >
           {/* Now Playing LCD Strip */}
           <div className="px-4 py-3 bg-crt-bg/90 border-b border-crt-border flex items-center justify-between gap-3">
@@ -403,6 +542,7 @@ export function HeaderSoundDeck({
               const unlocked = isMusicTrackUnlocked(track.id, controller.earnedPoints);
               const isSelected = controller.activeTrackId === track.id;
               const isCurrentlyPlaying = isSelected && controller.isPlaying;
+              const isNewlyUnlocked = unlocked && sessionHighlightedNewIds.includes(track.id);
 
               return (
                 <li key={track.id}>
@@ -426,7 +566,9 @@ export function HeaderSoundDeck({
                         ? 'opacity-55 cursor-not-allowed'
                         : isSelected
                           ? 'bg-crt-phosphor/10 cursor-pointer'
-                          : 'hover:bg-crt-elevated/70 cursor-pointer'
+                          : isNewlyUnlocked
+                            ? 'bg-crt-phosphor/[0.06] hover:bg-crt-phosphor/12 cursor-pointer'
+                            : 'hover:bg-crt-elevated/70 cursor-pointer'
                     }`}
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
@@ -438,7 +580,9 @@ export function HeaderSoundDeck({
                               ? 'border-crt-phosphor/70 bg-crt-phosphor/15 text-crt-phosphor'
                               : isSelected
                                 ? 'border-crt-phosphor/45 bg-crt-surface text-crt-phosphor'
-                                : 'border-crt-border bg-crt-surface text-crt-muted'
+                                : isNewlyUnlocked
+                                  ? 'border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor'
+                                  : 'border-crt-border bg-crt-surface text-crt-muted'
                         }`}
                       >
                         {!unlocked ? (
@@ -451,16 +595,23 @@ export function HeaderSoundDeck({
                       </span>
 
                       <div className="min-w-0">
-                        <div
-                          className={`font-display text-xs font-semibold truncate ${
-                            isSelected
-                              ? 'text-crt-phosphor'
-                              : unlocked
-                                ? 'text-crt-text'
-                                : 'text-crt-muted'
-                          }`}
-                        >
-                          {track.title}
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className={`font-display text-xs font-semibold truncate ${
+                              isSelected
+                                ? 'text-crt-phosphor'
+                                : unlocked
+                                  ? 'text-crt-text'
+                                  : 'text-crt-muted'
+                            }`}
+                          >
+                            {track.title}
+                          </span>
+                          {isNewlyUnlocked && (
+                            <span className="px-1 py-[1px] rounded-[3px] border border-crt-phosphor/70 bg-crt-phosphor/15 text-[9px] font-mono font-semibold uppercase tracking-wider text-crt-phosphor shrink-0">
+                              New
+                            </span>
+                          )}
                         </div>
                         <div className="text-[10px] font-mono text-crt-muted truncate">
                           {track.genre} · {track.bpm} BPM
@@ -474,16 +625,20 @@ export function HeaderSoundDeck({
                           ? 'text-crt-amber/85'
                           : isCurrentlyPlaying
                             ? 'text-crt-phosphor font-semibold'
-                            : 'text-crt-muted/80'
+                            : isNewlyUnlocked
+                              ? 'text-crt-phosphor'
+                              : 'text-crt-muted/80'
                       }`}
                     >
                       {!unlocked
                         ? `${track.requiredPoints.toLocaleString()} pts`
                         : isCurrentlyPlaying
                           ? 'Playing'
-                          : track.requiredPoints === 0
-                            ? 'Starter'
-                            : 'Ready'}
+                          : isNewlyUnlocked
+                            ? 'Unlocked'
+                            : track.requiredPoints === 0
+                              ? 'Starter'
+                              : 'Ready'}
                     </span>
                   </button>
                 </li>
@@ -498,6 +653,7 @@ export function HeaderSoundDeck({
               type="button"
               onClick={() => {
                 setOpen(false);
+                setSessionHighlightedNewIds([]);
                 onOpenRewards();
               }}
               className="inline-flex items-center gap-1 text-crt-amber hover:text-crt-phosphor transition-colors whitespace-nowrap shrink-0 cursor-pointer"

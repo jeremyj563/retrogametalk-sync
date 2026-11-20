@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   clampMusicVolume,
+  computeUnseenUnlockedTrackIds,
   getUnlockedTracks,
   isMusicTrackUnlocked,
+  loadSeenTrackIds,
   loadSoundtrackPrefs,
+  mergeSeenTrackIds,
   type MusicPlaybackMode,
   type MusicTrackDefinition,
   type MusicTrackId,
   pickNextTrackId,
   resolveEffectiveTrackId,
+  saveSeenTrackIds,
   saveSoundtrackPrefs,
   SOUNDTRACK_TRACK_BY_ID,
   SOUNDTRACK_TRACKS,
@@ -25,6 +29,7 @@ export interface SoundtrackController {
   activeTrack: MusicTrackDefinition;
   allTracks: readonly MusicTrackDefinition[];
   unlockedTracks: MusicTrackDefinition[];
+  unseenUnlockedTrackIds: MusicTrackId[];
   volume: number;
   muted: boolean;
   playbackMode: MusicPlaybackMode;
@@ -39,6 +44,7 @@ export interface SoundtrackController {
   toggleMute: () => void;
   cyclePlaybackMode: () => void;
   setPlaybackMode: (mode: MusicPlaybackMode) => void;
+  markAllUnlockedTracksSeen: () => void;
   getSpectrumLevels: (barCount: number) => number[];
 }
 
@@ -56,12 +62,31 @@ export function useSoundtrackPlayer({
   arcadeOpen,
 }: UseSoundtrackPlayerOptions): SoundtrackController {
   const [prefs, setPrefs] = useState<SoundtrackPrefs>(() => loadSoundtrackPrefs());
+  const [seenTrackIds, setSeenTrackIds] = useState<MusicTrackId[] | null>(() => loadSeenTrackIds());
   // Strictly OFF by default until the user explicitly clicks Play
   const [isPlaying, setIsPlaying] = useState(false);
   const [autoPausedForTab, setAutoPausedForTab] = useState(false);
 
   const unlockedTracks = useMemo(() => getUnlockedTracks(earnedPoints), [earnedPoints]);
   const unlockedTrackIds = useMemo(() => unlockedTracks.map((t) => t.id), [unlockedTracks]);
+
+  // Baseline-seed seen unlocked tracks on first-ever load once achievements arrive
+  useEffect(() => {
+    if (!achievementsLoaded) return;
+    setSeenTrackIds((prev) => {
+      if (prev !== null) return prev;
+      saveSeenTrackIds(unlockedTrackIds);
+      return unlockedTrackIds;
+    });
+  }, [achievementsLoaded, unlockedTrackIds]);
+
+  const unseenUnlockedTrackIds = useMemo(
+    () =>
+      achievementsLoaded
+        ? computeUnseenUnlockedTrackIds(unlockedTrackIds, seenTrackIds)
+        : [],
+    [achievementsLoaded, unlockedTrackIds, seenTrackIds],
+  );
 
   const activeTrackId = useMemo(
     () => resolveEffectiveTrackId(prefs.trackId, earnedPoints, achievementsLoaded),
@@ -92,6 +117,22 @@ export function useSoundtrackPlayer({
       return next;
     });
   }, []);
+
+  const markTracksSeen = useCallback((ids: readonly MusicTrackId[]) => {
+    if (ids.length === 0) return;
+    setSeenTrackIds((prev) => {
+      const next = mergeSeenTrackIds(prev, ids);
+      if (prev && next.length === prev.length && next.every((id, idx) => prev[idx] === id)) {
+        return prev;
+      }
+      saveSeenTrackIds(next);
+      return next;
+    });
+  }, []);
+
+  const markAllUnlockedTracksSeen = useCallback(() => {
+    markTracksSeen(unlockedIdsRef.current);
+  }, [markTracksSeen]);
 
   // Sync volume & mute to audio engine
   useEffect(() => {
@@ -181,18 +222,20 @@ export function useSoundtrackPlayer({
     (trackId: MusicTrackId) => {
       if (!isMusicTrackUnlocked(trackId, earnedPoints)) return;
       setAutoPausedForTab(false);
+      markTracksSeen([trackId]);
       updatePrefs({ trackId, muted: false });
       retroMusicPlayer.setMuted(false);
       const started = retroMusicPlayer.play(trackId);
       setIsPlaying(started);
     },
-    [earnedPoints, updatePrefs],
+    [earnedPoints, markTracksSeen, updatePrefs],
   );
 
   const selectTrack = useCallback(
     (trackId: MusicTrackId, autoPlay = true) => {
       if (!isMusicTrackUnlocked(trackId, earnedPoints)) return;
       setAutoPausedForTab(false);
+      markTracksSeen([trackId]);
       updatePrefs({ trackId });
       if (autoPlay) {
         if (prefs.muted) {
@@ -205,7 +248,7 @@ export function useSoundtrackPlayer({
         retroMusicPlayer.switchTrack(trackId);
       }
     },
-    [earnedPoints, prefs.muted, updatePrefs],
+    [earnedPoints, markTracksSeen, prefs.muted, updatePrefs],
   );
 
   const togglePlay = useCallback(() => {
@@ -233,14 +276,11 @@ export function useSoundtrackPlayer({
         playbackModeRef.current,
         direction,
       );
+      markTracksSeen([nextId]);
       updatePrefs({ trackId: nextId });
-      if (isPlayingRef.current) {
-        retroMusicPlayer.switchTrack(nextId);
-      } else {
-        retroMusicPlayer.switchTrack(nextId);
-      }
+      retroMusicPlayer.switchTrack(nextId);
     },
-    [updatePrefs],
+    [markTracksSeen, updatePrefs],
   );
 
   const nextTrack = useCallback(() => stepTrack('next'), [stepTrack]);
@@ -284,6 +324,7 @@ export function useSoundtrackPlayer({
     activeTrack,
     allTracks: SOUNDTRACK_TRACKS,
     unlockedTracks,
+    unseenUnlockedTrackIds,
     volume: prefs.volume,
     muted: prefs.muted,
     playbackMode: prefs.playbackMode,
@@ -298,6 +339,7 @@ export function useSoundtrackPlayer({
     toggleMute,
     cyclePlaybackMode,
     setPlaybackMode,
+    markAllUnlockedTracksSeen,
     getSpectrumLevels,
   };
 }

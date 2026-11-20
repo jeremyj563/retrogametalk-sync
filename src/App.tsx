@@ -1772,7 +1772,7 @@ export default function App() {
             requestSectionChange('monitor');
           }}
           aria-label="RetroGameTalk Sync"
-          className="crt-brand-link inline-flex items-center shrink-0 min-h-10 sm:min-h-[52px] rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-crt-phosphor"
+          className="order-1 crt-brand-link inline-flex items-center shrink-0 min-h-10 sm:min-h-[52px] rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-crt-phosphor"
         >
           <BrandMark
             isSyncRunning={Boolean(status?.activeRun)}
@@ -1784,15 +1784,17 @@ export default function App() {
           />
         </a>
 
-        {/* Sound Deck + Trophy Case Trigger + Sync Scope + Independent Dry Run Toggle + Reserved-Width Run/Stop Action */}
-        <div className="flex flex-wrap sm:flex-nowrap items-center gap-2.5 shrink-0 ml-auto">
-          {/* Compact Header CRT Sound Deck */}
+        {/* Zone 2: Center-Stage Recessed CRT Stereo Sound Deck */}
+        <div className="order-3 lg:order-2 w-full lg:w-auto lg:flex-1 flex justify-center min-w-0">
           <HeaderSoundDeck
             controller={soundtrack}
             uiMotion={effectiveCrtSettings.uiMotion}
             onOpenRewards={() => handleOpenTrophyDrawer(undefined, 'rewards')}
           />
+        </div>
 
+        {/* Zone 3: Trophy Case Trigger + Sync Scope + Independent Dry Run Toggle + Reserved-Width Run/Stop Action */}
+        <div className="order-2 lg:order-3 flex flex-wrap sm:flex-nowrap items-center gap-2.5 shrink-0 ml-auto lg:ml-0">
           {/* Compact Trophy Case Drawer Button */}
           <button
             type="button"

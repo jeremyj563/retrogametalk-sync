@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.18.0] - 2026-11-19
+
+- Redesigned the **Header Sound Deck** into a prominent **center-stage recessed CRT stereo receiver** positioned between the Brand Mark and Trophy/Sync controls (`~3×` wider on desktop with responsive tablet/mobile compression).
+- Added tactile inline **Previous / Play-Pause / Next** hardware transport controls, a dark recessed **CRT LCD Now Playing display** (track title + uppercase genre & tabular BPM readout with mute/pause cues), and a wider **12-bar live CRT spectrum visualizer** synced to the active phosphor palette (stepping down cleanly to 6 bars on narrower viewports and static bars when motion is off).
+- Added persisted **new-track unlock detection** (`NEW` / `+N NEW` phosphor badge on the stereo deck and matching row highlights inside the track selector popover) whenever Trophy Points unlock new soundtracks, clearing automatically when the deck is opened or a new track is selected.
+
 ## [1.17.1] - 2026-11-19
 
 - Overhauled the built-in **Web Audio VGM Synthesizer** (`retroMusicPlayer.ts`) for studio-grade clarity and punch: added procedural stereo hall/plate convolution reverb (`ConvolverNode`), custom `PeriodicWave` harmonic timbres (`pulse25`, `organ`, `brass`, `strings`, `epiano`, `slapbass`, `guitar`), click-free true ADSR envelopes, 3-voice ensemble chorus, pitch-glide expression, per-voice high-pass frequency carving, authentic 4×12 guitar speaker-cabinet EQ + power-chord stacking, and upgraded percussion (beater-click kick, gated reverb snare, triple-burst clap, rimshot, 6-oscillator metallic hi-hats/crashes, FM anvil clangs, and orchestral timpani).
