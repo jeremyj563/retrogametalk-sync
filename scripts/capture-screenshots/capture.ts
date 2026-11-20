@@ -20,6 +20,25 @@ import { type SeedDemoResult, seedDemoEnvironment } from './seedDemoDb.ts';
 
 const VIEWPORT = { width: 1440, height: 900 } as const;
 
+/**
+ * Deliberate viewer-friendly pacing (in ms) for the animated README walkthrough WebP
+ * so every view, modal, lightbox step, and palette transition is easy to read.
+ */
+export const WALKTHROUGH_TIMINGS_MS = {
+  syncOverviewDwell: 3800,
+  catalogGridDwell: 2600,
+  detailDrawerDwell: 2600,
+  lightboxFirstShotDwell: 2200,
+  lightboxSecondShotDwell: 2200,
+  afterLightboxCloseDwell: 1100,
+  afterDrawerCloseDwell: 900,
+  deviceExportPreThemeDwell: 1400,
+  crtPopoverOpenDwell: 1100,
+  crtPaletteSelectedDwell: 1100,
+  afterCrtPopoverCloseDwell: 500,
+  deviceExportFinalDwell: 3200,
+} as const;
+
 interface PlaywrightModuleLike {
   chromium: {
     launch: (options?: Record<string, unknown>) => Promise<PlaywrightBrowserLike>;
@@ -185,7 +204,7 @@ function encodeWalkthroughVideoToWebp(webmPath: string, webpPath: string): void 
       '-i',
       webmPath,
       '-vf',
-      'fps=18,scale=1200:-2:flags=lanczos',
+      'fps=15,scale=1200:-2:flags=lanczos',
       '-c:v',
       'libwebp',
       '-loop',
@@ -205,10 +224,11 @@ function encodeWalkthroughVideoToWebp(webmPath: string, webpPath: string): void 
 
 /**
  * Enhances a real /api/status payload in demo mode with a realistic active multi-chunk
- * transfer so the Sync Speed Wave, combined progress bar, and Telemetry Deck animate
- * cleanly without introducing any mock endpoints in production server code.
+ * transfer and verified session state so the Sync Speed Wave, combined progress bar,
+ * Telemetry Deck, and Monitor status bar render cleanly without credentials warnings or
+ * introducing any mock endpoints in production server code.
  */
-function buildActiveDemoStatus(
+export function buildActiveDemoStatus(
   base: ServiceStatusSnapshot,
   tick: number,
   featuredItemId: number,
@@ -326,6 +346,17 @@ function buildActiveDemoStatus(
       hasCover: true,
     },
     transferHistory: history,
+    auth: {
+      ...base.auth,
+      configured: true,
+      authenticated: true,
+      hasCompletedLogin: true,
+      lastAuthenticatedAt:
+        base.auth.lastAuthenticatedAt ?? new Date(now - 18 * 60 * 1000).toISOString(),
+      cookieCount: Math.max(base.auth.cookieCount || 0, 4),
+      lastCheckedAt: new Date(now - 2 * 60 * 1000).toISOString(),
+      lastMessage: 'Authenticated session active',
+    },
     rateLimiter: {
       ...base.rateLimiter,
       currentDelayMs: 880,
@@ -392,21 +423,30 @@ async function switchPaletteViaCrtStudio(
   page: PlaywrightPageLike,
   targetPalette: CrtPalette,
   fallbackSettings: CrtDisplaySettings,
+  pacing?: {
+    openDwellMs: number;
+    selectedDwellMs: number;
+    closeDwellMs: number;
+  },
 ): Promise<void> {
+  const openDwellMs = pacing?.openDwellMs ?? 260;
+  const selectedDwellMs = pacing?.selectedDwellMs ?? 260;
+  const closeDwellMs = pacing?.closeDwellMs ?? 320;
+
   try {
     const toggleBtn = page.locator('button:has-text("CRT Display")').first();
     if (await toggleBtn.isVisible({ timeout: 1500 })) {
       await toggleBtn.click();
-      await page.waitForTimeout(260);
+      await page.waitForTimeout(openDwellMs);
       const label = targetPalette === 'amber' ? 'Amber' : 'Green';
       const swatchBtn = page.getByRole('button', { name: new RegExp(`^${label}$`, 'i') }).first();
       if (await swatchBtn.isVisible({ timeout: 1500 })) {
         await swatchBtn.click();
-        await page.waitForTimeout(260);
+        await page.waitForTimeout(selectedDwellMs);
       }
       // Close CRT Display popover so the full console view is unobstructed
       await toggleBtn.click();
-      await page.waitForTimeout(320);
+      await page.waitForTimeout(closeDwellMs);
       return;
     }
   } catch {
@@ -634,45 +674,50 @@ export async function runScreenshotCapture(options: CaptureOptions): Promise<str
         );
       }
 
-      // Scene 1 (~3.2s): Sync Overview with live Speed Wave & transfer telemetry
+      // Scene 1 (~3.8s): Sync Overview with inline cover thumbnail, live Speed Wave & transfer telemetry
       await videoPage.goto(baseUrl!, { waitUntil: 'networkidle' });
-      await videoPage.waitForTimeout(3100);
+      await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.syncOverviewDwell);
 
-      // Scene 2 (~2.4s): Box-Art Catalog Grid
+      // Scene 2 (~3.5s): Box-Art Catalog Grid
       await clickNavTab(videoPage, 'Catalog');
       await ensureCatalogGridVisible(videoPage);
-      await videoPage.waitForTimeout(1900);
+      await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.catalogGridDwell);
 
-      // Scene 3 (~4.2s): Game Detail Drawer + Full-Res Screenshot Lightbox directional step
+      // Scene 3 (~9.7s): Game Detail Drawer + unhurried Full-Res Screenshot Lightbox walkthrough
       await openFeaturedGameDrawer(videoPage, demoSeed?.featuredItemTitle);
-      await videoPage.waitForTimeout(1000);
+      await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.detailDrawerDwell);
 
       const firstShotBtn = videoPage.locator('button[title="View screenshot 1"]').first();
       if (await firstShotBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
         await firstShotBtn.click();
-        await videoPage.waitForTimeout(950);
+        await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.lightboxFirstShotDwell);
         const nextBtn = videoPage.locator('button[aria-label="Next image"]').first();
         if (await nextBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
           await nextBtn.click();
-          await videoPage.waitForTimeout(1050);
+          await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.lightboxSecondShotDwell);
         }
         const closeLbBtn = videoPage.locator('button[aria-label="Close image lightbox"]').first();
         if (await closeLbBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
           await closeLbBtn.click();
-          await videoPage.waitForTimeout(550);
+          await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.afterLightboxCloseDwell);
         }
       }
 
       const closeDrawerBtn = videoPage.locator('button[aria-label="Close game details"]').first();
       if (await closeDrawerBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
         await closeDrawerBtn.click();
-        await videoPage.waitForTimeout(450);
+        await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.afterDrawerCloseDwell);
       }
 
-      // Scene 4 (~2.5s): SD Card Exporter highlighted in warm Amber phosphor
+      // Scene 4 (~7.3s): SD Card Exporter + legible CRT Display palette switch to warm Amber phosphor
       await clickNavTab(videoPage, 'Device Export');
-      await switchPaletteViaCrtStudio(videoPage, 'amber', amberSettings);
-      await videoPage.waitForTimeout(2100);
+      await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.deviceExportPreThemeDwell);
+      await switchPaletteViaCrtStudio(videoPage, 'amber', amberSettings, {
+        openDwellMs: WALKTHROUGH_TIMINGS_MS.crtPopoverOpenDwell,
+        selectedDwellMs: WALKTHROUGH_TIMINGS_MS.crtPaletteSelectedDwell,
+        closeDwellMs: WALKTHROUGH_TIMINGS_MS.afterCrtPopoverCloseDwell,
+      });
+      await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.deviceExportFinalDwell);
 
       const videoHandle = videoPage.video();
       await videoPage.close();

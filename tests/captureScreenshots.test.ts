@@ -10,10 +10,15 @@ import {
   renderDemoScreenshotPng,
 } from '../scripts/capture-screenshots/demoArtwork.ts';
 import {
+  WALKTHROUGH_TIMINGS_MS,
+  buildActiveDemoStatus,
+} from '../scripts/capture-screenshots/capture.ts';
+import {
   buildCaptureCrtSettings,
   parseCaptureCliArgs,
 } from '../scripts/capture-screenshots/options.ts';
 import { seedDemoEnvironment } from '../scripts/capture-screenshots/seedDemoDb.ts';
+import type { ServiceStatusSnapshot } from '../src/types.ts';
 
 test('parseCaptureCliArgs applies sensible defaults and honors CLI/env overrides', () => {
   const defaults = parseCaptureCliArgs([], {}, '/tmp/project');
@@ -209,4 +214,90 @@ test('seedDemoEnvironment creates an isolated migrated SQLite DB with artwork, t
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
+});
+
+test('buildActiveDemoStatus marks session configured & authenticated and populates activeSyncItem', () => {
+  const baseStatus: ServiceStatusSnapshot = {
+    podId: 'demo-pod',
+    uptimeSeconds: 120,
+    schemaVersion: 22,
+    debugLogging: false,
+    build: { version: '1.21.2', gitSha: 'abcdef0', gitUrl: null, gitRef: null, builtAt: null },
+    activeRun: null,
+    activeTransfer: null,
+    transferHistory: [],
+    currentPhase: 'Idle',
+    nextScheduledRunAt: null,
+    scheduleEnabled: true,
+    cronSchedule: '0 */6 * * *',
+    lastWatermarkAt: null,
+    rateLimiter: {
+      currentDelayMs: 1200,
+      baseDelayMs: 1200,
+      minDelayMs: 600,
+      maxDelayMs: 30000,
+      backoffMultiplier: 1.8,
+      consecutiveSuccesses: 0,
+      rateLimitHits: 0,
+      cooldownUntilMs: 0,
+      avgLatencyMs: 0,
+      totalRequests: 0,
+      history: [],
+    },
+    auth: {
+      configured: false,
+      authenticated: false,
+      hasCompletedLogin: true,
+      lastAuthenticatedAt: '2026-11-20T12:00:00Z',
+      cookieCount: 0,
+      lastCheckedAt: null,
+      lastMessage: null,
+    },
+    storage: {
+      downloadDir: '/tmp/repo',
+      dataDir: '/tmp/data',
+      writable: true,
+      totalFilesOnDisk: 12,
+      totalBytesOnDisk: 1024 * 1024,
+      sqliteBytes: 65536,
+      diskFreeBytes: 10 * 1024 * 1024 * 1024,
+      diskTotalBytes: 20 * 1024 * 1024 * 1024,
+    },
+    totals: {
+      totalCatalogItems: 24,
+      availableItems: 4,
+      downloadedItems: 20,
+      skippedItems: 0,
+      failedItems: 0,
+      queuedItems: 0,
+      installedItems: 6,
+      totalBytesMirrored: 1024 * 1024,
+      totalRuns: 14,
+    },
+    systems: [],
+    releaseTypes: [],
+  };
+
+  const enhanced = buildActiveDemoStatus(baseStatus, 1, 7, 'Chrono Vanguard DX');
+  assert.equal(enhanced.auth.configured, true);
+  assert.equal(enhanced.auth.authenticated, true);
+  assert.equal(enhanced.auth.hasCompletedLogin, true);
+  assert.ok(enhanced.auth.cookieCount >= 1);
+  assert.deepEqual(enhanced.activeSyncItem, {
+    itemId: 7,
+    title: 'Chrono Vanguard DX',
+    systemName: 'snes',
+    hasCover: true,
+  });
+  assert.equal(enhanced.activeTransfer?.hasCover, true);
+});
+
+test('WALKTHROUGH_TIMINGS_MS uses unhurried dwell durations after opening Game Detail Drawer', () => {
+  assert.ok(WALKTHROUGH_TIMINGS_MS.detailDrawerDwell >= 2000);
+  assert.ok(WALKTHROUGH_TIMINGS_MS.lightboxFirstShotDwell >= 2000);
+  assert.ok(WALKTHROUGH_TIMINGS_MS.lightboxSecondShotDwell >= 2000);
+  assert.ok(WALKTHROUGH_TIMINGS_MS.afterLightboxCloseDwell >= 1000);
+  assert.ok(WALKTHROUGH_TIMINGS_MS.crtPopoverOpenDwell >= 1000);
+  assert.ok(WALKTHROUGH_TIMINGS_MS.crtPaletteSelectedDwell >= 1000);
+  assert.ok(WALKTHROUGH_TIMINGS_MS.deviceExportFinalDwell >= 3000);
 });

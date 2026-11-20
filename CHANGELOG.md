@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.21.2] - 2026-11-20
+
+- Slowed down the animated **Playwright + FFmpeg** README walkthrough video pacing—especially from the **Game Detail Drawer** onward (drawer view, full-res screenshot lightbox steps, modal dismissals, **CRT Display** palette switch to Amber, and final **Device Export** view)—so every showcased feature stays clearly readable while encoding at `15 fps` to keep the animated WebP lean.
+- Marked the ephemeral demo capture status payload as configured and authenticated (`auth.configured`, `auth.authenticated`, `auth.hasCompletedLogin`) so the `"Repository credentials are not configured yet..."` banner is hidden during visual preview capture while still never storing credentials or making outbound login calls.
+
 ## [1.21.1] - 2026-11-20
 
 - Updated the automated **Playwright + FFmpeg** visual preview pipeline (`scripts/capture-screenshots` and `.github/workflows/update-screenshots.yml`) to default to and enforce the subtle **`Low`** **Living UI Motion** setting so README previews stay clean and understated while leaving the higher intensity tiers as an in-app discovery.
