@@ -21,16 +21,26 @@ import { type SeedDemoResult, seedDemoEnvironment } from './seedDemoDb.ts';
 const VIEWPORT = { width: 1440, height: 900 } as const;
 
 /**
+ * Matches CatalogPanel's persisted layout storage key so Playwright contexts mount
+ * directly into Box-Art Grid view with zero split-second Table view flash.
+ */
+export const CATALOG_VIEW_STORAGE_KEY = 'rgt_sync_catalog_view_v1';
+export const CAPTURE_CATALOG_VIEW_PREFS = {
+  viewMode: 'catalog',
+  catalogLayout: 'grid',
+} as const;
+
+/**
  * Deliberate viewer-friendly pacing (in ms) for the animated README walkthrough WebP
- * so every view, modal, lightbox step, and palette transition is easy to read.
+ * so every view, drawer section, screenshot thumbnail preview, and palette transition
+ * is easy to read.
  */
 export const WALKTHROUGH_TIMINGS_MS = {
   syncOverviewDwell: 3800,
   catalogGridDwell: 2600,
   detailDrawerDwell: 2600,
-  lightboxFirstShotDwell: 2200,
-  lightboxSecondShotDwell: 2200,
-  afterLightboxCloseDwell: 1100,
+  detailDrawerScrollSettleMs: 700,
+  detailDrawerScreenshotsDwell: 3200,
   afterDrawerCloseDwell: 900,
   deviceExportPreThemeDwell: 1400,
   crtPopoverOpenDwell: 1100,
@@ -459,10 +469,33 @@ async function switchPaletteViaCrtStudio(
   await page.waitForTimeout(450);
 }
 
+async function seedCaptureBrowserStorage(
+  context: PlaywrightContextLike,
+  crtSettings: CrtDisplaySettings,
+): Promise<void> {
+  await context.addInitScript(
+    ({ crtKey, crtValue, catalogKey, catalogValue }) => {
+      window.localStorage.setItem(crtKey, JSON.stringify(crtValue));
+      window.localStorage.setItem(catalogKey, JSON.stringify(catalogValue));
+    },
+    {
+      crtKey: CRT_DISPLAY_STORAGE_KEY,
+      crtValue: crtSettings,
+      catalogKey: CATALOG_VIEW_STORAGE_KEY,
+      catalogValue: CAPTURE_CATALOG_VIEW_PREFS,
+    },
+  );
+}
+
 async function ensureCatalogGridVisible(page: PlaywrightPageLike): Promise<void> {
   const gridBtn = page.locator('button[aria-label="Box-Art Grid view"]').first();
   if (await gridBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await gridBtn.click();
+    const isAlreadyGrid = await gridBtn
+      .evaluate((el: HTMLElement) => el.className.includes('text-crt-phosphor'))
+      .catch(() => false);
+    if (!isAlreadyGrid) {
+      await gridBtn.click();
+    }
   }
   await page.waitForSelector('.crt-catalog-card', { timeout: 10000 });
   // Wait for cover images to decode
@@ -494,6 +527,40 @@ async function openFeaturedGameDrawer(page: PlaywrightPageLike, preferredTitle?:
   }
   await page.waitForSelector('button[aria-label="Close game details"]', { timeout: 10000 });
   await page.waitForTimeout(650);
+}
+
+async function scrollDrawerToScreenshots(page: PlaywrightPageLike): Promise<boolean> {
+  const firstShotBtn = page.locator('button[title="View screenshot 1"]').first();
+  if (!(await firstShotBtn.isVisible({ timeout: 2000 }).catch(() => false))) {
+    return false;
+  }
+
+  await page.evaluate(() => {
+    const shotBtn = document.querySelector('button[title="View screenshot 1"]');
+    const section = shotBtn?.closest('section') ?? shotBtn;
+    section?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+  await page.waitForTimeout(WALKTHROUGH_TIMINGS_MS.detailDrawerScrollSettleMs);
+
+  // Ensure screenshot thumbnails inside the drawer have finished decoding
+  await page.evaluate(async () => {
+    const imgs = Array.from(
+      document.querySelectorAll('button[title^="View screenshot "] img'),
+    ) as HTMLImageElement[];
+    await Promise.all(
+      imgs.map((img) =>
+        img.complete
+          ? Promise.resolve()
+          : new Promise<void>((resolve) => {
+              img.addEventListener('load', () => resolve(), { once: true });
+              img.addEventListener('error', () => resolve(), { once: true });
+              setTimeout(resolve, 2500);
+            }),
+      ),
+    );
+  });
+
+  return true;
 }
 
 function formatSizeKb(filePath: string): string {
@@ -574,12 +641,7 @@ export async function runScreenshotCapture(options: CaptureOptions): Promise<str
       deviceScaleFactor: 1,
       colorScheme: 'dark',
     });
-    await staticContext.addInitScript(
-      ({ key, value }) => {
-        window.localStorage.setItem(key, JSON.stringify(value));
-      },
-      { key: CRT_DISPLAY_STORAGE_KEY, value: greenSettings },
-    );
+    await seedCaptureBrowserStorage(staticContext, greenSettings);
 
     const staticPage = await staticContext.newPage();
     if (isDemoMode && demoSeed) {
@@ -643,7 +705,7 @@ export async function runScreenshotCapture(options: CaptureOptions): Promise<str
     await staticContext.close();
 
     // ------------------------------------------------------------------
-    // Phase 2: Record smooth ~12s continuous walkthrough video -> animated WebP
+    // Phase 2: Record smooth continuous walkthrough video -> animated WebP
     // ------------------------------------------------------------------
     if (!options.skipVideo) {
       const videoDir = path.join(tempWorkDir, 'video');
@@ -658,12 +720,7 @@ export async function runScreenshotCapture(options: CaptureOptions): Promise<str
           size: VIEWPORT,
         },
       });
-      await videoContext.addInitScript(
-        ({ key, value }) => {
-          window.localStorage.setItem(key, JSON.stringify(value));
-        },
-        { key: CRT_DISPLAY_STORAGE_KEY, value: greenSettings },
-      );
+      await seedCaptureBrowserStorage(videoContext, greenSettings);
 
       const videoPage = await videoContext.newPage();
       if (isDemoMode && demoSeed) {
@@ -678,29 +735,17 @@ export async function runScreenshotCapture(options: CaptureOptions): Promise<str
       await videoPage.goto(baseUrl!, { waitUntil: 'networkidle' });
       await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.syncOverviewDwell);
 
-      // Scene 2 (~3.5s): Box-Art Catalog Grid
+      // Scene 2 (~3.5s): Box-Art Catalog Grid (pre-seeded directly in Grid view, no Table flash)
       await clickNavTab(videoPage, 'Catalog');
       await ensureCatalogGridVisible(videoPage);
       await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.catalogGridDwell);
 
-      // Scene 3 (~9.7s): Game Detail Drawer + unhurried Full-Res Screenshot Lightbox walkthrough
+      // Scene 3 (~8.0s): Game Detail Drawer + in-drawer Screenshot Thumbnails (no full-res lightbox)
       await openFeaturedGameDrawer(videoPage, demoSeed?.featuredItemTitle);
       await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.detailDrawerDwell);
 
-      const firstShotBtn = videoPage.locator('button[title="View screenshot 1"]').first();
-      if (await firstShotBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await firstShotBtn.click();
-        await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.lightboxFirstShotDwell);
-        const nextBtn = videoPage.locator('button[aria-label="Next image"]').first();
-        if (await nextBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
-          await nextBtn.click();
-          await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.lightboxSecondShotDwell);
-        }
-        const closeLbBtn = videoPage.locator('button[aria-label="Close image lightbox"]').first();
-        if (await closeLbBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
-          await closeLbBtn.click();
-          await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.afterLightboxCloseDwell);
-        }
+      if (await scrollDrawerToScreenshots(videoPage)) {
+        await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.detailDrawerScreenshotsDwell);
       }
 
       const closeDrawerBtn = videoPage.locator('button[aria-label="Close game details"]').first();

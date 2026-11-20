@@ -10,6 +10,8 @@ import {
   renderDemoScreenshotPng,
 } from '../scripts/capture-screenshots/demoArtwork.ts';
 import {
+  CAPTURE_CATALOG_VIEW_PREFS,
+  CATALOG_VIEW_STORAGE_KEY,
   WALKTHROUGH_TIMINGS_MS,
   buildActiveDemoStatus,
 } from '../scripts/capture-screenshots/capture.ts';
@@ -292,11 +294,19 @@ test('buildActiveDemoStatus marks session configured & authenticated and populat
   assert.equal(enhanced.activeTransfer?.hasCover, true);
 });
 
-test('WALKTHROUGH_TIMINGS_MS uses unhurried dwell durations after opening Game Detail Drawer', () => {
+test('Catalog capture prefs pre-seed Box-Art Grid view to prevent initial Table flash', () => {
+  assert.equal(CATALOG_VIEW_STORAGE_KEY, 'rgt_sync_catalog_view_v1');
+  assert.deepEqual(CAPTURE_CATALOG_VIEW_PREFS, {
+    viewMode: 'catalog',
+    catalogLayout: 'grid',
+  });
+});
+
+test('WALKTHROUGH_TIMINGS_MS dwells on drawer details and in-drawer screenshot thumbnails without lightbox', () => {
   assert.ok(WALKTHROUGH_TIMINGS_MS.detailDrawerDwell >= 2000);
-  assert.ok(WALKTHROUGH_TIMINGS_MS.lightboxFirstShotDwell >= 2000);
-  assert.ok(WALKTHROUGH_TIMINGS_MS.lightboxSecondShotDwell >= 2000);
-  assert.ok(WALKTHROUGH_TIMINGS_MS.afterLightboxCloseDwell >= 1000);
+  assert.ok(WALKTHROUGH_TIMINGS_MS.detailDrawerScrollSettleMs >= 500);
+  assert.ok(WALKTHROUGH_TIMINGS_MS.detailDrawerScreenshotsDwell >= 2500);
+  assert.equal('lightboxFirstShotDwell' in WALKTHROUGH_TIMINGS_MS, false);
   assert.ok(WALKTHROUGH_TIMINGS_MS.crtPopoverOpenDwell >= 1000);
   assert.ok(WALKTHROUGH_TIMINGS_MS.crtPaletteSelectedDwell >= 1000);
   assert.ok(WALKTHROUGH_TIMINGS_MS.deviceExportFinalDwell >= 3000);
