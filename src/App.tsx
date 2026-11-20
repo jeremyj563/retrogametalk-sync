@@ -17,6 +17,7 @@ import { MirroredSystemsSidebar } from './components/MirroredSystemsSidebar';
 import { OverviewPanel } from './components/OverviewPanel';
 import { SdCardExportModal } from './components/SdCardExportModal';
 import { ServiceTelemetrySidebar } from './components/ServiceTelemetrySidebar';
+import { StorageDeviceSidebarDock } from './components/StorageDeviceSidebarDock';
 import { SyncCommandButton } from './components/SyncCommandButton';
 import { SyncRulesPanel } from './components/SyncRulesPanel';
 import { SystemSettingsPanel } from './components/SystemSettingsPanel';
@@ -440,6 +441,7 @@ export default function App() {
       : null,
   );
   const configFocusNonceRef = useRef(initialRouteRef.current.target ? 1 : 0);
+  const [autoConfigureRequest, setAutoConfigureRequest] = useState<{ nonce: number } | null>(null);
   const configPanelRef = useRef<ConfigPanelHandle | null>(null);
   const [configDirty, setConfigDirty] = useState<ConfigDirtyState>({
     isDirty: false,
@@ -1496,6 +1498,11 @@ export default function App() {
     [requestSectionChange],
   );
 
+  const handleAutoConfigureMountedDevice = useCallback(() => {
+    setAutoConfigureRequest((prev) => ({ nonce: (prev?.nonce ?? 0) + 1 }));
+    navigateToConfigTarget('storageMappings');
+  }, [navigateToConfigTarget]);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if ('scrollRestoration' in window.history) {
@@ -1982,6 +1989,12 @@ export default function App() {
               })}
             </div>
 
+            {/* Persistent Recessed Storage Device Drive Bay */}
+            <StorageDeviceSidebarDock
+              installer={bulkInstaller}
+              onAutoConfigureDevice={handleAutoConfigureMountedDevice}
+            />
+
             {/* Real Daemon & Storage Telemetry Readout */}
             {status && (
               <ServiceTelemetrySidebar
@@ -2113,6 +2126,8 @@ export default function App() {
                   status={status}
                   installer={bulkInstaller}
                   focusRequest={configFocus}
+                  autoConfigureRequest={autoConfigureRequest}
+                  onAutoConfigureRequestHandled={() => setAutoConfigureRequest(null)}
                   onDirtyChange={setConfigDirty}
                   onSaveConfig={handleSaveConfigVoid}
                 />

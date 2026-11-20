@@ -53,6 +53,8 @@ interface StorageFolderMappingsSectionProps {
   onChange: (next: StorageFolderMappingConfig) => void;
   discoveredAndSyncedSlugs: string[];
   installer?: BulkStorageInstallerController;
+  autoConfigureRequest?: { nonce: number } | null;
+  onAutoConfigureRequestHandled?: () => void;
 }
 
 export function StorageFolderMappingsSection({
@@ -62,6 +64,8 @@ export function StorageFolderMappingsSection({
   onChange,
   discoveredAndSyncedSlugs,
   installer,
+  autoConfigureRequest = null,
+  onAutoConfigureRequestHandled,
 }: StorageFolderMappingsSectionProps) {
   const [scopeTab, setScopeTab] = useState<ConsoleScopeTab>(() =>
     discoveredAndSyncedSlugs.length > 0 ? 'discovered' : 'all',
@@ -85,6 +89,7 @@ export function StorageFolderMappingsSection({
   const [includeAutoSubfolders, setIncludeAutoSubfolders] = useState<boolean>(true);
   const [appliedAutoNotice, setAppliedAutoNotice] = useState<string | null>(null);
   const scanAbortRef = useRef<AbortController | null>(null);
+  const lastHandledAutoNonceRef = useRef<number>(0);
 
   useEffect(() => {
     return () => {
@@ -450,6 +455,21 @@ export function StorageFolderMappingsSection({
     }
     await runAutoConfigureScan(installer.sdRootHandle);
   }, [installer?.sdRootHandle, handlePickAndScanExportFolder, runAutoConfigureScan]);
+
+  useEffect(() => {
+    if (!autoConfigureRequest) return;
+    if (autoConfigureRequest.nonce <= lastHandledAutoNonceRef.current) return;
+    lastHandledAutoNonceRef.current = autoConfigureRequest.nonce;
+    onAutoConfigureRequestHandled?.();
+    if (installer?.sdRootHandle) {
+      void runAutoConfigureScan(installer.sdRootHandle);
+    }
+  }, [
+    autoConfigureRequest,
+    installer?.sdRootHandle,
+    onAutoConfigureRequestHandled,
+    runAutoConfigureScan,
+  ]);
 
   const handleCancelAutoScan = () => {
     scanAbortRef.current?.abort();

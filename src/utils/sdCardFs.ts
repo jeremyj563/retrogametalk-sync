@@ -40,18 +40,74 @@ export interface ScanStorageTreeOptions {
   onProgress?: (progress: { directoriesScanned: number; currentPath: string }) => void;
 }
 
-export function isFileSystemAccessSupported(): { supported: boolean; reason?: string } {
-  if (typeof window === 'undefined') {
-    return { supported: false, reason: 'Browser environment required.' };
-  }
-  const win = window as unknown as { showDirectoryPicker?: unknown };
-  if (typeof win.showDirectoryPicker !== 'function') {
+export type FileSystemAccessSupportCode =
+  | 'supported'
+  | 'insecure_context'
+  | 'unsupported_browser';
+
+export interface FileSystemAccessSupportResult {
+  supported: boolean;
+  code: FileSystemAccessSupportCode;
+  origin?: string;
+  reason?: string;
+}
+
+export function evaluateFileSystemAccessSupport(env: {
+  hasWindow: boolean;
+  isSecureContext?: boolean;
+  hasDirectoryPicker: boolean;
+  origin?: string;
+}): FileSystemAccessSupportResult {
+  if (!env.hasWindow) {
     return {
       supported: false,
-      reason: 'Direct storage device folder access requires Chrome, Edge, or another Chromium browser. Use Prepared ROM download in Firefox/Safari.',
+      code: 'unsupported_browser',
+      reason: 'Browser environment required.',
     };
   }
-  return { supported: true };
+  if (env.hasDirectoryPicker) {
+    return {
+      supported: true,
+      code: 'supported',
+      origin: env.origin,
+    };
+  }
+  if (env.isSecureContext === false) {
+    const originHint = env.origin && env.origin !== 'null' ? env.origin : 'this URL';
+    return {
+      supported: false,
+      code: 'insecure_context',
+      origin: env.origin,
+      reason: `Chrome hides direct folder access on plain HTTP (${originHint}). Serve over HTTPS or add ${originHint} to chrome://flags/#unsafely-treat-insecure-origin-as-secure and relaunch.`,
+    };
+  }
+  return {
+    supported: false,
+    code: 'unsupported_browser',
+    origin: env.origin,
+    reason:
+      'Direct storage device folder access requires Chrome, Edge, or another Chromium browser. Use Prepared ROM download in Firefox/Safari.',
+  };
+}
+
+export function isFileSystemAccessSupported(): FileSystemAccessSupportResult {
+  if (typeof window === 'undefined') {
+    return evaluateFileSystemAccessSupport({
+      hasWindow: false,
+      hasDirectoryPicker: false,
+    });
+  }
+  const win = window as unknown as {
+    showDirectoryPicker?: unknown;
+    isSecureContext?: boolean;
+    location?: { origin?: string };
+  };
+  return evaluateFileSystemAccessSupport({
+    hasWindow: true,
+    isSecureContext: win.isSecureContext,
+    hasDirectoryPicker: typeof win.showDirectoryPicker === 'function',
+    origin: win.location?.origin,
+  });
 }
 
 export async function pickSdCardRootDirectory(): Promise<SdDirectoryHandle> {

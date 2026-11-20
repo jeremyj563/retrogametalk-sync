@@ -32,13 +32,24 @@ interface DeviceExportPanelProps {
   status: ServiceStatusSnapshot;
   installer?: BulkStorageInstallerController;
   focusRequest?: ConfigFocusRequest | null;
+  autoConfigureRequest?: { nonce: number } | null;
+  onAutoConfigureRequestHandled?: () => void;
   onDirtyChange?: (state: ConfigDirtyState) => void;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
 }
 
 export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanelProps>(
   function DeviceExportPanel(
-    { config, status, installer, focusRequest = null, onDirtyChange, onSaveConfig },
+    {
+      config,
+      status,
+      installer,
+      focusRequest = null,
+      autoConfigureRequest = null,
+      onAutoConfigureRequestHandled,
+      onDirtyChange,
+      onSaveConfig,
+    },
     ref,
   ) {
     const [romNamingTemplate, setRomNamingTemplate] = useState(config.romNamingTemplate);
@@ -376,6 +387,8 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
           onChange={setStorageFolderConfig}
           discoveredAndSyncedSlugs={discoveredAndSyncedSlugs}
           installer={installer}
+          autoConfigureRequest={autoConfigureRequest}
+          onAutoConfigureRequestHandled={onAutoConfigureRequestHandled}
         />
 
         <ConfigSaveBar
