@@ -2069,6 +2069,7 @@ export default function App() {
                     });
                   }}
                   onPreviewRuleMatchesInCatalog={handleOpenRuleMatchesInCatalog}
+                  onQueueDownload={(ids) => handleQueueDownload({ ids })}
                   onRetryItem={handleRetryItem}
                   onRetryAllFailed={handleRetryAllFailed}
                   onRefreshStatus={loadInitialData}

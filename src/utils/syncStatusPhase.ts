@@ -1,6 +1,14 @@
-import type { ActiveTransferState, SyncRunRecord } from '../types';
+import type { ActiveSyncItemSummary, ActiveTransferState, SyncRunRecord } from '../types';
 
 export type SyncStatusSubjectKind = 'download' | 'title' | 'path' | 'detail' | 'idle';
+
+export interface ActiveSyncTargetCover {
+  itemId: number | null;
+  title: string;
+  systemName: string | null;
+  hasCoverHint: boolean;
+  coverUrl: string | null;
+}
 
 export interface ParsedSyncStatusHeader {
   syncType: string | null;
@@ -422,5 +430,79 @@ export function parseSyncStatusHeader(params: {
     subject: phase || 'Ready',
     subjectKind: 'detail',
     workerCount: 0,
+  };
+}
+
+function normalizePositiveItemId(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+export function resolveActiveSyncTargetCover(params: {
+  parsedHeader: ParsedSyncStatusHeader;
+  displayedSubject?: string | null;
+  activeRun: SyncRunRecord | null;
+  activeTransfer: ActiveTransferState | null;
+  activeSyncItem?: ActiveSyncItemSummary | null;
+  heldTransfer?: {
+    itemId?: number | null;
+    itemTitle?: string;
+    systemName?: string;
+    hasCover?: boolean;
+  } | null;
+}): ActiveSyncTargetCover | null {
+  const { parsedHeader, displayedSubject, activeRun, activeTransfer, activeSyncItem, heldTransfer } =
+    params;
+
+  // Never show a cover thumbnail in Standby or non-game phases (Authenticating, Enumerating, Checking, Stopping)
+  const isGameTarget =
+    parsedHeader.subjectKind === 'title' || parsedHeader.subjectKind === 'download';
+  if (!isGameTarget) {
+    return null;
+  }
+  if (!activeRun && !activeTransfer) {
+    return null;
+  }
+
+  const transferItemId = normalizePositiveItemId(activeTransfer?.itemId);
+  const syncItemId = normalizePositiveItemId(activeSyncItem?.itemId);
+  const heldItemId = normalizePositiveItemId(heldTransfer?.itemId);
+
+  const itemId = transferItemId ?? syncItemId ?? heldItemId ?? null;
+  const title =
+    (displayedSubject || '').trim() ||
+    (activeTransfer?.itemTitle || '').trim() ||
+    (activeSyncItem?.title || '').trim() ||
+    parsedHeader.subject;
+  const systemName =
+    activeTransfer?.systemName ||
+    activeSyncItem?.systemName ||
+    parsedHeader.systemName ||
+    heldTransfer?.systemName ||
+    null;
+
+  let hasCoverHint = false;
+  if (itemId !== null) {
+    if (transferItemId === itemId && activeTransfer?.hasCover !== undefined) {
+      hasCoverHint = Boolean(activeTransfer.hasCover);
+    } else if (syncItemId === itemId && activeSyncItem) {
+      hasCoverHint = Boolean(activeSyncItem.hasCover);
+    } else if (heldItemId === itemId && heldTransfer?.hasCover !== undefined) {
+      hasCoverHint = Boolean(heldTransfer.hasCover);
+    } else {
+      hasCoverHint = true;
+    }
+  }
+
+  const coverUrl =
+    itemId !== null
+      ? `/api/items/${itemId}/asset?kind=cover&lazy=1${hasCoverHint ? '&cv=1' : ''}`
+      : null;
+
+  return {
+    itemId,
+    title,
+    systemName,
+    hasCoverHint,
+    coverUrl,
   };
 }

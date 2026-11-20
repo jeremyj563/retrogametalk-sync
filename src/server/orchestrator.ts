@@ -97,6 +97,7 @@ import {
 } from './archiveService.ts';
 import { formatErrorDetails, isDebugLoggingEnabled, logServer } from './logger.ts';
 import type {
+  ActiveSyncItemSummary,
   ActiveTransferState,
   ArchiveBrowseListing,
   ArchiveInspectResult,
@@ -368,6 +369,7 @@ export class ScraperOrchestrator extends EventEmitter {
   private activeTransfer: ActiveTransferState | null = null;
   private activeTransfers = new Map<string, ActiveTransferState>();
   private activeTransferOrder: string[] = [];
+  private activeSyncItem: ActiveSyncItemSummary | null = null;
   private transferHistory: TransferSpeedSample[] = [];
   private lastTransferSampleMs = 0;
   private currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
@@ -1909,10 +1911,29 @@ export class ScraperOrchestrator extends EventEmitter {
     return cleared;
   }
 
+  private setActiveSyncItemFromRecord(
+    item:
+      | Pick<RepositoryItemRecord, 'id' | 'title' | 'systemName' | 'coverLocalPath' | 'metadata'>
+      | null
+      | undefined,
+  ): void {
+    if (!item || !Number.isInteger(item.id) || item.id <= 0) {
+      this.activeSyncItem = null;
+      return;
+    }
+    this.activeSyncItem = {
+      itemId: item.id,
+      title: (item.title || '').trim(),
+      systemName: item.systemName,
+      hasCover: Boolean(item.coverLocalPath || item.metadata?.coverUrl),
+    };
+  }
+
   private clearAllActiveTransfers(): void {
     this.activeTransfers.clear();
     this.activeTransferOrder = [];
     this.activeTransfer = null;
+    this.activeSyncItem = null;
     this.emit('transfer', null);
   }
 
@@ -2043,6 +2064,7 @@ export class ScraperOrchestrator extends EventEmitter {
       activeRun: this.activeRun,
       activeTransfer: this.activeTransfer,
       activeTransfers: this.getOrderedActiveTransfers(),
+      activeSyncItem: this.activeSyncItem,
       transferHistory: [...this.transferHistory],
       currentPhase: this.currentPhase,
       nextScheduledRunAt: cfg.scheduleEnabled && nextRun ? nextRun.toISOString() : null,
@@ -2557,6 +2579,7 @@ export class ScraperOrchestrator extends EventEmitter {
             );
 
             processedReleases += 1;
+            this.setActiveSyncItemFromRecord(item);
             this.currentPhase = `Queue (${processedReleases}/${totalInQueue}): ${item.systemName} / ${item.title}`;
             this.emitStatus();
 
@@ -3057,6 +3080,7 @@ export class ScraperOrchestrator extends EventEmitter {
     const actionPrefix = isDryRun ? 'Dry Run (Retry)' : 'Retrying';
     this.activeRun = run;
     this.abortController = new AbortController();
+    this.setActiveSyncItemFromRecord(item);
     this.currentPhase = `${actionPrefix}: ${item.title}`;
     this.emitStatus();
 
@@ -3211,6 +3235,7 @@ export class ScraperOrchestrator extends EventEmitter {
     const phasePrefix = isDryRun ? 'Dry Run (Retry)' : 'Retry Failed';
     this.activeRun = run;
     this.abortController = new AbortController();
+    this.activeSyncItem = null;
     this.currentPhase = `${phasePrefix}: ${targets.length} failed/partial release${targets.length === 1 ? '' : 's'}`;
 
     this.lockRenewTimer = setInterval(() => {
@@ -3274,6 +3299,7 @@ export class ScraperOrchestrator extends EventEmitter {
           }
 
           retryCompletedTargets += 1;
+          this.setActiveSyncItemFromRecord(item);
           this.currentPhase = `${phasePrefix} (${Math.min(retryCompletedTargets, targets.length)}/${targets.length}): ${item.systemName} / ${item.title}`;
           this.emitStatus();
 
@@ -3410,6 +3436,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
   stopActiveRun(): boolean {
     if (!this.activeRun || !this.abortController) return false;
+    this.activeSyncItem = null;
     this.currentPhase = `Stopping run #${this.activeRun.id}...`;
     this.log('warn', `Abort requested for run #${this.activeRun.id}`, null, this.activeRun.id);
     this.abortController.abort();
@@ -3791,7 +3818,9 @@ export class ScraperOrchestrator extends EventEmitter {
           lastRunId: run.id,
           metadata: effectiveMeta ?? null,
         });
+        this.setActiveSyncItemFromRecord(parent);
         this.emitCatalogUpdated('release_discovered', parent.id);
+        this.emitStatus();
 
         // Mirror cover art, screenshots, and metadata.json once per release page
         if (effectiveMeta) {
@@ -3810,7 +3839,9 @@ export class ScraperOrchestrator extends EventEmitter {
                 mirroredAssets.coverAbsPath,
                 mirroredAssets.screenshotAbsPaths,
               ) || parent;
+            this.setActiveSyncItemFromRecord(parent);
             this.emitCatalogUpdated('metadata_mirrored', parent.id);
+            this.emitStatus();
           } catch (err) {
             if (signal.aborted) throw err;
             runLogger('warn', `Metadata/artwork sync incomplete for ${parent.title}`, String(err));
@@ -4101,6 +4132,7 @@ export class ScraperOrchestrator extends EventEmitter {
               status: 200,
             };
           } else {
+            this.activeSyncItem = null;
             this.currentPhase = `Scanning page (${pagesCrawled + 1}): ${this.formatRelativePhasePath(pageUrl, liveCfg.baseUrl)}`;
             this.emitStatus();
             try {
@@ -4270,6 +4302,7 @@ export class ScraperOrchestrator extends EventEmitter {
       if (explicitFilters.length > 0) {
         targetSystems = filterValidSystemSlugs(explicitFilters).map((s) => s.toLowerCase());
       } else {
+        this.activeSyncItem = null;
         this.currentPhase = `Scanning repository index: ${this.formatRelativePhasePath(liveCfg.baseUrl, liveCfg.baseUrl)}`;
         this.emitStatus();
         const rootPage = await this.client.fetchPageHtml(liveCfg.baseUrl, liveCfg, signal, runLogger);
@@ -4438,6 +4471,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
               const completedCount = refreshedConsolesSet.size;
               const totalActiveConsoles = Math.max(completedCount, liveTargetSystems.length);
+              this.activeSyncItem = null;
               this.currentPhase = needsFullIndex
                 ? `${isDryRun ? 'Dry Run · ' : ''}Indexing ${systemSlug} (${completedCount}/${totalActiveConsoles})`
                 : `${isDryRun ? 'Dry Run · ' : ''}Delta check ${systemSlug} (${completedCount}/${totalActiveConsoles})`;
@@ -4698,6 +4732,7 @@ export class ScraperOrchestrator extends EventEmitter {
               }
 
               checkedOrMirroredUrls.add(canonicalUrl);
+              this.setActiveSyncItemFromRecord(item);
               this.currentPhase = `Full Sync · ${item.systemName} (${pIdx + 1}/${pendingLiveItems.length}): ${item.title}`;
               this.emitStatus();
               await inspectAndProcessReleasePage(item.remoteUrl, buildWpMetaHintFromItem(item), null);
@@ -4924,6 +4959,7 @@ export class ScraperOrchestrator extends EventEmitter {
                 });
               }
             }
+            this.setActiveSyncItemFromRecord(getRepositoryItemByRemoteUrl(canonicalLink));
             this.currentPhase = isDeltaMode
               ? `${isDryRun ? 'Dry Run (Incremental)' : 'Incremental'} · ${systemSlug} (${pIdx + 1}/${posts.length}): ${post.title || this.formatRelativePhasePath(post.link, liveCfg.baseUrl)}`
               : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} · ${systemSlug} (${pIdx + 1}/${posts.length}): ${post.title || this.formatRelativePhasePath(post.link, liveCfg.baseUrl)}`;
@@ -4979,6 +5015,7 @@ export class ScraperOrchestrator extends EventEmitter {
               scannedRestBases.add(restBaseKey);
             }
 
+            this.activeSyncItem = null;
             this.currentPhase = isDeltaMode
               ? `${isDryRun ? 'Dry Run (Incremental)' : 'Checking'} ${systemSlug} (${scopeLabel}) since ${effectiveCutoffIso!.slice(0, 16).replace('T', ' ')} UTC`
               : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} (${scopeLabel}): enumerating ${systemSlug}`;
@@ -5341,11 +5378,19 @@ export class ScraperOrchestrator extends EventEmitter {
       release.filename
     ).trim();
 
+    const resolvedHasCover = Boolean(
+      parentContext?.coverLocalPath ||
+        parentContext?.metadata?.coverUrl ||
+        initial.release.coverLocalPath ||
+        initial.release.metadata?.coverUrl,
+    );
+
     const workerKey = `${releaseId}:${initial.file.id}`;
     const transferEntry: ActiveTransferState = {
       workerKey,
       itemId: releaseId,
       itemTitle: resolvedItemTitle,
+      hasCover: resolvedHasCover,
       fileId: initial.file.id,
       fileIndex: fileSequence?.index ?? null,
       totalFiles: totalInItem,
@@ -5369,12 +5414,26 @@ export class ScraperOrchestrator extends EventEmitter {
       const remaining = this.getOrderedActiveTransfers();
       if (remaining.length > 0 && this.activeTransfer) {
         const primary = this.activeTransfer;
+        if (primary.itemId && primary.itemId > 0) {
+          this.activeSyncItem = {
+            itemId: primary.itemId,
+            title: (primary.itemTitle || primary.filename).trim(),
+            systemName: primary.systemName,
+            hasCover: Boolean(primary.hasCover),
+          };
+        }
         this.currentPhase =
           remaining.length > 1
             ? `Downloading ${remaining.length} files in parallel (primary: ${primary.systemName} / ${primary.filename})`
             : `Downloading ${primary.systemName} / ${primary.filename}`;
         this.emitStatus();
       } else if (this.activeRun && !signal.aborted) {
+        this.activeSyncItem = {
+          itemId: releaseId,
+          title: resolvedItemTitle,
+          systemName: transferEntry.systemName,
+          hasCover: resolvedHasCover,
+        };
         this.currentPhase = `Syncing · ${transferEntry.systemName}: ${resolvedItemTitle}`;
         this.emitStatus();
       }
@@ -5384,6 +5443,14 @@ export class ScraperOrchestrator extends EventEmitter {
     this.activeTransferOrder.push(workerKey);
     this.syncActiveTransferSnapshot(false);
     const primary = this.activeTransfer ?? transferEntry;
+    if (primary.itemId && primary.itemId > 0) {
+      this.activeSyncItem = {
+        itemId: primary.itemId,
+        title: (primary.itemTitle || primary.filename).trim(),
+        systemName: primary.systemName,
+        hasCover: Boolean(primary.hasCover),
+      };
+    }
     this.currentPhase =
       this.activeTransfers.size > 1
         ? `Downloading ${this.activeTransfers.size} files in parallel (primary: ${primary.systemName} / ${primary.filename})`
