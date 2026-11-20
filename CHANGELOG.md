@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.21.5] - 2026-11-20
+
+- Redesigned the main **Monitor** Sync status bar into a cohesive **Hero Showcase** layout: the active game's box art now anchors the left column and spans vertically alongside both the game title and the live docked transfer progress bar (while keeping the expandable per-worker `Details` drawer full-width underneath).
+- Switched the active box-art thumbnail from a cropped square to an **adaptive-aspect, fixed-height showcase frame** (`80px–90px` during active transfers, `62px–70px` on Dry Run previews) so portrait GBA/PS2/PSP covers, square-ish DS/PS1 jewel cases, and wide landscape SNES/N64 boxes display uncut, backed by a steady `3:4` recessed CRT placeholder silhouette until artwork loads.
+- Removed the bordered box around the active game title and the bordered pill around the `<system> · <current/total>` counter, replacing them with clean unboxed display typography, `·`-separated tabular telemetry, and a coordinated hover/focus `Inspect ↗` cue across both cover art and title that opens the **Game Detail Drawer**.
+
 ## [1.21.4] - 2026-11-20
 
 - Fixed a blank full-page reload flash during the **Device Export** scene of the **Playwright + FFmpeg** visual preview: updated the palette switcher to click the **Amber** swatch directly inside the always-open sidebar `.crt-tuner-card` in-place (instead of looking for a retired `CRT Display` popover toggle and falling back to `window.location.reload()`), giving viewers a completely uninterrupted view of **Device Export** with a seamless Green → Amber phosphor transition.

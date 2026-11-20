@@ -2,6 +2,7 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 import {
   Activity,
   AlertTriangle,
+  ArrowUpRight,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -169,6 +170,9 @@ interface SyncTargetCoverThumbnailProps {
   isDryRun: boolean;
   uiMotion: CrtUiMotionLevel;
   loadingDetail: boolean;
+  compact?: boolean;
+  highlighted?: boolean;
+  onHoverChange?: (hovering: boolean) => void;
   onInspect: (itemId: number) => void;
 }
 
@@ -177,12 +181,30 @@ function SyncTargetCoverThumbnail({
   isDryRun,
   uiMotion,
   loadingDetail,
+  compact = false,
+  highlighted = false,
+  onHoverChange,
   onInspect,
 }: SyncTargetCoverThumbnailProps) {
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const [imgState, setImgState] = useState<{
     url: string;
     status: 'loaded' | 'error';
   } | null>(null);
+
+  // Immediately recognize browser-cached artwork when switching between syncing titles
+  useEffect(() => {
+    const coverUrl = target.coverUrl;
+    const img = imgRef.current;
+    if (!coverUrl || !img) return;
+    if (img.complete && img.naturalWidth > 0) {
+      setImgState((prev) =>
+        prev?.url === coverUrl && prev.status === 'loaded'
+          ? prev
+          : { url: coverUrl, status: 'loaded' },
+      );
+    }
+  }, [target.coverUrl]);
 
   const isLoaded = Boolean(
     target.coverUrl && imgState?.url === target.coverUrl && imgState.status === 'loaded',
@@ -192,20 +214,31 @@ function SyncTargetCoverThumbnail({
   );
   const showImage = Boolean(target.coverUrl && !hasError);
   const isInteractive = target.itemId !== null;
+
+  const heightClass = compact ? 'h-[62px] sm:h-[70px]' : 'h-[80px] sm:h-[90px]';
+  const placeholderWidthClass = compact ? 'w-[50px] sm:w-[56px]' : 'w-[64px] sm:w-[72px]';
   const accentBorderClass = isDryRun
-    ? 'border-crt-amber/55 hover:border-crt-amber focus-visible:ring-crt-amber/75'
-    : 'border-crt-border-strong hover:border-crt-phosphor/85 focus-visible:ring-crt-phosphor/75';
+    ? highlighted
+      ? 'border-crt-amber/85 focus-visible:ring-crt-amber/75'
+      : 'border-crt-amber/45 hover:border-crt-amber/85 focus-visible:ring-crt-amber/75'
+    : highlighted
+      ? 'border-crt-phosphor/80 focus-visible:ring-crt-phosphor/75'
+      : 'border-crt-border-strong/90 hover:border-crt-phosphor/80 focus-visible:ring-crt-phosphor/75';
 
   const innerContent = (
     <>
-      {/* Recessed CRT placeholder frame: holds fixed square dimensions with zero layout shift */}
+      {/* Recessed 3:4 CRT placeholder frame: steady silhouette while cover caches or when artwork is absent */}
       <span
         aria-hidden="true"
-        className="pointer-events-none absolute inset-0 flex items-center justify-center bg-crt-bg text-crt-muted/75"
+        className={`pointer-events-none absolute inset-0 flex items-center justify-center bg-crt-bg text-crt-muted/70 ${
+          uiMotion === 'off'
+            ? ''
+            : 'transition-opacity duration-150 ease-out motion-reduce:transition-none'
+        } ${isLoaded ? 'opacity-0' : 'opacity-100'}`}
       >
-        <span className="absolute inset-[2px] rounded-[2px] border border-crt-border/45" />
-        <span className="absolute top-[3px] left-[3px] h-1.5 w-1.5 border-t border-l border-crt-border-strong/70" />
-        <span className="absolute bottom-[3px] right-[3px] h-1.5 w-1.5 border-b border-r border-crt-border-strong/70" />
+        <span className="absolute inset-[3px] rounded-[2px] border border-crt-border/45" />
+        <span className="absolute top-[4px] left-[4px] h-2 w-2 border-t border-l border-crt-border-strong/70" />
+        <span className="absolute bottom-[4px] right-[4px] h-2 w-2 border-b border-r border-crt-border-strong/70" />
         {loadingDetail ? (
           <Loader2
             className={`relative z-10 h-4 w-4 animate-spin ${
@@ -213,30 +246,46 @@ function SyncTargetCoverThumbnail({
             }`}
           />
         ) : (
-          <Gamepad2 className="relative z-10 h-4 w-4 opacity-75 transition-opacity group-hover:opacity-100" />
+          <Gamepad2
+            className={`relative z-10 h-5 w-5 transition-opacity duration-150 ${
+              highlighted ? 'opacity-100 text-crt-text' : 'opacity-70'
+            }`}
+          />
         )}
       </span>
 
+      {/* Adaptive-aspect cover artwork: preserves natural SNES landscape, DS square, and GBA/PS2 portrait proportions */}
       {showImage && target.coverUrl && (
         <img
+          ref={imgRef}
           src={target.coverUrl}
           alt={`${target.title} cover art`}
           referrerPolicy="no-referrer"
           decoding="async"
           onLoad={() => setImgState({ url: target.coverUrl!, status: 'loaded' })}
           onError={() => setImgState({ url: target.coverUrl!, status: 'error' })}
-          className={`absolute inset-0 h-full w-full object-cover ${
+          className={`${
+            isLoaded
+              ? 'relative z-10 block h-full w-auto min-w-[50px] max-w-[124px] sm:max-w-[144px] object-cover opacity-100'
+              : 'pointer-events-none absolute inset-0 h-full w-full object-contain opacity-0'
+          } ${
             uiMotion === 'off'
               ? ''
               : 'transition-opacity duration-150 ease-out motion-reduce:transition-none'
-          } ${isLoaded && !loadingDetail ? 'opacity-100' : 'opacity-0'}`}
+          }`}
         />
       )}
+
+      {/* Subtle top edge bevel sheen */}
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-20 rounded-[inherit] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+      />
 
       {loadingDetail && isLoaded && (
         <span
           aria-hidden="true"
-          className="absolute inset-0 flex items-center justify-center bg-crt-bg/65"
+          className="absolute inset-0 z-30 flex items-center justify-center bg-crt-bg/65"
         >
           <Loader2
             className={`h-4 w-4 animate-spin ${isDryRun ? 'text-crt-amber' : 'text-crt-phosphor'}`}
@@ -246,16 +295,22 @@ function SyncTargetCoverThumbnail({
     </>
   );
 
+  const frameSizeClass = `${heightClass} ${isLoaded ? 'w-auto' : placeholderWidthClass}`;
+
   if (isInteractive && target.itemId !== null) {
     const inspectId = target.itemId;
     return (
       <button
         type="button"
         onClick={() => onInspect(inspectId)}
+        onMouseEnter={() => onHoverChange?.(true)}
+        onMouseLeave={() => onHoverChange?.(false)}
+        onFocus={() => onHoverChange?.(true)}
+        onBlur={() => onHoverChange?.(false)}
         disabled={loadingDetail}
         title={`Inspect "${target.title}" details`}
         aria-label={`Inspect ${target.title} details`}
-        className={`group relative inline-flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center overflow-hidden rounded border bg-crt-bg shadow-[inset_0_0_0_1px_rgba(255,255,255,0.03)] cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-offset-crt-surface disabled:cursor-wait ${accentBorderClass}`}
+        className={`crt-hero-cover-frame group relative inline-flex ${frameSizeClass} shrink-0 items-center justify-center overflow-hidden rounded-[4px] border bg-crt-bg cursor-pointer transition-[border-color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-crt-surface disabled:cursor-wait ${accentBorderClass}`}
       >
         {innerContent}
       </button>
@@ -265,7 +320,7 @@ function SyncTargetCoverThumbnail({
   return (
     <span
       aria-hidden="true"
-      className="relative inline-flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center overflow-hidden rounded border border-crt-border bg-crt-bg shadow-[inset_0_0_0_1px_rgba(255,255,255,0.03)]"
+      className={`crt-hero-cover-frame relative inline-flex ${frameSizeClass} shrink-0 items-center justify-center overflow-hidden rounded-[4px] border border-crt-border bg-crt-bg`}
     >
       {innerContent}
     </span>
@@ -320,6 +375,7 @@ export function OverviewPanel({
   const [monitorQueueNotice, setMonitorQueueNotice] = useState<string | null>(null);
   const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
   const [loadingDetailId, setLoadingDetailId] = useState<number | null>(null);
+  const [heroInspectHover, setHeroInspectHover] = useState(false);
   const [, setTick] = useState(0);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
   const detailReqSeqRef = useRef(0);
@@ -822,6 +878,210 @@ export function OverviewPanel({
     }
   };
 
+  const isHeroLoadingDetail = Boolean(
+    activeSyncTargetCover?.itemId !== null &&
+      activeSyncTargetCover?.itemId !== undefined &&
+      loadingDetailId === activeSyncTargetCover.itemId,
+  );
+
+  const transferProgressBarBlock = combinedTransfer ? (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0">
+        <div className="flex items-center gap-1.5 text-crt-muted min-w-0">
+          <Download className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
+          <span className="text-crt-text/85 font-medium truncate">
+            {hasMultipleParallelTransfers
+              ? `Combined progress (${combinedTransfer.workerCount} active)`
+              : 'Transfer progress'}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+          <span>
+            {combinedTransfer.bytesReceived > 0 || combinedTransfer.totalBytes
+              ? `${formatBytes(combinedTransfer.bytesReceived)}${
+                  combinedTransfer.totalBytes ? ` / ${formatBytes(combinedTransfer.totalBytes)}` : ''
+                }`
+              : 'Connecting…'}
+          </span>
+          {combinedTransfer.bytesPerSec > 0 && (
+            <>
+              <span aria-hidden="true" className="hidden sm:inline text-crt-border-strong">
+                ·
+              </span>
+              <span className="hidden sm:inline">
+                {formatBytes(combinedTransfer.bytesPerSec)}/s
+              </span>
+            </>
+          )}
+          {combinedTransfer.pct !== null && (
+            <>
+              <span aria-hidden="true" className="text-crt-border-strong">
+                ·
+              </span>
+              <span className="text-crt-phosphor font-semibold inline-block min-w-[3.5ch] text-right">
+                {combinedTransfer.pct}%
+              </span>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={() => setTransferDetailsOpen((prev) => !prev)}
+            aria-expanded={transferDetailsOpen}
+            aria-controls="sync-transfer-details-drawer"
+            className={`ml-0.5 inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded-sm border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              transferDetailsOpen
+                ? 'bg-crt-elevated border-crt-border-strong text-crt-phosphor'
+                : 'bg-crt-bg/80 border-crt-border text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+            }`}
+          >
+            <span>Details</span>
+            {transferDetailsOpen ? (
+              <ChevronUp className="h-3 w-3 shrink-0" />
+            ) : (
+              <ChevronDown className="h-3 w-3 shrink-0" />
+            )}
+          </button>
+        </div>
+      </div>
+
+      <div
+        role="progressbar"
+        aria-label={`Combined download progress for ${displayedSyncSubject}`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={combinedTransfer.pct ?? undefined}
+        className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+      >
+        {combinedTransfer.pct !== null ? (
+          <div
+            key={`combined-${status.activeRun?.id ?? 'active'}`}
+            style={
+              combinedWaveParams.active
+                ? ({
+                    '--crt-wave-duration': `${combinedWaveParams.progressWaveDurationSec}s`,
+                  } as CSSProperties)
+                : undefined
+            }
+            className={`h-full bg-crt-phosphor crt-progress-beam ${
+              combinedWaveParams.active ? 'crt-progress-beam-wave' : ''
+            } transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none ${
+              PROGRESS_WIDTH_CLASSES[Math.max(3, Math.min(100, combinedTransfer.pct))]
+            }`}
+          />
+        ) : unknownSizeGraceElapsed ? (
+          <div className="h-full bg-crt-phosphor crt-progress-indeterminate" />
+        ) : (
+          <div
+            key={`handshake-${status.activeRun?.id ?? 'active'}`}
+            style={
+              combinedWaveParams.active
+                ? ({
+                    '--crt-wave-duration': `${combinedWaveParams.progressWaveDurationSec}s`,
+                  } as CSSProperties)
+                : undefined
+            }
+            className={`h-full bg-crt-phosphor/75 crt-progress-beam ${
+              combinedWaveParams.active ? 'crt-progress-beam-wave' : ''
+            } transition-opacity duration-150 motion-reduce:transition-none ${PROGRESS_WIDTH_CLASSES[4]}`}
+          />
+        )}
+      </div>
+    </div>
+  ) : heldTransferForActiveRun ? (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0">
+        <div className="flex items-center gap-1.5 text-crt-text/90 min-w-0">
+          <CheckCircle2 className="h-3.5 w-3.5 text-crt-phosphor/80 shrink-0" />
+          <span className="truncate">
+            {isLiveSyncRun ? 'Saved — queuing next…' : 'Sync transfer complete'}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+          {heldTransferForActiveRun.bytes > 0 && (
+            <>
+              <span>{formatBytes(heldTransferForActiveRun.bytes)}</span>
+              <span aria-hidden="true" className="text-crt-border-strong">
+                ·
+              </span>
+            </>
+          )}
+          <span className="text-crt-phosphor/80 font-semibold inline-block min-w-[3.5ch] text-right">
+            100%
+          </span>
+          <button
+            type="button"
+            onClick={() => setTransferDetailsOpen((prev) => !prev)}
+            aria-expanded={transferDetailsOpen}
+            aria-controls="sync-transfer-details-drawer"
+            className={`ml-0.5 inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded-sm border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              transferDetailsOpen
+                ? 'bg-crt-elevated border-crt-border-strong text-crt-phosphor'
+                : 'bg-crt-bg/80 border-crt-border text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+            }`}
+          >
+            <span>Details</span>
+            {transferDetailsOpen ? (
+              <ChevronUp className="h-3 w-3 shrink-0" />
+            ) : (
+              <ChevronDown className="h-3 w-3 shrink-0" />
+            )}
+          </button>
+        </div>
+      </div>
+
+      <div
+        role="progressbar"
+        aria-label={`Completed download for ${heldTransferForActiveRun.itemTitle}`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={100}
+        className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+      >
+        <div
+          key={heldTransferForActiveRun.fileKey}
+          className={`h-full bg-crt-phosphor transition-opacity duration-200 motion-reduce:transition-none ${
+            isLiveSyncRun ? 'opacity-45' : 'opacity-75'
+          } ${PROGRESS_WIDTH_CLASSES[100]}`}
+        />
+      </div>
+    </div>
+  ) : (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3 h-5 text-xs font-mono min-w-0">
+        <div className="flex items-center gap-1.5 text-crt-muted min-w-0">
+          <Activity className="h-3.5 w-3.5 text-crt-phosphor/80 shrink-0" />
+          <span className="truncate">
+            {isLiveSyncRun ? 'Preparing next downloadable archive…' : 'Sync scan complete'}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+          {status.activeRun ? (
+            <span>
+              {status.activeRun.newFound} matched · {status.activeRun.skippedCount} on disk
+            </span>
+          ) : (
+            <span>Done</span>
+          )}
+        </div>
+      </div>
+
+      <div
+        role="progressbar"
+        aria-label="Preparing repository transfer"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+      >
+        {isLiveSyncRun ? (
+          <div className="h-full bg-crt-phosphor/65 crt-progress-indeterminate" />
+        ) : (
+          <div className={`h-full bg-crt-phosphor/50 ${PROGRESS_WIDTH_CLASSES[100]}`} />
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-6 [overflow-anchor:none]">
       {/* Login / credentials notice until at least one login succeeds */}
@@ -861,383 +1121,265 @@ export function OverviewPanel({
         </div>
       ) : null}
 
-      {/* Active Runner Phase Status Panel */}
+      {/* Active Runner Phase Status Panel (Hero Showcase) */}
       <section className="relative crt-panel-living crt-panel-hero border border-crt-border bg-crt-surface rounded-md p-5">
         <div aria-hidden="true" className="crt-edge-beam">
           <span />
         </div>
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0 overflow-hidden rounded-md z-0"
-        >
-          <SyncSpeedWaveCanvas
-            bytesPerSec={combinedTransfer?.bytesPerSec ?? 0}
-            uiMotion={uiMotion}
-            syncSpeedWave={syncSpeedWave}
-            active={Boolean(combinedTransfer)}
-            palette={crtPalette}
-            isDryRun={isDryRunActive}
-          />
-        </div>
-        {/* Zone 1: Tiered Sync Status Header (Tier 1 Global Context / Tier 2 Active Target) */}
-        <div className="relative z-10 min-w-0">
-          {/* Tier 1: Global Sync Run, Sync Type & High-Contrast System / Progress Context */}
-          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 text-xs font-mono min-w-0">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
-              <span
-                className={`inline-flex items-center gap-1.5 font-medium whitespace-nowrap shrink-0 ${
-                  status.activeRun
-                    ? `${isDryRunActive ? 'text-crt-amber' : 'text-crt-phosphor'} crt-phase-sync-active`
-                    : 'text-crt-muted'
-                }`}
-              >
-                <LivingNavIcon section="monitor" className="h-3.5 w-3.5 shrink-0" />
-                <span>
-                  {status.activeRun
-                    ? `${isDryRunActive ? 'Dry Run Active' : 'Sync Active'} · Run #${status.activeRun.id}`
-                    : 'Standby'}
-                </span>
-              </span>
-
-              {(parsedSyncHeader.syncType ||
-                parsedSyncHeader.systemName ||
-                effectiveSystemProgress) && (
-                <>
-                  <span aria-hidden="true" className="text-crt-border-strong select-none">
-                    ·
-                  </span>
-                  {parsedSyncHeader.syncType && (
-                    <span className="text-crt-text/90 font-medium whitespace-nowrap shrink-0">
-                      {parsedSyncHeader.syncType}
-                    </span>
-                  )}
-                  {(parsedSyncHeader.systemName || effectiveSystemProgress) && (
-                    <span className="crt-status-context-block inline-flex items-center gap-1.5 text-[11px] font-mono tabular-nums min-w-0 max-w-full">
-                      {parsedSyncHeader.systemName && (
-                        <span className="text-crt-text font-semibold truncate">
-                          {parsedSyncHeader.systemName}
-                        </span>
-                      )}
-                      {parsedSyncHeader.systemName && effectiveSystemProgress && (
-                        <span aria-hidden="true" className="text-crt-muted">
-                          ·
-                        </span>
-                      )}
-                      {effectiveSystemProgress && (
-                        <span
-                          className={`whitespace-nowrap shrink-0 ${
-                            isDryRunActive ? 'text-crt-amber' : 'text-crt-phosphor'
-                          }`}
-                        >
-                          {effectiveSystemProgress}
-                        </span>
-                      )}
-                    </span>
-                  )}
-                </>
-              )}
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 overflow-hidden rounded-md z-0"
+            >
+              <SyncSpeedWaveCanvas
+                bytesPerSec={combinedTransfer?.bytesPerSec ?? 0}
+                uiMotion={uiMotion}
+                syncSpeedWave={syncSpeedWave}
+                active={Boolean(combinedTransfer)}
+                palette={crtPalette}
+                isDryRun={isDryRunActive}
+              />
             </div>
 
-            {status.activeRun ? (
-              <span className="text-crt-muted tabular-nums truncate">
-                {formatRunDuration(status.activeRun.startedAt, null)} elapsed
-                {status.activeRun.downloadedCount > 0
-                  ? ` · ${status.activeRun.downloadedCount} downloaded`
-                  : ''}
-              </span>
-            ) : cutoffSavedNotice && !editingCutoff ? (
-              <span className="text-crt-phosphor whitespace-nowrap shrink-0">{cutoffSavedNotice}</span>
-            ) : null}
-          </div>
-
-          {/* Tier 2: Active Target / Game Title (Optional Phase Prefix + Inline Cover Thumbnail + Highlighted Title Frame) */}
-          <h1
-            title={status.currentPhase}
-            className="mt-2.5 pt-2.5 border-t border-crt-border/70 min-w-0"
-          >
-            <span className="flex items-center gap-2.5 min-w-0">
-              {activeSyncTargetCover && (
-                <SyncTargetCoverThumbnail
-                  target={activeSyncTargetCover}
-                  isDryRun={isDryRunActive}
-                  uiMotion={uiMotion}
-                  loadingDetail={
-                    loadingDetailId !== null && loadingDetailId === activeSyncTargetCover.itemId
-                  }
-                  onInspect={openSyncItemDetail}
-                />
-              )}
-
-              <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 min-w-0 flex-1">
-                {parsedSyncHeader.actionPrefix && (
-                  <span className="font-display text-sm sm:text-[15px] font-medium tracking-tight text-crt-muted whitespace-nowrap shrink-0">
-                    {parsedSyncHeader.actionPrefix}
-                  </span>
-                )}
-
-                {isHighlightedGameTarget ? (
-                  activeSyncTargetCover?.itemId ? (
-                    <button
-                      type="button"
-                      onClick={() => openSyncItemDetail(activeSyncTargetCover.itemId!)}
-                      title={`Inspect "${displayedSyncSubject}" details`}
-                      className="crt-active-filename font-display text-lg sm:text-xl font-bold tracking-tight leading-snug min-w-0 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crt-phosphor/70 focus-visible:ring-offset-1 focus-visible:ring-offset-crt-surface"
-                    >
-                      <span aria-hidden="true" className="crt-active-filename-sheen" />
-                      <span className="crt-active-filename-label truncate min-w-0">
-                        {displayedSyncSubject}
-                      </span>
-                    </button>
-                  ) : (
-                    <span
-                      title={displayedSyncSubject}
-                      className="crt-active-filename font-display text-lg sm:text-xl font-bold tracking-tight leading-snug min-w-0"
-                    >
-                      <span aria-hidden="true" className="crt-active-filename-sheen" />
-                      <span className="crt-active-filename-label truncate min-w-0">
-                        {displayedSyncSubject}
-                      </span>
+            <div className="relative z-10 min-w-0">
+              {/* Tier 1: Clean Unboxed Telemetry Eyebrow (Zero-Pill Metadata) */}
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 text-xs font-mono min-w-0">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
+                  <span
+                    className={`inline-flex items-center gap-1.5 font-medium whitespace-nowrap shrink-0 ${
+                      status.activeRun
+                        ? `${isDryRunActive ? 'text-crt-amber' : 'text-crt-phosphor'} crt-phase-sync-active`
+                        : 'text-crt-muted'
+                    }`}
+                  >
+                    <LivingNavIcon section="monitor" className="h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      {status.activeRun
+                        ? `${isDryRunActive ? 'Dry Run Active' : 'Sync Active'} · Run #${status.activeRun.id}`
+                        : 'Standby'}
                     </span>
-                  )
-                ) : parsedSyncHeader.subjectKind === 'path' ? (
-                  <span
-                    title={displayedSyncSubject}
-                    className="font-mono text-sm sm:text-[15px] font-medium leading-snug text-crt-text/90 truncate min-w-0"
-                  >
-                    {displayedSyncSubject}
                   </span>
-                ) : parsedSyncHeader.subjectKind === 'idle' ? (
-                  <span
-                    title={displayedSyncSubject}
-                    className="font-display text-base sm:text-lg font-medium leading-snug text-crt-muted truncate min-w-0"
-                  >
-                    {displayedSyncSubject}
+
+                  {parsedSyncHeader.syncType && (
+                    <>
+                      <span aria-hidden="true" className="text-crt-border-strong select-none">
+                        ·
+                      </span>
+                      <span className="text-crt-muted font-medium whitespace-nowrap shrink-0">
+                        {parsedSyncHeader.syncType}
+                      </span>
+                    </>
+                  )}
+
+                  {parsedSyncHeader.systemName && (
+                    <>
+                      <span aria-hidden="true" className="text-crt-border-strong select-none">
+                        ·
+                      </span>
+                      <span className="text-crt-text font-semibold truncate">
+                        {parsedSyncHeader.systemName}
+                      </span>
+                    </>
+                  )}
+
+                  {effectiveSystemProgress && (
+                    <>
+                      <span aria-hidden="true" className="text-crt-border-strong select-none">
+                        ·
+                      </span>
+                      <span
+                        className={`font-medium tabular-nums whitespace-nowrap shrink-0 ${
+                          isDryRunActive ? 'text-crt-amber' : 'text-crt-phosphor'
+                        }`}
+                      >
+                        {effectiveSystemProgress}
+                      </span>
+                    </>
+                  )}
+                </div>
+
+                {status.activeRun ? (
+                  <span className="text-crt-muted tabular-nums truncate">
+                    {formatRunDuration(status.activeRun.startedAt, null)} elapsed
+                    {status.activeRun.downloadedCount > 0
+                      ? ` · ${status.activeRun.downloadedCount} downloaded`
+                      : ''}
                   </span>
-                ) : (
-                  <span
-                    title={displayedSyncSubject}
-                    className="font-display text-base sm:text-lg font-medium leading-snug text-crt-text/95 truncate min-w-0"
-                  >
-                    {displayedSyncSubject}
+                ) : cutoffSavedNotice && !editingCutoff ? (
+                  <span className="text-crt-phosphor whitespace-nowrap shrink-0">
+                    {cutoffSavedNotice}
                   </span>
-                )}
-              </span>
-            </span>
-          </h1>
-        </div>
+                ) : null}
+              </div>
 
-        {/* Zone 2: Run-Docked Combined Transfer Bar + Collapsed-by-Default Details Drawer */}
-        <div
-          aria-hidden={!isTransferBayOpen}
-          inert={!isTransferBayOpen || undefined}
-          data-open={isTransferBayOpen ? 'true' : 'false'}
-          className={`relative z-10 crt-accordion-grid transition-opacity duration-300 motion-reduce:transition-none ${
-            isTransferBayOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
-          }`}
-        >
-          <div className="crt-accordion-inner">
-            <div className="pt-4">
-              <div className="pt-3.5 border-t border-crt-border space-y-2.5">
-                {combinedTransfer ? (
-                  <>
-                    <div className="flex items-center justify-between gap-3 h-6 text-xs font-mono min-w-0">
-                      <div className="flex items-center gap-2 text-crt-text min-w-0">
-                        <Download className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
-                        <span className="text-crt-text/90 font-medium truncate">
-                          {hasMultipleParallelTransfers
-                            ? `Combined progress (${combinedTransfer.workerCount} active)`
-                            : 'Transfer progress'}
-                        </span>
-                      </div>
+              {/* Tier 2: Hero Showcase (Adaptive Box-Art spanning Unboxed Title + Docked Transfer Bar) */}
+              {activeSyncTargetCover ? (
+                <div className="mt-3 pt-3.5 border-t border-crt-border/70 flex items-stretch gap-4 min-w-0">
+                  <SyncTargetCoverThumbnail
+                    target={activeSyncTargetCover}
+                    isDryRun={isDryRunActive}
+                    uiMotion={uiMotion}
+                    compact={!isTransferBayOpen}
+                    highlighted={heroInspectHover}
+                    onHoverChange={setHeroInspectHover}
+                    loadingDetail={isHeroLoadingDetail}
+                    onInspect={openSyncItemDetail}
+                  />
 
-                      <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
-                        <span>
-                          {combinedTransfer.bytesReceived > 0 || combinedTransfer.totalBytes
-                            ? `${formatBytes(combinedTransfer.bytesReceived)}${
-                                combinedTransfer.totalBytes
-                                  ? ` / ${formatBytes(combinedTransfer.totalBytes)}`
-                                  : ''
-                              }`
-                            : 'Connecting…'}
-                        </span>
-                        {combinedTransfer.bytesPerSec > 0 && (
-                          <span className="hidden sm:inline">
-                            {formatBytes(combinedTransfer.bytesPerSec)}/s
-                          </span>
-                        )}
-                        {combinedTransfer.pct !== null && (
-                          <span className="text-crt-phosphor font-semibold inline-block min-w-[3.5ch] text-right">
-                            {combinedTransfer.pct}%
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => setTransferDetailsOpen((prev) => !prev)}
-                          aria-expanded={transferDetailsOpen}
-                          aria-controls="sync-transfer-details-drawer"
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded-sm border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                            transferDetailsOpen
-                              ? 'bg-crt-elevated border-crt-border-strong text-crt-phosphor'
-                              : 'bg-crt-bg/80 border-crt-border text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
-                          }`}
-                        >
-                          <span>Details</span>
-                          {transferDetailsOpen ? (
-                            <ChevronUp className="h-3 w-3 shrink-0" />
-                          ) : (
-                            <ChevronDown className="h-3 w-3 shrink-0" />
-                          )}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div
-                      role="progressbar"
-                      aria-label={`Combined download progress for ${displayedSyncSubject}`}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={combinedTransfer.pct ?? undefined}
-                      className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
-                    >
-                      {combinedTransfer.pct !== null ? (
-                        <div
-                          key={`combined-${status.activeRun?.id ?? 'active'}`}
-                          style={
-                            combinedWaveParams.active
-                              ? ({
-                                  '--crt-wave-duration': `${combinedWaveParams.progressWaveDurationSec}s`,
-                                } as CSSProperties)
-                              : undefined
-                          }
-                          className={`h-full bg-crt-phosphor crt-progress-beam ${
-                            combinedWaveParams.active ? 'crt-progress-beam-wave' : ''
-                          } transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none ${
-                            PROGRESS_WIDTH_CLASSES[Math.max(3, Math.min(100, combinedTransfer.pct))]
-                          }`}
-                        />
-                      ) : unknownSizeGraceElapsed ? (
-                        <div className="h-full bg-crt-phosphor crt-progress-indeterminate" />
-                      ) : (
-                        <div
-                          key={`handshake-${status.activeRun?.id ?? 'active'}`}
-                          style={
-                            combinedWaveParams.active
-                              ? ({
-                                  '--crt-wave-duration': `${combinedWaveParams.progressWaveDurationSec}s`,
-                                } as CSSProperties)
-                              : undefined
-                          }
-                          className={`h-full bg-crt-phosphor/75 crt-progress-beam ${
-                            combinedWaveParams.active ? 'crt-progress-beam-wave' : ''
-                          } transition-opacity duration-150 motion-reduce:transition-none ${PROGRESS_WIDTH_CLASSES[4]}`}
-                        />
-                      )}
-                    </div>
-                  </>
-                ) : heldTransferForActiveRun ? (
-                  <>
-                    <div className="flex items-center justify-between gap-3 h-6 text-xs font-mono min-w-0">
-                      <div className="flex items-center gap-2 text-crt-text/90 min-w-0">
-                        <CheckCircle2 className="h-3.5 w-3.5 text-crt-phosphor/80 shrink-0" />
-                        <span className="truncate">
-                          {isLiveSyncRun ? 'Saved — queuing next…' : 'Sync transfer complete'}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
-                        {heldTransferForActiveRun.bytes > 0 && (
-                          <span>{formatBytes(heldTransferForActiveRun.bytes)}</span>
-                        )}
-                        <span className="text-crt-phosphor/80 font-semibold inline-block min-w-[3.5ch] text-right">
-                          100%
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setTransferDetailsOpen((prev) => !prev)}
-                          aria-expanded={transferDetailsOpen}
-                          aria-controls="sync-transfer-details-drawer"
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded-sm border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                            transferDetailsOpen
-                              ? 'bg-crt-elevated border-crt-border-strong text-crt-phosphor'
-                              : 'bg-crt-bg/80 border-crt-border text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
-                          }`}
-                        >
-                          <span>Details</span>
-                          {transferDetailsOpen ? (
-                            <ChevronUp className="h-3 w-3 shrink-0" />
-                          ) : (
-                            <ChevronDown className="h-3 w-3 shrink-0" />
-                          )}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div
-                      role="progressbar"
-                      aria-label={`Completed download for ${heldTransferForActiveRun.itemTitle}`}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={100}
-                      className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
-                    >
-                      <div
-                        key={heldTransferForActiveRun.fileKey}
-                        className={`h-full bg-crt-phosphor transition-opacity duration-200 motion-reduce:transition-none ${
-                          isLiveSyncRun ? 'opacity-45' : 'opacity-75'
-                        } ${PROGRESS_WIDTH_CLASSES[100]}`}
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="flex items-center justify-between gap-3 h-6 text-xs font-mono min-w-0">
-                      <div className="flex items-center gap-2 text-crt-muted min-w-0">
-                        <Activity className="h-3.5 w-3.5 text-crt-phosphor/80 shrink-0" />
-                        <span className="truncate">
-                          {isLiveSyncRun
-                            ? 'Preparing next downloadable archive…'
-                            : 'Sync scan complete'}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2.5 text-crt-muted tabular-nums whitespace-nowrap shrink-0">
-                        {status.activeRun ? (
-                          <span>
-                            {status.activeRun.newFound} matched · {status.activeRun.skippedCount} on disk
-                          </span>
-                        ) : (
-                          <span>Done</span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div
-                      role="progressbar"
-                      aria-label="Preparing repository transfer"
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
-                    >
-                      {isLiveSyncRun ? (
-                        <div className="h-full bg-crt-phosphor/65 crt-progress-indeterminate" />
-                      ) : (
-                        <div className={`h-full bg-crt-phosphor/50 ${PROGRESS_WIDTH_CLASSES[100]}`} />
-                      )}
-                    </div>
-                  </>
-                )}
-
-                {/* Collapsible Transfer Details Drawer (starts collapsed every visit) */}
-                {(combinedTransfer || heldTransferForActiveRun) && (
                   <div
-                    id="sync-transfer-details-drawer"
-                    aria-hidden={!transferDetailsOpen}
-                    inert={!transferDetailsOpen || undefined}
-                    data-open={transferDetailsOpen ? 'true' : 'false'}
+                    className={`flex-1 min-w-0 flex flex-col ${
+                      isTransferBayOpen ? 'justify-between gap-2.5' : 'justify-center gap-1'
+                    }`}
+                  >
+                    <h1 title={status.currentPhase} className="min-w-0">
+                      <span className="flex items-baseline gap-2.5 min-w-0">
+                        {parsedSyncHeader.actionPrefix && (
+                          <span className="font-mono text-xs font-medium text-crt-muted whitespace-nowrap shrink-0">
+                            {parsedSyncHeader.actionPrefix}
+                          </span>
+                        )}
+
+                        {activeSyncTargetCover.itemId !== null ? (
+                          <button
+                            type="button"
+                            onClick={() => openSyncItemDetail(activeSyncTargetCover.itemId!)}
+                            onMouseEnter={() => setHeroInspectHover(true)}
+                            onMouseLeave={() => setHeroInspectHover(false)}
+                            onFocus={() => setHeroInspectHover(true)}
+                            onBlur={() => setHeroInspectHover(false)}
+                            disabled={isHeroLoadingDetail}
+                            title={`Inspect "${displayedSyncSubject}" details`}
+                            className="group/title inline-flex items-baseline gap-2.5 max-w-full min-w-0 text-left cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crt-phosphor/70 focus-visible:ring-offset-2 focus-visible:ring-offset-crt-surface disabled:cursor-wait"
+                          >
+                            <span
+                              className={`crt-hero-game-title font-display text-lg sm:text-[22px] font-bold tracking-tight leading-tight truncate min-w-0 transition-colors duration-150 ${
+                                heroInspectHover
+                                  ? isDryRunActive
+                                    ? 'text-crt-amber'
+                                    : 'text-crt-phosphor'
+                                  : 'text-crt-text'
+                              }`}
+                            >
+                              {displayedSyncSubject}
+                            </span>
+                            <span
+                              aria-hidden="true"
+                              className={`hidden sm:inline-flex items-center gap-0.5 text-[11px] font-mono whitespace-nowrap shrink-0 transition-opacity duration-150 motion-reduce:transition-none ${
+                                heroInspectHover || isHeroLoadingDetail
+                                  ? 'opacity-100'
+                                  : 'opacity-0'
+                              } ${isDryRunActive ? 'text-crt-amber/90' : 'text-crt-phosphor/90'}`}
+                            >
+                              {isHeroLoadingDetail ? (
+                                <>
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                  <span>Opening…</span>
+                                </>
+                              ) : (
+                                <>
+                                  <span>Inspect</span>
+                                  <ArrowUpRight className="h-3 w-3" />
+                                </>
+                              )}
+                            </span>
+                          </button>
+                        ) : (
+                          <span
+                            title={displayedSyncSubject}
+                            className="crt-hero-game-title font-display text-lg sm:text-[22px] font-bold tracking-tight leading-tight text-crt-text truncate min-w-0"
+                          >
+                            {displayedSyncSubject}
+                          </span>
+                        )}
+                      </span>
+                    </h1>
+
+                    {isTransferBayOpen ? (
+                      transferProgressBarBlock
+                    ) : (
+                      <p className="text-xs font-mono text-crt-muted truncate">
+                        {isDryRunActive
+                          ? 'Dry run preview · inspecting release metadata and sync rules'
+                          : 'Preparing release assets and download queue'}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <h1
+                    title={status.currentPhase}
+                    className="mt-2.5 pt-2.5 border-t border-crt-border/70 min-w-0"
+                  >
+                    <span className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 min-w-0">
+                      {parsedSyncHeader.actionPrefix && (
+                        <span className="font-mono text-xs font-medium text-crt-muted whitespace-nowrap shrink-0">
+                          {parsedSyncHeader.actionPrefix}
+                        </span>
+                      )}
+
+                      {isHighlightedGameTarget ? (
+                        <span
+                          title={displayedSyncSubject}
+                          className="crt-hero-game-title font-display text-lg sm:text-[21px] font-bold tracking-tight leading-tight text-crt-text truncate min-w-0"
+                        >
+                          {displayedSyncSubject}
+                        </span>
+                      ) : parsedSyncHeader.subjectKind === 'path' ? (
+                        <span
+                          title={displayedSyncSubject}
+                          className="font-mono text-sm sm:text-[15px] font-medium leading-snug text-crt-text/90 truncate min-w-0"
+                        >
+                          {displayedSyncSubject}
+                        </span>
+                      ) : parsedSyncHeader.subjectKind === 'idle' ? (
+                        <span
+                          title={displayedSyncSubject}
+                          className="font-display text-base sm:text-lg font-medium leading-snug text-crt-muted truncate min-w-0"
+                        >
+                          {displayedSyncSubject}
+                        </span>
+                      ) : (
+                        <span
+                          title={displayedSyncSubject}
+                          className="font-display text-base sm:text-lg font-medium leading-snug text-crt-text/95 truncate min-w-0"
+                        >
+                          {displayedSyncSubject}
+                        </span>
+                      )}
+                    </span>
+                  </h1>
+
+                  {/* Fallback Full-Width Transfer Bay when transfer runs before a game title resolves */}
+                  <div
+                    aria-hidden={!isTransferBayOpen}
+                    inert={!isTransferBayOpen || undefined}
+                    data-open={isTransferBayOpen ? 'true' : 'false'}
                     className={`crt-accordion-grid transition-opacity duration-300 motion-reduce:transition-none ${
-                      transferDetailsOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                      isTransferBayOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
                     }`}
                   >
                     <div className="crt-accordion-inner">
-                      <div className="pt-2.5 mt-1 border-t border-crt-border/70 space-y-2.5">
+                      <div className="pt-3.5 mt-3 border-t border-crt-border/70">
+                        {transferProgressBarBlock}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Full-Width Collapsible Transfer Details Drawer (starts collapsed every visit) */}
+              {isTransferBayOpen && (combinedTransfer || heldTransferForActiveRun) && (
+                <div
+                  id="sync-transfer-details-drawer"
+                  aria-hidden={!transferDetailsOpen}
+                  inert={!transferDetailsOpen || undefined}
+                  data-open={transferDetailsOpen ? 'true' : 'false'}
+                  className={`crt-accordion-grid transition-opacity duration-300 motion-reduce:transition-none ${
+                    transferDetailsOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                  }`}
+                >
+                  <div className="crt-accordion-inner">
+                    <div className="pt-3 mt-3.5 border-t border-crt-border/70 space-y-2.5">
                         {combinedTransfer ? (
                           <>
                             {hasMultipleParallelTransfers && (
@@ -1408,13 +1550,10 @@ export function OverviewPanel({
                     </div>
                   </div>
                 )}
-              </div>
             </div>
-          </div>
-        </div>
 
         {/* Zone 3: 4-Column Operational Summary Strip */}
-        <div className="mt-4 pt-3.5 border-t border-crt-border grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-x-6">
+        <div className="relative z-10 mt-4 pt-3.5 border-t border-crt-border grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-x-6">
           <div className="space-y-1 min-w-0">
             <div className="flex items-center justify-between gap-2 text-[11px]">
               <span className="text-crt-muted">Next Schedule</span>
