@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ActiveTransferState, SyncRunRecord } from '../src/types.ts';
-import { parseSyncStatusHeader } from '../src/utils/syncStatusPhase.ts';
+import type { ActiveSyncItemSummary, ActiveTransferState, SyncRunRecord } from '../src/types.ts';
+import {
+  parseSyncStatusHeader,
+  resolveActiveSyncTargetCover,
+} from '../src/utils/syncStatusPhase.ts';
 
 function makeRun(overrides: Partial<SyncRunRecord> = {}): SyncRunRecord {
   return {
@@ -225,5 +228,156 @@ test('keeps steady highlighted title with no redundant prefix across Index-First
   assert.equal(downloading.subject, 'Parallel World');
   assert.equal(downloading.subjectKind, 'title');
   assert.equal(downloading.systemName, 'nes-roms');
+});
+
+test('resolves active sync cover thumbnail cleanly across warm-up, download, handoff, Dry Run, and Standby', () => {
+  const fullRun = makeRun({ mode: 'full' });
+  const dryRun = makeRun({ mode: 'full', dryRun: true });
+  const syncItem: ActiveSyncItemSummary = {
+    itemId: 101,
+    title: 'Parallel World',
+    systemName: 'nes-roms',
+    hasCover: true,
+  };
+
+  // 1. Standby / Idle -> never render cover thumbnail
+  const idleHeader = parseSyncStatusHeader({
+    currentPhase: 'Idle · Waiting for next scheduled run or manual trigger',
+    activeRun: null,
+    activeTransfer: null,
+    parallelTransferCount: 0,
+  });
+  assert.equal(
+    resolveActiveSyncTargetCover({
+      parsedHeader: idleHeader,
+      activeRun: null,
+      activeTransfer: null,
+      activeSyncItem: syncItem,
+    }),
+    null,
+  );
+
+  // 2. Non-game phases (Enumerating, Stopping, Authenticating) -> never render cover thumbnail
+  const enumHeader = parseSyncStatusHeader({
+    currentPhase: 'Indexing nes-roms (1/4)',
+    activeRun: fullRun,
+    activeTransfer: null,
+    parallelTransferCount: 0,
+  });
+  assert.equal(
+    resolveActiveSyncTargetCover({
+      parsedHeader: enumHeader,
+      activeRun: fullRun,
+      activeTransfer: null,
+      activeSyncItem: syncItem,
+    }),
+    null,
+  );
+
+  const stoppingHeader = parseSyncStatusHeader({
+    currentPhase: 'Stopping run #42...',
+    activeRun: fullRun,
+    activeTransfer: makeTransfer({ itemId: 101, hasCover: true }),
+    parallelTransferCount: 1,
+  });
+  assert.equal(
+    resolveActiveSyncTargetCover({
+      parsedHeader: stoppingHeader,
+      activeRun: fullRun,
+      activeTransfer: makeTransfer({ itemId: 101, hasCover: true }),
+      activeSyncItem: syncItem,
+    }),
+    null,
+  );
+
+  // 3. Warm-up phase before binary transfer opens -> uses activeSyncItem
+  const warmupHeader = parseSyncStatusHeader({
+    currentPhase: 'Full Sync · nes-roms (98/110): Parallel World',
+    activeRun: fullRun,
+    activeTransfer: null,
+    parallelTransferCount: 0,
+  });
+  const warmupTarget = resolveActiveSyncTargetCover({
+    parsedHeader: warmupHeader,
+    activeRun: fullRun,
+    activeTransfer: null,
+    activeSyncItem: syncItem,
+  });
+  assert.deepEqual(warmupTarget, {
+    itemId: 101,
+    title: 'Parallel World',
+    systemName: 'nes-roms',
+    hasCoverHint: true,
+    coverUrl: '/api/items/101/asset?kind=cover&lazy=1&cv=1',
+  });
+
+  // 4. Active binary transfer -> prefers activeTransfer.itemId and hasCover
+  const transfer = makeTransfer({
+    itemId: 202,
+    itemTitle: 'Chrono Trigger',
+    systemName: 'snes-roms',
+    hasCover: true,
+  });
+  const transferHeader = parseSyncStatusHeader({
+    currentPhase: 'Downloading snes-roms / Chrono Trigger.zip',
+    activeRun: fullRun,
+    activeTransfer: transfer,
+    parallelTransferCount: 1,
+  });
+  const transferTarget = resolveActiveSyncTargetCover({
+    parsedHeader: transferHeader,
+    activeRun: fullRun,
+    activeTransfer: transfer,
+    activeSyncItem: syncItem,
+  });
+  assert.deepEqual(transferTarget, {
+    itemId: 202,
+    title: 'Chrono Trigger',
+    systemName: 'snes-roms',
+    hasCoverHint: true,
+    coverUrl: '/api/items/202/asset?kind=cover&lazy=1&cv=1',
+  });
+
+  // 5. Inter-file handoff (activeTransfer momentarily null) -> stays pinned via activeSyncItem
+  const handoffHeader = parseSyncStatusHeader({
+    currentPhase: 'Syncing · snes-roms: Chrono Trigger',
+    activeRun: fullRun,
+    activeTransfer: null,
+    parallelTransferCount: 0,
+  });
+  const handoffTarget = resolveActiveSyncTargetCover({
+    parsedHeader: handoffHeader,
+    activeRun: fullRun,
+    activeTransfer: null,
+    activeSyncItem: { itemId: 202, title: 'Chrono Trigger', systemName: 'snes-roms', hasCover: false },
+  });
+  assert.deepEqual(handoffTarget, {
+    itemId: 202,
+    title: 'Chrono Trigger',
+    systemName: 'snes-roms',
+    hasCoverHint: false,
+    coverUrl: '/api/items/202/asset?kind=cover&lazy=1',
+  });
+
+  // 6. Dry Run / newly discovered release without catalog itemId yet -> keeps CRT placeholder slot
+  const dryHeader = parseSyncStatusHeader({
+    currentPhase: 'Dry Run (Incremental) · nes-roms (1/5): Unindexed Homebrew',
+    activeRun: dryRun,
+    activeTransfer: null,
+    parallelTransferCount: 0,
+  });
+  const dryPlaceholderTarget = resolveActiveSyncTargetCover({
+    parsedHeader: dryHeader,
+    activeRun: dryRun,
+    activeTransfer: null,
+    activeSyncItem: null,
+  });
+  assert.deepEqual(dryPlaceholderTarget, {
+    itemId: null,
+    title: 'Unindexed Homebrew',
+    systemName: 'nes-roms',
+    hasCoverHint: false,
+    coverUrl: null,
+  });
 });
 

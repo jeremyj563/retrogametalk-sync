@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.21.0] - 2026-11-20
+
+- Added a **compact inline game cover thumbnail** beside the active game title in the main **Monitor** sync status bar whenever a Full Sync, Incremental Sync, Retry run, or Download Queue is operating on a release (including warm-up, active transfers, multi-file handoffs, and Dry Runs).
+- Added a **recessed CRT placeholder frame** (`36px–40px` fixed square with zero layout shift) that holds the thumbnail slot while artwork lazily caches/loads or when a release has no upstream cover art, smoothly cross-fading to box art via compositor-only opacity transitions while respecting Living UI Motion and reduced-motion preferences.
+- Added **one-click Game Detail Drawer inspection** directly from Monitor: clicking the active cover thumbnail (or highlighted game title) fetches the release and opens the full **Game Detail Drawer** over Monitor with live transfer progress, retry/queue/delete actions, and archive inspection without leaving the live telemetry view.
+- Extended live status snapshots and transfer telemetry with `activeSyncItem` (`itemId`, `title`, `systemName`, `hasCover`) so the status bar tracks cover availability seamlessly from pre-download warm-up through completion and clears cleanly on Standby and non-game phases.
+
 ## [1.20.4] - 2026-11-20
 
 - Fixed false-positive `.zip` download entries created from regular HTML navigation links whose anchor text contained the word `"Download"` (such as `TurboGrafx-16 Japanese Download` → `/repo/turbografx-16/download-japan/` on *Populous*): tightened `isDownloadCandidateUrl` and guarded dynamic AJAX link extraction so only genuine archive/endpoint links (`download.php`, `?file=`, `?wpdmdl=`, `?action=download`, `<a download>`, or archive extensions) are queued.

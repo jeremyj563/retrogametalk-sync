@@ -1,4 +1,4 @@
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -8,6 +8,8 @@ import {
   Clock,
   Download,
   FlaskConical,
+  Gamepad2,
+  Loader2,
   Pause,
   Trash2,
   XCircle,
@@ -26,6 +28,7 @@ import type {
   ActivityLogRecord,
   LogLevel,
   OperationsSectionTarget,
+  RepositoryItemRecord,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
   SyncPreflightSummary,
@@ -38,8 +41,13 @@ import {
   formatRunDuration,
   formatTimeShort,
 } from '../utils/format';
-import { parseSyncStatusHeader } from '../utils/syncStatusPhase';
+import {
+  type ActiveSyncTargetCover,
+  parseSyncStatusHeader,
+  resolveActiveSyncTargetCover,
+} from '../utils/syncStatusPhase';
 import { FailedQueueDrawer } from './FailedQueueDrawer';
+import { GameDetailDrawer } from './GameDetailDrawer';
 import { LivingNavIcon, LivingTerminalIcon } from './LivingNavIcon';
 import { SyncSpeedWaveCanvas } from './SyncSpeedWaveCanvas';
 import { TelemetryDeck } from './TelemetryDeck';
@@ -62,6 +70,7 @@ interface OverviewPanelProps {
   onNavigateToOperations: (target?: OperationsSectionTarget) => void;
   onQueueRuleMatches?: () => Promise<void>;
   onPreviewRuleMatchesInCatalog?: (onlyNotDownloaded?: boolean) => void;
+  onQueueDownload?: (ids: number[]) => Promise<unknown>;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onRetryAllFailed: (options?: { system?: string; ids?: number[]; dryRun?: boolean }) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
@@ -143,6 +152,8 @@ const PROGRESS_WIDTH_CLASSES: readonly string[] = [
 
 interface CompletedTransferHold {
   runId: number | null;
+  itemId: number | null;
+  hasCover: boolean;
   fileKey: string;
   itemTitle: string;
   systemName: string;
@@ -151,6 +162,114 @@ interface CompletedTransferHold {
   totalFiles: number | null;
   bytes: number;
   downloadedCount: number;
+}
+
+interface SyncTargetCoverThumbnailProps {
+  target: ActiveSyncTargetCover;
+  isDryRun: boolean;
+  uiMotion: CrtUiMotionLevel;
+  loadingDetail: boolean;
+  onInspect: (itemId: number) => void;
+}
+
+function SyncTargetCoverThumbnail({
+  target,
+  isDryRun,
+  uiMotion,
+  loadingDetail,
+  onInspect,
+}: SyncTargetCoverThumbnailProps) {
+  const [imgState, setImgState] = useState<{
+    url: string;
+    status: 'loaded' | 'error';
+  } | null>(null);
+
+  const isLoaded = Boolean(
+    target.coverUrl && imgState?.url === target.coverUrl && imgState.status === 'loaded',
+  );
+  const hasError = Boolean(
+    target.coverUrl && imgState?.url === target.coverUrl && imgState.status === 'error',
+  );
+  const showImage = Boolean(target.coverUrl && !hasError);
+  const isInteractive = target.itemId !== null;
+  const accentBorderClass = isDryRun
+    ? 'border-crt-amber/55 hover:border-crt-amber focus-visible:ring-crt-amber/75'
+    : 'border-crt-border-strong hover:border-crt-phosphor/85 focus-visible:ring-crt-phosphor/75';
+
+  const innerContent = (
+    <>
+      {/* Recessed CRT placeholder frame: holds fixed square dimensions with zero layout shift */}
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 flex items-center justify-center bg-crt-bg text-crt-muted/75"
+      >
+        <span className="absolute inset-[2px] rounded-[2px] border border-crt-border/45" />
+        <span className="absolute top-[3px] left-[3px] h-1.5 w-1.5 border-t border-l border-crt-border-strong/70" />
+        <span className="absolute bottom-[3px] right-[3px] h-1.5 w-1.5 border-b border-r border-crt-border-strong/70" />
+        {loadingDetail ? (
+          <Loader2
+            className={`relative z-10 h-4 w-4 animate-spin ${
+              isDryRun ? 'text-crt-amber' : 'text-crt-phosphor'
+            }`}
+          />
+        ) : (
+          <Gamepad2 className="relative z-10 h-4 w-4 opacity-75 transition-opacity group-hover:opacity-100" />
+        )}
+      </span>
+
+      {showImage && target.coverUrl && (
+        <img
+          src={target.coverUrl}
+          alt={`${target.title} cover art`}
+          referrerPolicy="no-referrer"
+          decoding="async"
+          onLoad={() => setImgState({ url: target.coverUrl!, status: 'loaded' })}
+          onError={() => setImgState({ url: target.coverUrl!, status: 'error' })}
+          className={`absolute inset-0 h-full w-full object-cover ${
+            uiMotion === 'off'
+              ? ''
+              : 'transition-opacity duration-150 ease-out motion-reduce:transition-none'
+          } ${isLoaded && !loadingDetail ? 'opacity-100' : 'opacity-0'}`}
+        />
+      )}
+
+      {loadingDetail && isLoaded && (
+        <span
+          aria-hidden="true"
+          className="absolute inset-0 flex items-center justify-center bg-crt-bg/65"
+        >
+          <Loader2
+            className={`h-4 w-4 animate-spin ${isDryRun ? 'text-crt-amber' : 'text-crt-phosphor'}`}
+          />
+        </span>
+      )}
+    </>
+  );
+
+  if (isInteractive && target.itemId !== null) {
+    const inspectId = target.itemId;
+    return (
+      <button
+        type="button"
+        onClick={() => onInspect(inspectId)}
+        disabled={loadingDetail}
+        title={`Inspect "${target.title}" details`}
+        aria-label={`Inspect ${target.title} details`}
+        className={`group relative inline-flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center overflow-hidden rounded border bg-crt-bg shadow-[inset_0_0_0_1px_rgba(255,255,255,0.03)] cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-offset-crt-surface disabled:cursor-wait ${accentBorderClass}`}
+      >
+        {innerContent}
+      </button>
+    );
+  }
+
+  return (
+    <span
+      aria-hidden="true"
+      className="relative inline-flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center overflow-hidden rounded border border-crt-border bg-crt-bg shadow-[inset_0_0_0_1px_rgba(255,255,255,0.03)]"
+    >
+      {innerContent}
+    </span>
+  );
 }
 
 function toLocalDateTimeInputValue(date: Date): string {
@@ -177,6 +296,7 @@ export function OverviewPanel({
   onNavigateToOperations,
   onQueueRuleMatches,
   onPreviewRuleMatchesInCatalog,
+  onQueueDownload,
   onRetryItem,
   onRetryAllFailed,
   onRefreshStatus,
@@ -198,8 +318,74 @@ export function OverviewPanel({
   const [queueingRuleMatches, setQueueingRuleMatches] = useState(false);
   const [confirmQueueRuleMatches, setConfirmQueueRuleMatches] = useState(false);
   const [monitorQueueNotice, setMonitorQueueNotice] = useState<string | null>(null);
+  const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
+  const [loadingDetailId, setLoadingDetailId] = useState<number | null>(null);
   const [, setTick] = useState(0);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
+  const detailReqSeqRef = useRef(0);
+
+  const openSyncItemDetail = useCallback(async (itemId: number) => {
+    if (!Number.isInteger(itemId) || itemId <= 0) return;
+    const reqId = ++detailReqSeqRef.current;
+    setLoadingDetailId(itemId);
+    try {
+      const res = await fetch(`/api/items/${itemId}`);
+      if (!res.ok) return;
+      const data = (await res.json()) as { item?: RepositoryItemRecord };
+      if (reqId === detailReqSeqRef.current && data.item) {
+        setActiveDetailItem(data.item);
+      }
+    } catch {
+      // Ignore transient network errors when inspecting active sync item
+    } finally {
+      if (reqId === detailReqSeqRef.current) {
+        setLoadingDetailId(null);
+      }
+    }
+  }, []);
+
+  const closeSyncItemDetail = useCallback(() => {
+    detailReqSeqRef.current += 1;
+    setLoadingDetailId(null);
+    setActiveDetailItem(null);
+  }, []);
+
+  // Keep an open Monitor Game Detail Drawer fresh as files finish or metadata updates
+  useEffect(() => {
+    if (!activeDetailItem) return;
+    let cancelled = false;
+    const targetId = activeDetailItem.id;
+    void (async () => {
+      try {
+        const res = await fetch(`/api/items/${targetId}`);
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { item?: RepositoryItemRecord };
+        if (!cancelled && data.item) {
+          setActiveDetailItem(data.item);
+        }
+      } catch {
+        // Ignore transient poll errors
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [catalogRevision, activeDetailItem?.id]);
+
+  const handleDeleteDetailItem = useCallback(
+    async (id: number) => {
+      const res = await fetch('/api/items', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [id] }),
+      });
+      if (res.ok) {
+        closeSyncItemDetail();
+        await onRefreshStatus();
+      }
+    },
+    [closeSyncItemDetail, onRefreshStatus],
+  );
 
   const latestDryRunWithSummary = useMemo(
     () =>
@@ -439,10 +625,14 @@ export function OverviewPanel({
     const resolvedTitle = (t.itemTitle || '').trim() || t.filename;
     setLastCompletedTransfer((prev) => {
       const nextRunId = status.activeRun?.id ?? prev?.runId ?? null;
+      const nextItemId = t.itemId ?? prev?.itemId ?? null;
+      const nextHasCover = Boolean(t.hasCover ?? prev?.hasCover ?? false);
       const nextDownloadedCount = status.activeRun?.downloadedCount ?? prev?.downloadedCount ?? 0;
       if (
         prev &&
         prev.runId === nextRunId &&
+        prev.itemId === nextItemId &&
+        prev.hasCover === nextHasCover &&
         prev.fileKey === fileKey &&
         prev.itemTitle === resolvedTitle &&
         prev.bytes === bytes &&
@@ -452,6 +642,8 @@ export function OverviewPanel({
       }
       return {
         runId: nextRunId,
+        itemId: nextItemId,
+        hasCover: nextHasCover,
         fileKey,
         itemTitle: resolvedTitle,
         systemName: t.systemName,
@@ -523,6 +715,32 @@ export function OverviewPanel({
       : parsedSyncHeader.subject;
   const isHighlightedGameTarget =
     parsedSyncHeader.subjectKind === 'title' || parsedSyncHeader.subjectKind === 'download';
+  const activeSyncTargetCover = useMemo(
+    () =>
+      resolveActiveSyncTargetCover({
+        parsedHeader: parsedSyncHeader,
+        displayedSubject: displayedSyncSubject,
+        activeRun: status.activeRun,
+        activeTransfer: status.activeTransfer,
+        activeSyncItem: status.activeSyncItem ?? null,
+        heldTransfer: heldTransferForActiveRun,
+      }),
+    [
+      parsedSyncHeader,
+      displayedSyncSubject,
+      status.activeRun,
+      status.activeTransfer,
+      status.activeSyncItem,
+      heldTransferForActiveRun,
+    ],
+  );
+  const activeDetailTransfer = useMemo(() => {
+    if (!activeDetailItem) return null;
+    return (
+      parallelTransfers.find((t) => t.itemId === activeDetailItem.id) ??
+      (status.activeTransfer?.itemId === activeDetailItem.id ? status.activeTransfer : null)
+    );
+  }, [activeDetailItem, parallelTransfers, status.activeTransfer]);
 
   const activeWatermakVal = status.lastWatermarkAt ?? config.lastWatermarkAt;
   const activeWatermark = activeWatermakVal;
@@ -732,50 +950,78 @@ export function OverviewPanel({
             ) : null}
           </div>
 
-          {/* Tier 2: Active Target / Game Title (Optional Phase Prefix + Highlighted Title Frame) */}
+          {/* Tier 2: Active Target / Game Title (Optional Phase Prefix + Inline Cover Thumbnail + Highlighted Title Frame) */}
           <h1
             title={status.currentPhase}
             className="mt-2.5 pt-2.5 border-t border-crt-border/70 min-w-0"
           >
-            <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 min-w-0">
-              {parsedSyncHeader.actionPrefix && (
-                <span className="font-display text-sm sm:text-[15px] font-medium tracking-tight text-crt-muted whitespace-nowrap shrink-0">
-                  {parsedSyncHeader.actionPrefix}
-                </span>
+            <span className="flex items-center gap-2.5 min-w-0">
+              {activeSyncTargetCover && (
+                <SyncTargetCoverThumbnail
+                  target={activeSyncTargetCover}
+                  isDryRun={isDryRunActive}
+                  uiMotion={uiMotion}
+                  loadingDetail={
+                    loadingDetailId !== null && loadingDetailId === activeSyncTargetCover.itemId
+                  }
+                  onInspect={openSyncItemDetail}
+                />
               )}
 
-              {isHighlightedGameTarget ? (
-                <span
-                  title={displayedSyncSubject}
-                  className="crt-active-filename font-display text-lg sm:text-xl font-bold tracking-tight leading-snug min-w-0"
-                >
-                  <span aria-hidden="true" className="crt-active-filename-sheen" />
-                  <span className="crt-active-filename-label truncate min-w-0">
+              <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 min-w-0 flex-1">
+                {parsedSyncHeader.actionPrefix && (
+                  <span className="font-display text-sm sm:text-[15px] font-medium tracking-tight text-crt-muted whitespace-nowrap shrink-0">
+                    {parsedSyncHeader.actionPrefix}
+                  </span>
+                )}
+
+                {isHighlightedGameTarget ? (
+                  activeSyncTargetCover?.itemId ? (
+                    <button
+                      type="button"
+                      onClick={() => openSyncItemDetail(activeSyncTargetCover.itemId!)}
+                      title={`Inspect "${displayedSyncSubject}" details`}
+                      className="crt-active-filename font-display text-lg sm:text-xl font-bold tracking-tight leading-snug min-w-0 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crt-phosphor/70 focus-visible:ring-offset-1 focus-visible:ring-offset-crt-surface"
+                    >
+                      <span aria-hidden="true" className="crt-active-filename-sheen" />
+                      <span className="crt-active-filename-label truncate min-w-0">
+                        {displayedSyncSubject}
+                      </span>
+                    </button>
+                  ) : (
+                    <span
+                      title={displayedSyncSubject}
+                      className="crt-active-filename font-display text-lg sm:text-xl font-bold tracking-tight leading-snug min-w-0"
+                    >
+                      <span aria-hidden="true" className="crt-active-filename-sheen" />
+                      <span className="crt-active-filename-label truncate min-w-0">
+                        {displayedSyncSubject}
+                      </span>
+                    </span>
+                  )
+                ) : parsedSyncHeader.subjectKind === 'path' ? (
+                  <span
+                    title={displayedSyncSubject}
+                    className="font-mono text-sm sm:text-[15px] font-medium leading-snug text-crt-text/90 truncate min-w-0"
+                  >
                     {displayedSyncSubject}
                   </span>
-                </span>
-              ) : parsedSyncHeader.subjectKind === 'path' ? (
-                <span
-                  title={displayedSyncSubject}
-                  className="font-mono text-sm sm:text-[15px] font-medium leading-snug text-crt-text/90 truncate min-w-0"
-                >
-                  {displayedSyncSubject}
-                </span>
-              ) : parsedSyncHeader.subjectKind === 'idle' ? (
-                <span
-                  title={displayedSyncSubject}
-                  className="font-display text-base sm:text-lg font-medium leading-snug text-crt-muted truncate min-w-0"
-                >
-                  {displayedSyncSubject}
-                </span>
-              ) : (
-                <span
-                  title={displayedSyncSubject}
-                  className="font-display text-base sm:text-lg font-medium leading-snug text-crt-text/95 truncate min-w-0"
-                >
-                  {displayedSyncSubject}
-                </span>
-              )}
+                ) : parsedSyncHeader.subjectKind === 'idle' ? (
+                  <span
+                    title={displayedSyncSubject}
+                    className="font-display text-base sm:text-lg font-medium leading-snug text-crt-muted truncate min-w-0"
+                  >
+                    {displayedSyncSubject}
+                  </span>
+                ) : (
+                  <span
+                    title={displayedSyncSubject}
+                    className="font-display text-base sm:text-lg font-medium leading-snug text-crt-text/95 truncate min-w-0"
+                  >
+                    {displayedSyncSubject}
+                  </span>
+                )}
+              </span>
             </span>
           </h1>
         </div>
@@ -1830,6 +2076,19 @@ export function OverviewPanel({
           </div>
         </div>
       </section>
+
+      <GameDetailDrawer
+        item={activeDetailItem}
+        activeRun={Boolean(status.activeRun)}
+        activeTransfer={activeDetailTransfer}
+        canSync={Boolean(status.auth.hasCompletedLogin)}
+        retryingItem={activeRetryItemId === activeDetailItem?.id}
+        onClose={closeSyncItemDetail}
+        onItemUpdated={(updated) => setActiveDetailItem(updated)}
+        onRetryItem={onRetryItem}
+        onQueueDownload={onQueueDownload}
+        onDeleteItem={handleDeleteDetailItem}
+      />
     </div>
   );
 }

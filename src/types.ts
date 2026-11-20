@@ -335,10 +335,18 @@ export interface RateLimiterTelemetry {
   history: RateLimitSample[];
 }
 
+export interface ActiveSyncItemSummary {
+  itemId: number;
+  title: string;
+  systemName: string;
+  hasCover: boolean;
+}
+
 export interface ActiveTransferState {
   workerKey?: string;
   itemId: number | null;
   itemTitle?: string;
+  hasCover?: boolean;
   fileId?: number | null;
   fileIndex?: number | null;
   totalFiles?: number | null;
@@ -401,6 +409,7 @@ export interface ServiceStatusSnapshot {
   activeRun: SyncRunRecord | null;
   activeTransfer: ActiveTransferState | null;
   activeTransfers?: ActiveTransferState[];
+  activeSyncItem?: ActiveSyncItemSummary | null;
   transferHistory: TransferSpeedSample[];
   currentPhase: string;
   nextScheduledRunAt: string | null;
