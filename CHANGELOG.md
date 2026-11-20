@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.21.7] - 2026-11-20
+
+- Redesigned the **CRT Display** sidebar **Phosphor Palette** selector into a **single uniform 7-column hardware swatch strip** so all starter and collector palettes share identical square keycap proportions, crisp active LED highlight halos, and flush alignment with the adjacent `Presets` and `Living UI Motion` rows.
+- Added a **live right-aligned header name readout** beside `Phosphor Palette` that displays the active palette's full name and previews any hovered or keyboard-focused swatch in real time—including Trophy Point unlock thresholds for inline locked collector swatches (`aria-disabled` with subtle dimmed phosphor tint + centered lock icon).
+- Added explicit `data-crt-palette` attributes and updated the Playwright visual preview palette switcher to target them cleanly while respecting locked states.
+
 ## [1.21.6] - 2026-11-20
 
 - Added a **retained-outgoing dual-layer cover crossfade** to the **Monitor** Sync Hero Showcase: while the next game's box art decodes off-stage, the previous cover remains crisply displayed (eliminating blank/placeholder flashes between consecutive titles), then crossfades directly into the incoming cover with stale-request protection during rapid multi-release skips.
