@@ -302,12 +302,21 @@ test('Catalog capture prefs pre-seed Box-Art Grid view to prevent initial Table 
   });
 });
 
-test('WALKTHROUGH_TIMINGS_MS dwells on drawer details and in-drawer screenshot thumbnails without lightbox', () => {
+test('WALKTHROUGH_TIMINGS_MS dwells on drawer details, in-drawer screenshot thumbnails, and uninterrupted Device Export', () => {
   assert.ok(WALKTHROUGH_TIMINGS_MS.detailDrawerDwell >= 2000);
   assert.ok(WALKTHROUGH_TIMINGS_MS.detailDrawerScrollSettleMs >= 500);
   assert.ok(WALKTHROUGH_TIMINGS_MS.detailDrawerScreenshotsDwell >= 2500);
   assert.equal('lightboxFirstShotDwell' in WALKTHROUGH_TIMINGS_MS, false);
-  assert.ok(WALKTHROUGH_TIMINGS_MS.crtPopoverOpenDwell >= 1000);
-  assert.ok(WALKTHROUGH_TIMINGS_MS.crtPaletteSelectedDwell >= 1000);
+  assert.ok(WALKTHROUGH_TIMINGS_MS.deviceExportPreThemeDwell >= 1500);
   assert.ok(WALKTHROUGH_TIMINGS_MS.deviceExportFinalDwell >= 3000);
+
+  const captureSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'scripts/capture-screenshots/capture.ts'),
+    'utf8',
+  );
+  assert.equal(
+    captureSource.includes('location.reload'),
+    false,
+    'Walkthrough capture must switch CRT palettes in-place without reloading the page',
+  );
 });
