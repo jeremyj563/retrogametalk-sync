@@ -89,11 +89,18 @@ import {
   type WpPostMetadata,
   resolveMirroredPaths,
 } from './rgtClient.ts';
-import { inspectArchiveForItem } from './archiveService.ts';
+import {
+  browseArchiveAtPath,
+  detectArchiveFormat,
+  inspectArchiveForItem,
+  readArchiveTextPreview,
+} from './archiveService.ts';
 import { formatErrorDetails, isDebugLoggingEnabled, logServer } from './logger.ts';
 import type {
   ActiveTransferState,
+  ArchiveBrowseListing,
   ArchiveInspectResult,
+  ArchiveTextPreviewResult,
   AuthTestResult,
   CatalogIndexerStatus,
   ConfigUpdateInput,
@@ -1091,12 +1098,15 @@ export class ScraperOrchestrator extends EventEmitter {
             childrenCount,
           });
         } else if (entry.isFile()) {
+          const archiveFormat = detectArchiveFormat(full);
+          const isArchive = archiveFormat !== 'raw';
           nodes.push({
             name: entry.name,
             relativePath: rel,
             type: 'file',
             sizeBytes: st.size,
             modifiedAt: st.mtime.toISOString(),
+            ...(isArchive ? { isArchive: true, archiveFormat } : {}),
           });
         }
       } catch {
@@ -1511,6 +1521,65 @@ export class ScraperOrchestrator extends EventEmitter {
       );
       throw err;
     }
+  }
+
+  resolveFsArchivePath(relativePath: string): { absPath: string; relativePath: string } {
+    const cfg = getInternalConfig();
+    const root = path.resolve(cfg.downloadDir);
+    const cleaned = relativePath.replace(/^\/+/, '');
+    if (!cleaned) {
+      throw new Error('Archive relative path is required');
+    }
+    const target = path.resolve(root, cleaned);
+    if (!target.startsWith(root + path.sep)) {
+      throw new Error('Path traversal outside DOWNLOAD_DIR is not allowed');
+    }
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+      throw new Error('Archive file not found on disk');
+    }
+    const format = detectArchiveFormat(target);
+    if (format === 'raw') {
+      throw new Error('Selected file is not a supported archive (.zip, .7z, .rar, .tar)');
+    }
+    return {
+      absPath: target,
+      relativePath: path.relative(root, target).split(path.sep).join('/'),
+    };
+  }
+
+  async browseFsArchive(relativePath: string): Promise<{ relativePath: string; listing: ArchiveBrowseListing }> {
+    const resolved = this.resolveFsArchivePath(relativePath);
+    const listing = await browseArchiveAtPath(resolved.absPath);
+    return { relativePath: resolved.relativePath, listing };
+  }
+
+  async previewFsArchiveEntry(relativePath: string, entryPath: string): Promise<ArchiveTextPreviewResult> {
+    const resolved = this.resolveFsArchivePath(relativePath);
+    return readArchiveTextPreview(resolved.absPath, entryPath);
+  }
+
+  async browseItemArchive(
+    itemId: number,
+    fileId?: number,
+  ): Promise<{ itemId: number; fileId: number; listing: ArchiveBrowseListing } | null> {
+    const ctx = this.resolveItemFileContext(itemId, fileId);
+    if (!ctx) return null;
+    const listing = await browseArchiveAtPath(ctx.absPath);
+    return {
+      itemId: ctx.item.id,
+      fileId: ctx.file.id,
+      listing,
+    };
+  }
+
+  async previewItemArchiveEntry(
+    itemId: number,
+    entryPath: string,
+    fileId?: number,
+  ): Promise<ArchiveTextPreviewResult | null> {
+    const ctx = this.resolveItemFileContext(itemId, fileId);
+    if (!ctx) return null;
+    return readArchiveTextPreview(ctx.absPath, entryPath);
   }
 
   async fetchItemMetadata(
