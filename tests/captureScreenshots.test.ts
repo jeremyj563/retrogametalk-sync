@@ -14,6 +14,7 @@ import {
   CATALOG_VIEW_STORAGE_KEY,
   WALKTHROUGH_TIMINGS_MS,
   buildActiveDemoStatus,
+  switchPaletteInPlace,
 } from '../scripts/capture-screenshots/capture.ts';
 import {
   buildCaptureCrtSettings,
@@ -325,3 +326,75 @@ test('WALKTHROUGH_TIMINGS_MS dwells on drawer details, in-drawer screenshot thum
     'Walkthrough capture should target the uniform data-crt-palette swatch attribute',
   );
 });
+
+test('switchPaletteInPlace evaluates cleanly in isolated browser scope without tsx __name helpers', async () => {
+  let clickedPalette: string | null = null;
+  const fakeDocument = {
+    querySelectorAll: () => [
+      {
+        disabled: false,
+        dataset: { crtPalette: 'amber' },
+        textContent: 'Amber',
+        getAttribute: () => 'false',
+        click: () => {
+          clickedPalette = 'amber';
+        },
+      },
+      {
+        disabled: false,
+        dataset: { crtPalette: 'synthwave' },
+        textContent: 'Synth',
+        getAttribute: (name: string) => (name === 'aria-disabled' ? 'true' : null),
+        click: () => {
+          clickedPalette = 'synthwave';
+        },
+      },
+    ],
+  };
+
+  const fakePage = {
+    goto: async () => undefined,
+    waitForSelector: async () => undefined,
+    waitForTimeout: async () => undefined,
+    waitForLoadState: async () => undefined,
+    screenshot: async () => Buffer.alloc(0),
+    locator: () => ({
+      first: () => ({
+        click: async () => undefined,
+        isVisible: async () => false,
+        count: async () => 0,
+      }),
+    }),
+    getByRole: () => ({
+      first: () => ({
+        click: async () => undefined,
+        isVisible: async () => false,
+        count: async () => 0,
+      }),
+    }),
+    evaluate: async <T>(fn: (...args: any[]) => T | Promise<T>, arg?: unknown): Promise<T> => {
+      const serialized = fn.toString();
+      assert.equal(
+        serialized.includes('__name'),
+        false,
+        `page.evaluate callback must not reference esbuild __name helper: ${serialized}`,
+      );
+      const runInIsolatedScope = new Function('document', 'arg', `return (${serialized})(arg);`);
+      return runInIsolatedScope(fakeDocument, arg) as T;
+    },
+    route: async () => undefined,
+    unroute: async () => undefined,
+    video: () => null,
+    close: async () => undefined,
+  };
+
+  const unlockedResult = await switchPaletteInPlace(fakePage, 'amber');
+  assert.equal(unlockedResult, true);
+  assert.equal(clickedPalette, 'amber');
+
+  clickedPalette = null;
+  const lockedResult = await switchPaletteInPlace(fakePage, 'synthwave');
+  assert.equal(lockedResult, false);
+  assert.equal(clickedPalette, null);
+});
+
