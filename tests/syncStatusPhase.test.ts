@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { test } from 'node:test';
 import type { ActiveSyncItemSummary, ActiveTransferState, SyncRunRecord } from '../src/types.ts';
 import {
+  HERO_DETAIL_LOADING_DELAY_MS,
   computeHeroCoverFrameWidthPx,
   deriveSyncReleaseIdentityKey,
   getHeroSwapDurationMs,
@@ -514,5 +516,40 @@ test('maps Living UI Motion tiers to progressive Hero Showcase swap durations an
     'title:nes-roms:unindexed homebrew',
   );
 });
+
+test('keeps Hero Showcase box art untouched on click and gates inline Opening cue behind 250ms delay', () => {
+  assert.equal(HERO_DETAIL_LOADING_DELAY_MS, 250);
+
+  const overviewSource = fs.readFileSync(
+    new URL('../src/components/OverviewPanel.tsx', import.meta.url),
+    'utf8',
+  );
+  const coverSectionStart = overviewSource.indexOf('function SyncTargetCoverThumbnail');
+  const coverSectionEnd = overviewSource.indexOf('function toLocalDateTimeInputValue');
+  assert.ok(coverSectionStart > 0 && coverSectionEnd > coverSectionStart);
+
+  const coverSection = overviewSource.slice(coverSectionStart, coverSectionEnd);
+  assert.equal(
+    coverSection.includes('Loader2'),
+    false,
+    'SyncTargetCoverThumbnail must never render a reload/spinner overlay over box art or its placeholder',
+  );
+  assert.equal(
+    coverSection.includes('bg-crt-bg/65'),
+    false,
+    'SyncTargetCoverThumbnail must never mount a translucent reload scrim over box art',
+  );
+  assert.equal(
+    coverSection.includes('loadingDetail'),
+    false,
+    'SyncTargetCoverThumbnail should not accept or react to detail loading state',
+  );
+  assert.equal(
+    overviewSource.includes('HERO_DETAIL_LOADING_DELAY_MS'),
+    true,
+    'OverviewPanel should gate the inline Opening cue behind HERO_DETAIL_LOADING_DELAY_MS',
+  );
+});
+
 
 

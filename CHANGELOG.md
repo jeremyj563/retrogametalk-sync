@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.21.9] - 2026-11-20
+
+- Eliminated the brief "reload" spinner flash over the **Monitor** Sync Hero Showcase box-art thumbnail when clicking the box art or game title to inspect release details: removed the translucent scrim overlay and placeholder spinner swap from `SyncTargetCoverThumbnail`, replaced button `disabled` toggling with a silent in-flight request guard, and gated the inline `Opening…` cue beside the title behind a **250ms** slow-request threshold so fast local SQLite lookups open the **Game Detail Drawer** cleanly with zero visual flicker.
+
 ## [1.21.8] - 2026-11-20
 
 - Fixed `ReferenceError: __name is not defined` during Playwright visual preview capture (`npm run capture:screenshots`): removed the named inner arrow helper inside `switchPaletteInPlace`'s `page.evaluate(...)` callback that `tsx`/esbuild `keepNames` transpiled into a Node-only `__name(...)` wrapper, and added an isolated-scope serialization regression test covering both unlocked and `aria-disabled` locked swatches.

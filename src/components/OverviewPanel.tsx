@@ -44,6 +44,7 @@ import {
 } from '../utils/format';
 import {
   type ActiveSyncTargetCover,
+  HERO_DETAIL_LOADING_DELAY_MS,
   computeHeroCoverFrameWidthPx,
   deriveSyncReleaseIdentityKey,
   getHeroSwapDurationMs,
@@ -172,7 +173,6 @@ interface SyncTargetCoverThumbnailProps {
   target: ActiveSyncTargetCover;
   isDryRun: boolean;
   uiMotion: CrtUiMotionLevel;
-  loadingDetail: boolean;
   compact?: boolean;
   highlighted?: boolean;
   onHoverChange?: (hovering: boolean) => void;
@@ -198,7 +198,6 @@ function SyncTargetCoverThumbnail({
   target,
   isDryRun,
   uiMotion,
-  loadingDetail,
   compact = false,
   highlighted = false,
   onHoverChange,
@@ -398,19 +397,11 @@ function SyncTargetCoverThumbnail({
         <span className="absolute inset-[3px] rounded-[2px] border border-crt-border/45" />
         <span className="absolute top-[4px] left-[4px] h-2 w-2 border-t border-l border-crt-border-strong/70" />
         <span className="absolute bottom-[4px] right-[4px] h-2 w-2 border-b border-r border-crt-border-strong/70" />
-        {loadingDetail ? (
-          <Loader2
-            className={`relative z-10 h-4 w-4 animate-spin ${
-              isDryRun ? 'text-crt-amber' : 'text-crt-phosphor'
-            }`}
-          />
-        ) : (
-          <Gamepad2
-            className={`relative z-10 h-5 w-5 transition-opacity duration-150 ${
-              highlighted ? 'opacity-100 text-crt-text' : 'opacity-70'
-            }`}
-          />
-        )}
+        <Gamepad2
+          className={`relative z-10 h-5 w-5 transition-opacity duration-150 ${
+            highlighted ? 'opacity-100 text-crt-text' : 'opacity-70'
+          }`}
+        />
       </span>
 
       {/* Outgoing cover art retained during crossfade so consecutive releases never flash blank */}
@@ -461,17 +452,6 @@ function SyncTargetCoverThumbnail({
         aria-hidden="true"
         className="pointer-events-none absolute inset-0 z-30 rounded-[inherit] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
       />
-
-      {loadingDetail && hasVisibleArt && (
-        <span
-          aria-hidden="true"
-          className="absolute inset-0 z-40 flex items-center justify-center bg-crt-bg/65"
-        >
-          <Loader2
-            className={`h-4 w-4 animate-spin ${isDryRun ? 'text-crt-amber' : 'text-crt-phosphor'}`}
-          />
-        </span>
-      )}
     </>
   );
 
@@ -487,10 +467,9 @@ function SyncTargetCoverThumbnail({
         onMouseLeave={() => onHoverChange?.(false)}
         onFocus={() => onHoverChange?.(true)}
         onBlur={() => onHoverChange?.(false)}
-        disabled={loadingDetail}
         title={`Inspect "${target.title}" details`}
         aria-label={`Inspect ${target.title} details`}
-        className={`crt-hero-cover-frame group relative inline-flex ${heightClass} shrink-0 items-center justify-center overflow-hidden rounded-[4px] border bg-crt-bg cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-crt-surface disabled:cursor-wait ${accentBorderClass}`}
+        className={`crt-hero-cover-frame group relative inline-flex ${heightClass} shrink-0 items-center justify-center overflow-hidden rounded-[4px] border bg-crt-bg cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-crt-surface ${accentBorderClass}`}
       >
         {innerContent}
       </button>
@@ -556,37 +535,64 @@ export function OverviewPanel({
   const [confirmQueueRuleMatches, setConfirmQueueRuleMatches] = useState(false);
   const [monitorQueueNotice, setMonitorQueueNotice] = useState<string | null>(null);
   const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
-  const [loadingDetailId, setLoadingDetailId] = useState<number | null>(null);
+  const [slowLoadingDetailId, setSlowLoadingDetailId] = useState<number | null>(null);
   const [heroInspectHover, setHeroInspectHover] = useState(false);
   const [, setTick] = useState(0);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
   const detailReqSeqRef = useRef(0);
+  const inFlightDetailIdRef = useRef<number | null>(null);
+  const detailLoadingTimerRef = useRef<number | null>(null);
 
-  const openSyncItemDetail = useCallback(async (itemId: number) => {
-    if (!Number.isInteger(itemId) || itemId <= 0) return;
-    const reqId = ++detailReqSeqRef.current;
-    setLoadingDetailId(itemId);
-    try {
-      const res = await fetch(`/api/items/${itemId}`);
-      if (!res.ok) return;
-      const data = (await res.json()) as { item?: RepositoryItemRecord };
-      if (reqId === detailReqSeqRef.current && data.item) {
-        setActiveDetailItem(data.item);
-      }
-    } catch {
-      // Ignore transient network errors when inspecting active sync item
-    } finally {
-      if (reqId === detailReqSeqRef.current) {
-        setLoadingDetailId(null);
-      }
+  const clearDetailLoadingTimer = useCallback(() => {
+    if (detailLoadingTimerRef.current !== null) {
+      window.clearTimeout(detailLoadingTimerRef.current);
+      detailLoadingTimerRef.current = null;
     }
   }, []);
 
+  useEffect(() => clearDetailLoadingTimer, [clearDetailLoadingTimer]);
+
+  const openSyncItemDetail = useCallback(
+    async (itemId: number) => {
+      if (!Number.isInteger(itemId) || itemId <= 0) return;
+      if (inFlightDetailIdRef.current === itemId) return;
+      const reqId = ++detailReqSeqRef.current;
+      inFlightDetailIdRef.current = itemId;
+      clearDetailLoadingTimer();
+      setSlowLoadingDetailId(null);
+      detailLoadingTimerRef.current = window.setTimeout(() => {
+        detailLoadingTimerRef.current = null;
+        if (reqId === detailReqSeqRef.current) {
+          setSlowLoadingDetailId(itemId);
+        }
+      }, HERO_DETAIL_LOADING_DELAY_MS);
+      try {
+        const res = await fetch(`/api/items/${itemId}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { item?: RepositoryItemRecord };
+        if (reqId === detailReqSeqRef.current && data.item) {
+          setActiveDetailItem(data.item);
+        }
+      } catch {
+        // Ignore transient network errors when inspecting active sync item
+      } finally {
+        if (reqId === detailReqSeqRef.current) {
+          clearDetailLoadingTimer();
+          inFlightDetailIdRef.current = null;
+          setSlowLoadingDetailId(null);
+        }
+      }
+    },
+    [clearDetailLoadingTimer],
+  );
+
   const closeSyncItemDetail = useCallback(() => {
     detailReqSeqRef.current += 1;
-    setLoadingDetailId(null);
+    clearDetailLoadingTimer();
+    inFlightDetailIdRef.current = null;
+    setSlowLoadingDetailId(null);
     setActiveDetailItem(null);
-  }, []);
+  }, [clearDetailLoadingTimer]);
 
   // Keep an open Monitor Game Detail Drawer fresh as files finish or metadata updates
   useEffect(() => {
@@ -1078,10 +1084,10 @@ export function OverviewPanel({
     }
   };
 
-  const isHeroLoadingDetail = Boolean(
+  const isHeroSlowLoadingDetail = Boolean(
     activeSyncTargetCover?.itemId !== null &&
       activeSyncTargetCover?.itemId !== undefined &&
-      loadingDetailId === activeSyncTargetCover.itemId,
+      slowLoadingDetailId === activeSyncTargetCover.itemId,
   );
 
   const transferProgressBarBlock = combinedTransfer ? (
@@ -1421,7 +1427,6 @@ export function OverviewPanel({
                     compact={!isTransferBayOpen}
                     highlighted={heroInspectHover}
                     onHoverChange={setHeroInspectHover}
-                    loadingDetail={isHeroLoadingDetail}
                     onInspect={openSyncItemDetail}
                   />
 
@@ -1446,9 +1451,9 @@ export function OverviewPanel({
                             onMouseLeave={() => setHeroInspectHover(false)}
                             onFocus={() => setHeroInspectHover(true)}
                             onBlur={() => setHeroInspectHover(false)}
-                            disabled={isHeroLoadingDetail}
+                            aria-busy={isHeroSlowLoadingDetail}
                             title={`Inspect "${displayedSyncSubject}" details`}
-                            className="group/title inline-flex items-baseline gap-2.5 max-w-full min-w-0 text-left cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crt-phosphor/70 focus-visible:ring-offset-2 focus-visible:ring-offset-crt-surface disabled:cursor-wait"
+                            className="group/title inline-flex items-baseline gap-2.5 max-w-full min-w-0 text-left cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crt-phosphor/70 focus-visible:ring-offset-2 focus-visible:ring-offset-crt-surface"
                           >
                             <span
                               key={`hero-title-${titleSwapSeq}`}
@@ -1468,12 +1473,12 @@ export function OverviewPanel({
                             <span
                               aria-hidden="true"
                               className={`hidden sm:inline-flex items-center gap-0.5 text-[11px] font-mono whitespace-nowrap shrink-0 transition-opacity duration-150 motion-reduce:transition-none ${
-                                heroInspectHover || isHeroLoadingDetail
+                                heroInspectHover || isHeroSlowLoadingDetail
                                   ? 'opacity-100'
                                   : 'opacity-0'
                               } ${isDryRunActive ? 'text-crt-amber/90' : 'text-crt-phosphor/90'}`}
                             >
-                              {isHeroLoadingDetail ? (
+                              {isHeroSlowLoadingDetail ? (
                                 <>
                                   <Loader2 className="h-3 w-3 animate-spin" />
                                   <span>Opening…</span>
