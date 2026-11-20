@@ -2021,6 +2021,17 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   );
 }
 
+/* Hero Showcase: Adaptive-aspect Box-Art Frame & Unboxed Display Game Title */
+.crt-hero-cover-frame {
+  box-shadow:
+    0 4px 14px rgba(0, 0, 0, 0.44),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.crt-fx-active .crt-hero-game-title {
+  text-shadow: 0 0 10px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.16);
+}
+
 /* Compact High-Contrast Active System & Progress Context Block in Tier 1 Sync Status */
 .crt-status-context-block {
   border-radius: 3px;
