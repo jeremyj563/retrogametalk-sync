@@ -13,17 +13,6 @@ on:
           - subtle
           - arcade
           - bvm
-      motion_level:
-        description: 'Living UI Motion level'
-        required: false
-        default: 'high'
-        type: choice
-        options:
-          - high
-          - medium
-          - low
-          - ultra
-          - 'off'
       create_pr:
         description: 'Open or update PR with captured WebP assets'
         required: false
@@ -88,9 +77,9 @@ jobs:
       - name: Capture animated walkthrough & static screenshots
         env:
           CAPTURE_CRT_PRESET: ${{ inputs.crt_preset || 'pvm' }}
-          CAPTURE_UI_MOTION: ${{ inputs.motion_level || 'high' }}
+          CAPTURE_UI_MOTION: 'low'
         run: |
-          npm run capture:screenshots -- --preset "$CAPTURE_CRT_PRESET" --motion "$CAPTURE_UI_MOTION"
+          npm run capture:screenshots -- --preset "$CAPTURE_CRT_PRESET" --motion low
           ls -lh docs/assets/screenshots/
 
       - name: Upload preview bundle artifact
@@ -115,7 +104,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH_NAME: chore/update-readme-screenshots
           CRT_PRESET: ${{ inputs.crt_preset || 'pvm' }}
-          MOTION_LEVEL: ${{ inputs.motion_level || 'high' }}
+          MOTION_LEVEL: 'low'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
