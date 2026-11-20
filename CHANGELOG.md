@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.18.1] - 2026-11-19
+
+- Removed the sticky **Full Sync** pre-flight drop-down drawer (including the redundant `Dry Run Full` button, manual refresh toggle, breakdown accordion, and legacy crawl link) so clicking **Full Sync** in the header starts mirroring everything matching your **Sync Rules** in one simple click.
+- Enabled automatic stale/unindexed console index refreshing behind the scenes whenever **Full Sync** runs, while keeping the header **Dry Run** checkbox as the single toggle for simulation mode and preserving the **Monitor** page's **Sync Rule Readiness** strip for at-a-glance counts and Catalog shortcuts.
+
 ## [1.18.0] - 2026-11-19
 
 - Redesigned the **Header Sound Deck** into a prominent **center-stage recessed CRT stereo receiver** positioned between the Brand Mark and Trophy/Sync controls (`~3×` wider on desktop with responsive tablet/mobile compression).
