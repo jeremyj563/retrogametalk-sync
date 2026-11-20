@@ -2199,23 +2199,6 @@ export function CatalogPanel({
               )}
               <button
                 type="button"
-                onClick={() => void installer.promptMountSdCard()}
-                title={
-                  sdRootHandle
-                    ? `Mounted storage device: ${sdRootHandle.name} (click to switch)`
-                    : 'Mount a target storage device folder (SD card, HDD, SSD, or USB drive)'
-                }
-                className={`crt-cta-beam inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                  sdRootHandle
-                    ? 'border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/15'
-                    : 'border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-text'
-                }`}
-              >
-                <HardDrive className="h-3.5 w-3.5 shrink-0" />
-                {sdRootHandle ? `Device: ${sdRootHandle.name}` : 'Mount Storage Device'}
-              </button>
-              <button
-                type="button"
                 disabled={refreshing}
                 onClick={() => void loadCatalog(false, { softRefresh: true })}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60"

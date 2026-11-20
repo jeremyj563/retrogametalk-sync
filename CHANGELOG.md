@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.23.0] - 2026-11-20
+
+- Moved **Mount Storage Device** out of the crowded Catalog toolbar row into a permanent **Storage Device** recessed hardware drive bay in the left sidebar (directly below the main navigation switcher):
+  - Features a machined cartridge/SD slot groove, theme-adaptive CRT recessed bezel, and live hardware LED paired with explicit status text (`Standby`, `Mounted`, `Writing`, `HTTPS Req`, `Unsupported`).
+  - Once mounted, displays the active volume/folder name in an illuminated monospace LCD readout with quick **Switch**, **Eject**, and **Auto-Configure** actions (clicking **Auto-Configure** jumps straight to **Device Export → Storage Device Folder Mappings** and opens the reviewable **Auto-Configure Preview** scan for the mounted device).
+  - Updated File System Access capability detection (`evaluateFileSystemAccessSupport`) to distinguish plain LAN HTTP origins (`!window.isSecureContext`, e.g. `http://192.168.x.x:8080` on Chrome/ChromeOS) from non-Chromium browsers and surface exact HTTPS / Chrome flag guidance.
+
 ## [1.22.0] - 2026-11-20
 
 - Added **Export Device Auto-Configure** inside **Device Export → Storage Device Folder Mappings**:
