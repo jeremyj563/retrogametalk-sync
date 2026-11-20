@@ -151,4 +151,69 @@ test('preserves clear global non-game phase prefixes for standby, auth, enumerat
   });
   assert.equal(enumerating.actionPrefix, 'Enumerating');
   assert.equal(enumerating.subjectKind, 'detail');
+
+  const indexFirstConsole = parseSyncStatusHeader({
+    currentPhase: 'Indexing nes-roms (1/4)',
+    activeRun: makeRun({ mode: 'full' }),
+    activeTransfer: null,
+    parallelTransferCount: 0,
+  });
+  assert.equal(indexFirstConsole.actionPrefix, 'Enumerating');
+  assert.equal(indexFirstConsole.systemName, 'nes-roms');
+  assert.equal(indexFirstConsole.progressLabel, 'System 1/4');
+
+  const indexFirstDeltaPage = parseSyncStatusHeader({
+    currentPhase: 'Dry Run · Delta snes-roms · WP page 2/5',
+    activeRun: makeRun({ mode: 'full', dryRun: true }),
+    activeTransfer: null,
+    parallelTransferCount: 0,
+  });
+  assert.equal(indexFirstDeltaPage.actionPrefix, 'Checking');
+  assert.equal(indexFirstDeltaPage.systemName, 'snes-roms');
+  assert.equal(indexFirstDeltaPage.progressLabel, 'WP 2/5');
 });
+
+test('keeps steady "Syncing <Title>" across Index-First Full Sync warm-up and active transfer without flipping to Status', () => {
+  const fullRun = makeRun({ mode: 'full' });
+
+  // Both canonical and alternate Index-First warm-up formats must render steady "Syncing" + highlighted title
+  const canonicalWarmup = parseSyncStatusHeader({
+    currentPhase: 'Full Sync · nes-roms (98/110): Parallel World',
+    activeRun: fullRun,
+    activeTransfer: null,
+    parallelTransferCount: 0,
+  });
+  assert.equal(canonicalWarmup.actionPrefix, 'Syncing');
+  assert.equal(canonicalWarmup.subject, 'Parallel World');
+  assert.equal(canonicalWarmup.subjectKind, 'title');
+  assert.equal(canonicalWarmup.systemName, 'nes-roms');
+  assert.equal(canonicalWarmup.progressLabel, '98/110');
+
+  const altWarmup = parseSyncStatusHeader({
+    currentPhase: 'Full Sync (98/110): nes-roms · Parallel World',
+    activeRun: fullRun,
+    activeTransfer: null,
+    parallelTransferCount: 0,
+  });
+  assert.equal(altWarmup.actionPrefix, 'Syncing');
+  assert.equal(altWarmup.subject, 'Parallel World');
+  assert.equal(altWarmup.subjectKind, 'title');
+  assert.equal(altWarmup.systemName, 'nes-roms');
+  assert.equal(altWarmup.progressLabel, '98/110');
+
+  const downloading = parseSyncStatusHeader({
+    currentPhase: 'Downloading nes-roms / Parallel World.zip',
+    activeRun: fullRun,
+    activeTransfer: makeTransfer({
+      itemTitle: 'Parallel World',
+      filename: 'Parallel World.zip',
+      systemName: 'nes-roms',
+    }),
+    parallelTransferCount: 1,
+  });
+  assert.equal(downloading.actionPrefix, 'Syncing');
+  assert.equal(downloading.subject, 'Parallel World');
+  assert.equal(downloading.subjectKind, 'title');
+  assert.equal(downloading.systemName, 'nes-roms');
+});
+

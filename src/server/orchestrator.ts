@@ -4698,7 +4698,7 @@ export class ScraperOrchestrator extends EventEmitter {
               }
 
               checkedOrMirroredUrls.add(canonicalUrl);
-              this.currentPhase = `Full Sync (${pIdx + 1}/${pendingLiveItems.length}): ${item.systemName} · ${item.title}`;
+              this.currentPhase = `Full Sync · ${item.systemName} (${pIdx + 1}/${pendingLiveItems.length}): ${item.title}`;
               this.emitStatus();
               await inspectAndProcessReleasePage(item.remoteUrl, buildWpMetaHintFromItem(item), null);
             }
