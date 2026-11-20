@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   CRT_DISPLAY_STORAGE_KEY,
+  CRT_PALETTES,
   type CrtDisplaySettings,
   type CrtPalette,
 } from '../../src/shared/crtDisplay.ts';
@@ -42,11 +43,8 @@ export const WALKTHROUGH_TIMINGS_MS = {
   detailDrawerScrollSettleMs: 700,
   detailDrawerScreenshotsDwell: 3200,
   afterDrawerCloseDwell: 900,
-  deviceExportPreThemeDwell: 1400,
-  crtPopoverOpenDwell: 1100,
-  crtPaletteSelectedDwell: 1100,
-  afterCrtPopoverCloseDwell: 500,
-  deviceExportFinalDwell: 3200,
+  deviceExportPreThemeDwell: 1800,
+  deviceExportFinalDwell: 3600,
 } as const;
 
 interface PlaywrightModuleLike {
@@ -411,62 +409,38 @@ async function installDemoLiveTransferRoute(
   });
 }
 
-async function setCrtSettingsInPage(
-  page: PlaywrightPageLike,
-  settings: CrtDisplaySettings,
-): Promise<void> {
-  await page.evaluate(
-    ({ key, value }) => {
-      window.localStorage.setItem(key, JSON.stringify(value));
-    },
-    { key: CRT_DISPLAY_STORAGE_KEY, value: settings },
-  );
-}
-
 async function clickNavTab(page: PlaywrightPageLike, label: string): Promise<void> {
   const navBtn = page.getByRole('button', { name: new RegExp(`^${label}$`, 'i') }).first();
   await navBtn.click();
   await page.waitForTimeout(450);
 }
 
-async function switchPaletteViaCrtStudio(
+/**
+ * Clicks a Phosphor Palette swatch inside the always-open sidebar CRT Display card
+ * via DOM click so React updates the theme in-place with zero page reload, zero
+ * blank flash, and zero viewport scroll jump.
+ */
+async function switchPaletteInPlace(
   page: PlaywrightPageLike,
   targetPalette: CrtPalette,
-  fallbackSettings: CrtDisplaySettings,
-  pacing?: {
-    openDwellMs: number;
-    selectedDwellMs: number;
-    closeDwellMs: number;
-  },
-): Promise<void> {
-  const openDwellMs = pacing?.openDwellMs ?? 260;
-  const selectedDwellMs = pacing?.selectedDwellMs ?? 260;
-  const closeDwellMs = pacing?.closeDwellMs ?? 320;
+): Promise<boolean> {
+  const label = CRT_PALETTES[targetPalette].shortLabel;
+  const switched = await page.evaluate((targetLabel: string) => {
+    const buttons = Array.from(
+      document.querySelectorAll('.crt-tuner-card button'),
+    ) as HTMLButtonElement[];
+    const swatchBtn = buttons.find(
+      (btn) => !btn.disabled && btn.textContent?.trim().toLowerCase() === targetLabel.toLowerCase(),
+    );
+    if (!swatchBtn) return false;
+    swatchBtn.click();
+    return true;
+  }, label);
 
-  try {
-    const toggleBtn = page.locator('button:has-text("CRT Display")').first();
-    if (await toggleBtn.isVisible({ timeout: 1500 })) {
-      await toggleBtn.click();
-      await page.waitForTimeout(openDwellMs);
-      const label = targetPalette === 'amber' ? 'Amber' : 'Green';
-      const swatchBtn = page.getByRole('button', { name: new RegExp(`^${label}$`, 'i') }).first();
-      if (await swatchBtn.isVisible({ timeout: 1500 })) {
-        await swatchBtn.click();
-        await page.waitForTimeout(selectedDwellMs);
-      }
-      // Close CRT Display popover so the full console view is unobstructed
-      await toggleBtn.click();
-      await page.waitForTimeout(closeDwellMs);
-      return;
-    }
-  } catch {
-    // Fallback cleanly to localStorage + reload below
+  if (!switched) {
+    console.warn(`[capture] Could not locate "${label}" swatch inside .crt-tuner-card`);
   }
-
-  await setCrtSettingsInPage(page, fallbackSettings);
-  await page.evaluate(() => window.location.reload());
-  await page.waitForLoadState('networkidle');
-  await page.waitForTimeout(450);
+  return switched;
 }
 
 async function seedCaptureBrowserStorage(
@@ -623,7 +597,6 @@ export async function runScreenshotCapture(options: CaptureOptions): Promise<str
     }
 
     const greenSettings = buildCaptureCrtSettings('green', options.crtPreset, options.uiMotion);
-    const amberSettings = buildCaptureCrtSettings('amber', options.crtPreset, options.uiMotion);
 
     browser = await playwright.chromium.launch({
       headless: true,
@@ -691,8 +664,8 @@ export async function runScreenshotCapture(options: CaptureOptions): Promise<str
     // 4) Direct-to-SD-Card Exporter (Warm Amber Phosphor Highlight · PVM)
     await clickNavTab(staticPage, 'Device Export');
     await staticPage.waitForTimeout(350);
-    await switchPaletteViaCrtStudio(staticPage, 'amber', amberSettings);
-    await staticPage.waitForTimeout(550);
+    await switchPaletteInPlace(staticPage, 'amber');
+    await staticPage.waitForTimeout(450);
     const exportPng = path.join(tempWorkDir, 'sd-card-exporter.png');
     const exportWebp = path.join(options.outDir, SCREENSHOT_FILENAMES.sdCardExporter);
     await staticPage.screenshot({ path: exportPng, fullPage: false });
@@ -754,14 +727,10 @@ export async function runScreenshotCapture(options: CaptureOptions): Promise<str
         await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.afterDrawerCloseDwell);
       }
 
-      // Scene 4 (~7.3s): SD Card Exporter + legible CRT Display palette switch to warm Amber phosphor
+      // Scene 4 (~5.8s): SD Card Exporter with seamless in-place Green -> Amber phosphor transition
       await clickNavTab(videoPage, 'Device Export');
       await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.deviceExportPreThemeDwell);
-      await switchPaletteViaCrtStudio(videoPage, 'amber', amberSettings, {
-        openDwellMs: WALKTHROUGH_TIMINGS_MS.crtPopoverOpenDwell,
-        selectedDwellMs: WALKTHROUGH_TIMINGS_MS.crtPaletteSelectedDwell,
-        closeDwellMs: WALKTHROUGH_TIMINGS_MS.afterCrtPopoverCloseDwell,
-      });
+      await switchPaletteInPlace(videoPage, 'amber');
       await videoPage.waitForTimeout(WALKTHROUGH_TIMINGS_MS.deviceExportFinalDwell);
 
       const videoHandle = videoPage.video();

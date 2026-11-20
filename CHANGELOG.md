@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.21.4] - 2026-11-20
+
+- Fixed a blank full-page reload flash during the **Device Export** scene of the **Playwright + FFmpeg** visual preview: updated the palette switcher to click the **Amber** swatch directly inside the always-open sidebar `.crt-tuner-card` in-place (instead of looking for a retired `CRT Display` popover toggle and falling back to `window.location.reload()`), giving viewers a completely uninterrupted view of **Device Export** with a seamless Green → Amber phosphor transition.
+
 ## [1.21.3] - 2026-11-20
 
 - Pre-seeded the Catalog view preference (`rgt_sync_catalog_view_v1` → `catalogLayout: "grid"`) inside the **Playwright + FFmpeg** visual preview contexts so switching to **Catalog** mounts directly into **Box-Art Grid** view with zero split-second Table view flash.
