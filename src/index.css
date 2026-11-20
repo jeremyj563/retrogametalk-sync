@@ -2021,15 +2021,273 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
   );
 }
 
-/* Hero Showcase: Adaptive-aspect Box-Art Frame & Unboxed Display Game Title */
+/* Hero Showcase: Adaptive-aspect Box-Art Frame, Smooth Crossfade & Choreographed Title */
 .crt-hero-cover-frame {
+  --crt-hero-accent: var(--color-crt-phosphor);
+  width: var(--crt-hero-frame-width, 64px);
   box-shadow:
     0 4px 14px rgba(0, 0, 0, 0.44),
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  transition:
+    width var(--crt-hero-swap-ms, 200ms) cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 150ms ease,
+    box-shadow 180ms ease;
+}
+
+.crt-hero-cover-frame[data-swap-accent="amber"],
+.crt-hero-game-title[data-swap-accent="amber"] {
+  --crt-hero-accent: var(--color-crt-amber);
+}
+
+.crt-hero-cover-placeholder {
+  transition: opacity var(--crt-hero-swap-ms, 200ms) cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.crt-hero-cover-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  will-change: opacity, transform;
+}
+
+.crt-hero-cover-enter {
+  animation: crt-hero-cover-in var(--crt-hero-swap-ms, 200ms) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.crt-hero-cover-exit {
+  animation: crt-hero-cover-out var(--crt-hero-swap-ms, 200ms) cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.crt-hero-cover-rim {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--crt-hero-accent) 85%, #ffffff),
+    inset 0 0 14px -2px color-mix(in srgb, var(--crt-hero-accent) 70%, transparent);
+  animation: crt-hero-rim-pulse calc(var(--crt-hero-swap-ms, 240ms) * 1.45)
+    cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.crt-hero-cover-glint {
+  position: absolute;
+  inset: -4px;
+  width: 48%;
+  pointer-events: none;
+  opacity: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--crt-hero-accent) 26%, transparent) 42%,
+    rgba(255, 255, 255, 0.42) 55%,
+    color-mix(in srgb, var(--crt-hero-accent) 18%, transparent) 72%,
+    transparent 100%
+  );
+  will-change: transform, opacity;
 }
 
 .crt-fx-active .crt-hero-game-title {
   text-shadow: 0 0 10px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.16);
+}
+
+.crt-hero-title-enter {
+  --crt-hero-accent: var(--color-crt-phosphor);
+  display: inline-block;
+  will-change: opacity, transform;
+  animation: crt-hero-title-in var(--crt-hero-swap-ms, 200ms) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes crt-hero-cover-in {
+  0% {
+    opacity: 0;
+    transform: scale(var(--crt-hero-cover-scale, 1));
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes crt-hero-cover-in-phosphor {
+  0% {
+    opacity: 0;
+    transform: scale(var(--crt-hero-cover-scale, 0.978));
+    filter: brightness(var(--crt-hero-cover-bright, 1.12)) saturate(1.06);
+  }
+  58% {
+    opacity: 1;
+    filter: brightness(calc(1 + (var(--crt-hero-cover-bright, 1.12) - 1) * 0.35)) saturate(1.02);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    filter: brightness(1) saturate(1);
+  }
+}
+
+@keyframes crt-hero-cover-out {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(var(--crt-hero-cover-exit-scale, 1));
+  }
+}
+
+@keyframes crt-hero-rim-pulse {
+  0% {
+    opacity: 0;
+  }
+  26% {
+    opacity: var(--crt-hero-rim-alpha, 0);
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes crt-hero-glint-sweep {
+  0% {
+    transform: translateX(-145%) skewX(-18deg);
+    opacity: 0;
+  }
+  18% {
+    opacity: 0.92;
+  }
+  80% {
+    opacity: 0.72;
+  }
+  100% {
+    transform: translateX(310%) skewX(-18deg);
+    opacity: 0;
+  }
+}
+
+@keyframes crt-hero-title-in {
+  0% {
+    opacity: 0;
+    transform: translateY(var(--crt-hero-title-shift, 0px));
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes crt-hero-title-in-phosphor {
+  0% {
+    opacity: 0;
+    transform: translateY(var(--crt-hero-title-shift, 4px));
+    text-shadow: 0 0 16px color-mix(in srgb, var(--crt-hero-accent) var(--crt-hero-title-bloom-pct, 40%), transparent);
+  }
+  55% {
+    opacity: 1;
+    text-shadow: 0 0 12px color-mix(in srgb, var(--crt-hero-accent) var(--crt-hero-title-bloom-pct, 40%), transparent);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    text-shadow: 0 0 0 transparent;
+  }
+}
+
+/* Living UI Motion Tier Scaling for Monitor Hero Showcase Transitions */
+[data-crt-motion="off"] {
+  --crt-hero-swap-ms: 0ms;
+  --crt-hero-cover-scale: 1;
+  --crt-hero-cover-exit-scale: 1;
+  --crt-hero-title-shift: 0px;
+  --crt-hero-rim-alpha: 0;
+
+  .crt-hero-cover-frame,
+  .crt-hero-cover-placeholder {
+    transition-duration: 0ms;
+  }
+
+  .crt-hero-cover-enter,
+  .crt-hero-cover-exit,
+  .crt-hero-cover-rim,
+  .crt-hero-cover-glint,
+  .crt-hero-title-enter {
+    animation: none;
+  }
+}
+
+[data-crt-motion="low"] {
+  --crt-hero-swap-ms: 200ms;
+  --crt-hero-cover-scale: 1;
+  --crt-hero-cover-exit-scale: 1;
+  --crt-hero-title-shift: 0px;
+  --crt-hero-rim-alpha: 0;
+}
+
+[data-crt-motion="medium"] {
+  --crt-hero-swap-ms: 240ms;
+  --crt-hero-cover-scale: 0.985;
+  --crt-hero-cover-exit-scale: 1.01;
+  --crt-hero-title-shift: 3px;
+  --crt-hero-rim-alpha: 0.34;
+}
+
+[data-crt-motion="high"] {
+  --crt-hero-swap-ms: 260ms;
+  --crt-hero-cover-scale: 0.978;
+  --crt-hero-cover-exit-scale: 1.015;
+  --crt-hero-cover-bright: 1.12;
+  --crt-hero-title-shift: 4px;
+  --crt-hero-rim-alpha: 0.56;
+  --crt-hero-title-bloom-pct: 42%;
+
+  .crt-hero-cover-enter {
+    animation-name: crt-hero-cover-in-phosphor;
+  }
+
+  .crt-hero-title-enter {
+    animation-name: crt-hero-title-in-phosphor;
+  }
+}
+
+[data-crt-motion="ultra"] {
+  --crt-hero-swap-ms: 300ms;
+  --crt-hero-cover-scale: 0.968;
+  --crt-hero-cover-exit-scale: 1.02;
+  --crt-hero-cover-bright: 1.2;
+  --crt-hero-title-shift: 5px;
+  --crt-hero-rim-alpha: 0.78;
+  --crt-hero-title-bloom-pct: 60%;
+
+  .crt-hero-cover-enter {
+    animation-name: crt-hero-cover-in-phosphor;
+  }
+
+  .crt-hero-title-enter {
+    animation-name: crt-hero-title-in-phosphor;
+  }
+
+  .crt-hero-cover-glint {
+    animation: crt-hero-glint-sweep 380ms cubic-bezier(0.16, 1, 0.3, 1) 40ms both;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crt-hero-cover-frame,
+  .crt-hero-cover-placeholder {
+    transition: none !important;
+  }
+
+  .crt-hero-cover-enter,
+  .crt-hero-cover-exit,
+  .crt-hero-cover-rim,
+  .crt-hero-cover-glint,
+  .crt-hero-title-enter {
+    animation: none !important;
+  }
 }
 
 /* Compact High-Contrast Active System & Progress Context Block in Tier 1 Sync Status */

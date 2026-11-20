@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.21.6] - 2026-11-20
+
+- Added a **retained-outgoing dual-layer cover crossfade** to the **Monitor** Sync Hero Showcase: while the next game's box art decodes off-stage, the previous cover remains crisply displayed (eliminating blank/placeholder flashes between consecutive titles), then crossfades directly into the incoming cover with stale-request protection during rapid multi-release skips.
+- Added **adaptive frame-width easing** (`cubic-bezier(0.16, 1, 0.3, 1)`) computed from each decoded cover's natural aspect ratio and clamped to responsive showcase bounds (`50px–124px` mobile, `50px–144px` desktop) so switching between portrait GBA/PS2, square DS, and landscape SNES box art glides smoothly without layout snapping.
+- Choreographed the unboxed **Hero Showcase game title** to enter in sync with release transitions (keyed cleanly on release identity so routine progress ticks never re-trigger animations or disrupt hover/focus) and scaled transition intensity progressively across **Living UI Motion** tiers (`Off` / `prefers-reduced-motion` instant, `Low` calm opacity crossfade, `Medium` subtle micro-scale & glide, `High` phosphor rim pulse & text bloom, `Ultra` fleeting specular scan-glint sweep).
+
 ## [1.21.5] - 2026-11-20
 
 - Redesigned the main **Monitor** Sync status bar into a cohesive **Hero Showcase** layout: the active game's box art now anchors the left column and spans vertically alongside both the game title and the live docked transfer progress bar (while keeping the expandable per-worker `Details` drawer full-width underneath).

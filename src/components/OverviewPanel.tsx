@@ -44,6 +44,9 @@ import {
 } from '../utils/format';
 import {
   type ActiveSyncTargetCover,
+  computeHeroCoverFrameWidthPx,
+  deriveSyncReleaseIdentityKey,
+  getHeroSwapDurationMs,
   parseSyncStatusHeader,
   resolveActiveSyncTargetCover,
 } from '../utils/syncStatusPhase';
@@ -176,6 +179,21 @@ interface SyncTargetCoverThumbnailProps {
   onInspect: (itemId: number) => void;
 }
 
+interface CommittedCoverArt {
+  key: number;
+  url: string;
+  title: string;
+  naturalWidth: number;
+  naturalHeight: number;
+}
+
+function readMediaMatch(query: string, fallback: boolean): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return fallback;
+  }
+  return window.matchMedia(query).matches;
+}
+
 function SyncTargetCoverThumbnail({
   target,
   isDryRun,
@@ -186,37 +204,176 @@ function SyncTargetCoverThumbnail({
   onHoverChange,
   onInspect,
 }: SyncTargetCoverThumbnailProps) {
-  const imgRef = useRef<HTMLImageElement | null>(null);
-  const [imgState, setImgState] = useState<{
-    url: string;
-    status: 'loaded' | 'error';
-  } | null>(null);
+  const [isDesktop, setIsDesktop] = useState<boolean>(() =>
+    readMediaMatch('(min-width: 640px)', true),
+  );
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState<boolean>(() =>
+    readMediaMatch('(prefers-reduced-motion: reduce)', false),
+  );
+  const [displayedCover, setDisplayedCover] = useState<CommittedCoverArt | null>(null);
+  const [outgoingCover, setOutgoingCover] = useState<CommittedCoverArt | null>(null);
+  const [swapSeq, setSwapSeq] = useState<number>(0);
 
-  // Immediately recognize browser-cached artwork when switching between syncing titles
+  const displayedCoverRef = useRef<CommittedCoverArt | null>(null);
+  const targetTitleRef = useRef<string>(target.title);
+  const requestIdRef = useRef<number>(0);
+  const keySeqRef = useRef<number>(0);
+  const cleanupTimerRef = useRef<number | null>(null);
+  const uiMotionRef = useRef<CrtUiMotionLevel>(uiMotion);
+  const prefersReducedMotionRef = useRef<boolean>(prefersReducedMotion);
+
+  displayedCoverRef.current = displayedCover;
+  targetTitleRef.current = target.title;
+  uiMotionRef.current = uiMotion;
+  prefersReducedMotionRef.current = prefersReducedMotion;
+
   useEffect(() => {
-    const coverUrl = target.coverUrl;
-    const img = imgRef.current;
-    if (!coverUrl || !img) return;
-    if (img.complete && img.naturalWidth > 0) {
-      setImgState((prev) =>
-        prev?.url === coverUrl && prev.status === 'loaded'
-          ? prev
-          : { url: coverUrl, status: 'loaded' },
-      );
-    }
-  }, [target.coverUrl]);
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const smQuery = window.matchMedia('(min-width: 640px)');
+    const rmQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onSmChange = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
+    const onRmChange = (e: MediaQueryListEvent) => setPrefersReducedMotion(e.matches);
 
-  const isLoaded = Boolean(
-    target.coverUrl && imgState?.url === target.coverUrl && imgState.status === 'loaded',
-  );
-  const hasError = Boolean(
-    target.coverUrl && imgState?.url === target.coverUrl && imgState.status === 'error',
-  );
-  const showImage = Boolean(target.coverUrl && !hasError);
+    setIsDesktop(smQuery.matches);
+    setPrefersReducedMotion(rmQuery.matches);
+    smQuery.addEventListener('change', onSmChange);
+    rmQuery.addEventListener('change', onRmChange);
+    return () => {
+      smQuery.removeEventListener('change', onSmChange);
+      rmQuery.removeEventListener('change', onRmChange);
+    };
+  }, []);
+
+  const clearOutgoingTimer = useCallback(() => {
+    if (cleanupTimerRef.current !== null) {
+      window.clearTimeout(cleanupTimerRef.current);
+      cleanupTimerRef.current = null;
+    }
+  }, []);
+
+  // Immediately clear any in-flight outgoing layer if user disables motion mid-transition
+  useEffect(() => {
+    if (uiMotion === 'off' || prefersReducedMotion) {
+      clearOutgoingTimer();
+      setOutgoingCover(null);
+    }
+  }, [uiMotion, prefersReducedMotion, clearOutgoingTimer]);
+
+  // Retained-outgoing preload & decode pipeline: keeps previous cover crisp until incoming art is decoded
+  useEffect(() => {
+    const nextUrl = target.coverUrl;
+    const current = displayedCoverRef.current;
+
+    if (nextUrl && current?.url === nextUrl) {
+      return;
+    }
+
+    const reqId = ++requestIdRef.current;
+    let cancelled = false;
+
+    const commitCover = (nextCover: CommittedCoverArt | null) => {
+      if (cancelled || requestIdRef.current !== reqId) return;
+      const prev = displayedCoverRef.current;
+      if (prev?.url === nextCover?.url) return;
+
+      const swapMs = prefersReducedMotionRef.current
+        ? 0
+        : getHeroSwapDurationMs(uiMotionRef.current);
+
+      clearOutgoingTimer();
+      if (swapMs > 0 && prev) {
+        setOutgoingCover(prev);
+        cleanupTimerRef.current = window.setTimeout(() => {
+          cleanupTimerRef.current = null;
+          setOutgoingCover(null);
+        }, swapMs + 45);
+      } else {
+        setOutgoingCover(null);
+      }
+
+      setDisplayedCover(nextCover);
+      if (swapMs > 0 && nextCover) {
+        setSwapSeq((n) => n + 1);
+      }
+    };
+
+    if (!nextUrl) {
+      commitCover(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const loader = new Image();
+    loader.referrerPolicy = 'no-referrer';
+    loader.decoding = 'async';
+    let settled = false;
+
+    const finalizeLoad = () => {
+      if (settled) return;
+      settled = true;
+      loader.onload = null;
+      loader.onerror = null;
+      const naturalWidth = loader.naturalWidth;
+      const naturalHeight = loader.naturalHeight;
+      if (naturalWidth <= 0 || naturalHeight <= 0) {
+        commitCover(null);
+        return;
+      }
+      const nextRecord: CommittedCoverArt = {
+        key: ++keySeqRef.current,
+        url: nextUrl,
+        title: targetTitleRef.current,
+        naturalWidth,
+        naturalHeight,
+      };
+      if (typeof loader.decode === 'function') {
+        loader
+          .decode()
+          .catch(() => undefined)
+          .finally(() => commitCover(nextRecord));
+      } else {
+        commitCover(nextRecord);
+      }
+    };
+
+    const finalizeError = () => {
+      if (settled) return;
+      settled = true;
+      loader.onload = null;
+      loader.onerror = null;
+      commitCover(null);
+    };
+
+    loader.onload = finalizeLoad;
+    loader.onerror = finalizeError;
+    loader.src = nextUrl;
+
+    // Fast path for images already decoded in the browser cache
+    if (loader.complete && loader.naturalWidth > 0) {
+      finalizeLoad();
+    }
+
+    return () => {
+      cancelled = true;
+      loader.onload = null;
+      loader.onerror = null;
+    };
+  }, [target.coverUrl, clearOutgoingTimer]);
+
+  useEffect(() => clearOutgoingTimer, [clearOutgoingTimer]);
+
+  const animationsEnabled = uiMotion !== 'off' && !prefersReducedMotion;
+  const hasVisibleArt = displayedCover !== null;
   const isInteractive = target.itemId !== null;
+  const frameWidthPx = computeHeroCoverFrameWidthPx({
+    naturalWidth: displayedCover?.naturalWidth,
+    naturalHeight: displayedCover?.naturalHeight,
+    compact,
+    isDesktop,
+  });
 
   const heightClass = compact ? 'h-[62px] sm:h-[70px]' : 'h-[80px] sm:h-[90px]';
-  const placeholderWidthClass = compact ? 'w-[50px] sm:w-[56px]' : 'w-[64px] sm:w-[72px]';
   const accentBorderClass = isDryRun
     ? highlighted
       ? 'border-crt-amber/85 focus-visible:ring-crt-amber/75'
@@ -224,17 +381,19 @@ function SyncTargetCoverThumbnail({
     : highlighted
       ? 'border-crt-phosphor/80 focus-visible:ring-crt-phosphor/75'
       : 'border-crt-border-strong/90 hover:border-crt-phosphor/80 focus-visible:ring-crt-phosphor/75';
+  const frameStyle = {
+    '--crt-hero-frame-width': `${frameWidthPx}px`,
+  } as CSSProperties;
+  const swapAccent = isDryRun ? 'amber' : 'phosphor';
 
   const innerContent = (
     <>
-      {/* Recessed 3:4 CRT placeholder frame: steady silhouette while cover caches or when artwork is absent */}
+      {/* Recessed 3:4 CRT placeholder frame: steady silhouette before initial art loads or when artwork is absent */}
       <span
         aria-hidden="true"
-        className={`pointer-events-none absolute inset-0 flex items-center justify-center bg-crt-bg text-crt-muted/70 ${
-          uiMotion === 'off'
-            ? ''
-            : 'transition-opacity duration-150 ease-out motion-reduce:transition-none'
-        } ${isLoaded ? 'opacity-0' : 'opacity-100'}`}
+        className={`crt-hero-cover-placeholder pointer-events-none absolute inset-0 z-0 flex items-center justify-center bg-crt-bg text-crt-muted/70 ${
+          hasVisibleArt ? 'opacity-0' : 'opacity-100'
+        }`}
       >
         <span className="absolute inset-[3px] rounded-[2px] border border-crt-border/45" />
         <span className="absolute top-[4px] left-[4px] h-2 w-2 border-t border-l border-crt-border-strong/70" />
@@ -254,38 +413,59 @@ function SyncTargetCoverThumbnail({
         )}
       </span>
 
-      {/* Adaptive-aspect cover artwork: preserves natural SNES landscape, DS square, and GBA/PS2 portrait proportions */}
-      {showImage && target.coverUrl && (
+      {/* Outgoing cover art retained during crossfade so consecutive releases never flash blank */}
+      {outgoingCover && animationsEnabled && (
         <img
-          ref={imgRef}
-          src={target.coverUrl}
+          key={`out-${outgoingCover.key}`}
+          src={outgoingCover.url}
+          alt=""
+          aria-hidden="true"
+          referrerPolicy="no-referrer"
+          className="crt-hero-cover-layer crt-hero-cover-exit pointer-events-none z-10"
+        />
+      )}
+
+      {/* Active committed adaptive-aspect cover art */}
+      {displayedCover && (
+        <img
+          key={`in-${displayedCover.key}`}
+          src={displayedCover.url}
           alt={`${target.title} cover art`}
           referrerPolicy="no-referrer"
-          decoding="async"
-          onLoad={() => setImgState({ url: target.coverUrl!, status: 'loaded' })}
-          onError={() => setImgState({ url: target.coverUrl!, status: 'error' })}
-          className={`${
-            isLoaded
-              ? 'relative z-10 block h-full w-auto min-w-[50px] max-w-[124px] sm:max-w-[144px] object-cover opacity-100'
-              : 'pointer-events-none absolute inset-0 h-full w-full object-contain opacity-0'
-          } ${
-            uiMotion === 'off'
-              ? ''
-              : 'transition-opacity duration-150 ease-out motion-reduce:transition-none'
+          className={`crt-hero-cover-layer z-20 ${
+            animationsEnabled && swapSeq > 0 ? 'crt-hero-cover-enter' : ''
           }`}
+        />
+      )}
+
+      {/* Living UI Motion accent rim pulse (Medium/High/Ultra) */}
+      {animationsEnabled && swapSeq > 0 && (
+        <span
+          key={`rim-${swapSeq}`}
+          aria-hidden="true"
+          className="crt-hero-cover-rim z-30"
+        />
+      )}
+
+      {/* Ultra-tier fleeting specular scan-glint sweep */}
+      {animationsEnabled && uiMotion === 'ultra' && swapSeq > 0 && (
+        <span
+          key={`glint-${swapSeq}`}
+          aria-hidden="true"
+          className="crt-hero-cover-glint z-30"
         />
       )}
 
       {/* Subtle top edge bevel sheen */}
       <span
         aria-hidden="true"
-        className="pointer-events-none absolute inset-0 z-20 rounded-[inherit] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+        className="pointer-events-none absolute inset-0 z-30 rounded-[inherit] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
       />
 
-      {loadingDetail && isLoaded && (
+      {loadingDetail && hasVisibleArt && (
         <span
           aria-hidden="true"
-          className="absolute inset-0 z-30 flex items-center justify-center bg-crt-bg/65"
+          className="absolute inset-0 z-40 flex items-center justify-center bg-crt-bg/65"
         >
           <Loader2
             className={`h-4 w-4 animate-spin ${isDryRun ? 'text-crt-amber' : 'text-crt-phosphor'}`}
@@ -295,13 +475,13 @@ function SyncTargetCoverThumbnail({
     </>
   );
 
-  const frameSizeClass = `${heightClass} ${isLoaded ? 'w-auto' : placeholderWidthClass}`;
-
   if (isInteractive && target.itemId !== null) {
     const inspectId = target.itemId;
     return (
       <button
         type="button"
+        style={frameStyle}
+        data-swap-accent={swapAccent}
         onClick={() => onInspect(inspectId)}
         onMouseEnter={() => onHoverChange?.(true)}
         onMouseLeave={() => onHoverChange?.(false)}
@@ -310,7 +490,7 @@ function SyncTargetCoverThumbnail({
         disabled={loadingDetail}
         title={`Inspect "${target.title}" details`}
         aria-label={`Inspect ${target.title} details`}
-        className={`crt-hero-cover-frame group relative inline-flex ${frameSizeClass} shrink-0 items-center justify-center overflow-hidden rounded-[4px] border bg-crt-bg cursor-pointer transition-[border-color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-crt-surface disabled:cursor-wait ${accentBorderClass}`}
+        className={`crt-hero-cover-frame group relative inline-flex ${heightClass} shrink-0 items-center justify-center overflow-hidden rounded-[4px] border bg-crt-bg cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-crt-surface disabled:cursor-wait ${accentBorderClass}`}
       >
         {innerContent}
       </button>
@@ -320,7 +500,9 @@ function SyncTargetCoverThumbnail({
   return (
     <span
       aria-hidden="true"
-      className={`crt-hero-cover-frame relative inline-flex ${frameSizeClass} shrink-0 items-center justify-center overflow-hidden rounded-[4px] border border-crt-border bg-crt-bg`}
+      style={frameStyle}
+      data-swap-accent={swapAccent}
+      className={`crt-hero-cover-frame relative inline-flex ${heightClass} shrink-0 items-center justify-center overflow-hidden rounded-[4px] border border-crt-border bg-crt-bg`}
     >
       {innerContent}
     </span>
@@ -790,6 +972,24 @@ export function OverviewPanel({
       heldTransferForActiveRun,
     ],
   );
+  const activeReleaseIdentityKey = useMemo(
+    () => deriveSyncReleaseIdentityKey(activeSyncTargetCover),
+    [activeSyncTargetCover],
+  );
+  const prevReleaseIdentityRef = useRef<string | null>(null);
+  const [titleSwapSeq, setTitleSwapSeq] = useState<number>(0);
+
+  useEffect(() => {
+    const prevKey = prevReleaseIdentityRef.current;
+    if (!activeReleaseIdentityKey) {
+      prevReleaseIdentityRef.current = null;
+      return;
+    }
+    if (prevKey !== null && prevKey !== activeReleaseIdentityKey) {
+      setTitleSwapSeq((n) => n + 1);
+    }
+    prevReleaseIdentityRef.current = activeReleaseIdentityKey;
+  }, [activeReleaseIdentityKey]);
   const activeDetailTransfer = useMemo(() => {
     if (!activeDetailItem) return null;
     return (
@@ -1251,7 +1451,11 @@ export function OverviewPanel({
                             className="group/title inline-flex items-baseline gap-2.5 max-w-full min-w-0 text-left cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crt-phosphor/70 focus-visible:ring-offset-2 focus-visible:ring-offset-crt-surface disabled:cursor-wait"
                           >
                             <span
-                              className={`crt-hero-game-title font-display text-lg sm:text-[22px] font-bold tracking-tight leading-tight truncate min-w-0 transition-colors duration-150 ${
+                              key={`hero-title-${titleSwapSeq}`}
+                              data-swap-accent={isDryRunActive ? 'amber' : 'phosphor'}
+                              className={`crt-hero-game-title ${
+                                titleSwapSeq > 0 && uiMotion !== 'off' ? 'crt-hero-title-enter' : ''
+                              } font-display text-lg sm:text-[22px] font-bold tracking-tight leading-tight truncate min-w-0 transition-colors duration-150 ${
                                 heroInspectHover
                                   ? isDryRunActive
                                     ? 'text-crt-amber'
@@ -1284,8 +1488,12 @@ export function OverviewPanel({
                           </button>
                         ) : (
                           <span
+                            key={`hero-title-static-${titleSwapSeq}`}
+                            data-swap-accent={isDryRunActive ? 'amber' : 'phosphor'}
                             title={displayedSyncSubject}
-                            className="crt-hero-game-title font-display text-lg sm:text-[22px] font-bold tracking-tight leading-tight text-crt-text truncate min-w-0"
+                            className={`crt-hero-game-title ${
+                              titleSwapSeq > 0 && uiMotion !== 'off' ? 'crt-hero-title-enter' : ''
+                            } font-display text-lg sm:text-[22px] font-bold tracking-tight leading-tight text-crt-text truncate min-w-0`}
                           >
                             {displayedSyncSubject}
                           </span>
