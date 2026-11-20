@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.20.2] - 2026-11-19
+
+- Fixed HTTP 404 download failures on signed mirror URLs whose upstream WordPress/ACF `file=` query parameter contains HTML-encoded entities (for example `Traverse%20-%20Starlight%20%26amp%3B%20Prairie%20%28Japan%29.zip`): `downloadFileAtomic` now automatically retries HTTP 404 responses with an entity-decoded, PHP `rawurlencode`-compatible `file=` fallback while preserving all other query parameters byte-for-byte and keeping the authenticated session intact if the mirror rejects the fallback.
+- Fixed HTML entities (such as `&amp;`, `&#038;`, `&#8217;`, and double-encoded `&amp;amp;`) appearing literally in catalog titles, original titles, metadata, and file hints by decoding WP REST ACF fields (`acf.game_name`, `acf.original_title`, `acf.download_links[].file_name`) and dynamic download extractor labels.
+- Added SQLite startup migration **`v21` (`decode_html_entities_in_titles`)** to automatically clean existing stored catalog release titles, publishers/developers, metadata hints, and file display labels without modifying on-disk `local_path` entries.
+
 ## [1.20.1] - 2026-11-19
 
 - Fixed a regression in **Index-First Full Sync** where the Monitor status header briefly flipped from `Status Full Sync (N/M): <console> · <Game Title>` during release warm-up to `Syncing <Game Title>` once downloading began; Index-First Full Sync now emits and parses the steady **`Syncing <Game Title>`** format consistently from warm-up through download completion (and cleanly formats Phase 1 console indexing/delta status messages).

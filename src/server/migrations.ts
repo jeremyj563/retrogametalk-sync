@@ -8,6 +8,7 @@ import {
   filterValidSystemSlugs,
   sanitizeSystemFilterString,
 } from '../shared/systemCatalog.ts';
+import { decodeHtmlEntities, hasHtmlEntities } from './releaseTags.ts';
 import type { AppliedMigrationRecord, DatabaseMigrationReport } from './types.ts';
 
 export interface MigrationContext {
@@ -786,6 +787,119 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
     up: (db) => {
       if (!tableHasColumn(db, 'sync_runs', 'summary_json')) {
         db.exec('ALTER TABLE sync_runs ADD COLUMN summary_json TEXT;');
+      }
+    },
+  },
+  {
+    version: 21,
+    name: 'decode_html_entities_in_titles',
+    description:
+      'Decode raw HTML entities (e.g. &amp;, &#038;, &#8217;) in catalog release titles, metadata fields, and file display labels without altering local disk paths',
+    up: (db) => {
+      const releaseRows = db
+        .prepare(
+          `SELECT id, title, publisher, developer, metadata_json
+           FROM catalog_releases
+           WHERE title LIKE '%&%'
+              OR publisher LIKE '%&%'
+              OR developer LIKE '%&%'
+              OR metadata_json LIKE '%&%'`,
+        )
+        .all() as {
+        id: number;
+        title: string;
+        publisher: string | null;
+        developer: string | null;
+        metadata_json: string | null;
+      }[];
+
+      const updateReleaseStmt = db.prepare(
+        `UPDATE catalog_releases
+         SET title = ?, publisher = ?, developer = ?, metadata_json = ?
+         WHERE id = ?`,
+      );
+
+      for (const row of releaseRows) {
+        let changed = false;
+        const nextTitle = hasHtmlEntities(row.title) ? decodeHtmlEntities(row.title) : row.title;
+        if (nextTitle !== row.title) changed = true;
+
+        const nextPublisher =
+          row.publisher && hasHtmlEntities(row.publisher)
+            ? decodeHtmlEntities(row.publisher)
+            : row.publisher;
+        if (nextPublisher !== row.publisher) changed = true;
+
+        const nextDeveloper =
+          row.developer && hasHtmlEntities(row.developer)
+            ? decodeHtmlEntities(row.developer)
+            : row.developer;
+        if (nextDeveloper !== row.developer) changed = true;
+
+        let nextMetadataJson = row.metadata_json;
+        if (row.metadata_json && hasHtmlEntities(row.metadata_json)) {
+          try {
+            const parsed = JSON.parse(row.metadata_json) as Record<string, unknown>;
+            let metaChanged = false;
+            for (const key of ['title', 'subtitle', 'publisher', 'developer', 'consoleName'] as const) {
+              const val = parsed[key];
+              if (typeof val === 'string' && hasHtmlEntities(val)) {
+                const decoded = decodeHtmlEntities(val);
+                if (decoded !== val) {
+                  parsed[key] = decoded;
+                  metaChanged = true;
+                }
+              }
+            }
+            if (Array.isArray(parsed.downloadHints)) {
+              for (const hint of parsed.downloadHints) {
+                if (hint && typeof hint === 'object') {
+                  const h = hint as { filename?: unknown };
+                  if (typeof h.filename === 'string' && hasHtmlEntities(h.filename)) {
+                    const decoded = decodeHtmlEntities(h.filename);
+                    if (decoded !== h.filename) {
+                      h.filename = decoded;
+                      metaChanged = true;
+                    }
+                  }
+                }
+              }
+            }
+            if (metaChanged) {
+              nextMetadataJson = JSON.stringify(parsed);
+              changed = true;
+            }
+          } catch {
+            // Preserve malformed metadata_json as-is
+          }
+        }
+
+        if (changed) {
+          updateReleaseStmt.run(nextTitle, nextPublisher, nextDeveloper, nextMetadataJson, row.id);
+        }
+      }
+
+      const fileRows = db
+        .prepare(
+          `SELECT id, display_label
+           FROM catalog_release_files
+           WHERE display_label LIKE '%&%'`,
+        )
+        .all() as { id: number; display_label: string }[];
+
+      const updateFileStmt = db.prepare(
+        `UPDATE catalog_release_files
+         SET display_label = ?
+         WHERE id = ?`,
+      );
+
+      for (const row of fileRows) {
+        if (hasHtmlEntities(row.display_label)) {
+          const nextLabel = decodeHtmlEntities(row.display_label);
+          if (nextLabel !== row.display_label) {
+            updateFileStmt.run(nextLabel, row.id);
+          }
+        }
       }
     },
   },

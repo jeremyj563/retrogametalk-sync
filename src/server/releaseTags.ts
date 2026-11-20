@@ -1,7 +1,25 @@
 import { load as loadHtml } from 'cheerio';
 
+const HTML_ENTITY_PATTERN = /&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]{1,31});/i;
+
+export function hasHtmlEntities(text: string): boolean {
+  return Boolean(text && text.includes('&') && HTML_ENTITY_PATTERN.test(text));
+}
+
 export function decodeHtmlEntities(text: string): string {
-  return loadHtml(`<span>${text}</span>`).text().trim();
+  if (!text) return '';
+  if (!text.includes('&') && !text.includes('<')) {
+    return text.trim();
+  }
+  let current = loadHtml(`<span>${text}</span>`).text().trim();
+  for (let pass = 0; pass < 2 && hasHtmlEntities(current); pass += 1) {
+    // Protect any literal '<' characters produced by prior decoding from being parsed as HTML tags
+    const shielded = current.replace(/</g, '\uE000LT\uE000');
+    const decoded = loadHtml(`<span>${shielded}</span>`).text().replace(/\uE000LT\uE000/g, '<').trim();
+    if (decoded === current) break;
+    current = decoded;
+  }
+  return current;
 }
 
 export function classifyFileRole(
