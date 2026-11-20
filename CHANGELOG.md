@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.20.3] - 2026-11-20
+
+- Removed duplicate status prefixes on the main **Monitor** sync status bar: Tier 2 now omits the redundant `Standby` prefix when Tier 1 already displays `Standby` and omits the redundant `Syncing` prefix before the highlighted game title when Tier 1 already displays `Sync Active` / `Dry Run Active`, while retaining distinct sub-phase prefixes (`Initializing`, `Authenticating`, `Enumerating`, `Checking`, `Scanning`, `Stopping`).
+
 ## [1.20.2] - 2026-11-19
 
 - Fixed HTTP 404 download failures on signed mirror URLs whose upstream WordPress/ACF `file=` query parameter contains HTML-encoded entities (for example `Traverse%20-%20Starlight%20%26amp%3B%20Prairie%20%28Japan%29.zip`): `downloadFileAtomic` now automatically retries HTTP 404 responses with an entity-decoded, PHP `rawurlencode`-compatible `file=` fallback while preserving all other query parameters byte-for-byte and keeping the authenticated session intact if the mirror rejects the fallback.

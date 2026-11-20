@@ -48,7 +48,7 @@ function makeTransfer(overrides: Partial<ActiveTransferState> = {}): ActiveTrans
   };
 }
 
-test('keeps steady "Syncing" label and title highlight across warm-up, active download, and handoff', () => {
+test('omits redundant "Syncing" prefix and keeps highlighted title steady across warm-up, active download, and handoff', () => {
   const run = makeRun({ triggerType: 'download' });
 
   // Phase 1: Queue warm-up before binary stream opens
@@ -58,7 +58,7 @@ test('keeps steady "Syncing" label and title highlight across warm-up, active do
     activeTransfer: null,
     parallelTransferCount: 0,
   });
-  assert.equal(warmUp.actionPrefix, 'Syncing');
+  assert.equal(warmUp.actionPrefix, null);
   assert.equal(warmUp.subject, 'Just Breed');
   assert.equal(warmUp.subjectKind, 'title');
   assert.equal(warmUp.systemName, 'nes-roms');
@@ -71,7 +71,7 @@ test('keeps steady "Syncing" label and title highlight across warm-up, active do
     activeTransfer: makeTransfer(),
     parallelTransferCount: 2,
   });
-  assert.equal(active.actionPrefix, 'Syncing');
+  assert.equal(active.actionPrefix, null);
   assert.equal(active.subject, 'Just Breed');
   assert.equal(active.subjectKind, 'title');
   assert.equal(active.systemName, 'nes-roms');
@@ -84,20 +84,20 @@ test('keeps steady "Syncing" label and title highlight across warm-up, active do
     activeTransfer: null,
     parallelTransferCount: 0,
   });
-  assert.equal(handoff.actionPrefix, 'Syncing');
+  assert.equal(handoff.actionPrefix, null);
   assert.equal(handoff.subject, 'Just Breed');
   assert.equal(handoff.subjectKind, 'title');
   assert.equal(handoff.systemName, 'nes-roms');
 });
 
-test('uses steady "Syncing" + highlighted title across incremental, full sync, and retry phases', () => {
+test('omits redundant "Syncing" prefix across incremental, full sync, and retry phases', () => {
   const fullWarmup = parseSyncStatusHeader({
     currentPhase: 'Full Sync · n64-roms (9/424): The Legend of Zelda: Ocarina of Time',
     activeRun: makeRun({ mode: 'full' }),
     activeTransfer: null,
     parallelTransferCount: 0,
   });
-  assert.equal(fullWarmup.actionPrefix, 'Syncing');
+  assert.equal(fullWarmup.actionPrefix, null);
   assert.equal(fullWarmup.subject, 'The Legend of Zelda: Ocarina of Time');
   assert.equal(fullWarmup.subjectKind, 'title');
   assert.equal(fullWarmup.progressLabel, '9/424');
@@ -108,7 +108,7 @@ test('uses steady "Syncing" + highlighted title across incremental, full sync, a
     activeTransfer: null,
     parallelTransferCount: 0,
   });
-  assert.equal(singleRetry.actionPrefix, 'Syncing');
+  assert.equal(singleRetry.actionPrefix, null);
   assert.equal(singleRetry.subject, 'Chrono Trigger');
   assert.equal(singleRetry.subjectKind, 'title');
 
@@ -118,21 +118,31 @@ test('uses steady "Syncing" + highlighted title across incremental, full sync, a
     activeTransfer: null,
     parallelTransferCount: 0,
   });
-  assert.equal(batchRetry.actionPrefix, 'Syncing');
+  assert.equal(batchRetry.actionPrefix, null);
   assert.equal(batchRetry.subject, 'EarthBound');
   assert.equal(batchRetry.subjectKind, 'title');
   assert.equal(batchRetry.progressLabel, '2/5');
 });
 
-test('preserves clear global non-game phase prefixes for standby, auth, enumeration, and stopping', () => {
+test('omits redundant Standby prefix on idle while preserving distinct phase prefixes for stopping and indexing', () => {
   const idle = parseSyncStatusHeader({
     currentPhase: 'Idle · Waiting for next scheduled run or manual trigger',
     activeRun: null,
     activeTransfer: makeTransfer(), // Idle phase takes priority over any stale transfer
     parallelTransferCount: 0,
   });
-  assert.equal(idle.actionPrefix, 'Standby');
+  assert.equal(idle.actionPrefix, null);
+  assert.equal(idle.subject, 'Waiting for next scheduled run or manual trigger');
   assert.equal(idle.subjectKind, 'idle');
+
+  const fallbackIdle = parseSyncStatusHeader({
+    currentPhase: '',
+    activeRun: null,
+    activeTransfer: null,
+    parallelTransferCount: 0,
+  });
+  assert.equal(fallbackIdle.actionPrefix, null);
+  assert.equal(fallbackIdle.subject, 'Ready');
 
   const stopping = parseSyncStatusHeader({
     currentPhase: 'Stopping run #42...',
@@ -173,17 +183,17 @@ test('preserves clear global non-game phase prefixes for standby, auth, enumerat
   assert.equal(indexFirstDeltaPage.progressLabel, 'WP 2/5');
 });
 
-test('keeps steady "Syncing <Title>" across Index-First Full Sync warm-up and active transfer without flipping to Status', () => {
+test('keeps steady highlighted title with no redundant prefix across Index-First Full Sync warm-up and active transfer', () => {
   const fullRun = makeRun({ mode: 'full' });
 
-  // Both canonical and alternate Index-First warm-up formats must render steady "Syncing" + highlighted title
+  // Both canonical and alternate Index-First warm-up formats must render highlighted title with no prefix flicker
   const canonicalWarmup = parseSyncStatusHeader({
     currentPhase: 'Full Sync · nes-roms (98/110): Parallel World',
     activeRun: fullRun,
     activeTransfer: null,
     parallelTransferCount: 0,
   });
-  assert.equal(canonicalWarmup.actionPrefix, 'Syncing');
+  assert.equal(canonicalWarmup.actionPrefix, null);
   assert.equal(canonicalWarmup.subject, 'Parallel World');
   assert.equal(canonicalWarmup.subjectKind, 'title');
   assert.equal(canonicalWarmup.systemName, 'nes-roms');
@@ -195,7 +205,7 @@ test('keeps steady "Syncing <Title>" across Index-First Full Sync warm-up and ac
     activeTransfer: null,
     parallelTransferCount: 0,
   });
-  assert.equal(altWarmup.actionPrefix, 'Syncing');
+  assert.equal(altWarmup.actionPrefix, null);
   assert.equal(altWarmup.subject, 'Parallel World');
   assert.equal(altWarmup.subjectKind, 'title');
   assert.equal(altWarmup.systemName, 'nes-roms');
@@ -211,7 +221,7 @@ test('keeps steady "Syncing <Title>" across Index-First Full Sync warm-up and ac
     }),
     parallelTransferCount: 1,
   });
-  assert.equal(downloading.actionPrefix, 'Syncing');
+  assert.equal(downloading.actionPrefix, null);
   assert.equal(downloading.subject, 'Parallel World');
   assert.equal(downloading.subjectKind, 'title');
   assert.equal(downloading.systemName, 'nes-roms');

@@ -6,7 +6,7 @@ export interface ParsedSyncStatusHeader {
   syncType: string | null;
   systemName: string | null;
   progressLabel: string | null;
-  actionPrefix: string;
+  actionPrefix: string | null;
   subject: string;
   subjectKind: SyncStatusSubjectKind;
   workerCount: number;
@@ -50,14 +50,14 @@ export function parseSyncStatusHeader(params: {
   const phase = (currentPhase || '').trim();
   const runSyncType = deriveRunSyncTypeLabel(activeRun);
 
-  // 1. Idle / Standby (always takes precedence over stale state)
+  // 1. Idle / Standby (always takes precedence over stale state; Tier 1 already displays "Standby")
   if (/^Idle\b/i.test(phase)) {
     const detail = phase.replace(/^Idle\s*(?:·|:|-)?\s*/i, '').trim();
     return {
       syncType: null,
       systemName: null,
       progressLabel: null,
-      actionPrefix: 'Standby',
+      actionPrefix: null,
       subject: detail || 'Waiting for next scheduled run or manual trigger',
       subjectKind: 'idle',
       workerCount: 0,
@@ -78,7 +78,7 @@ export function parseSyncStatusHeader(params: {
     };
   }
 
-  // 3. Active transfer snapshot — always foreground the game/catalog-item title with steady "Syncing"
+  // 3. Active transfer snapshot — foreground the game/catalog-item title directly (Tier 1 already displays "Sync Active")
   if (activeTransfer) {
     const workerCount = Math.max(parallelTransferCount, activeTransfer.activeWorkers ?? 1, 1);
     const resolvedTitle = (activeTransfer.itemTitle || '').trim();
@@ -87,7 +87,7 @@ export function parseSyncStatusHeader(params: {
       syncType: runSyncType ?? 'Sync',
       systemName: activeTransfer.systemName || null,
       progressLabel: null,
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject,
       subjectKind: resolvedTitle ? 'title' : 'download',
       workerCount,
@@ -101,7 +101,7 @@ export function parseSyncStatusHeader(params: {
       syncType: runSyncType ?? 'Sync',
       systemName: syncingItemMatch[1].trim() || null,
       progressLabel: null,
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject: syncingItemMatch[2].trim(),
       subjectKind: 'title',
       workerCount: 0,
@@ -117,7 +117,7 @@ export function parseSyncStatusHeader(params: {
       syncType: runSyncType ?? 'Sync',
       systemName: parallelDlMatch[2].trim() || null,
       progressLabel: null,
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject: parallelDlMatch[3].trim(),
       subjectKind: 'download',
       workerCount,
@@ -130,7 +130,7 @@ export function parseSyncStatusHeader(params: {
       syncType: runSyncType ?? 'Sync',
       systemName: singleDlMatch[1].trim() || null,
       progressLabel: null,
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject: singleDlMatch[2].trim(),
       subjectKind: 'download',
       workerCount: 1,
@@ -164,7 +164,7 @@ export function parseSyncStatusHeader(params: {
     };
   }
 
-  // 5. Per-release processing (warm-up -> seamless transition into transfer): steady "Syncing"
+  // 5. Per-release processing (warm-up -> seamless transition into transfer): title only without redundant "Syncing"
   const releaseMatch = phase.match(
     /^(Dry Run \((?:Full|Incremental)\)|Full Sync|Incremental)\s+·\s+([^\s(]+)\s+\((\d+\/\d+)\):\s+(.+)$/,
   );
@@ -173,7 +173,7 @@ export function parseSyncStatusHeader(params: {
       syncType: releaseMatch[1].trim(),
       systemName: releaseMatch[2].trim(),
       progressLabel: releaseMatch[3].trim(),
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject: releaseMatch[4].trim(),
       subjectKind: 'title',
       workerCount: 0,
@@ -205,7 +205,7 @@ export function parseSyncStatusHeader(params: {
       syncType: indexFirstReleaseMatch[1].trim(),
       systemName: indexFirstReleaseMatch[3].trim(),
       progressLabel: indexFirstReleaseMatch[2].trim(),
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject: indexFirstReleaseMatch[4].trim(),
       subjectKind: 'title',
       workerCount: 0,
@@ -297,7 +297,7 @@ export function parseSyncStatusHeader(params: {
     };
   }
 
-  // 7. Retry queues & single-item retries — steady "Syncing" + highlighted title
+  // 7. Retry queues & single-item retries — highlighted title without redundant "Syncing"
   const batchRetryItemMatch = phase.match(
     /^(Dry Run \(Retry\)|Retry Failed)\s+\((\d+\/\d+)\):\s+([^/]+?)\s*\/\s*(.+)$/i,
   );
@@ -306,7 +306,7 @@ export function parseSyncStatusHeader(params: {
       syncType: batchRetryItemMatch[1].trim(),
       systemName: batchRetryItemMatch[3].trim(),
       progressLabel: batchRetryItemMatch[2].trim(),
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject: batchRetryItemMatch[4].trim(),
       subjectKind: 'title',
       workerCount: 0,
@@ -321,7 +321,7 @@ export function parseSyncStatusHeader(params: {
       syncType: batchRetryStartMatch[1].trim(),
       systemName: null,
       progressLabel: null,
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject: batchRetryStartMatch[2].trim(),
       subjectKind: 'detail',
       workerCount: 0,
@@ -335,21 +335,21 @@ export function parseSyncStatusHeader(params: {
       syncType: runSyncType ?? (isDry ? 'Dry Run (Retry)' : 'Retry Failed'),
       systemName: null,
       progressLabel: null,
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject: singleRetryMatch[2].trim(),
       subjectKind: 'title',
       workerCount: 0,
     };
   }
 
-  // 7b. On-demand Download Queue phases — steady "Syncing" + highlighted title
+  // 7b. On-demand Download Queue phases — highlighted title without redundant "Syncing"
   const queueItemMatch = phase.match(/^Queue\s+\((\d+\/\d+)\):\s+([^/]+?)\s*\/\s*(.+)$/i);
   if (queueItemMatch) {
     return {
       syncType: runSyncType ?? 'Download Queue',
       systemName: queueItemMatch[2].trim(),
       progressLabel: queueItemMatch[1].trim(),
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject: queueItemMatch[3].trim(),
       subjectKind: 'title',
       workerCount: 0,
@@ -362,7 +362,7 @@ export function parseSyncStatusHeader(params: {
       syncType: runSyncType ?? 'Download Queue',
       systemName: null,
       progressLabel: null,
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject: queueStartMatch[1].trim(),
       subjectKind: 'detail',
       workerCount: 0,
@@ -406,7 +406,7 @@ export function parseSyncStatusHeader(params: {
       syncType: runSyncType,
       systemName: inferSystemFromRelativePath(relPath),
       progressLabel: null,
-      actionPrefix: 'Syncing',
+      actionPrefix: null,
       subject: relPath,
       subjectKind: 'path',
       workerCount: 0,
@@ -418,7 +418,7 @@ export function parseSyncStatusHeader(params: {
     syncType: runSyncType,
     systemName: null,
     progressLabel: null,
-    actionPrefix: activeRun ? 'Status' : 'Standby',
+    actionPrefix: activeRun ? 'Status' : null,
     subject: phase || 'Ready',
     subjectKind: 'detail',
     workerCount: 0,
