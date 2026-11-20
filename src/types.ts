@@ -5,6 +5,7 @@ export type {
   SystemTypeFolderOverride,
   SystemTypeSubfolderMode,
 } from './shared/storageFolderMappings';
+export type { LiveSyncReloadReceipt } from './shared/syncRuleMatcher';
 export type NavSection =
   | 'monitor'
   | 'catalog'
@@ -101,6 +102,11 @@ export interface ScraperConfigPublic {
   systemIndexState?: Record<string, SystemIndexCursor>;
   updatedAt: string;
   envOverrides: string[];
+}
+
+export interface ConfigSaveResult {
+  config: ScraperConfigPublic;
+  liveSyncReload?: import('./shared/syncRuleMatcher').LiveSyncReloadReceipt | null;
 }
 
 export interface DryRunSampleRelease {

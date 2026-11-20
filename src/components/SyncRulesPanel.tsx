@@ -51,10 +51,12 @@ import {
   groupSystemsByBrand,
   resolveSystemDisplayInfo,
 } from '../shared/systemCatalog';
+import { isSyncRunEligibleForLiveRuleReload } from '../shared/syncRuleMatcher';
 import type {
   ConfigDirtyState,
   ConfigFocusRequest,
   ConfigPanelHandle,
+  ConfigSaveResult,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
   SyncPreflightSummary,
@@ -69,7 +71,7 @@ interface SyncRulesPanelProps {
   preflight?: SyncPreflightSummary | null;
   focusRequest?: ConfigFocusRequest | null;
   onDirtyChange?: (state: ConfigDirtyState) => void;
-  onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
+  onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<ConfigSaveResult | void>;
   onStartCatalogIndex?: (scope: 'filtered' | 'full') => Promise<void>;
   onStopCatalogIndex?: () => Promise<void>;
   onPreviewRuleMatchesInCatalog?: () => void;
@@ -603,7 +605,7 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
       setSaveMsg(null);
       setSaveErr(null);
       try {
-        await onSaveConfig({
+        const saveResult = await onSaveConfig({
           ...(!scheduleEnabledLockedByEnv ? { scheduleEnabled } : {}),
           ...(!autoDownloadLockedByEnv ? { autoDownloadNewReleases } : {}),
           ...(!cronLockedByEnv ? { cronSchedule: cronSchedule.trim() } : {}),
@@ -613,11 +615,25 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
             : {}),
         });
         isDirtyRef.current = false;
-        setSaveMsg('Sync Rules saved');
-        saveNoticeTimerRef.current = window.setTimeout(() => {
-          setSaveMsg(null);
-          saveNoticeTimerRef.current = null;
-        }, 3500);
+        const liveReceipt = saveResult && 'liveSyncReload' in saveResult ? saveResult.liveSyncReload : null;
+        if (liveReceipt?.applied) {
+          const modeLabel = liveReceipt.runMode === 'full' ? 'Full Sync' : 'Incremental Sync';
+          const dryLabel = liveReceipt.dryRun ? ' Dry Run' : '';
+          const detail = liveReceipt.changeSummary ? ` (${liveReceipt.changeSummary})` : '';
+          setSaveMsg(
+            `Sync Rules saved — applied live to active ${modeLabel}${dryLabel} #${liveReceipt.runId}${detail}`,
+          );
+          saveNoticeTimerRef.current = window.setTimeout(() => {
+            setSaveMsg(null);
+            saveNoticeTimerRef.current = null;
+          }, 6000);
+        } else {
+          setSaveMsg('Sync Rules saved');
+          saveNoticeTimerRef.current = window.setTimeout(() => {
+            setSaveMsg(null);
+            saveNoticeTimerRef.current = null;
+          }, 3500);
+        }
         return true;
       } catch (err) {
         setSaveErr(err instanceof Error ? err.message : String(err));
@@ -663,6 +679,17 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
         : customTypeSelectionEmpty
           ? 'Select at least one release type or switch back to All Release Types before saving.'
           : null;
+
+    const liveReloadTargetRun = isSyncRunEligibleForLiveRuleReload(status.activeRun)
+      ? status.activeRun
+      : null;
+    const hasUnsavedRuleEdits =
+      dirtyState.changedSections.includes('Target Consoles') ||
+      dirtyState.changedSections.includes('Allowed Types');
+    const liveReloadHint =
+      liveReloadTargetRun && hasUnsavedRuleEdits
+        ? `Active ${liveReloadTargetRun.mode === 'full' ? 'Full Sync' : 'Incremental Sync'}${liveReloadTargetRun.dryRun ? ' Dry Run' : ''} #${liveReloadTargetRun.id} running — saved rule changes will apply live after the current file.`
+        : null;
 
     return (
       <form
@@ -1865,6 +1892,7 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
           saveMsg={saveMsg}
           saveErr={saveErr}
           validationHint={validationHint}
+          infoHint={liveReloadHint}
           saveDisabled={customTypeSelectionEmpty || (!cronLockedByEnv && !cronValidation.valid)}
           onDiscard={discardChanges}
         />

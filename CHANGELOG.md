@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.19.0] - 2026-11-19
+
+- Added **Live Mid-Run Sync Rule Hot-Reloading**: saving changes to **Target Consoles** or **Allowed Release Types** in **Sync Rules** now applies immediately to any active **Full Sync** or **Incremental Sync** (including Dry Runs) without waiting for the next run.
+- **Graceful transfer boundary & dynamic queue convergence**: currently downloading files finish cleanly before newly excluded consoles or release types are skipped immediately (never deleting files already on disk); newly added consoles automatically refresh their catalog index/delta and expand the live queue, and widening allowed release types re-evaluates earlier type-skipped items within the same run.
+- **Manual queue isolation & two-place operator feedback**: manual **Catalog** download queues and **Retry** runs remain untouched; `PUT /api/config` returns a `liveSyncReload` receipt so **Sync Rules** shows a live-reload editing hint and post-save confirmation banner (*"Sync Rules saved — applied live to active Full/Incremental Sync #N"*), paired with a timestamped `[Live Rules]` entry in **Monitor**'s Activity Log.
+
 ## [1.18.1] - 2026-11-19
 
 - Removed the sticky **Full Sync** pre-flight drop-down drawer (including the redundant `Dry Run Full` button, manual refresh toggle, breakdown accordion, and legacy crawl link) so clicking **Full Sync** in the header starts mirroring everything matching your **Sync Rules** in one simple click.

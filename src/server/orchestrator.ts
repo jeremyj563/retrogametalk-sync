@@ -70,8 +70,14 @@ import {
 } from '../shared/releaseTypeFilter.ts';
 import {
   classifySystemIndexFreshness,
+  diffSyncRules,
   doesCatalogReleaseMatchSyncRules,
   formatSyncRuleScopeSummary,
+  isConsoleAllowedBySyncRules,
+  isSyncRunEligibleForLiveRuleReload,
+  type LiveSyncReloadReceipt,
+  resolveTargetConsoleScope,
+  type SyncRuleDiff,
 } from '../shared/syncRuleMatcher.ts';
 import { normalizeGitRepoUrl } from '../shared/gitUrl.ts';
 import { canonicalizeSystemSlug, filterValidSystemSlugs } from '../shared/systemCatalog.ts';
@@ -360,6 +366,7 @@ export class ScraperOrchestrator extends EventEmitter {
   private currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
   private abortController: AbortController | null = null;
   private lockRenewTimer: NodeJS.Timeout | null = null;
+  private syncRulesRevision = 0;
   private shuttingDown = false;
   private inFlightAssetUpgrades = new Map<number, Promise<RepositoryItemRecord | null>>();
   private inFlightDetailHydrations = new Map<number, Promise<RepositoryItemRecord | null>>();
@@ -815,13 +822,50 @@ export class ScraperOrchestrator extends EventEmitter {
   }
 
   updateConfiguration(input: ConfigUpdateInput): ScraperConfigPublic {
+    return this.updateConfigurationWithMeta(input).config;
+  }
+
+  updateConfigurationWithMeta(input: ConfigUpdateInput): {
+    config: ScraperConfigPublic;
+    liveSyncReload: LiveSyncReloadReceipt | null;
+  } {
+    const prevCfg = getInternalConfig();
     const prevAuthAt = getLastAuthenticatedAt();
     const updated = updateConfig(input);
+    const nextCfg = getInternalConfig();
     const nextAuthAt = getLastAuthenticatedAt();
     if (prevAuthAt && !nextAuthAt) {
       this.client.resetAuthSession(true);
     }
-    this.reconfigureScheduler(getInternalConfig());
+    this.reconfigureScheduler(nextCfg);
+
+    const ruleDiff = diffSyncRules(prevCfg, nextCfg, nextCfg.discoveredSystems);
+    let liveSyncReload: LiveSyncReloadReceipt | null = null;
+
+    if (ruleDiff.changed) {
+      this.syncRulesRevision += 1;
+      if (this.activeRun && isSyncRunEligibleForLiveRuleReload(this.activeRun)) {
+        const activeMode: 'incremental' | 'full' =
+          this.activeRun.mode === 'full' ? 'full' : 'incremental';
+        const activeDryRun = Boolean(this.activeRun.dryRun || this.activeRun.mode === 'dry_run');
+        liveSyncReload = {
+          applied: true,
+          runId: this.activeRun.id,
+          runMode: activeMode,
+          dryRun: activeDryRun,
+          changeSummary: ruleDiff.changeSummary,
+          scopeSummary: ruleDiff.scopeSummary,
+        };
+        this.log(
+          'info',
+          `[Live Rules] Sync Rules updated mid-run — applying live after current file`,
+          `${ruleDiff.changeSummary} · Scope: ${ruleDiff.scopeSummary}`,
+          this.activeRun.id,
+        );
+      }
+      this.emitCatalogUpdated('sync_rules_updated');
+    }
+
     if (input.lastWatermarkAt !== undefined) {
       this.log(
         'info',
@@ -829,7 +873,7 @@ export class ScraperOrchestrator extends EventEmitter {
           ? `Incremental cutoff watermark updated to ${updated.lastWatermarkAt}`
           : 'Incremental cutoff watermark cleared (using default 24h lookback)',
       );
-    } else {
+    } else if (!liveSyncReload) {
       this.log('info', 'Service configuration saved');
     }
     this.emitStatus();
@@ -860,7 +904,7 @@ export class ScraperOrchestrator extends EventEmitter {
     } catch {
       // Non-fatal
     }
-    return updated;
+    return { config: updated, liveSyncReload };
   }
 
   async testAuth(): Promise<AuthTestResult> {
@@ -3329,12 +3373,20 @@ export class ScraperOrchestrator extends EventEmitter {
     let bytesDownloaded = 0;
     let newestReleaseIso: string | null = null;
     let runSummarySnapshot: SyncRunSummarySnapshot | null = null;
-    const allowedReleaseTypes = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes);
-    const hasReleaseTypeFilter = allowedReleaseTypes.length > 0;
+    let liveCfg: ScraperConfigInternal = cfg;
+    let liveAllowedReleaseTypes = normalizeAllowedReleaseTypes(liveCfg.allowedReleaseTypes);
+    let liveHasReleaseTypeFilter = liveAllowedReleaseTypes.length > 0;
+    let observedRuleRevision = this.syncRulesRevision;
+    let knownDiscoveredSystems: string[] = filterValidSystemSlugs(liveCfg.discoveredSystems).map((s) =>
+      s.toLowerCase(),
+    );
+    let liveTargetSystems: string[] = [];
+    const typeSkippedReleaseUrls = new Set<string>();
+    const typeSkippedFileUrls = new Set<string>();
 
     const inferSystemFromUrl = (rawUrl: string): string => {
       try {
-        return resolveMirroredPaths(cfg.baseUrl, rawUrl, cfg.downloadDir, 'probe.zip').systemName;
+        return resolveMirroredPaths(liveCfg.baseUrl, rawUrl, liveCfg.downloadDir, 'probe.zip').systemName;
       } catch {
         return '';
       }
@@ -3409,10 +3461,10 @@ export class ScraperOrchestrator extends EventEmitter {
         runLogger('info', 'Full Sync mode active: uncapped mirror of every release in target scope');
       }
 
-      if (hasReleaseTypeFilter) {
+      if (liveHasReleaseTypeFilter) {
         runLogger(
           'info',
-          `Release Type Filter active: ${formatAllowedReleaseTypesSummary(allowedReleaseTypes)}`,
+          `Release Type Filter active: ${formatAllowedReleaseTypesSummary(liveAllowedReleaseTypes)}`,
           'Releases and archives outside the enabled categories will be skipped before download link resolution',
         );
       }
@@ -3420,6 +3472,37 @@ export class ScraperOrchestrator extends EventEmitter {
       const visitedPages = new Set<string>();
       const visitedReleasePages = new Set<string>();
       const processedFileUrls = new Set<string>();
+
+      const syncLiveRules = (): SyncRuleDiff | null => {
+        if (this.syncRulesRevision === observedRuleRevision) {
+          return null;
+        }
+        const freshCfg = getInternalConfig();
+        const combinedDiscovered = filterValidSystemSlugs([
+          ...knownDiscoveredSystems,
+          ...freshCfg.discoveredSystems,
+        ]).map((s) => s.toLowerCase());
+        knownDiscoveredSystems = combinedDiscovered;
+
+        const diff = diffSyncRules(liveCfg, freshCfg, combinedDiscovered);
+        observedRuleRevision = this.syncRulesRevision;
+        liveCfg = freshCfg;
+        liveAllowedReleaseTypes = normalizeAllowedReleaseTypes(freshCfg.allowedReleaseTypes);
+        liveHasReleaseTypeFilter = liveAllowedReleaseTypes.length > 0;
+        liveTargetSystems = resolveTargetConsoleScope(freshCfg.systemFilter, combinedDiscovered);
+
+        if (diff.releaseTypesWidened) {
+          for (const url of typeSkippedReleaseUrls) {
+            visitedReleasePages.delete(url);
+          }
+          typeSkippedReleaseUrls.clear();
+          for (const fileUrl of typeSkippedFileUrls) {
+            processedFileUrls.delete(fileUrl);
+          }
+          typeSkippedFileUrls.clear();
+        }
+        return diff;
+      };
 
       const baseWithSlash = (() => {
         try {
@@ -3493,9 +3576,22 @@ export class ScraperOrchestrator extends EventEmitter {
           };
         }
 
+        // Re-check live Sync Rules before per-file filtering or catalog writes
+        syncLiveRules();
+        if (!isConsoleAllowedBySyncRules(systemName, liveCfg)) {
+          skippedCount += uniqueReleases.length;
+          runLogger(
+            'info',
+            `[Live Rules] Skipped ${effectiveMeta?.title || canonicalPageUrl}`,
+            `Console "${systemName}" was removed from Target Consoles mid-run`,
+          );
+          persistCounters();
+          return;
+        }
+
         // Evaluate per-file release type allowlist before creating catalog rows or downloading archives
         const eligibleReleases: DiscoveredRelease[] = [];
-        if (hasReleaseTypeFilter) {
+        if (liveHasReleaseTypeFilter) {
           const baseMetaTags = effectiveMeta?.releaseTags || [];
           for (const rel of uniqueReleases) {
             const role = classifyFileRole(rel.filename, rel.displayLabel || rel.filename, {
@@ -3506,9 +3602,11 @@ export class ScraperOrchestrator extends EventEmitter {
               systemName,
             });
             const fileTypeKeys = classifyFileRoleToTypeKeys(role, baseMetaTags, systemName);
-            const match = evaluateReleaseTypeMatch(fileTypeKeys, allowedReleaseTypes);
+            const match = evaluateReleaseTypeMatch(fileTypeKeys, liveAllowedReleaseTypes);
             if (!match.allowed) {
               processedFileUrls.add(rel.remoteUrl);
+              typeSkippedFileUrls.add(rel.remoteUrl);
+              typeSkippedReleaseUrls.add(canonicalPageUrl);
               newFound += 1;
               skippedCount += 1;
               skippedByTypeCount += 1;
@@ -3657,8 +3755,52 @@ export class ScraperOrchestrator extends EventEmitter {
           ...eligibleReleases.map((r) => r.remoteUrl),
         ]).size;
 
-        await runWithConcurrency(toDownload, cfg.maxConcurrency, signal, async (rel, fileIdx) => {
+        await runWithConcurrency(toDownload, liveCfg.maxConcurrency, signal, async (rel, fileIdx) => {
           if (signal.aborted) return;
+
+          // Gracefully enforce live Sync Rule updates right before starting each next file
+          // (in-flight transfers finish cleanly; newly excluded remaining files are skipped immediately)
+          syncLiveRules();
+          if (!isConsoleAllowedBySyncRules(systemName, liveCfg)) {
+            skippedCount += 1;
+            runLogger(
+              'info',
+              `[Live Rules] Skipped ${rel.filename}`,
+              `Console "${systemName}" was removed from Target Consoles mid-run`,
+            );
+            persistCounters();
+            return;
+          }
+          if (liveHasReleaseTypeFilter) {
+            const role = classifyFileRole(rel.filename, rel.displayLabel || rel.filename, {
+              genres: effectiveMeta?.genres,
+              languages: effectiveMeta?.languages,
+              sources: effectiveMeta?.sources,
+              title: effectiveMeta?.title || rel.title,
+              systemName,
+            });
+            const fileTypeKeys = classifyFileRoleToTypeKeys(
+              role,
+              effectiveMeta?.releaseTags || [],
+              systemName,
+            );
+            const match = evaluateReleaseTypeMatch(fileTypeKeys, liveAllowedReleaseTypes);
+            if (!match.allowed) {
+              processedFileUrls.add(rel.remoteUrl);
+              typeSkippedFileUrls.add(rel.remoteUrl);
+              typeSkippedReleaseUrls.add(canonicalPageUrl);
+              skippedCount += 1;
+              skippedByTypeCount += 1;
+              runLogger(
+                'info',
+                `[Live Rules] Skipped ${rel.filename}`,
+                `Detected type: ${match.detectedLabels.join(', ')} (excluded by updated Sync Rules)`,
+              );
+              persistCounters();
+              return;
+            }
+          }
+
           processedFileUrls.add(rel.remoteUrl);
           newFound += 1;
 
@@ -3666,7 +3808,7 @@ export class ScraperOrchestrator extends EventEmitter {
           const outcome = await this.downloadReleaseFile(
             parent.id,
             rel,
-            cfg,
+            liveCfg,
             run.id,
             signal,
             runLogger,
@@ -3690,14 +3832,24 @@ export class ScraperOrchestrator extends EventEmitter {
         preloadedWpData?: WpPostMetadata | null,
         enforceCutoffMs?: number | null,
       ): Promise<{ newerThanCutoff: boolean }> => {
+        syncLiveRules();
         const canonicalRelUrl = relPageUrl.split('#')[0];
         if (visitedReleasePages.has(canonicalRelUrl)) {
+          return { newerThanCutoff: false };
+        }
+        const preFetchSys = inferSystemFromUrl(canonicalRelUrl);
+        if (preFetchSys && !isConsoleAllowedBySyncRules(preFetchSys, liveCfg)) {
+          runLogger(
+            'info',
+            `[Live Rules] Skipped ${canonicalRelUrl}`,
+            `Console "${preFetchSys}" was removed from Target Consoles mid-run`,
+          );
           return { newerThanCutoff: false };
         }
         visitedReleasePages.add(canonicalRelUrl);
 
         try {
-          const relPage = await this.client.fetchPageHtml(canonicalRelUrl, cfg, signal, runLogger);
+          const relPage = await this.client.fetchPageHtml(canonicalRelUrl, liveCfg, signal, runLogger);
           pagesCrawled += 1;
           if (relPage.status >= 400) {
             runLogger(
@@ -3716,13 +3868,23 @@ export class ScraperOrchestrator extends EventEmitter {
               : await this.client.fetchReleaseWpMetadata(
                   relPage.finalUrl,
                   this.client.extractWpPostIdHint(relPage.html),
-                  cfg,
+                  liveCfg,
                   signal,
                   runLogger,
                 );
 
           // In delta fallback mode, verify RGT creation/modification timestamp BEFORE resolving download nonces
           const inferredSys = inferSystemFromUrl(relPage.finalUrl);
+          syncLiveRules();
+          if (inferredSys && !isConsoleAllowedBySyncRules(inferredSys, liveCfg)) {
+            runLogger(
+              'info',
+              `[Live Rules] Skipped ${wpData?.title || canonicalRelUrl}`,
+              `Console "${inferredSys}" was removed from Target Consoles mid-run`,
+            );
+            return { newerThanCutoff: false };
+          }
+
           const prelimHintRoles = (wpData?.downloadHints || []).map((h) =>
             classifyFileRole(h.filename, '', {
               genres: wpData?.genres,
@@ -3757,13 +3919,14 @@ export class ScraperOrchestrator extends EventEmitter {
           }
 
           // Pre-nonce Release Type Allowlist gate: skip disallowed releases before resolving download links
-          if (hasReleaseTypeFilter) {
+          if (liveHasReleaseTypeFilter) {
             const prelimTypeKeys = classifyReleaseTagsToTypeKeys(
               prelimMeta.releaseTags || [],
               prelimMeta.consoleName || inferredSys,
             );
-            const match = evaluateReleaseTypeMatch(prelimTypeKeys, allowedReleaseTypes);
+            const match = evaluateReleaseTypeMatch(prelimTypeKeys, liveAllowedReleaseTypes);
             if (!match.allowed) {
+              typeSkippedReleaseUrls.add(canonicalRelUrl);
               recordObservedTimestamp(prelimMeta.publishedAt);
               recordObservedTimestamp(prelimMeta.remoteUpdatedAt);
               newFound += 1;
@@ -3842,13 +4005,21 @@ export class ScraperOrchestrator extends EventEmitter {
         scopeSystemSlug: string | null,
         preloadedFirstPage?: { url: string; html: string; finalUrl: string },
       ) => {
-        const scopedCfg: ScraperConfigInternal = scopeSystemSlug
-          ? { ...cfg, systemFilter: scopeSystemSlug }
-          : cfg;
         const queue = [...seedUrls];
 
         while (queue.length > 0) {
           if (signal.aborted) break;
+          syncLiveRules();
+          if (scopeSystemSlug && !isConsoleAllowedBySyncRules(scopeSystemSlug, liveCfg)) {
+            runLogger(
+              'info',
+              `[Live Rules] Stopping HTML crawl for ${scopeSystemSlug} — console removed from Target Consoles`,
+            );
+            break;
+          }
+          const scopedCfg: ScraperConfigInternal = scopeSystemSlug
+            ? { ...liveCfg, systemFilter: scopeSystemSlug }
+            : liveCfg;
           const pageUrl = queue.shift()!;
           if (visitedPages.has(pageUrl)) continue;
           visitedPages.add(pageUrl);
@@ -3861,10 +4032,10 @@ export class ScraperOrchestrator extends EventEmitter {
               status: 200,
             };
           } else {
-            this.currentPhase = `Scanning page (${pagesCrawled + 1}): ${this.formatRelativePhasePath(pageUrl, cfg.baseUrl)}`;
+            this.currentPhase = `Scanning page (${pagesCrawled + 1}): ${this.formatRelativePhasePath(pageUrl, liveCfg.baseUrl)}`;
             this.emitStatus();
             try {
-              pageData = await this.client.fetchPageHtml(pageUrl, cfg, signal, runLogger);
+              pageData = await this.client.fetchPageHtml(pageUrl, liveCfg, signal, runLogger);
             } catch (err) {
               if (signal.aborted) break;
               const errMsg = err instanceof Error ? err.message : String(err);
@@ -3916,7 +4087,7 @@ export class ScraperOrchestrator extends EventEmitter {
             const wpData = await this.client.fetchReleaseWpMetadata(
               pageData.finalUrl,
               wpPostIdHint,
-              cfg,
+              liveCfg,
               signal,
               runLogger,
             );
@@ -3979,14 +4150,18 @@ export class ScraperOrchestrator extends EventEmitter {
             releaseCandidates.push(relPageUrl);
           }
 
-          await runWithConcurrency(releaseCandidates, cfg.maxConcurrency, signal, async (relPageUrl) => {
+          await runWithConcurrency(releaseCandidates, liveCfg.maxConcurrency, signal, async (relPageUrl) => {
             if (signal.aborted) return;
+            syncLiveRules();
+            if (scopeSystemSlug && !isConsoleAllowedBySyncRules(scopeSystemSlug, liveCfg)) {
+              return;
+            }
             const inspectPrefix = isDryRun
               ? `Dry Run (${dryRunScopeTag}) inspecting`
               : isDeltaMode
                 ? 'Inspecting delta candidate'
                 : 'Full Sync inspecting';
-            this.currentPhase = `${inspectPrefix}: ${this.formatRelativePhasePath(relPageUrl, cfg.baseUrl)}`;
+            this.currentPhase = `${inspectPrefix}: ${this.formatRelativePhasePath(relPageUrl, liveCfg.baseUrl)}`;
             this.emitStatus();
 
             const res = await inspectAndProcessReleasePage(relPageUrl, undefined, cutoffMs);
@@ -4015,7 +4190,7 @@ export class ScraperOrchestrator extends EventEmitter {
       };
 
       // Resolve target console slugs (either user's Console Filter or all discovered RGT consoles)
-      const explicitFilters = cfg.systemFilter
+      const explicitFilters = liveCfg.systemFilter
         .split(',')
         .map((s) => s.trim().toLowerCase())
         .filter(Boolean);
@@ -4026,39 +4201,43 @@ export class ScraperOrchestrator extends EventEmitter {
       if (explicitFilters.length > 0) {
         targetSystems = filterValidSystemSlugs(explicitFilters).map((s) => s.toLowerCase());
       } else {
-        this.currentPhase = `Scanning repository index: ${this.formatRelativePhasePath(cfg.baseUrl, cfg.baseUrl)}`;
+        this.currentPhase = `Scanning repository index: ${this.formatRelativePhasePath(liveCfg.baseUrl, liveCfg.baseUrl)}`;
         this.emitStatus();
-        const rootPage = await this.client.fetchPageHtml(cfg.baseUrl, cfg, signal, runLogger);
+        const rootPage = await this.client.fetchPageHtml(liveCfg.baseUrl, liveCfg, signal, runLogger);
         pagesCrawled += 1;
         if (rootPage.status >= 400) {
           throw new Error(`HTTP ${rootPage.status} on ${rootPage.finalUrl}`);
         }
         successfulPages += 1;
-        preloadedRootPage = { url: cfg.baseUrl, html: rootPage.html, finalUrl: rootPage.finalUrl };
+        preloadedRootPage = { url: liveCfg.baseUrl, html: rootPage.html, finalUrl: rootPage.finalUrl };
 
         const rootExtracted = this.client.extractLinksFromHtml(
           rootPage.html,
           rootPage.finalUrl,
-          { ...cfg, systemFilter: '' },
+          { ...liveCfg, systemFilter: '' },
         );
         const liveValidSystems =
           rootExtracted.systems.length > 0
-            ? await this.client.filterLiveSystems(rootExtracted.systems, cfg, signal, runLogger)
+            ? await this.client.filterLiveSystems(rootExtracted.systems, liveCfg, signal, runLogger)
             : [];
         if (liveValidSystems.length > 0) {
           saveDiscoveredSystems(liveValidSystems);
         }
 
-        targetSystems = filterValidSystemSlugs([
+        knownDiscoveredSystems = filterValidSystemSlugs([
+          ...knownDiscoveredSystems,
           ...getInternalConfig().discoveredSystems,
           ...liveValidSystems,
         ]).map((s) => s.toLowerCase());
+        targetSystems = [...knownDiscoveredSystems];
       }
+
+      liveTargetSystems = [...targetSystems];
 
       runLogger(
         'debug',
-        `[Crawl] Resolved ${targetSystems.length} target system(s)`,
-        `systems=[${targetSystems.join(', ')}], mode=${run.mode}, dryRun=${isDryRun}, cutoff=${effectiveCutoffIso ?? 'none'}`,
+        `[Crawl] Resolved ${liveTargetSystems.length} target system(s)`,
+        `systems=[${liveTargetSystems.join(', ')}], mode=${run.mode}, dryRun=${isDryRun}, cutoff=${effectiveCutoffIso ?? 'none'}`,
       );
 
       const buildWpMetaHintFromItem = (item: RepositoryItemRecord): WpPostMetadata | undefined => {
@@ -4086,10 +4265,10 @@ export class ScraperOrchestrator extends EventEmitter {
         };
       };
 
-      const isIndexFirstFullSync = !isDeltaMode && !options?.legacyFullCrawl && targetSystems.length > 0;
+      const isIndexFirstFullSync = !isDeltaMode && !options?.legacyFullCrawl && liveTargetSystems.length > 0;
 
-      if (targetSystems.length === 0) {
-        await crawlHtmlScope([cfg.baseUrl], null, preloadedRootPage);
+      if (liveTargetSystems.length === 0) {
+        await crawlHtmlScope([liveCfg.baseUrl], null, preloadedRootPage);
       } else if (isIndexFirstFullSync) {
         if (preloadedRootPage) {
           visitedPages.add(preloadedRootPage.url);
@@ -4098,119 +4277,17 @@ export class ScraperOrchestrator extends EventEmitter {
 
         const shouldRefreshIndexes = options?.refreshStaleIndexes !== false;
         const refreshedConsoles: string[] = [];
+        const refreshedConsolesSet = new Set<string>();
+        const scannedRestBases = new Set<string>();
         let newDeltaDiscoveredCount = 0;
-        const htmlFallbackSystems: string[] = [];
+        const htmlFallbackSystemsSet = new Set<string>();
+        const crawledHtmlFallbackSet = new Set<string>();
         const dryRunSimulatedPosts: { systemSlug: string; post: WpPostMetadata }[] = [];
+        const checkedOrMirroredUrls = new Set<string>();
+        const verifiedOnDiskUrls = new Set<string>();
 
-        const systemIndexState = getSystemIndexState();
-        const freshness = classifySystemIndexFreshness(targetSystems, systemIndexState);
-        const unindexedOrStaleSet = new Set([...freshness.unindexed, ...freshness.stale]);
-
-        runLogger(
-          'info',
-          `${isDryRun ? '[Dry Run · Index-First Full] ' : ''}Index-first mirror across ${targetSystems.length} target console(s)`,
-          `${freshness.fresh.length} fresh · ${freshness.stale.length} stale · ${freshness.unindexed.length} unindexed · refreshStale=${shouldRefreshIndexes}`,
-        );
-
-        // Phase 1: Ensure unindexed/stale consoles are indexed + quick delta refresh for fresh consoles
-        if (shouldRefreshIndexes) {
-          const scannedRestBases = new Set<string>();
-          for (let sysIdx = 0; sysIdx < targetSystems.length; sysIdx += 1) {
-            if (signal.aborted) break;
-            const systemSlug = targetSystems[sysIdx];
-            const canonicalSlug = canonicalizeSystemSlug(systemSlug).toLowerCase();
-            const needsFullIndex = unindexedOrStaleSet.has(canonicalSlug);
-            const existingCursor = systemIndexState[canonicalSlug] ?? systemIndexState[systemSlug];
-            const deltaCutoffIso = !needsFullIndex && existingCursor?.lastIndexedAt ? existingCursor.lastIndexedAt : null;
-
-            const resolvedRestBase = await this.client.resolveWpRestBaseForSystem(systemSlug, cfg, signal, runLogger);
-            if (resolvedRestBase) {
-              const restBaseKey = resolvedRestBase.toLowerCase();
-              if (scannedRestBases.has(restBaseKey)) {
-                continue;
-              }
-              scannedRestBases.add(restBaseKey);
-            }
-
-            this.currentPhase = needsFullIndex
-              ? `${isDryRun ? 'Dry Run · ' : ''}Indexing ${systemSlug} (${sysIdx + 1}/${targetSystems.length})`
-              : `${isDryRun ? 'Dry Run · ' : ''}Delta check ${systemSlug} (${sysIdx + 1}/${targetSystems.length})`;
-            this.emitStatus();
-
-            const wpRes = await this.client.listConsoleReleasesViaWpRest(systemSlug, cfg, {
-              modifiedAfterIso: deltaCutoffIso,
-              signal,
-              log: runLogger,
-              onPageFetched: (wpPage, wpTotalPages) => {
-                pagesCrawled += 1;
-                successfulPages += 1;
-                this.currentPhase = needsFullIndex
-                  ? `${isDryRun ? 'Dry Run · ' : ''}Indexing ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`
-                  : `${isDryRun ? 'Dry Run · ' : ''}Delta ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`;
-                persistCounters();
-              },
-            });
-
-            if (wpRes.supported) {
-              successfulPages += 1;
-              if (needsFullIndex && wpRes.posts.length === 0) {
-                htmlFallbackSystems.push(systemSlug);
-              } else {
-                for (const post of wpRes.posts) {
-                  recordObservedTimestamp(post.dateGmt);
-                  recordObservedTimestamp(post.modifiedGmt);
-                }
-                if (isDryRun) {
-                  for (const post of wpRes.posts) {
-                    if (post.link) {
-                      dryRunSimulatedPosts.push({ systemSlug: canonicalSlug, post });
-                    }
-                  }
-                  if (needsFullIndex || wpRes.posts.length > 0) {
-                    refreshedConsoles.push(canonicalSlug);
-                  }
-                } else {
-                  let upsertedForConsole = 0;
-                  for (const post of wpRes.posts) {
-                    if (!post.link) continue;
-                    const existingItem = getRepositoryItemByRemoteUrl(post.link.split('#')[0]);
-                    upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, cfg, run.id));
-                    if (!existingItem) {
-                      upsertedForConsole += 1;
-                    }
-                  }
-                  if (upsertedForConsole > 0) {
-                    newDeltaDiscoveredCount += upsertedForConsole;
-                    this.emitCatalogUpdated('sync_indexed');
-                  }
-                  const nowIso = new Date().toISOString();
-                  updateSystemIndexCursor(canonicalSlug, {
-                    lastIndexedAt: nowIso,
-                    totalWpPosts: needsFullIndex ? wpRes.posts.length : (existingCursor?.totalWpPosts ?? 0) + upsertedForConsole,
-                    totalPages: needsFullIndex ? wpRes.totalPages : (existingCursor?.totalPages ?? wpRes.totalPages),
-                    pagesIndexed: needsFullIndex ? wpRes.totalPages : (existingCursor?.pagesIndexed ?? wpRes.totalPages),
-                    fullyIndexed: true,
-                    scope: explicitFilters.length > 0 ? 'filtered' : 'full',
-                  });
-                  if (needsFullIndex || wpRes.posts.length > 0) {
-                    refreshedConsoles.push(canonicalSlug);
-                  }
-                }
-              }
-            } else {
-              htmlFallbackSystems.push(systemSlug);
-            }
-          }
-        }
-
-        // Phase 2: Mirror rule-matched releases directly from SQLite catalog
-        const { matched, excludedByRulesCount, totalCataloged } = listCatalogReleasesForRuleSync(cfg);
-        if (totalCataloged > 0) {
-          successfulPages = Math.max(successfulPages, 1);
-        }
-
-        let summaryTotalRuleMatched = matched.length;
-        let summaryExcludedByRules = excludedByRulesCount;
+        let summaryTotalRuleMatched = 0;
+        let summaryExcludedByRules = 0;
         let summaryAlreadyOnDisk = 0;
         let summaryWouldDownload = 0;
         let dryRunEstimatedBytes = 0;
@@ -4240,149 +4317,362 @@ export class ScraperOrchestrator extends EventEmitter {
           }
         };
 
-        const seenMatchedUrls = new Set(matched.map((item) => item.remoteUrl.split('#')[0]));
-        const pendingLiveItems: RepositoryItemRecord[] = [];
+        const initialFreshness = classifySystemIndexFreshness(liveTargetSystems, getSystemIndexState());
+        runLogger(
+          'info',
+          `${isDryRun ? '[Dry Run · Index-First Full] ' : ''}Index-first mirror across ${liveTargetSystems.length} target console(s)`,
+          `${initialFreshness.fresh.length} fresh · ${initialFreshness.stale.length} stale · ${initialFreshness.unindexed.length} unindexed · refreshStale=${shouldRefreshIndexes}`,
+        );
 
-        for (const item of matched) {
-          if (signal.aborted) break;
-          const files = item.files || [];
-          const hasAllFilesOnDisk =
-            item.status === 'skipped' ||
-            (item.status === 'downloaded' &&
-              files.length > 0 &&
-              files.every(
-                (f) =>
-                  (f.status === 'downloaded' || f.status === 'skipped') &&
-                  Boolean(f.localPath) &&
-                  defaultFileExistsWithBytes(f.localPath),
-              ));
-
-          if (hasAllFilesOnDisk) {
-            const countUnits = Math.max(1, files.length);
-            newFound += countUnits;
-            skippedCount += countUnits;
-            summaryAlreadyOnDisk += 1;
-            continue;
+        const MAX_CONVERGENCE_PASSES = 25;
+        for (let pass = 0; pass < MAX_CONVERGENCE_PASSES && !signal.aborted; pass += 1) {
+          const prePassDiff = syncLiveRules();
+          if (prePassDiff?.releaseTypesWidened) {
+            for (const u of checkedOrMirroredUrls) {
+              if (!verifiedOnDiskUrls.has(u) && !visitedReleasePages.has(u)) {
+                checkedOrMirroredUrls.delete(u);
+              }
+            }
           }
+
+          // Phase 1: Ensure any unrefreshed target consoles (including newly added ones) are indexed/delta-checked
+          if (shouldRefreshIndexes) {
+            let phase1Guard = 0;
+            while (!signal.aborted && phase1Guard < 200) {
+              phase1Guard += 1;
+              syncLiveRules();
+
+              const pendingRefreshConsoles = liveTargetSystems.filter((slug) => {
+                const canonical = canonicalizeSystemSlug(slug).toLowerCase();
+                return !refreshedConsolesSet.has(canonical);
+              });
+              if (pendingRefreshConsoles.length === 0) break;
+
+              const systemSlug = pendingRefreshConsoles[0];
+              const canonicalSlug = canonicalizeSystemSlug(systemSlug).toLowerCase();
+              refreshedConsolesSet.add(canonicalSlug);
+
+              const systemIndexState = getSystemIndexState();
+              const freshness = classifySystemIndexFreshness([canonicalSlug], systemIndexState);
+              const needsFullIndex = freshness.unindexed.length > 0 || freshness.stale.length > 0;
+              const existingCursor = systemIndexState[canonicalSlug] ?? systemIndexState[systemSlug];
+              const deltaCutoffIso = !needsFullIndex && existingCursor?.lastIndexedAt ? existingCursor.lastIndexedAt : null;
+
+              const resolvedRestBase = await this.client.resolveWpRestBaseForSystem(systemSlug, liveCfg, signal, runLogger);
+              if (resolvedRestBase) {
+                const restBaseKey = resolvedRestBase.toLowerCase();
+                if (scannedRestBases.has(restBaseKey)) {
+                  continue;
+                }
+                scannedRestBases.add(restBaseKey);
+              }
+
+              const completedCount = refreshedConsolesSet.size;
+              const totalActiveConsoles = Math.max(completedCount, liveTargetSystems.length);
+              this.currentPhase = needsFullIndex
+                ? `${isDryRun ? 'Dry Run · ' : ''}Indexing ${systemSlug} (${completedCount}/${totalActiveConsoles})`
+                : `${isDryRun ? 'Dry Run · ' : ''}Delta check ${systemSlug} (${completedCount}/${totalActiveConsoles})`;
+              this.emitStatus();
+
+              const wpRes = await this.client.listConsoleReleasesViaWpRest(systemSlug, liveCfg, {
+                modifiedAfterIso: deltaCutoffIso,
+                signal,
+                log: runLogger,
+                onPageFetched: (wpPage, wpTotalPages) => {
+                  pagesCrawled += 1;
+                  successfulPages += 1;
+                  this.currentPhase = needsFullIndex
+                    ? `${isDryRun ? 'Dry Run · ' : ''}Indexing ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`
+                    : `${isDryRun ? 'Dry Run · ' : ''}Delta ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`;
+                  persistCounters();
+                },
+              });
+
+              if (wpRes.supported) {
+                successfulPages += 1;
+                if (needsFullIndex && wpRes.posts.length === 0) {
+                  htmlFallbackSystemsSet.add(systemSlug);
+                } else {
+                  for (const post of wpRes.posts) {
+                    recordObservedTimestamp(post.dateGmt);
+                    recordObservedTimestamp(post.modifiedGmt);
+                  }
+                  if (isDryRun) {
+                    for (const post of wpRes.posts) {
+                      if (post.link) {
+                        dryRunSimulatedPosts.push({ systemSlug: canonicalSlug, post });
+                      }
+                    }
+                    if (needsFullIndex || wpRes.posts.length > 0) {
+                      refreshedConsoles.push(canonicalSlug);
+                    }
+                  } else {
+                    let upsertedForConsole = 0;
+                    for (const post of wpRes.posts) {
+                      if (!post.link) continue;
+                      const existingItem = getRepositoryItemByRemoteUrl(post.link.split('#')[0]);
+                      upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, liveCfg, run.id));
+                      if (!existingItem) {
+                        upsertedForConsole += 1;
+                      }
+                    }
+                    if (upsertedForConsole > 0) {
+                      newDeltaDiscoveredCount += upsertedForConsole;
+                      this.emitCatalogUpdated('sync_indexed');
+                    }
+                    const nowIso = new Date().toISOString();
+                    const hasExplicitFilterNow = liveCfg.systemFilter.trim().length > 0;
+                    updateSystemIndexCursor(canonicalSlug, {
+                      lastIndexedAt: nowIso,
+                      totalWpPosts: needsFullIndex ? wpRes.posts.length : (existingCursor?.totalWpPosts ?? 0) + upsertedForConsole,
+                      totalPages: needsFullIndex ? wpRes.totalPages : (existingCursor?.totalPages ?? wpRes.totalPages),
+                      pagesIndexed: needsFullIndex ? wpRes.totalPages : (existingCursor?.pagesIndexed ?? wpRes.totalPages),
+                      fullyIndexed: true,
+                      scope: hasExplicitFilterNow ? 'filtered' : 'full',
+                    });
+                    if (needsFullIndex || wpRes.posts.length > 0) {
+                      refreshedConsoles.push(canonicalSlug);
+                    }
+                  }
+                }
+              } else {
+                htmlFallbackSystemsSet.add(systemSlug);
+              }
+            }
+          }
+
+          if (signal.aborted) break;
+
+          // Phase 2: Query latest rule-matched releases from SQLite using liveCfg
+          syncLiveRules();
+          const { matched, excludedByRulesCount, totalCataloged } = listCatalogReleasesForRuleSync(liveCfg);
+          if (totalCataloged > 0) {
+            successfulPages = Math.max(successfulPages, 1);
+          }
+
+          summaryTotalRuleMatched = matched.length;
+          summaryExcludedByRules = excludedByRulesCount;
 
           if (isDryRun) {
-            const estBytes =
-              item.fileSizeBytes > 0
-                ? item.fileSizeBytes
-                : estimateDownloadHintsBytes(item.metadata?.downloadHints);
-            newFound += 1;
-            summaryWouldDownload += 1;
-            recordPendingSummaryItem(
-              item.systemName,
-              {
-                id: item.id,
-                title: item.title,
-                systemName: (canonicalizeSystemSlug(item.systemName) || item.systemName).toLowerCase(),
-                releaseType: item.releaseType || 'Retail ROM',
-                fileSizeBytes: estBytes,
-                status: item.status,
-              },
-              estBytes,
-            );
-          } else {
-            pendingLiveItems.push(item);
+            summaryAlreadyOnDisk = 0;
+            summaryWouldDownload = 0;
+            dryRunEstimatedBytes = 0;
+            consoleBreakdownMap.clear();
+            sampleReleases.length = 0;
           }
-        }
 
-        // Include simulated newly refreshed remote posts in Dry Run without writing to SQLite
-        if (isDryRun && dryRunSimulatedPosts.length > 0) {
-          for (const sim of dryRunSimulatedPosts) {
-            if (!sim.post.link) continue;
-            const canonicalUrl = sim.post.link.split('#')[0];
-            if (seenMatchedUrls.has(canonicalUrl)) continue;
-            seenMatchedUrls.add(canonicalUrl);
-            if (getRepositoryItemByRemoteUrl(canonicalUrl)) continue;
+          const seenMatchedUrls = new Set(matched.map((item) => item.remoteUrl.split('#')[0]));
+          const pendingLiveItems: RepositoryItemRecord[] = [];
+          let passVerifiedOnDisk = 0;
 
-            const hintRoles = (sim.post.downloadHints || []).map((h) =>
-              classifyFileRole(h.filename, '', {
-                genres: sim.post.genres,
-                languages: sim.post.languages,
-                sources: sim.post.sources,
-                title: sim.post.title || undefined,
-                systemName: sim.systemSlug,
-              }),
-            );
-            const wpTags = deriveReleaseTags(
-              {
-                genres: sim.post.genres,
-                languages: sim.post.languages,
-                sources: sim.post.sources,
-                systemName: sim.systemSlug,
-              },
-              hintRoles,
-            );
-            const matches = doesCatalogReleaseMatchSyncRules(
-              {
-                systemName: sim.systemSlug,
-                releaseType: wpTags[0] || 'Retail ROM',
-                releaseTags: wpTags,
-                fileRoles: hintRoles,
-              },
-              cfg,
-            );
-            if (!matches) {
-              summaryExcludedByRules += 1;
+          for (const item of matched) {
+            if (signal.aborted) break;
+            const canonicalUrl = item.remoteUrl.split('#')[0];
+            if (!isDryRun && checkedOrMirroredUrls.has(canonicalUrl)) {
               continue;
             }
-            summaryTotalRuleMatched += 1;
-            newDeltaDiscoveredCount += 1;
-            const estBytes = estimateDownloadHintsBytes(sim.post.downloadHints);
-            newFound += 1;
-            summaryWouldDownload += 1;
-            recordPendingSummaryItem(
-              sim.systemSlug,
-              {
-                title: sim.post.title || canonicalUrl,
-                systemName: sim.systemSlug,
-                releaseType: wpTags[0] || 'Retail ROM',
-                fileSizeBytes: estBytes,
-                status: 'available',
-              },
-              estBytes,
+            const files = item.files || [];
+            const hasAllFilesOnDisk =
+              item.status === 'skipped' ||
+              (item.status === 'downloaded' &&
+                files.length > 0 &&
+                files.every(
+                  (f) =>
+                    (f.status === 'downloaded' || f.status === 'skipped') &&
+                    Boolean(f.localPath) &&
+                    defaultFileExistsWithBytes(f.localPath),
+                ));
+
+            if (hasAllFilesOnDisk) {
+              if (!verifiedOnDiskUrls.has(canonicalUrl)) {
+                verifiedOnDiskUrls.add(canonicalUrl);
+                checkedOrMirroredUrls.add(canonicalUrl);
+                const countUnits = Math.max(1, files.length);
+                newFound += countUnits;
+                skippedCount += countUnits;
+                summaryAlreadyOnDisk += 1;
+                passVerifiedOnDisk += 1;
+              }
+              continue;
+            }
+
+            if (isDryRun) {
+              const estBytes =
+                item.fileSizeBytes > 0
+                  ? item.fileSizeBytes
+                  : estimateDownloadHintsBytes(item.metadata?.downloadHints);
+              newFound += 1;
+              summaryWouldDownload += 1;
+              recordPendingSummaryItem(
+                item.systemName,
+                {
+                  id: item.id,
+                  title: item.title,
+                  systemName: (canonicalizeSystemSlug(item.systemName) || item.systemName).toLowerCase(),
+                  releaseType: item.releaseType || 'Retail ROM',
+                  fileSizeBytes: estBytes,
+                  status: item.status,
+                },
+                estBytes,
+              );
+            } else {
+              pendingLiveItems.push(item);
+            }
+          }
+
+          // Include simulated newly refreshed remote posts in Dry Run without writing to SQLite
+          if (isDryRun && dryRunSimulatedPosts.length > 0) {
+            for (const sim of dryRunSimulatedPosts) {
+              if (!sim.post.link) continue;
+              const canonicalUrl = sim.post.link.split('#')[0];
+              if (seenMatchedUrls.has(canonicalUrl)) continue;
+              seenMatchedUrls.add(canonicalUrl);
+              if (getRepositoryItemByRemoteUrl(canonicalUrl)) continue;
+
+              const hintRoles = (sim.post.downloadHints || []).map((h) =>
+                classifyFileRole(h.filename, '', {
+                  genres: sim.post.genres,
+                  languages: sim.post.languages,
+                  sources: sim.post.sources,
+                  title: sim.post.title || undefined,
+                  systemName: sim.systemSlug,
+                }),
+              );
+              const wpTags = deriveReleaseTags(
+                {
+                  genres: sim.post.genres,
+                  languages: sim.post.languages,
+                  sources: sim.post.sources,
+                  systemName: sim.systemSlug,
+                },
+                hintRoles,
+              );
+              const matches = doesCatalogReleaseMatchSyncRules(
+                {
+                  systemName: sim.systemSlug,
+                  releaseType: wpTags[0] || 'Retail ROM',
+                  releaseTags: wpTags,
+                  fileRoles: hintRoles,
+                },
+                liveCfg,
+              );
+              if (!matches) {
+                summaryExcludedByRules += 1;
+                continue;
+              }
+              summaryTotalRuleMatched += 1;
+              newDeltaDiscoveredCount += 1;
+              const estBytes = estimateDownloadHintsBytes(sim.post.downloadHints);
+              newFound += 1;
+              summaryWouldDownload += 1;
+              recordPendingSummaryItem(
+                sim.systemSlug,
+                {
+                  title: sim.post.title || canonicalUrl,
+                  systemName: sim.systemSlug,
+                  releaseType: wpTags[0] || 'Retail ROM',
+                  fileSizeBytes: estBytes,
+                  status: 'available',
+                },
+                estBytes,
+              );
+            }
+          }
+
+          if (passVerifiedOnDisk > 0) {
+            runLogger(
+              'info',
+              `${isDryRun ? '[Dry Run · Index-First] ' : ''}Verified ${passVerifiedOnDisk} already-downloaded rule-matched release(s) on disk`,
             );
           }
-        }
 
-        if (summaryAlreadyOnDisk > 0) {
-          runLogger(
-            'info',
-            `${isDryRun ? '[Dry Run · Index-First] ' : ''}Verified ${summaryAlreadyOnDisk} already-downloaded rule-matched release(s) on disk`,
-          );
-        }
+          let rulesChangedDuringMirror = false;
+          if (!isDryRun && pendingLiveItems.length > 0) {
+            runLogger(
+              'info',
+              pass === 0
+                ? `Full Sync mirroring ${pendingLiveItems.length} pending rule-matched release(s) from SQLite catalog`
+                : `[Live Rules] Full Sync expanded queue with ${pendingLiveItems.length} newly matched release(s)`,
+              summaryExcludedByRules > 0 ? `${summaryExcludedByRules} cataloged release(s) excluded by Sync Rules` : null,
+            );
+            for (let pIdx = 0; pIdx < pendingLiveItems.length; pIdx += 1) {
+              if (signal.aborted) break;
 
-        if (!isDryRun && pendingLiveItems.length > 0) {
-          runLogger(
-            'info',
-            `Full Sync mirroring ${pendingLiveItems.length} pending rule-matched release(s) from SQLite catalog`,
-            summaryExcludedByRules > 0 ? `${summaryExcludedByRules} cataloged release(s) excluded by Sync Rules` : null,
-          );
-          for (let pIdx = 0; pIdx < pendingLiveItems.length; pIdx += 1) {
-            if (signal.aborted) break;
-            const item = pendingLiveItems[pIdx];
-            if (!item.remoteUrl || !item.remoteUrl.startsWith('http')) continue;
-            this.currentPhase = `Full Sync (${pIdx + 1}/${pendingLiveItems.length}): ${item.systemName} · ${item.title}`;
-            this.emitStatus();
-            await inspectAndProcessReleasePage(item.remoteUrl, buildWpMetaHintFromItem(item), null);
+              const midDiff = syncLiveRules();
+              if (midDiff?.changed) {
+                runLogger(
+                  'info',
+                  `[Live Rules] Reloaded active Full Sync queue`,
+                  `${midDiff.changeSummary} · Recalculating pending matches`,
+                );
+                rulesChangedDuringMirror = true;
+                break;
+              }
+
+              const item = pendingLiveItems[pIdx];
+              if (!item.remoteUrl || !item.remoteUrl.startsWith('http')) continue;
+              const canonicalUrl = item.remoteUrl.split('#')[0];
+
+              if (
+                !doesCatalogReleaseMatchSyncRules(
+                  {
+                    systemName: item.systemName,
+                    releaseType: item.releaseType,
+                    releaseTags: item.releaseTags,
+                    fileRoles: (item.files || []).map((f) => f.fileRole),
+                  },
+                  liveCfg,
+                )
+              ) {
+                skippedCount += 1;
+                continue;
+              }
+
+              checkedOrMirroredUrls.add(canonicalUrl);
+              this.currentPhase = `Full Sync (${pIdx + 1}/${pendingLiveItems.length}): ${item.systemName} · ${item.title}`;
+              this.emitStatus();
+              await inspectAndProcessReleasePage(item.remoteUrl, buildWpMetaHintFromItem(item), null);
+            }
           }
-        }
 
-        // Fallback HTML crawl for consoles without WP REST CPT support
-        for (const fallbackSlug of htmlFallbackSystems) {
-          if (signal.aborted) break;
-          const consoleHtmlUrl = new URL(`${encodeURIComponent(fallbackSlug)}/`, baseWithSlash).toString();
-          runLogger('debug', `[Crawl] "${fallbackSlug}" falling back to HTML Full Sync crawl`, consoleHtmlUrl);
-          await crawlHtmlScope([consoleHtmlUrl], fallbackSlug);
+          // Fallback HTML crawl for currently allowed consoles without WP REST CPT support
+          for (const fallbackSlug of htmlFallbackSystemsSet) {
+            if (signal.aborted) break;
+            if (crawledHtmlFallbackSet.has(fallbackSlug)) continue;
+            const midDiff = syncLiveRules();
+            if (midDiff?.changed) {
+              rulesChangedDuringMirror = true;
+              break;
+            }
+            if (!isConsoleAllowedBySyncRules(fallbackSlug, liveCfg)) {
+              continue;
+            }
+            crawledHtmlFallbackSet.add(fallbackSlug);
+            const consoleHtmlUrl = new URL(`${encodeURIComponent(fallbackSlug)}/`, baseWithSlash).toString();
+            runLogger('debug', `[Crawl] "${fallbackSlug}" falling back to HTML Full Sync crawl`, consoleHtmlUrl);
+            await crawlHtmlScope([consoleHtmlUrl], fallbackSlug);
+          }
+
+          const postPassDiff = syncLiveRules();
+          if (postPassDiff?.changed) {
+            rulesChangedDuringMirror = true;
+          }
+
+          const hasUnrefreshedTarget =
+            shouldRefreshIndexes &&
+            liveTargetSystems.some(
+              (slug) => !refreshedConsolesSet.has(canonicalizeSystemSlug(slug).toLowerCase()),
+            );
+
+          if (!rulesChangedDuringMirror && !hasUnrefreshedTarget) {
+            break;
+          }
         }
 
         skippedByTypeCount += summaryExcludedByRules;
         runSummarySnapshot = {
           strategy: 'index_first',
-          ruleScopeLabel: formatSyncRuleScopeSummary(cfg.systemFilter, cfg.allowedReleaseTypes),
+          ruleScopeLabel: formatSyncRuleScopeSummary(liveCfg.systemFilter, liveCfg.allowedReleaseTypes),
           totalRuleMatched: summaryTotalRuleMatched,
           wouldDownloadCount: isDryRun ? summaryWouldDownload : downloadedCount,
           alreadyOnDiskCount: summaryAlreadyOnDisk,
@@ -4414,54 +4704,30 @@ export class ScraperOrchestrator extends EventEmitter {
 
         const existingIndexState = getSystemIndexState();
         const scannedRestBases = new Set<string>();
-        for (let sysIdx = 0; sysIdx < targetSystems.length; sysIdx += 1) {
-          if (signal.aborted) break;
-          const systemSlug = targetSystems[sysIdx];
-          const canonicalSlug = canonicalizeSystemSlug(systemSlug).toLowerCase();
-          const scopeLabel = `${sysIdx + 1}/${targetSystems.length}`;
-          const prevNewFound = newFound;
-          const prevSkipped = skippedCount;
-
-          const resolvedRestBase = await this.client.resolveWpRestBaseForSystem(systemSlug, cfg, signal, runLogger);
-          if (resolvedRestBase) {
-            const restBaseKey = resolvedRestBase.toLowerCase();
-            if (scannedRestBases.has(restBaseKey)) {
-              runLogger(
-                'debug',
-                `[Crawl] Skipping duplicate target "${systemSlug}" (WP REST "${resolvedRestBase}" already scanned in this run)`,
-              );
-              continue;
-            }
-            scannedRestBases.add(restBaseKey);
+        const scannedConsolesSet = new Set<string>();
+        const cachedDeltaPostsByConsole = new Map<
+          string,
+          {
+            systemSlug: string;
+            canonicalSlug: string;
+            posts: WpPostMetadata[];
+            preUpsertExistingByUrl: Map<string, RepositoryItemRecord | null>;
           }
+        >();
 
-          this.currentPhase = isDeltaMode
-            ? `${isDryRun ? 'Dry Run (Incremental)' : 'Checking'} ${systemSlug} (${scopeLabel}) since ${effectiveCutoffIso!.slice(0, 16).replace('T', ' ')} UTC`
-            : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} (${scopeLabel}): enumerating ${systemSlug}`;
-          this.emitStatus();
-
-          const wpRes = await this.client.listConsoleReleasesViaWpRest(systemSlug, cfg, {
-            modifiedAfterIso: effectiveCutoffIso,
-            signal,
-            log: runLogger,
-            onPageFetched: (wpPage, wpTotalPages) => {
-              pagesCrawled += 1;
-              successfulPages += 1;
-              this.currentPhase = isDeltaMode
-                ? `${isDryRun ? 'Dry Run (Incremental)' : 'Checking'} ${systemSlug} (${scopeLabel}) · WP page ${wpPage}/${wpTotalPages}`
-                : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} (${scopeLabel}): ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`;
-              persistCounters();
-            },
-          });
-
-          runLogger(
-            'debug',
-            `[Crawl] System "${systemSlug}" WP REST scan`,
-            `supported=${wpRes.supported}, posts=${wpRes.posts.length}`,
-          );
+        const processDeltaPostsForConsole = async (
+          systemSlug: string,
+          canonicalSlug: string,
+          posts: WpPostMetadata[],
+          preUpsertExistingByUrl: Map<string, RepositoryItemRecord | null>,
+          isReplayPass: boolean,
+        ): Promise<{ fastSkippedReleasesCount: number; fastSkippedFilesCount: number; rulesWidened: boolean }> => {
+          let fastSkippedReleasesCount = 0;
+          let fastSkippedFilesCount = 0;
+          let rulesWidened = false;
 
           const shouldSkipWpPostBeforeHtml = (post: WpPostMetadata): boolean => {
-            if (!hasReleaseTypeFilter) return false;
+            if (!liveHasReleaseTypeFilter) return false;
             const hintRoles = (post.downloadHints || []).map((h) =>
               classifyFileRole(h.filename, '', {
                 genres: post.genres,
@@ -4481,8 +4747,11 @@ export class ScraperOrchestrator extends EventEmitter {
               hintRoles,
             );
             const wpTypeKeys = classifyReleaseTagsToTypeKeys(wpTags, systemSlug);
-            const match = evaluateReleaseTypeMatch(wpTypeKeys, allowedReleaseTypes);
+            const match = evaluateReleaseTypeMatch(wpTypeKeys, liveAllowedReleaseTypes);
             if (!match.allowed) {
+              if (post.link) {
+                typeSkippedReleaseUrls.add(post.link.split('#')[0]);
+              }
               newFound += 1;
               skippedCount += 1;
               skippedByTypeCount += 1;
@@ -4496,215 +4765,355 @@ export class ScraperOrchestrator extends EventEmitter {
             return false;
           };
 
-          let fastSkippedReleasesCount = 0;
-          let fastSkippedFilesCount = 0;
-
-          if (wpRes.supported) {
-            successfulPages += 1;
-            const preUpsertExistingByUrl = new Map<string, RepositoryItemRecord | null>();
-            for (const post of wpRes.posts) {
-              if (!post.link) continue;
-              const canonicalLink = post.link.split('#')[0];
-              if (!preUpsertExistingByUrl.has(canonicalLink)) {
-                preUpsertExistingByUrl.set(
-                  canonicalLink,
-                  getRepositoryItemByRemoteUrl(canonicalLink),
+          const tryFastSkipWpPost = (post: WpPostMetadata): boolean => {
+            if (!post.link) return false;
+            const canonicalLink = post.link.split('#')[0];
+            const existing = preUpsertExistingByUrl.get(canonicalLink) ?? null;
+            const check = evaluateReleaseFastSkip({
+              existing,
+              post,
+              systemSlug,
+              allowedReleaseTypes: liveAllowedReleaseTypes,
+            });
+            if (!check.skip) {
+              if (existing && existing.status === 'downloaded') {
+                runLogger(
+                  'debug',
+                  `[Fast Skip] Re-inspecting downloaded release "${post.title || canonicalLink}" (${check.reason})`,
                 );
               }
+              return false;
+            }
+            visitedReleasePages.add(canonicalLink);
+            newFound += check.verifiedFilesCount;
+            skippedCount += check.verifiedFilesCount;
+            fastSkippedReleasesCount += 1;
+            fastSkippedFilesCount += check.verifiedFilesCount;
+            deltaAlreadyOnDiskCount += 1;
+            runLogger(
+              'debug',
+              `[Fast Skip] Already downloaded & verified on disk: ${post.title || canonicalLink} (${check.verifiedFilesCount} file(s))`,
+            );
+            persistCounters();
+            return true;
+          };
+
+          for (let pIdx = 0; pIdx < posts.length; pIdx += 1) {
+            if (signal.aborted) break;
+            const diff = syncLiveRules();
+            if (diff?.releaseTypesWidened) {
+              rulesWidened = true;
+            }
+            if (!isConsoleAllowedBySyncRules(systemSlug, liveCfg)) {
+              runLogger(
+                'info',
+                `[Live Rules] Stopping remaining releases in ${systemSlug}`,
+                'Console was removed from Target Consoles mid-run',
+              );
+              break;
             }
 
-            if (!isDryRun && wpRes.posts.length > 0) {
+            const post = posts[pIdx];
+            if (!post.link) continue;
+            const canonicalLink = post.link.split('#')[0];
+            if (isReplayPass && visitedReleasePages.has(canonicalLink)) {
+              continue;
+            }
+
+            recordObservedTimestamp(post.dateGmt);
+            recordObservedTimestamp(post.modifiedGmt);
+            if (shouldSkipWpPostBeforeHtml(post)) {
+              persistCounters();
+              continue;
+            }
+            deltaMatchedCount += 1;
+            if (tryFastSkipWpPost(post)) {
+              continue;
+            }
+            if (isDeltaMode && isDryRun) {
+              const estBytes = estimateDownloadHintsBytes(post.downloadHints);
+              deltaWouldDownloadCount += 1;
+              deltaEstimatedBytes += estBytes;
+              const cEntry = deltaConsoleMap.get(canonicalSlug);
+              if (cEntry) {
+                cEntry.pendingCount += 1;
+                cEntry.estimatedBytes += estBytes;
+              } else {
+                deltaConsoleMap.set(canonicalSlug, {
+                  systemName: canonicalSlug,
+                  pendingCount: 1,
+                  estimatedBytes: estBytes,
+                });
+              }
+              if (deltaSamples.length < 12) {
+                deltaSamples.push({
+                  title: post.title || post.link,
+                  systemName: canonicalSlug,
+                  releaseType: 'Delta Release',
+                  fileSizeBytes: estBytes,
+                  status: 'available',
+                });
+              }
+            }
+            this.currentPhase = isDeltaMode
+              ? `${isDryRun ? 'Dry Run (Incremental)' : 'Incremental'} · ${systemSlug} (${pIdx + 1}/${posts.length}): ${post.title || this.formatRelativePhasePath(post.link, liveCfg.baseUrl)}`
+              : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} · ${systemSlug} (${pIdx + 1}/${posts.length}): ${post.title || this.formatRelativePhasePath(post.link, liveCfg.baseUrl)}`;
+            this.emitStatus();
+            await inspectAndProcessReleasePage(post.link, post, isDeltaMode ? cutoffMs : null);
+          }
+
+          return { fastSkippedReleasesCount, fastSkippedFilesCount, rulesWidened };
+        };
+
+        const MAX_DELTA_PASSES = 25;
+        let pendingReplayForWidenedTypes = false;
+
+        for (let pass = 0; pass < MAX_DELTA_PASSES && !signal.aborted; pass += 1) {
+          const passDiff = syncLiveRules();
+          if (passDiff?.releaseTypesWidened) {
+            pendingReplayForWidenedTypes = true;
+          }
+
+          let scannedAnyInPass = false;
+          let consoleGuard = 0;
+          while (!signal.aborted && consoleGuard < 200) {
+            consoleGuard += 1;
+            const stepDiff = syncLiveRules();
+            if (stepDiff?.releaseTypesWidened) {
+              pendingReplayForWidenedTypes = true;
+            }
+
+            const nextSlug = liveTargetSystems.find(
+              (slug) => !scannedConsolesSet.has(canonicalizeSystemSlug(slug).toLowerCase()),
+            );
+            if (!nextSlug) break;
+
+            scannedAnyInPass = true;
+            const systemSlug = nextSlug;
+            const canonicalSlug = canonicalizeSystemSlug(systemSlug).toLowerCase();
+            scannedConsolesSet.add(canonicalSlug);
+
+            const scopeLabel = `${scannedConsolesSet.size}/${Math.max(scannedConsolesSet.size, liveTargetSystems.length)}`;
+            const prevNewFound = newFound;
+            const prevSkipped = skippedCount;
+
+            const resolvedRestBase = await this.client.resolveWpRestBaseForSystem(systemSlug, liveCfg, signal, runLogger);
+            if (resolvedRestBase) {
+              const restBaseKey = resolvedRestBase.toLowerCase();
+              if (scannedRestBases.has(restBaseKey)) {
+                runLogger(
+                  'debug',
+                  `[Crawl] Skipping duplicate target "${systemSlug}" (WP REST "${resolvedRestBase}" already scanned in this run)`,
+                );
+                continue;
+              }
+              scannedRestBases.add(restBaseKey);
+            }
+
+            this.currentPhase = isDeltaMode
+              ? `${isDryRun ? 'Dry Run (Incremental)' : 'Checking'} ${systemSlug} (${scopeLabel}) since ${effectiveCutoffIso!.slice(0, 16).replace('T', ' ')} UTC`
+              : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} (${scopeLabel}): enumerating ${systemSlug}`;
+            this.emitStatus();
+
+            const wpRes = await this.client.listConsoleReleasesViaWpRest(systemSlug, liveCfg, {
+              modifiedAfterIso: effectiveCutoffIso,
+              signal,
+              log: runLogger,
+              onPageFetched: (wpPage, wpTotalPages) => {
+                pagesCrawled += 1;
+                successfulPages += 1;
+                this.currentPhase = isDeltaMode
+                  ? `${isDryRun ? 'Dry Run (Incremental)' : 'Checking'} ${systemSlug} (${scopeLabel}) · WP page ${wpPage}/${wpTotalPages}`
+                  : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} (${scopeLabel}): ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`;
+                persistCounters();
+              },
+            });
+
+            runLogger(
+              'debug',
+              `[Crawl] System "${systemSlug}" WP REST scan`,
+              `supported=${wpRes.supported}, posts=${wpRes.posts.length}`,
+            );
+
+            let fastSkippedReleasesCount = 0;
+            let fastSkippedFilesCount = 0;
+
+            if (wpRes.supported) {
+              successfulPages += 1;
+              const preUpsertExistingByUrl = new Map<string, RepositoryItemRecord | null>();
               for (const post of wpRes.posts) {
                 if (!post.link) continue;
                 const canonicalLink = post.link.split('#')[0];
-                if (!preUpsertExistingByUrl.get(canonicalLink)) {
-                  deltaNewDiscoveredCount += 1;
-                }
-                upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, cfg, run.id));
-              }
-              this.emitCatalogUpdated('sync_indexed');
-            } else if (isDryRun && wpRes.posts.length > 0) {
-              for (const post of wpRes.posts) {
-                if (!post.link) continue;
-                if (!preUpsertExistingByUrl.get(post.link.split('#')[0])) {
-                  deltaNewDiscoveredCount += 1;
-                }
-              }
-            }
-
-            if (!isDryRun) {
-              const prevCursor = existingIndexState[canonicalSlug] ?? existingIndexState[systemSlug];
-              if (prevCursor?.fullyIndexed) {
-                updateSystemIndexCursor(canonicalSlug, {
-                  ...prevCursor,
-                  lastIndexedAt: new Date().toISOString(),
-                  totalWpPosts: (prevCursor.totalWpPosts ?? 0) + (wpRes.posts.length > 0 ? wpRes.posts.length : 0),
-                });
-              }
-              if (wpRes.posts.length > 0) {
-                refreshedDeltaConsoles.push(canonicalSlug);
-              }
-            }
-
-            const tryFastSkipWpPost = (post: WpPostMetadata): boolean => {
-              if (!post.link) return false;
-              const canonicalLink = post.link.split('#')[0];
-              const existing = preUpsertExistingByUrl.get(canonicalLink) ?? null;
-              const check = evaluateReleaseFastSkip({
-                existing,
-                post,
-                systemSlug,
-                allowedReleaseTypes,
-              });
-              if (!check.skip) {
-                if (existing && existing.status === 'downloaded') {
-                  runLogger(
-                    'debug',
-                    `[Fast Skip] Re-inspecting downloaded release "${post.title || canonicalLink}" (${check.reason})`,
+                if (!preUpsertExistingByUrl.has(canonicalLink)) {
+                  preUpsertExistingByUrl.set(
+                    canonicalLink,
+                    getRepositoryItemByRemoteUrl(canonicalLink),
                   );
                 }
-                return false;
               }
-              visitedReleasePages.add(canonicalLink);
-              newFound += check.verifiedFilesCount;
-              skippedCount += check.verifiedFilesCount;
-              fastSkippedReleasesCount += 1;
-              fastSkippedFilesCount += check.verifiedFilesCount;
-              deltaAlreadyOnDiskCount += 1;
-              runLogger(
-                'debug',
-                `[Fast Skip] Already downloaded & verified on disk: ${post.title || canonicalLink} (${check.verifiedFilesCount} file(s))`,
-              );
-              persistCounters();
-              return true;
-            };
 
-            const isIndexOnlyScheduled =
-              isDeltaMode && run.triggerType === 'scheduled' && !cfg.autoDownloadNewReleases;
-
-            if (isIndexOnlyScheduled && !isDryRun) {
-              if (wpRes.posts.length > 0) {
+              if (!isDryRun && wpRes.posts.length > 0) {
                 for (const post of wpRes.posts) {
                   if (!post.link) continue;
-                  recordObservedTimestamp(post.dateGmt);
-                  recordObservedTimestamp(post.modifiedGmt);
-                  newFound += 1;
+                  const canonicalLink = post.link.split('#')[0];
+                  if (!preUpsertExistingByUrl.get(canonicalLink)) {
+                    deltaNewDiscoveredCount += 1;
+                  }
+                  upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, liveCfg, run.id));
                 }
-                runLogger(
-                  'info',
-                  `[Scheduled Index] Cataloged ${wpRes.posts.length} new/updated release(s) in ${systemSlug} as Available (auto-download paused)`,
-                );
+                this.emitCatalogUpdated('sync_indexed');
+              } else if (isDryRun && wpRes.posts.length > 0) {
+                for (const post of wpRes.posts) {
+                  if (!post.link) continue;
+                  if (!preUpsertExistingByUrl.get(post.link.split('#')[0])) {
+                    deltaNewDiscoveredCount += 1;
+                  }
+                }
               }
-            } else if (isDeltaMode) {
+
+              if (!isDryRun) {
+                const prevCursor = existingIndexState[canonicalSlug] ?? existingIndexState[systemSlug];
+                if (prevCursor?.fullyIndexed) {
+                  updateSystemIndexCursor(canonicalSlug, {
+                    ...prevCursor,
+                    lastIndexedAt: new Date().toISOString(),
+                    totalWpPosts: (prevCursor.totalWpPosts ?? 0) + (wpRes.posts.length > 0 ? wpRes.posts.length : 0),
+                  });
+                }
+                if (wpRes.posts.length > 0) {
+                  refreshedDeltaConsoles.push(canonicalSlug);
+                }
+              }
+
               if (wpRes.posts.length > 0) {
+                cachedDeltaPostsByConsole.set(canonicalSlug, {
+                  systemSlug,
+                  canonicalSlug,
+                  posts: wpRes.posts,
+                  preUpsertExistingByUrl,
+                });
+              }
+
+              const isIndexOnlyScheduled =
+                isDeltaMode && run.triggerType === 'scheduled' && !liveCfg.autoDownloadNewReleases;
+
+              if (isIndexOnlyScheduled && !isDryRun) {
+                if (wpRes.posts.length > 0) {
+                  for (const post of wpRes.posts) {
+                    if (!post.link) continue;
+                    recordObservedTimestamp(post.dateGmt);
+                    recordObservedTimestamp(post.modifiedGmt);
+                    newFound += 1;
+                  }
+                  runLogger(
+                    'info',
+                    `[Scheduled Index] Cataloged ${wpRes.posts.length} new/updated release(s) in ${systemSlug} as Available (auto-download paused)`,
+                  );
+                }
+              } else if (isDeltaMode) {
+                if (wpRes.posts.length > 0) {
+                  runLogger(
+                    'info',
+                    `${isDryRun ? '[Dry Run · Incremental] ' : ''}Found ${wpRes.posts.length} new/updated release(s) in ${systemSlug} since cutoff`,
+                  );
+                }
+                const res = await processDeltaPostsForConsole(
+                  systemSlug,
+                  canonicalSlug,
+                  wpRes.posts,
+                  preUpsertExistingByUrl,
+                  false,
+                );
+                fastSkippedReleasesCount = res.fastSkippedReleasesCount;
+                fastSkippedFilesCount = res.fastSkippedFilesCount;
+                if (res.rulesWidened) pendingReplayForWidenedTypes = true;
+              } else if (wpRes.posts.length > 0) {
                 runLogger(
                   'info',
-                  `${isDryRun ? '[Dry Run · Incremental] ' : ''}Found ${wpRes.posts.length} new/updated release(s) in ${systemSlug} since cutoff`,
+                  isDryRun
+                    ? `[Dry Run · Full] Inspecting ${wpRes.posts.length} release(s) in ${systemSlug}`
+                    : `Full Sync mirroring ${wpRes.posts.length} release(s) in ${systemSlug}`,
                 );
-              }
-              for (let pIdx = 0; pIdx < wpRes.posts.length; pIdx += 1) {
-                if (signal.aborted) break;
-                const post = wpRes.posts[pIdx];
-                if (!post.link) continue;
-                recordObservedTimestamp(post.dateGmt);
-                recordObservedTimestamp(post.modifiedGmt);
-                if (shouldSkipWpPostBeforeHtml(post)) {
-                  persistCounters();
-                  continue;
-                }
-                deltaMatchedCount += 1;
-                if (tryFastSkipWpPost(post)) {
-                  continue;
-                }
-                if (isDryRun) {
-                  const estBytes = estimateDownloadHintsBytes(post.downloadHints);
-                  deltaWouldDownloadCount += 1;
-                  deltaEstimatedBytes += estBytes;
-                  const cEntry = deltaConsoleMap.get(canonicalSlug);
-                  if (cEntry) {
-                    cEntry.pendingCount += 1;
-                    cEntry.estimatedBytes += estBytes;
-                  } else {
-                    deltaConsoleMap.set(canonicalSlug, {
-                      systemName: canonicalSlug,
-                      pendingCount: 1,
-                      estimatedBytes: estBytes,
-                    });
-                  }
-                  if (deltaSamples.length < 12) {
-                    deltaSamples.push({
-                      title: post.title || post.link,
-                      systemName: canonicalSlug,
-                      releaseType: 'Delta Release',
-                      fileSizeBytes: estBytes,
-                      status: 'available',
-                    });
-                  }
-                }
-                this.currentPhase = `${isDryRun ? 'Dry Run (Incremental)' : 'Incremental'} · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
-                this.emitStatus();
-                await inspectAndProcessReleasePage(post.link, post, cutoffMs);
-              }
-            } else if (wpRes.posts.length > 0) {
-              runLogger(
-                'info',
-                isDryRun
-                  ? `[Dry Run · Full] Inspecting ${wpRes.posts.length} release(s) in ${systemSlug}`
-                  : `Full Sync mirroring ${wpRes.posts.length} release(s) in ${systemSlug}`,
-              );
-              for (let pIdx = 0; pIdx < wpRes.posts.length; pIdx += 1) {
-                if (signal.aborted) break;
-                const post = wpRes.posts[pIdx];
-                if (!post.link) continue;
-                recordObservedTimestamp(post.dateGmt);
-                recordObservedTimestamp(post.modifiedGmt);
-                if (shouldSkipWpPostBeforeHtml(post)) {
-                  persistCounters();
-                  continue;
-                }
-                deltaMatchedCount += 1;
-                if (tryFastSkipWpPost(post)) {
-                  continue;
-                }
-                this.currentPhase = `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} · ${systemSlug} (${pIdx + 1}/${wpRes.posts.length}): ${post.title || this.formatRelativePhasePath(post.link, cfg.baseUrl)}`;
-                this.emitStatus();
-                await inspectAndProcessReleasePage(post.link, post, null);
+                const res = await processDeltaPostsForConsole(
+                  systemSlug,
+                  canonicalSlug,
+                  wpRes.posts,
+                  preUpsertExistingByUrl,
+                  false,
+                );
+                fastSkippedReleasesCount = res.fastSkippedReleasesCount;
+                fastSkippedFilesCount = res.fastSkippedFilesCount;
+                if (res.rulesWidened) pendingReplayForWidenedTypes = true;
+              } else {
+                const consoleHtmlUrl = new URL(`${encodeURIComponent(systemSlug)}/`, baseWithSlash).toString();
+                runLogger('debug', `[Crawl] "${systemSlug}" WP REST returned 0 posts in Full Sync; falling back to HTML`, consoleHtmlUrl);
+                await crawlHtmlScope([consoleHtmlUrl], systemSlug);
               }
             } else {
               const consoleHtmlUrl = new URL(`${encodeURIComponent(systemSlug)}/`, baseWithSlash).toString();
-              runLogger('debug', `[Crawl] "${systemSlug}" WP REST returned 0 posts in Full Sync; falling back to HTML`, consoleHtmlUrl);
+              runLogger('debug', `[Crawl] "${systemSlug}" has no WP REST CPT; falling back to HTML crawl`, consoleHtmlUrl);
               await crawlHtmlScope([consoleHtmlUrl], systemSlug);
             }
-          } else {
-            const consoleHtmlUrl = new URL(`${encodeURIComponent(systemSlug)}/`, baseWithSlash).toString();
-            runLogger('debug', `[Crawl] "${systemSlug}" has no WP REST CPT; falling back to HTML crawl`, consoleHtmlUrl);
-            await crawlHtmlScope([consoleHtmlUrl], systemSlug);
+
+            if (!isDryRun && !signal.aborted && fastSkippedReleasesCount > 0) {
+              runLogger(
+                'info',
+                `${isDeltaMode ? 'Incremental Sync' : 'Full Sync'} (${systemSlug}): fast-skipped ${fastSkippedReleasesCount} already-downloaded release(s) (${fastSkippedFilesCount} verified file(s) on disk)`,
+              );
+            }
+
+            if (isDryRun && !signal.aborted && newFound > prevNewFound) {
+              const sysDiscovered = newFound - prevNewFound;
+              const sysSkipped = skippedCount - prevSkipped;
+              const sysWouldDownload = Math.max(0, sysDiscovered - sysSkipped);
+              runLogger(
+                'info',
+                `[Dry Run · ${dryRunScopeTag}] ${systemSlug} summary: ${sysWouldDownload} would download, ${sysSkipped} skipped (on disk or filtered)`,
+              );
+            }
+
+            persistCounters();
           }
 
-          if (!isDryRun && !signal.aborted && fastSkippedReleasesCount > 0) {
-            runLogger(
-              'info',
-              `${isDeltaMode ? 'Incremental Sync' : 'Full Sync'} (${systemSlug}): fast-skipped ${fastSkippedReleasesCount} already-downloaded release(s) (${fastSkippedFilesCount} verified file(s) on disk)`,
-            );
+          // If release types were widened mid-run, re-evaluate cached delta posts for still-allowed consoles
+          const endPassDiff = syncLiveRules();
+          if (endPassDiff?.releaseTypesWidened) {
+            pendingReplayForWidenedTypes = true;
           }
 
-          if (isDryRun && !signal.aborted && newFound > prevNewFound) {
-            const sysDiscovered = newFound - prevNewFound;
-            const sysSkipped = skippedCount - prevSkipped;
-            const sysWouldDownload = Math.max(0, sysDiscovered - sysSkipped);
-            runLogger(
-              'info',
-              `[Dry Run · ${dryRunScopeTag}] ${systemSlug} summary: ${sysWouldDownload} would download, ${sysSkipped} skipped (on disk or filtered)`,
-            );
+          if (pendingReplayForWidenedTypes && !signal.aborted) {
+            pendingReplayForWidenedTypes = false;
+            for (const entry of cachedDeltaPostsByConsole.values()) {
+              if (signal.aborted) break;
+              if (!isConsoleAllowedBySyncRules(entry.systemSlug, liveCfg)) continue;
+              const res = await processDeltaPostsForConsole(
+                entry.systemSlug,
+                entry.canonicalSlug,
+                entry.posts,
+                entry.preUpsertExistingByUrl,
+                true,
+              );
+              if (res.rulesWidened) {
+                pendingReplayForWidenedTypes = true;
+              }
+            }
           }
 
-          persistCounters();
+          const hasUnscannedTarget = liveTargetSystems.some(
+            (slug) => !scannedConsolesSet.has(canonicalizeSystemSlug(slug).toLowerCase()),
+          );
+          if (!hasUnscannedTarget && !pendingReplayForWidenedTypes && this.syncRulesRevision === observedRuleRevision && !scannedAnyInPass) {
+            break;
+          }
+          if (!hasUnscannedTarget && !pendingReplayForWidenedTypes && this.syncRulesRevision === observedRuleRevision) {
+            break;
+          }
         }
 
         if (isDeltaMode || options?.legacyFullCrawl) {
           runSummarySnapshot = {
             strategy: options?.legacyFullCrawl ? 'legacy_crawl' : 'incremental_delta',
-            ruleScopeLabel: formatSyncRuleScopeSummary(cfg.systemFilter, cfg.allowedReleaseTypes),
+            ruleScopeLabel: formatSyncRuleScopeSummary(liveCfg.systemFilter, liveCfg.allowedReleaseTypes),
             totalRuleMatched: deltaMatchedCount,
             wouldDownloadCount: isDryRun ? Math.max(deltaWouldDownloadCount, Math.max(0, newFound - skippedCount)) : downloadedCount,
             alreadyOnDiskCount: deltaAlreadyOnDiskCount,

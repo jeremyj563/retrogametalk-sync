@@ -1274,18 +1274,37 @@ export default function App() {
     await loadInitialData();
   };
 
-  const handleSaveConfig = async (patch: Partial<ScraperConfigPublic> & { password?: string }) => {
+  const handleSaveConfig = async (
+    patch: Partial<ScraperConfigPublic> & { password?: string },
+  ): Promise<{
+    config: ScraperConfigPublic;
+    liveSyncReload: import('./types').LiveSyncReloadReceipt | null;
+  }> => {
     const res = await fetch('/api/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     });
-    const parsed = await readJsonSafely<{ config?: ScraperConfigPublic; error?: string }>(res);
+    const parsed = await readJsonSafely<{
+      config?: ScraperConfigPublic;
+      liveSyncReload?: import('./types').LiveSyncReloadReceipt | null;
+      error?: string;
+    }>(res);
     if (!parsed.ok || !parsed.data?.config) {
       throw new Error(parsed.errorMessage || `Save failed (HTTP ${res.status})`);
     }
     setConfig(parsed.data.config);
     await loadInitialData();
+    return {
+      config: parsed.data.config,
+      liveSyncReload: parsed.data.liveSyncReload ?? null,
+    };
+  };
+
+  const handleSaveConfigVoid = async (
+    patch: Partial<ScraperConfigPublic> & { password?: string },
+  ): Promise<void> => {
+    await handleSaveConfig(patch);
   };
 
   const handleQueueDownload = async (payload: {
@@ -2037,7 +2056,7 @@ export default function App() {
                   uiMotion={effectiveCrtSettings.uiMotion}
                   syncSpeedWave={effectiveCrtSettings.syncSpeedWave}
                   crtPalette={effectiveCrtSettings.palette}
-                  onSaveConfig={handleSaveConfig}
+                  onSaveConfig={handleSaveConfigVoid}
                   onClearLogs={handleClearLogs}
                   onClearRuns={handleClearRuns}
                   onNavigateToOperations={navigateToConfigTarget}
@@ -2093,7 +2112,7 @@ export default function App() {
                   status={status}
                   focusRequest={configFocus}
                   onDirtyChange={setConfigDirty}
-                  onSaveConfig={handleSaveConfig}
+                  onSaveConfig={handleSaveConfigVoid}
                 />
               )}
               {section === 'settings' && (
@@ -2103,7 +2122,7 @@ export default function App() {
                   status={status}
                   focusRequest={configFocus}
                   onDirtyChange={setConfigDirty}
-                  onSaveConfig={handleSaveConfig}
+                  onSaveConfig={handleSaveConfigVoid}
                   onRefreshConfig={loadInitialData}
                 />
               )}

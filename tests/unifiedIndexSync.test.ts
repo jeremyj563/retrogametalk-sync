@@ -6,8 +6,11 @@ import { after, before, test } from 'node:test';
 import {
   DEFAULT_INDEX_STALE_MS,
   classifySystemIndexFreshness,
+  diffSyncRules,
   doesCatalogReleaseMatchSyncRules,
   formatSyncRuleScopeSummary,
+  isConsoleAllowedBySyncRules,
+  isSyncRunEligibleForLiveRuleReload,
   normalizeTargetConsoleSlugs,
   resolveTargetConsoleScope,
 } from '../src/shared/syncRuleMatcher.ts';
@@ -324,3 +327,93 @@ test('Catalog syncRules query, facets, listCatalogReleasesForRuleSync, and compu
   assert.equal(preflight.topPendingConsoles.length, 2);
   assert.equal(preflight.samplePendingReleases.length, 2);
 });
+
+test('live mid-run sync rule helpers diff console additions/removals, release type widening/narrowing, aliases, and run eligibility', () => {
+  const discovered = ['gameboy-roms', 'gba', 'psx', 'snes'];
+
+  // Console allow check with alias normalization
+  assert.equal(
+    isConsoleAllowedBySyncRules('gb-roms', { systemFilter: 'gameboy-roms,snes', allowedReleaseTypes: [] }),
+    true,
+  );
+  assert.equal(
+    isConsoleAllowedBySyncRules('psx', { systemFilter: 'gameboy-roms,snes', allowedReleaseTypes: [] }),
+    false,
+  );
+  assert.equal(
+    isConsoleAllowedBySyncRules('psx', { systemFilter: '', allowedReleaseTypes: [] }),
+    true,
+  );
+
+  // Run eligibility: Full and Incremental (manual & scheduled, live & dry-run) reload; manual download & retry do not
+  assert.equal(isSyncRunEligibleForLiveRuleReload({ triggerType: 'manual', mode: 'full' }), true);
+  assert.equal(isSyncRunEligibleForLiveRuleReload({ triggerType: 'scheduled', mode: 'incremental' }), true);
+  assert.equal(isSyncRunEligibleForLiveRuleReload({ triggerType: 'download', mode: 'full' }), false);
+  assert.equal(isSyncRunEligibleForLiveRuleReload({ triggerType: 'retry', mode: 'incremental' }), false);
+  assert.equal(isSyncRunEligibleForLiveRuleReload(null), false);
+
+  // Adding a console + removing a console simultaneously
+  const consoleDiff = diffSyncRules(
+    { systemFilter: 'snes,psx', allowedReleaseTypes: ['retail'] },
+    { systemFilter: 'snes,gba', allowedReleaseTypes: ['retail'] },
+    discovered,
+  );
+  assert.equal(consoleDiff.changed, true);
+  assert.equal(consoleDiff.consolesChanged, true);
+  assert.equal(consoleDiff.releaseTypesChanged, false);
+  assert.equal(consoleDiff.releaseTypesWidened, false);
+  assert.deepEqual(consoleDiff.addedConsoles, ['gba']);
+  assert.deepEqual(consoleDiff.removedConsoles, ['psx']);
+  assert.ok(consoleDiff.changeSummary.includes('+gba'));
+  assert.ok(consoleDiff.changeSummary.includes('-psx'));
+
+  // Alias-only rewrite produces no diff
+  const aliasNoOp = diffSyncRules(
+    { systemFilter: 'gb-roms, snes', allowedReleaseTypes: ['retail'] },
+    { systemFilter: 'snes,gameboy-roms', allowedReleaseTypes: ['retail'] },
+    discovered,
+  );
+  assert.equal(aliasNoOp.changed, false);
+
+  // Switching from explicit list to All Consoles adds remaining discovered consoles
+  const expandToAll = diffSyncRules(
+    { systemFilter: 'snes', allowedReleaseTypes: [] },
+    { systemFilter: '', allowedReleaseTypes: [] },
+    discovered,
+  );
+  assert.equal(expandToAll.changed, true);
+  assert.equal(expandToAll.consolesChanged, true);
+  assert.deepEqual(expandToAll.addedConsoles, ['gameboy-roms', 'gba', 'psx']);
+  assert.deepEqual(expandToAll.removedConsoles, []);
+
+  // Narrowing release types (All -> Retail only) is NOT widened
+  const narrowTypes = diffSyncRules(
+    { systemFilter: 'snes', allowedReleaseTypes: [] },
+    { systemFilter: 'snes', allowedReleaseTypes: ['retail'] },
+    discovered,
+  );
+  assert.equal(narrowTypes.changed, true);
+  assert.equal(narrowTypes.releaseTypesChanged, true);
+  assert.equal(narrowTypes.releaseTypesWidened, false);
+
+  // Widening release types (Retail -> Retail + Hack) triggers releaseTypesWidened so earlier type-skipped items re-evaluate
+  const widenCustom = diffSyncRules(
+    { systemFilter: 'snes', allowedReleaseTypes: ['retail'] },
+    { systemFilter: 'snes', allowedReleaseTypes: ['retail', 'hack'] },
+    discovered,
+  );
+  assert.equal(widenCustom.changed, true);
+  assert.equal(widenCustom.releaseTypesChanged, true);
+  assert.equal(widenCustom.releaseTypesWidened, true);
+
+  // Widening from custom allowlist back to All Release Types ([]) also triggers releaseTypesWidened
+  const widenToAll = diffSyncRules(
+    { systemFilter: 'snes', allowedReleaseTypes: ['retail'] },
+    { systemFilter: 'snes', allowedReleaseTypes: [] },
+    discovered,
+  );
+  assert.equal(widenToAll.changed, true);
+  assert.equal(widenToAll.releaseTypesChanged, true);
+  assert.equal(widenToAll.releaseTypesWidened, true);
+});
+
