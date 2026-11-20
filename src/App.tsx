@@ -2111,6 +2111,7 @@ export default function App() {
                   ref={configPanelRef}
                   config={config}
                   status={status}
+                  installer={bulkInstaller}
                   focusRequest={configFocus}
                   onDirtyChange={setConfigDirty}
                   onSaveConfig={handleSaveConfigVoid}

@@ -1,12 +1,23 @@
-import { useMemo, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import {
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
+  FolderSearch,
   FolderTree,
+  HardDrive,
+  Loader2,
   RotateCcw,
   Search,
   X,
 } from 'lucide-react';
+import type { BulkStorageInstallerController } from '../hooks/useBulkStorageInstaller';
+import {
+  classifyDiscoveredConsoleDiff,
+  discoverStorageFolderMappings,
+  mergeDiscoveredStorageMappings,
+  type DeviceAutoConfigResult,
+} from '../shared/storageAutoConfig';
 import {
   buildUniqueConsoleMappingSlugs,
   canonicalStorageFolderConfigJson,
@@ -24,6 +35,14 @@ import {
   type SystemTypeSubfolderMode,
 } from '../shared/storageFolderMappings';
 import { groupSystemsByBrand, resolveSystemDisplayInfo } from '../shared/systemCatalog';
+import {
+  isAbortError,
+  isFileSystemAccessSupported,
+  pickSdCardRootDirectory,
+  scanStorageDirectoryTree,
+  type SdDirectoryHandle,
+} from '../utils/sdCardFs';
+import { StorageAutoConfigReview } from './StorageAutoConfigReview';
 
 type ConsoleScopeTab = 'discovered' | 'all' | 'customized';
 
@@ -33,6 +52,7 @@ interface StorageFolderMappingsSectionProps {
   value: StorageFolderMappingConfig;
   onChange: (next: StorageFolderMappingConfig) => void;
   discoveredAndSyncedSlugs: string[];
+  installer?: BulkStorageInstallerController;
 }
 
 export function StorageFolderMappingsSection({
@@ -41,6 +61,7 @@ export function StorageFolderMappingsSection({
   value,
   onChange,
   discoveredAndSyncedSlugs,
+  installer,
 }: StorageFolderMappingsSectionProps) {
   const [scopeTab, setScopeTab] = useState<ConsoleScopeTab>(() =>
     discoveredAndSyncedSlugs.length > 0 ? 'discovered' : 'all',
@@ -48,6 +69,29 @@ export function StorageFolderMappingsSection({
   const [searchQuery, setSearchQuery] = useState('');
   const [showGlobalTypeDefaults, setShowGlobalTypeDefaults] = useState(false);
   const [expandedConsoleSlug, setExpandedConsoleSlug] = useState<string | null>(null);
+
+  // Export Device Auto-Configure state
+  const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
+  const [autoScanPhase, setAutoScanPhase] = useState<'idle' | 'scanning' | 'ready' | 'error'>('idle');
+  const [autoScanTargetLabel, setAutoScanTargetLabel] = useState<string>('');
+  const [autoScanProgress, setAutoScanProgress] = useState<{
+    directoriesScanned: number;
+    currentPath: string;
+  }>({ directoriesScanned: 0, currentPath: '' });
+  const [autoScanError, setAutoScanError] = useState<string | null>(null);
+  const [autoConfigResult, setAutoConfigResult] = useState<DeviceAutoConfigResult | null>(null);
+  const [selectedAutoSlugs, setSelectedAutoSlugs] = useState<Set<string>>(new Set());
+  const [chosenPathBySlug, setChosenPathBySlug] = useState<Record<string, string>>({});
+  const [includeAutoSubfolders, setIncludeAutoSubfolders] = useState<boolean>(true);
+  const [appliedAutoNotice, setAppliedAutoNotice] = useState<string | null>(null);
+  const scanAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      scanAbortRef.current?.abort();
+      scanAbortRef.current = null;
+    };
+  }, []);
 
   const defaultConfigJson = useMemo(
     () => canonicalStorageFolderConfigJson(createDefaultStorageFolderConfig()),
@@ -279,6 +323,185 @@ export function StorageFolderMappingsSection({
     onChange(createDefaultStorageFolderConfig());
   };
 
+  const runAutoConfigureScan = useCallback(
+    async (rootHandle: SdDirectoryHandle) => {
+      scanAbortRef.current?.abort();
+      const abortController = new AbortController();
+      scanAbortRef.current = abortController;
+
+      setAppliedAutoNotice(null);
+      setAutoScanError(null);
+      setAutoConfigResult(null);
+      setAutoScanTargetLabel(rootHandle.name || 'Storage Device');
+      setAutoScanProgress({ directoriesScanned: 0, currentPath: rootHandle.name || '' });
+      setAutoScanPhase('scanning');
+
+      const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      try {
+        const nodes = await scanStorageDirectoryTree(rootHandle, {
+          signal: abortController.signal,
+          onProgress: (prog) => {
+            if (!abortController.signal.aborted) {
+              setAutoScanProgress(prog);
+            }
+          },
+        });
+        if (abortController.signal.aborted) return;
+
+        const durationMs = Math.max(
+          1,
+          Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+        );
+        const preferredSlugs = [
+          ...discoveredAndSyncedSlugs,
+          ...Object.keys(value.systemFolders),
+          ...Object.keys(value.systemTypeOverrides),
+        ];
+        const result = discoverStorageFolderMappings(nodes, {
+          rootLabel: rootHandle.name || 'Storage Device',
+          preferredSlugs,
+          durationMs,
+        });
+
+        const initialSelected = new Set<string>();
+        const initialChosen: Record<string, string> = {};
+        for (const match of result.matches) {
+          initialChosen[match.canonicalSlug] = match.recommendedPath;
+          const diff = classifyDiscoveredConsoleDiff(
+            match.canonicalSlug,
+            match.recommendedPath,
+            match.detectedTypeSubfolders,
+            true,
+            value,
+          );
+          if (diff.kind === 'new') {
+            initialSelected.add(match.canonicalSlug);
+          }
+        }
+
+        setChosenPathBySlug(initialChosen);
+        setSelectedAutoSlugs(initialSelected);
+        setIncludeAutoSubfolders(true);
+        setAutoConfigResult(result);
+        setAutoScanPhase('ready');
+      } catch (err) {
+        if (isAbortError(err)) {
+          setAutoScanPhase('idle');
+          return;
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        setAutoScanError(msg || 'Failed scanning the selected export directory.');
+        setAutoScanPhase('error');
+      } finally {
+        if (scanAbortRef.current === abortController) {
+          scanAbortRef.current = null;
+        }
+      }
+    },
+    [discoveredAndSyncedSlugs, value],
+  );
+
+  const handlePickAndScanExportFolder = useCallback(async () => {
+    setAutoScanError(null);
+    setAppliedAutoNotice(null);
+    if (!fsSupport.supported) {
+      setAutoScanError(
+        fsSupport.reason || 'Browser folder picker is not supported in this browser.',
+      );
+      setAutoScanPhase('error');
+      return;
+    }
+
+    let handle: SdDirectoryHandle | null = null;
+    if (installer) {
+      handle = await installer.promptMountSdCard();
+      if (!handle) {
+        if (installer.mountError) {
+          setAutoScanError(installer.mountError);
+          setAutoScanPhase('error');
+        }
+        return;
+      }
+    } else {
+      try {
+        handle = await pickSdCardRootDirectory();
+      } catch (err) {
+        if (isAbortError(err)) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        setAutoScanError(
+          /cross origin|sub frame|user activation/i.test(msg)
+            ? 'Browser blocked folder picker inside this embedded frame. Open the app directly in its own tab.'
+            : msg,
+        );
+        setAutoScanPhase('error');
+        return;
+      }
+    }
+
+    if (handle) {
+      await runAutoConfigureScan(handle);
+    }
+  }, [fsSupport, installer, runAutoConfigureScan]);
+
+  const handleScanMountedDevice = useCallback(async () => {
+    if (!installer?.sdRootHandle) {
+      await handlePickAndScanExportFolder();
+      return;
+    }
+    await runAutoConfigureScan(installer.sdRootHandle);
+  }, [installer?.sdRootHandle, handlePickAndScanExportFolder, runAutoConfigureScan]);
+
+  const handleCancelAutoScan = () => {
+    scanAbortRef.current?.abort();
+    scanAbortRef.current = null;
+    setAutoScanPhase('idle');
+  };
+
+  const handleToggleAutoSlug = (slug: string) => {
+    setSelectedAutoSlugs((prev) => {
+      const next = new Set(prev);
+      if (next.has(slug)) next.delete(slug);
+      else next.add(slug);
+      return next;
+    });
+  };
+
+  const handleChooseAutoCandidatePath = (slug: string, relativePath: string) => {
+    setChosenPathBySlug((prev) => ({
+      ...prev,
+      [slug]: relativePath,
+    }));
+    // Automatically select the console when user explicitly picks an alternate path
+    setSelectedAutoSlugs((prev) => {
+      if (prev.has(slug)) return prev;
+      const next = new Set(prev);
+      next.add(slug);
+      return next;
+    });
+  };
+
+  const handleApplyAutoConfig = () => {
+    if (!autoConfigResult || selectedAutoSlugs.size === 0) return;
+    const merged = mergeDiscoveredStorageMappings(value, autoConfigResult, {
+      selectedSlugs: selectedAutoSlugs,
+      chosenPathBySlug,
+      includeTypeSubfolders: includeAutoSubfolders,
+    });
+    const appliedCount = selectedAutoSlugs.size;
+    onChange(merged);
+    setAutoConfigResult(null);
+    setAutoScanPhase('idle');
+    setAppliedAutoNotice(
+      `Applied ${appliedCount} discovered console mapping${appliedCount === 1 ? '' : 's'} from "${autoConfigResult.rootLabel}" — click Save Changes below to persist.`,
+    );
+  };
+
+  const handleDismissAutoReview = () => {
+    setAutoConfigResult(null);
+    setAutoScanPhase('idle');
+    setAutoScanError(null);
+  };
+
   const globalDefaultsExpanded = value.typeSubfoldersEnabled || showGlobalTypeDefaults;
 
   // Live preview sample paths using SNES
@@ -344,6 +567,138 @@ export function StorageFolderMappingsSection({
           </button>
         )}
       </div>
+
+      {/* Export Device Auto-Configure Bar */}
+      <div className="border border-crt-border bg-crt-bg rounded p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+              <span className="font-semibold text-crt-text">
+                Auto-Configure from Storage Device
+              </span>
+              {installer?.sdRootHandle && (
+                <span className="font-mono text-[11px] text-crt-muted">
+                  · Mounted: <span className="text-crt-phosphor">{installer.sdRootHandle.name}</span>
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-crt-muted max-w-2xl leading-relaxed">
+              {fsSupport.supported
+                ? 'Select your SD card root, Roms directory, or handheld base export path to automatically discover console base folders and existing ROM-type subfolders.'
+                : fsSupport.reason ||
+                  'Direct storage device scanning requires Chrome, Edge, or another Chromium browser. You can still configure folder paths manually below.'}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {autoScanPhase === 'scanning' ? (
+              <button
+                type="button"
+                onClick={handleCancelAutoScan}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-border bg-crt-surface text-crt-text hover:border-crt-phosphor rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5 shrink-0" />
+                <span>Cancel Scan</span>
+              </button>
+            ) : installer?.sdRootHandle ? (
+              <>
+                <button
+                  type="button"
+                  disabled={!fsSupport.supported}
+                  onClick={() => void handleScanMountedDevice()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor hover:bg-crt-phosphor/25 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <FolderSearch className="h-3.5 w-3.5 shrink-0" />
+                  <span>Scan &ldquo;{installer.sdRootHandle.name}&rdquo;</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!fsSupport.supported}
+                  onClick={() => void handlePickAndScanExportFolder()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                  <span>Choose Different Folder</span>
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                disabled={!fsSupport.supported}
+                onClick={() => void handlePickAndScanExportFolder()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor hover:bg-crt-phosphor/25 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <FolderSearch className="h-3.5 w-3.5 shrink-0" />
+                <span>Auto-Configure from Folder</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {autoScanPhase === 'scanning' && (
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-crt-border/70 text-xs font-mono text-crt-muted tabular-nums">
+            <Loader2 className="h-3.5 w-3.5 text-crt-phosphor animate-spin shrink-0" />
+            <span>
+              Scanning &ldquo;{autoScanTargetLabel}&rdquo; ·{' '}
+              {autoScanProgress.directoriesScanned.toLocaleString()} folder
+              {autoScanProgress.directoriesScanned === 1 ? '' : 's'} inspected
+              {autoScanProgress.currentPath ? ` · /${autoScanProgress.currentPath}` : ''}
+            </span>
+          </div>
+        )}
+
+        {autoScanError && (
+          <div className="flex items-center justify-between gap-2 pt-2 border-t border-crt-border/70 text-xs font-mono text-red-400">
+            <span>{autoScanError}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setAutoScanError(null);
+                setAutoScanPhase('idle');
+              }}
+              aria-label="Dismiss scan error"
+              className="p-0.5 text-crt-muted hover:text-crt-text rounded cursor-pointer shrink-0"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+
+        {appliedAutoNotice && autoScanPhase === 'idle' && (
+          <div className="flex items-center justify-between gap-2 pt-2 border-t border-crt-border/70 text-xs font-mono text-crt-phosphor">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+              <span>{appliedAutoNotice}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAppliedAutoNotice(null)}
+              aria-label="Dismiss auto-configure applied notice"
+              className="p-0.5 text-crt-muted hover:text-crt-text rounded cursor-pointer shrink-0"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Inline Auto-Configure Review & Selective Merge Workspace */}
+      {autoScanPhase === 'ready' && autoConfigResult && (
+        <StorageAutoConfigReview
+          result={autoConfigResult}
+          currentConfig={value}
+          selectedSlugs={selectedAutoSlugs}
+          chosenPathBySlug={chosenPathBySlug}
+          includeTypeSubfolders={includeAutoSubfolders}
+          onToggleSlug={handleToggleAutoSlug}
+          onSetSelectedSlugs={setSelectedAutoSlugs}
+          onChooseCandidatePath={handleChooseAutoCandidatePath}
+          onToggleIncludeTypeSubfolders={setIncludeAutoSubfolders}
+          onApply={handleApplyAutoConfig}
+          onPickDifferentFolder={() => void handlePickAndScanExportFolder()}
+          onDismiss={handleDismissAutoReview}
+        />
+      )}
 
       {/* Global ROM Type Subfolder Opt-In & Category Defaults */}
       <div className="border border-crt-border bg-crt-bg rounded p-4 space-y-4">

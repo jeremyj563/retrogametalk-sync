@@ -1,4 +1,8 @@
 import { buildUpgradeMatchStem } from '../shared/romNaming';
+import {
+  IGNORED_SCAN_DIRECTORY_NAMES,
+  type ScannedDirNode,
+} from '../shared/storageAutoConfig';
 
 export interface SdDirectoryHandle {
   kind: 'directory';
@@ -26,6 +30,14 @@ export interface SdScanFolderResult {
   exactNames: Set<string>;
   exactNamesLower: Map<string, string>;
   entries: { name: string; kind: 'file' | 'directory'; stemInfo: ReturnType<typeof buildUpgradeMatchStem> }[];
+}
+
+export interface ScanStorageTreeOptions {
+  maxDepth?: number;
+  maxDirectories?: number;
+  maxSampleFilesPerDir?: number;
+  signal?: AbortSignal;
+  onProgress?: (progress: { directoriesScanned: number; currentPath: string }) => void;
 }
 
 export function isFileSystemAccessSupported(): { supported: boolean; reason?: string } {
@@ -108,6 +120,123 @@ export async function scanTargetFolder(
   }
 
   return { exactNames, exactNamesLower, entries };
+}
+
+function extractFileExtension(filename: string): string {
+  const trimmed = filename.trim();
+  const dotIdx = trimmed.lastIndexOf('.');
+  if (dotIdx <= 0 || dotIdx === trimmed.length - 1) return '';
+  return trimmed.slice(dotIdx + 1).toLowerCase();
+}
+
+/**
+ * Walks a user-selected FileSystemDirectoryHandle in bounded breadth-first order to build
+ * a lightweight directory tree snapshot for Export Device Auto-Configure.
+ * Prunes hidden/OS/media/save folders and caps per-directory file sampling so large SD cards
+ * finish quickly and remain responsive.
+ */
+export async function scanStorageDirectoryTree(
+  rootHandle: SdDirectoryHandle,
+  options: ScanStorageTreeOptions = {},
+): Promise<ScannedDirNode[]> {
+  const maxDepth = Math.max(1, options.maxDepth ?? 4);
+  const maxDirectories = Math.max(20, options.maxDirectories ?? 600);
+  const maxSampleFilesPerDir = Math.max(8, options.maxSampleFilesPerDir ?? 48);
+  const { signal, onProgress } = options;
+
+  const nodes: ScannedDirNode[] = [];
+  const queue: Array<{
+    handle: SdDirectoryHandle;
+    relativePath: string;
+    name: string;
+    depth: number;
+  }> = [{ handle: rootHandle, relativePath: '', name: rootHandle.name || 'Storage Device', depth: 0 }];
+
+  let lastProgressAt = 0;
+
+  while (queue.length > 0 && nodes.length < maxDirectories) {
+    if (signal?.aborted) {
+      throw new DOMException('Directory scan canceled by user.', 'AbortError');
+    }
+
+    const current = queue.shift()!;
+    const childDirs: string[] = [];
+    const childHandles: Array<{ name: string; handle: SdDirectoryHandle }> = [];
+    const sampleExtensions: string[] = [];
+    let fileCount = 0;
+
+    try {
+      for await (const entry of current.handle.values()) {
+        if (signal?.aborted) {
+          throw new DOMException('Directory scan canceled by user.', 'AbortError');
+        }
+        const entryName = entry.name.trim();
+        if (!entryName || entryName.startsWith('.')) continue;
+
+        if (entry.kind === 'directory') {
+          childDirs.push(entryName);
+          const lowerName = entryName.toLowerCase();
+          if (current.depth < maxDepth && !IGNORED_SCAN_DIRECTORY_NAMES.has(lowerName)) {
+            childHandles.push({ name: entryName, handle: entry });
+          }
+        } else if (entry.kind === 'file') {
+          fileCount += 1;
+          if (sampleExtensions.length < maxSampleFilesPerDir) {
+            const ext = extractFileExtension(entryName);
+            if (ext) sampleExtensions.push(ext);
+          }
+          // Generous safety cap against pathological directories while still scanning
+          // all normal ROM collections completely so child subfolders are never missed
+          if (fileCount >= 25000) {
+            break;
+          }
+        }
+      }
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      // Skip unreadable subdirectories cleanly while continuing scan
+    }
+
+    nodes.push({
+      relativePath: current.relativePath,
+      name: current.name,
+      depth: current.depth,
+      childDirs,
+      sampleExtensions,
+      fileCount,
+    });
+
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (onProgress && (nodes.length === 1 || now - lastProgressAt >= 80)) {
+      lastProgressAt = now;
+      onProgress({
+        directoriesScanned: nodes.length,
+        currentPath: current.relativePath || current.name,
+      });
+    }
+
+    if (current.depth < maxDepth) {
+      for (const child of childHandles) {
+        if (nodes.length + queue.length >= maxDirectories) break;
+        const childRelPath = current.relativePath
+          ? `${current.relativePath}/${child.name}`
+          : child.name;
+        queue.push({
+          handle: child.handle,
+          relativePath: childRelPath,
+          name: child.name,
+          depth: current.depth + 1,
+        });
+      }
+    }
+  }
+
+  onProgress?.({
+    directoriesScanned: nodes.length,
+    currentPath: '',
+  });
+
+  return nodes;
 }
 
 export function registerWrittenEntryInScan(
