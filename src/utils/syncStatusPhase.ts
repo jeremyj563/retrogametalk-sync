@@ -506,3 +506,84 @@ export function resolveActiveSyncTargetCover(params: {
     coverUrl,
   };
 }
+
+export type HeroCoverMotionTier = 'off' | 'low' | 'medium' | 'high' | 'ultra';
+
+export interface HeroCoverFrameDimensions {
+  heightPx: number;
+  placeholderWidthPx: number;
+  minWidthPx: number;
+  maxWidthPx: number;
+}
+
+export function getHeroCoverFrameDimensions(params: {
+  compact: boolean;
+  isDesktop: boolean;
+}): HeroCoverFrameDimensions {
+  const { compact, isDesktop } = params;
+  if (compact) {
+    return {
+      heightPx: isDesktop ? 70 : 62,
+      placeholderWidthPx: isDesktop ? 56 : 50,
+      minWidthPx: 50,
+      maxWidthPx: isDesktop ? 144 : 124,
+    };
+  }
+  return {
+    heightPx: isDesktop ? 90 : 80,
+    placeholderWidthPx: isDesktop ? 72 : 64,
+    minWidthPx: 50,
+    maxWidthPx: isDesktop ? 144 : 124,
+  };
+}
+
+export function computeHeroCoverFrameWidthPx(params: {
+  naturalWidth: number | null | undefined;
+  naturalHeight: number | null | undefined;
+  compact: boolean;
+  isDesktop: boolean;
+}): number {
+  const { naturalWidth, naturalHeight, compact, isDesktop } = params;
+  const dims = getHeroCoverFrameDimensions({ compact, isDesktop });
+  if (
+    typeof naturalWidth !== 'number' ||
+    typeof naturalHeight !== 'number' ||
+    !Number.isFinite(naturalWidth) ||
+    !Number.isFinite(naturalHeight) ||
+    naturalWidth <= 0 ||
+    naturalHeight <= 0
+  ) {
+    return dims.placeholderWidthPx;
+  }
+  const scaled = Math.round((naturalWidth / naturalHeight) * dims.heightPx);
+  return Math.max(dims.minWidthPx, Math.min(dims.maxWidthPx, scaled));
+}
+
+export function getHeroSwapDurationMs(uiMotion: HeroCoverMotionTier): number {
+  switch (uiMotion) {
+    case 'off':
+      return 0;
+    case 'low':
+      return 200;
+    case 'medium':
+      return 240;
+    case 'high':
+      return 260;
+    case 'ultra':
+      return 300;
+  }
+}
+
+export function deriveSyncReleaseIdentityKey(
+  target: ActiveSyncTargetCover | null,
+): string | null {
+  if (!target) return null;
+  if (target.itemId !== null) {
+    return `item:${target.itemId}`;
+  }
+  const normalizedTitle = target.title.trim().toLowerCase();
+  if (!normalizedTitle) return null;
+  const normalizedSystem = (target.systemName || '').trim().toLowerCase();
+  return `title:${normalizedSystem}:${normalizedTitle}`;
+}
+

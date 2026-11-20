@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ActiveSyncItemSummary, ActiveTransferState, SyncRunRecord } from '../src/types.ts';
 import {
+  computeHeroCoverFrameWidthPx,
+  deriveSyncReleaseIdentityKey,
+  getHeroSwapDurationMs,
   parseSyncStatusHeader,
   resolveActiveSyncTargetCover,
 } from '../src/utils/syncStatusPhase.ts';
@@ -380,4 +383,136 @@ test('resolves active sync cover thumbnail cleanly across warm-up, download, han
     coverUrl: null,
   });
 });
+
+test('computes bounded adaptive Hero Showcase cover frame widths across portrait, square, landscape, compact, and fallback inputs', () => {
+  // Missing or invalid natural dimensions fall back cleanly to steady 3:4 CRT placeholder width
+  assert.equal(
+    computeHeroCoverFrameWidthPx({
+      naturalWidth: null,
+      naturalHeight: null,
+      compact: false,
+      isDesktop: true,
+    }),
+    72,
+  );
+  assert.equal(
+    computeHeroCoverFrameWidthPx({
+      naturalWidth: 0,
+      naturalHeight: 400,
+      compact: false,
+      isDesktop: false,
+    }),
+    64,
+  );
+  assert.equal(
+    computeHeroCoverFrameWidthPx({
+      naturalWidth: undefined,
+      naturalHeight: undefined,
+      compact: true,
+      isDesktop: true,
+    }),
+    56,
+  );
+
+  // Desktop standard height (90px): portrait PS2/GBA (~0.71), square DS (1:1), landscape SNES (~1.42)
+  assert.equal(
+    computeHeroCoverFrameWidthPx({
+      naturalWidth: 355,
+      naturalHeight: 500,
+      compact: false,
+      isDesktop: true,
+    }),
+    64,
+  );
+  assert.equal(
+    computeHeroCoverFrameWidthPx({
+      naturalWidth: 500,
+      naturalHeight: 500,
+      compact: false,
+      isDesktop: true,
+    }),
+    90,
+  );
+  assert.equal(
+    computeHeroCoverFrameWidthPx({
+      naturalWidth: 710,
+      naturalHeight: 500,
+      compact: false,
+      isDesktop: true,
+    }),
+    128,
+  );
+
+  // Extreme ultra-wide and ultra-tall scans stay safely clamped within showcase bounds
+  assert.equal(
+    computeHeroCoverFrameWidthPx({
+      naturalWidth: 2000,
+      naturalHeight: 400,
+      compact: false,
+      isDesktop: true,
+    }),
+    144,
+  );
+  assert.equal(
+    computeHeroCoverFrameWidthPx({
+      naturalWidth: 2000,
+      naturalHeight: 400,
+      compact: false,
+      isDesktop: false,
+    }),
+    124,
+  );
+  assert.equal(
+    computeHeroCoverFrameWidthPx({
+      naturalWidth: 100,
+      naturalHeight: 1000,
+      compact: true,
+      isDesktop: true,
+    }),
+    50,
+  );
+});
+
+test('maps Living UI Motion tiers to progressive Hero Showcase swap durations and derives stable release identity keys', () => {
+  assert.equal(getHeroSwapDurationMs('off'), 0);
+  assert.equal(getHeroSwapDurationMs('low'), 200);
+  assert.equal(getHeroSwapDurationMs('medium'), 240);
+  assert.equal(getHeroSwapDurationMs('high'), 260);
+  assert.equal(getHeroSwapDurationMs('ultra'), 300);
+
+  assert.equal(deriveSyncReleaseIdentityKey(null), null);
+  assert.equal(
+    deriveSyncReleaseIdentityKey({
+      itemId: 404,
+      title: 'Chrono Trigger',
+      systemName: 'snes-roms',
+      hasCoverHint: true,
+      coverUrl: '/api/items/404/asset?kind=cover&lazy=1&cv=1',
+    }),
+    'item:404',
+  );
+  // Same itemId produces identical identity key even if display title formatting changes during handoff
+  assert.equal(
+    deriveSyncReleaseIdentityKey({
+      itemId: 404,
+      title: 'Chrono Trigger (USA)',
+      systemName: 'snes-roms',
+      hasCoverHint: true,
+      coverUrl: '/api/items/404/asset?kind=cover&lazy=1&cv=1',
+    }),
+    'item:404',
+  );
+  // Unindexed Dry Run fallback normalizes system + title cleanly
+  assert.equal(
+    deriveSyncReleaseIdentityKey({
+      itemId: null,
+      title: '  Unindexed Homebrew  ',
+      systemName: 'NES-ROMS',
+      hasCoverHint: false,
+      coverUrl: null,
+    }),
+    'title:nes-roms:unindexed homebrew',
+  );
+});
+
 
