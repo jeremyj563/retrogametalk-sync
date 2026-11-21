@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.27.1] - 2026-11-21
+
+- Redesigned the left sidebar **Storage Device** section to blend seamlessly with **Service Telemetry**, **Mirrored Systems**, and **CRT Display**:
+  - Replaced the floating bordered drive-bay card, slot groove, nested LCD box, and stacked rectangular buttons with a flush hairline-divided section matching the sidebar's native rail typography and row rhythm.
+  - Added clean `Volume` and clickable `Layout` rows (preserving the detected console count without truncation) plus a compact single-line `Preview` / `Switch · Eject` action strip, and a quiet `Mount Device...` row when unmounted.
+
 ## [1.27.0] - 2026-11-21
 
 - Added **Universal Live Mid-Run Reload** for all sync-affecting settings across **Sync Rules** and **Request Pacing & Rate Protection**:
