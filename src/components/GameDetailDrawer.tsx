@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -15,9 +16,11 @@ import {
   Image as ImageIcon,
   Maximize2,
   Minimize2,
+  MoreHorizontal,
   RefreshCw,
   RotateCcw,
   SkipForward,
+  SlidersHorizontal,
   Trash2,
   X,
   XCircle,
@@ -28,6 +31,7 @@ import type {
   ActiveTransferState,
   ArchiveBrowseListing,
   ArchiveInspectResult,
+  PlayableExportTarget,
   RepositoryItemRecord,
 } from '../types';
 import { ArchiveExplorer } from './ArchiveExplorer';
@@ -41,6 +45,14 @@ import {
   type DrawerPhase,
   type DrawerSwapDirection,
 } from '../utils/drawerMotion';
+import {
+  buildPreparedRomDownloadUrl,
+  resolveGameDetailFooterPlan,
+  resolveRomDownloadOutcome,
+  shouldShowPerFileDownloadButton,
+  triggerBrowserFileDownload,
+  type RomDownloadOutcome,
+} from '../utils/gameDetailActions';
 import { reportAchievementEvent } from '../utils/achievementsClient';
 import { readJsonSafely } from '../utils/http';
 import { resolveFileTransferProgress, resolveItemTransferProgress } from '../utils/transferProgress';
@@ -64,12 +76,15 @@ interface GameDetailDrawerProps {
   activeTransfer?: ActiveTransferState | null;
   canSync: boolean;
   retryingItem?: boolean;
+  mountedDeviceName?: string | null;
+  isInstallingToDevice?: boolean;
   navigation?: GameDetailNavigation | null;
   onClose: () => void;
   onItemUpdated: (updated: RepositoryItemRecord) => void;
   onRetryItem: (id: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onQueueDownload?: (ids: number[]) => Promise<unknown>;
   onDeleteItem: (id: number) => Promise<void>;
+  onExpressInstallToDevice?: (id: number) => void;
   onExportToSdCard?: (id: number) => void;
 }
 
@@ -244,12 +259,15 @@ export function GameDetailDrawer({
   activeTransfer = null,
   canSync,
   retryingItem = false,
+  mountedDeviceName = null,
+  isInstallingToDevice = false,
   navigation: activeNavigation = null,
   onClose,
   onItemUpdated,
   onRetryItem,
   onQueueDownload,
   onDeleteItem,
+  onExpressInstallToDevice,
   onExportToSdCard,
 }: GameDetailDrawerProps) {
   const [renderedItem, setRenderedItem] = useState<RepositoryItemRecord | null>(activeItem);
@@ -267,6 +285,7 @@ export function GameDetailDrawer({
   const [queueingDownload, setQueueingDownload] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [coverFailed, setCoverFailed] = useState(false);
   const [failedScreenshots, setFailedScreenshots] = useState<Set<number>>(new Set());
   const [loadedScreenshots, setLoadedScreenshots] = useState<Set<number>>(new Set());
@@ -287,9 +306,11 @@ export function GameDetailDrawer({
   const [lightboxLoading, setLightboxLoading] = useState(false);
   const [lightboxDimensions, setLightboxDimensions] = useState<{ width: number; height: number } | null>(null);
   const [inspectingFileId, setInspectingFileId] = useState<number | null>(null);
-  const [inspection, setInspection] = useState<ArchiveInspectResult | null>(null);
+  const [romOutcomePanel, setRomOutcomePanel] = useState<
+    Extract<RomDownloadOutcome, { kind: 'variant_picker' | 'patch_only_fallback' }> | null
+  >(null);
+  const [downloadStartedKey, setDownloadStartedKey] = useState<string | null>(null);
   const [inspectError, setInspectError] = useState<string | null>(null);
-  const [preparedNames, setPreparedNames] = useState<Record<string, string>>({});
   const [browsingFileId, setBrowsingFileId] = useState<number | null>(null);
   const [archiveBrowse, setArchiveBrowse] = useState<{
     fileId: number;
@@ -301,9 +322,12 @@ export function GameDetailDrawer({
 
   const autoUpgradedIdsRef = useRef<Set<number>>(new Set());
   const autoHydratedIdsRef = useRef<Set<number>>(new Set());
+  const inspectionCacheRef = useRef<Map<number, ArchiveInspectResult>>(new Map());
   const bodyScrollRef = useRef<HTMLDivElement | null>(null);
   const archivePanelRef = useRef<HTMLDivElement | null>(null);
+  const moreMenuContainerRef = useRef<HTMLDivElement | null>(null);
   const lightboxImgRef = useRef<HTMLImageElement | null>(null);
+  const downloadFeedbackTimerRef = useRef<number | null>(null);
   const pendingSwapDirRef = useRef<DrawerSwapDirection>('none');
   const prevRenderedIdRef = useRef<number | null>(activeItem?.id ?? null);
   const prevNavIndexRef = useRef<number | null>(activeNavigation?.currentIndex ?? null);
@@ -370,9 +394,25 @@ export function GameDetailDrawer({
       clearCloseTimer();
       clearOpenRafs();
       clearLightboxTimers();
+      if (downloadFeedbackTimerRef.current !== null) {
+        window.clearTimeout(downloadFeedbackTimerRef.current);
+        downloadFeedbackTimerRef.current = null;
+      }
     },
     [clearCloseTimer, clearOpenRafs, clearLightboxTimers],
   );
+
+  useEffect(() => {
+    if (!moreMenuOpen) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      const container = moreMenuContainerRef.current;
+      if (container && e.target instanceof Node && !container.contains(e.target)) {
+        setMoreMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [moreMenuOpen]);
 
   useEffect(() => {
     if (!activeItem?.id) return;
@@ -452,9 +492,12 @@ export function GameDetailDrawer({
         setRenderedNavigation(null);
         setSwapDir('none');
         setConfirmDelete(false);
+        setMoreMenuOpen(false);
         setMetaError(null);
         setInspectError(null);
-        setInspection(null);
+        setRomOutcomePanel(null);
+        setDownloadStartedKey(null);
+        inspectionCacheRef.current.clear();
         prevRenderedIdRef.current = null;
         prevNavIndexRef.current = null;
       }, closeDurationMs);
@@ -525,6 +568,7 @@ export function GameDetailDrawer({
     if (!activeItem) return;
     setMetaError(null);
     setConfirmDelete(false);
+    setMoreMenuOpen(false);
     setCoverFailed(false);
     setFailedScreenshots(new Set());
     setLoadedScreenshots(new Set());
@@ -533,9 +577,14 @@ export function GameDetailDrawer({
     setLightboxLoading(false);
     setUpgradingAssets(false);
     setInspectingFileId(null);
-    setInspection(null);
+    setRomOutcomePanel(null);
+    setDownloadStartedKey(null);
     setInspectError(null);
-    setPreparedNames({});
+    inspectionCacheRef.current.clear();
+    if (downloadFeedbackTimerRef.current !== null) {
+      window.clearTimeout(downloadFeedbackTimerRef.current);
+      downloadFeedbackTimerRef.current = null;
+    }
     setBrowsingFileId(null);
     setArchiveBrowse(null);
     setArchiveBrowseSubpath('');
@@ -812,6 +861,12 @@ export function GameDetailDrawer({
       if (e.key === 'Escape') {
         if (lightbox) {
           setLightbox(null);
+        } else if (moreMenuOpen) {
+          setMoreMenuOpen(false);
+        } else if (confirmDelete) {
+          setConfirmDelete(false);
+        } else if (romOutcomePanel) {
+          setRomOutcomePanel(null);
         } else {
           onClose();
         }
@@ -851,7 +906,18 @@ export function GameDetailDrawer({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeItem, lightbox, activeNavigation, onClose, handlePrevNav, handleNextNav, stepLightboxSlide]);
+  }, [
+    activeItem,
+    lightbox,
+    moreMenuOpen,
+    confirmDelete,
+    romOutcomePanel,
+    activeNavigation,
+    onClose,
+    handlePrevNav,
+    handleNextNav,
+    stepLightboxSlide,
+  ]);
 
   const infoRows = useMemo(() => {
     if (!item) return [];
@@ -1036,37 +1102,69 @@ export function GameDetailDrawer({
     }
   };
 
-  const handleInspectPreparedRom = async (fileId: number) => {
-    if (!activeItem) return;
-    setInspectingFileId(fileId);
-    setInspectError(null);
-    setArchiveBrowse(null);
-    setArchiveBrowseError(null);
-    try {
-      const res = await fetch(`/api/items/${item.id}/inspect?fileId=${encodeURIComponent(String(fileId))}`);
-      const parsed = await readJsonSafely<{ inspection?: ArchiveInspectResult; error?: string }>(res);
-      if (!parsed.ok || !parsed.data?.inspection) {
-        setInspectError(parsed.errorMessage || `Archive inspection failed (HTTP ${res.status})`);
-        setInspection(null);
-        return;
-      }
-      const insp = parsed.data.inspection;
-      const nextNames: Record<string, string> = {};
-      for (const target of insp.playableTargets) {
-        nextNames[target.id] = target.kind === 'disc_set' ? target.suggestedArchiveName : target.suggestedFilename;
-      }
-      setPreparedNames(nextNames);
-      setInspection(insp);
-    } catch (err) {
-      setInspectError(err instanceof Error ? err.message : String(err));
-      setInspection(null);
-    } finally {
-      setInspectingFileId(null);
+  const flashDownloadStarted = (key: string) => {
+    setDownloadStartedKey(key);
+    if (downloadFeedbackTimerRef.current !== null) {
+      window.clearTimeout(downloadFeedbackTimerRef.current);
     }
+    downloadFeedbackTimerRef.current = window.setTimeout(() => {
+      downloadFeedbackTimerRef.current = null;
+      setDownloadStartedKey((cur) => (cur === key ? null : cur));
+    }, 2200);
+  };
+
+  const handleDownloadRom = async (fileId: number, feedbackKey: string) => {
+    if (!activeItem) return;
+    setMoreMenuOpen(false);
+    setInspectError(null);
+
+    let insp = inspectionCacheRef.current.get(fileId) ?? null;
+    if (!insp) {
+      setInspectingFileId(fileId);
+      try {
+        const res = await fetch(
+          `/api/items/${item.id}/inspect?fileId=${encodeURIComponent(String(fileId))}`,
+        );
+        const parsed = await readJsonSafely<{ inspection?: ArchiveInspectResult; error?: string }>(
+          res,
+        );
+        if (!parsed.ok || !parsed.data?.inspection) {
+          setInspectError(parsed.errorMessage || `Archive inspection failed (HTTP ${res.status})`);
+          setRomOutcomePanel(null);
+          return;
+        }
+        insp = parsed.data.inspection;
+        inspectionCacheRef.current.set(fileId, insp);
+      } catch (err) {
+        setInspectError(err instanceof Error ? err.message : String(err));
+        setRomOutcomePanel(null);
+        return;
+      } finally {
+        setInspectingFileId(null);
+      }
+    }
+
+    const outcome = resolveRomDownloadOutcome(item.id, insp);
+    if (outcome.kind === 'instant_download') {
+      setRomOutcomePanel(null);
+      triggerBrowserFileDownload(outcome.url, outcome.filename);
+      flashDownloadStarted(feedbackKey);
+      return;
+    }
+
+    setRomOutcomePanel(outcome);
+  };
+
+  const handleDownloadVariant = (fileId: number, target: PlayableExportTarget) => {
+    if (!activeItem) return;
+    const { url, filename } = buildPreparedRomDownloadUrl(item.id, fileId, target);
+    triggerBrowserFileDownload(url, filename);
+    flashDownloadStarted(`target-${target.id}`);
   };
 
   const handleBrowseArchive = async (fileId: number) => {
     if (!activeItem) return;
+    setMoreMenuOpen(false);
     if (archiveBrowse?.fileId === fileId) {
       setArchiveBrowse(null);
       setArchiveBrowseError(null);
@@ -1075,7 +1173,7 @@ export function GameDetailDrawer({
     }
     setBrowsingFileId(fileId);
     setArchiveBrowseError(null);
-    setInspection(null);
+    setRomOutcomePanel(null);
     setInspectError(null);
     try {
       const res = await fetch(`/api/items/${item.id}/archive?fileId=${encodeURIComponent(String(fileId))}`);
@@ -1548,7 +1646,7 @@ export function GameDetailDrawer({
                 </div>
                 <div className="px-4 py-2 grid grid-cols-12 gap-3 items-baseline">
                   <dt className="col-span-4 text-crt-muted font-medium">Storage Device</dt>
-                  <dd className="col-span-8 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+                  <dd className="col-span-8 text-[11px] font-mono">
                     {item.installedAt ? (
                       <span className="inline-flex items-center gap-1.5 text-crt-phosphor tabular-nums">
                         <HardDrive className="h-3 w-3 shrink-0" />
@@ -1562,18 +1660,6 @@ export function GameDetailDrawer({
                     ) : (
                       <span className="text-crt-muted">Not installed</span>
                     )}
-                    <button
-                      type="button"
-                      disabled={togglingInstalled}
-                      onClick={() => void handleToggleInstalled(!item.installedAt)}
-                      className="text-[11px] font-mono text-crt-muted hover:text-crt-phosphor underline underline-offset-2 transition-colors disabled:opacity-50 cursor-pointer shrink-0"
-                    >
-                      {togglingInstalled
-                        ? 'Updating...'
-                        : item.installedAt
-                          ? 'Clear flag'
-                          : 'Mark installed'}
-                    </button>
                   </dd>
                 </div>
               </dl>
@@ -1584,6 +1670,10 @@ export function GameDetailDrawer({
           {(() => {
             const downloadHints = item.metadata?.downloadHints ?? [];
             const displayFilesCount = item.files.length > 0 ? item.filesCount : downloadHints.length;
+            const downloadedFilesCount = item.files.filter(
+              (f) => f.status === 'downloaded' || f.status === 'skipped',
+            ).length;
+            const showRowDownloadButton = shouldShowPerFileDownloadButton(downloadedFilesCount);
             return (
           <section className="crt-panel-living space-y-3">
             <div className="flex items-center justify-between">
@@ -1602,7 +1692,7 @@ export function GameDetailDrawer({
                   {downloadHints.map((hint, hintIdx) => (
                     <div
                       key={`${hint.filename}-${hintIdx}`}
-                      className="px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                      className="px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"
                     >
                       <div className="min-w-0 flex-1 space-y-1">
                         <div className="text-xs font-medium text-crt-text break-words">
@@ -1617,20 +1707,6 @@ export function GameDetailDrawer({
                           </span>
                         </div>
                       </div>
-                      {onQueueDownload && (
-                        <div className="flex items-center gap-2 shrink-0">
-                          <button
-                            type="button"
-                            disabled={queueingDownload || !canSync}
-                            title={!canSync ? 'Verify login in System Settings before downloading' : 'Queue this release for download'}
-                            onClick={() => void handleQueueReleaseDownload()}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0 cursor-pointer"
-                          >
-                            <Download className="h-3.5 w-3.5" />
-                            {queueingDownload ? 'Queueing...' : 'Download'}
-                          </button>
-                        </div>
-                      )}
                     </div>
                   ))}
                 </div>
@@ -1648,7 +1724,6 @@ export function GameDetailDrawer({
                         <div className={`crt-skeleton-bar h-3.5 ${rowIdx === 0 ? 'w-64' : 'w-48'} max-w-full`} />
                         <div className="crt-skeleton-bar h-2.5 w-36" />
                       </div>
-                      <div className="crt-skeleton-bar h-7 w-24 shrink-0" />
                     </div>
                   ))}
                 </div>
@@ -1662,6 +1737,8 @@ export function GameDetailDrawer({
                 {item.files.map((file) => {
                   const canDownload = file.status === 'downloaded' || file.status === 'skipped';
                   const isRetryingThis = retryingKey === `file-${file.id}`;
+                  const rowDownloadKey = `file-${file.id}`;
+                  const isRowDownloadStarted = downloadStartedKey === rowDownloadKey;
                   const showSecondaryFilename =
                     file.displayLabel && file.displayLabel.trim() !== file.filename.trim();
                   const fileTransfer = resolveFileTransferProgress(file, item.id, activeTransfer);
@@ -1765,111 +1842,58 @@ export function GameDetailDrawer({
                         )}
                       </div>
 
-                      <div className="flex flex-wrap items-center gap-2 shrink-0">
-                        {canDownload ? (
-                          <>
+                      {(canDownload && showRowDownloadButton) ||
+                      file.status === 'failed' ||
+                      fileTransfer.active ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          {canDownload && showRowDownloadButton ? (
                             <button
                               type="button"
                               disabled={inspectingFileId === file.id}
-                              onClick={() => void handleInspectPreparedRom(file.id)}
-                              title="Inspect archive, strip readme/doc clutter, and download pre-renamed ROM"
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+                              onClick={() => void handleDownloadRom(file.id, rowDownloadKey)}
+                              title="Download extracted, cleanly renamed ROM from this archive"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-border hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
                             >
-                              <Download className="h-3.5 w-3.5" />
-                              {inspectingFileId === file.id ? 'Inspecting...' : 'Prepared ROM'}
+                              {inspectingFileId === file.id ? (
+                                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                              ) : isRowDownloadStarted ? (
+                                <Check className="h-3.5 w-3.5 text-crt-phosphor" />
+                              ) : (
+                                <Download className="h-3.5 w-3.5" />
+                              )}
+                              {inspectingFileId === file.id
+                                ? 'Preparing...'
+                                : isRowDownloadStarted
+                                  ? 'Started'
+                                  : 'Download ROM'}
                             </button>
-                            {isBrowsableArchiveName(file.filename) && (
-                              <button
-                                type="button"
-                                disabled={browsingFileId === file.id}
-                                onClick={() => void handleBrowseArchive(file.id)}
-                                title="Navigate files and folders inside this archive without unpacking to disk"
-                                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer ${
-                                  archiveBrowse?.fileId === file.id
-                                    ? 'border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor'
-                                    : 'border-crt-border hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor'
-                                }`}
-                              >
-                                <FolderOpen className="h-3.5 w-3.5" />
-                                {browsingFileId === file.id
-                                  ? 'Opening...'
-                                  : archiveBrowse?.fileId === file.id
-                                    ? 'Hide Contents'
-                                    : 'Inspect Archive'}
-                              </button>
-                            )}
-                            <a
-                              href={`/api/items/${item.id}/download?fileId=${file.id}`}
-                              download={file.filename}
-                              title="Download exact raw mirrored archive"
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border border-crt-border hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap"
-                            >
-                              Raw
-                            </a>
-                          </>
-                        ) : file.status === 'failed' ? (
-                          <>
-                            <button
-                              type="button"
-                              disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
-                              title={
-                                !canSync
-                                  ? 'Verify login in System Settings before retrying'
-                                  : 'Dry-run: verify fresh download link for this file without downloading'
-                              }
-                              onClick={() => void handleRetry(file.id, true)}
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border border-crt-amber/70 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
-                            >
-                              <FlaskConical className={`h-3.5 w-3.5 ${retryingKey === `file-${file.id}-dry` ? 'animate-spin' : ''}`} />
-                              {retryingKey === `file-${file.id}-dry` ? 'Checking...' : 'Dry Run'}
-                            </button>
+                          ) : file.status === 'failed' ? (
                             <button
                               type="button"
                               disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
                               title={!canSync ? 'Verify login in System Settings before retrying' : undefined}
                               onClick={() => void handleRetry(file.id, false)}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0 cursor-pointer"
                             >
                               <RotateCcw className={`h-3.5 w-3.5 ${isRetryingThis || retryingItem ? 'animate-spin' : ''}`} />
                               {isRetryingThis || retryingItem ? 'Retrying...' : 'Retry'}
                             </button>
-                          </>
-                        ) : fileTransfer.active ? (
-                          <span
-                            className={`font-mono text-xs font-medium tabular-nums px-2 ${
-                              fileTransfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
-                            }`}
-                          >
-                            {fileTransfer.percent !== null
-                              ? `${fileTransfer.percent}%`
-                              : fileTransfer.speedLabel || 'preparing'}
-                          </span>
-                        ) : file.status === 'available' && onQueueDownload ? (
-                          <button
-                            type="button"
-                            disabled={queueingDownload || !canSync}
-                            title={!canSync ? 'Verify login in System Settings before downloading' : 'Queue this release for download'}
-                            onClick={() => void handleQueueReleaseDownload()}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0 cursor-pointer"
-                          >
-                            <Download className="h-3.5 w-3.5" />
-                            {queueingDownload ? 'Queueing...' : 'Download'}
-                          </button>
-                        ) : (
-                          <span className="font-mono text-[11px] text-crt-muted px-2">
-                            {file.status}
-                          </span>
-                        )}
-                      </div>
+                          ) : fileTransfer.active ? (
+                            <span
+                              className={`font-mono text-xs font-medium tabular-nums px-2 ${
+                                fileTransfer.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
+                              }`}
+                            >
+                              {fileTransfer.percent !== null
+                                ? `${fileTransfer.percent}%`
+                                : fileTransfer.speedLabel || 'preparing'}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
                   );
                 })}
-              </div>
-            )}
-
-            {inspectError && (
-              <div className="border border-crt-crimson/50 bg-crt-crimson/10 rounded-md px-4 py-3 text-xs font-mono text-crt-crimson">
-                {inspectError}
               </div>
             )}
 
@@ -1903,100 +1927,6 @@ export function GameDetailDrawer({
                 />
               )}
             </div>
-
-            {inspection && (
-              <div className="border border-crt-phosphor/50 bg-crt-bg rounded-md p-4 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-crt-border pb-2.5">
-                  <div className="space-y-0.5 min-w-0">
-                    <div className="text-xs font-semibold text-crt-phosphor">
-                      Prepared ROM Export · {inspection.archiveFormat.toUpperCase()}
-                    </div>
-                    <div className="font-mono text-[11px] text-crt-muted truncate">
-                      {inspection.notes[0] || `Source: ${inspection.sourceFilename}`}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setInspection(null)}
-                    aria-label="Close prepared ROM panel"
-                    className="p-1 text-crt-muted hover:text-crt-text rounded"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-
-                {inspection.playableTargets.length === 0 ? (
-                  <div className="text-xs font-mono text-crt-amber space-y-2">
-                    <p>
-                      {inspection.patchOnly
-                        ? 'This archive contains patch files only (no standalone playable ROM payload).'
-                        : 'No playable ROM files were detected inside this archive.'}
-                    </p>
-                    <a
-                      href={`/api/items/${item.id}/download?fileId=${inspection.fileId}`}
-                      download={inspection.sourceFilename}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border text-crt-text hover:border-crt-phosphor rounded transition-colors"
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                      Download Raw Archive
-                    </a>
-                  </div>
-                ) : (
-                  <div className="space-y-2.5">
-                    {inspection.playableTargets.length > 1 && (
-                      <p className="text-xs font-mono text-crt-amber">
-                        {inspection.playableTargets.length} playable ROM variants found inside archive — download the variant you need:
-                      </p>
-                    )}
-
-                    {inspection.playableTargets.map((target) => {
-                      const editedName = preparedNames[target.id] ?? (target.kind === 'disc_set' ? target.suggestedArchiveName : target.suggestedFilename);
-                      const dlHref = `/api/items/${item.id}/download-rom?fileId=${inspection.fileId}&targetId=${encodeURIComponent(target.id)}&name=${encodeURIComponent(editedName)}`;
-                      return (
-                        <div
-                          key={target.id}
-                          className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1"
-                        >
-                          <div className="min-w-0 flex-1 space-y-1">
-                            <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-crt-muted">
-                              <span className="text-crt-text truncate">{target.displayName}</span>
-                              <span>·</span>
-                              <span className="tabular-nums">{formatBytes(target.sizeBytes)}</span>
-                              {target.detectedVersion && (
-                                <>
-                                  <span>·</span>
-                                  <span className="text-crt-phosphor">{target.detectedVersion}</span>
-                                </>
-                              )}
-                            </div>
-                            <input
-                              type="text"
-                              value={editedName}
-                              aria-label={`Prepared output filename for ${target.displayName}`}
-                              onChange={(e) =>
-                                setPreparedNames((prev) => ({ ...prev, [target.id]: e.target.value }))
-                              }
-                              className="w-full px-2.5 py-1.5 text-xs font-mono bg-crt-surface border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
-                            />
-                          </div>
-
-                          <div className="flex items-center gap-2 shrink-0 sm:pt-4">
-                            <a
-                              href={dlHref}
-                              download={editedName}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap"
-                            >
-                              <Download className="h-3.5 w-3.5" />
-                              {target.kind === 'disc_set' ? 'Download Clean Zip' : 'Download ROM'}
-                            </a>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
           </section>
             );
           })()}
@@ -2105,7 +2035,7 @@ export function GameDetailDrawer({
                 <p className="text-xs text-crt-muted">
                   {item.metadata?.detailHydrated
                     ? 'No release description listed on RetroGameTalk.'
-                    : 'No description available locally yet. Use "Fetch Metadata & Artwork" to mirror release notes from RetroGameTalk.'}
+                    : 'No description available locally yet. Use More → Fetch Metadata to mirror release notes from RetroGameTalk.'}
                 </p>
               )}
             </div>
@@ -2113,160 +2043,514 @@ export function GameDetailDrawer({
           </div>
         </div>
 
-        {/* Sticky Footer */}
-        <footer className="px-6 py-3.5 border-t border-crt-border bg-crt-bg flex flex-wrap items-center justify-between gap-3 shrink-0">
-          <div className="flex flex-wrap items-center gap-2.5">
-            {primaryDownloadFile ? (
-              <>
+        {/* Docked Inline ROM Variant Picker / Patch-Only Notice / Error Strip */}
+        {(inspectError || romOutcomePanel) && (
+          <div className="px-6 py-3 border-t border-crt-border bg-crt-surface/95 shrink-0 space-y-2.5">
+            {inspectError && (
+              <div className="flex items-start justify-between gap-3 text-xs font-mono text-crt-crimson">
+                <div className="flex items-center gap-2 min-w-0">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                  <span className="break-words">{inspectError}</span>
+                </div>
                 <button
                   type="button"
-                  disabled={inspectingFileId === primaryDownloadFile.id}
-                  onClick={() => void handleInspectPreparedRom(primaryDownloadFile.id)}
-                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+                  onClick={() => setInspectError(null)}
+                  aria-label="Dismiss error"
+                  className="p-0.5 text-crt-muted hover:text-crt-text rounded cursor-pointer shrink-0"
                 >
-                  <Download className="h-3.5 w-3.5" />
-                  {inspectingFileId === primaryDownloadFile.id ? 'Inspecting...' : 'Prepared ROM'}
+                  <X className="h-3.5 w-3.5" />
                 </button>
-                {isBrowsableArchiveName(primaryDownloadFile.filename) && (
+              </div>
+            )}
+
+            {romOutcomePanel?.kind === 'variant_picker' && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-baseline gap-2 min-w-0">
+                    <span className="text-xs font-semibold text-crt-text">
+                      Choose ROM Variant
+                    </span>
+                    <span className="font-mono text-[11px] text-crt-muted tabular-nums">
+                      {romOutcomePanel.targets.length} playable · {romOutcomePanel.archiveFormat.toUpperCase()}
+                    </span>
+                  </div>
                   <button
                     type="button"
-                    disabled={browsingFileId === primaryDownloadFile.id}
-                    onClick={() => void handleBrowseArchive(primaryDownloadFile.id)}
-                    className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer ${
-                      archiveBrowse?.fileId === primaryDownloadFile.id
-                        ? 'border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor'
-                        : 'border-crt-border text-crt-text hover:border-crt-phosphor hover:text-crt-phosphor'
-                    }`}
+                    onClick={() => setRomOutcomePanel(null)}
+                    aria-label="Close variant picker"
+                    className="p-1 text-crt-muted hover:text-crt-text rounded cursor-pointer shrink-0"
                   >
-                    <FolderOpen className="h-3.5 w-3.5" />
-                    {browsingFileId === primaryDownloadFile.id ? 'Opening...' : 'Inspect Archive'}
+                    <X className="h-3.5 w-3.5" />
                   </button>
-                )}
-                {onExportToSdCard && (
+                </div>
+
+                <div className="max-h-48 overflow-y-auto border border-crt-border bg-crt-bg rounded divide-y divide-crt-border">
+                  {romOutcomePanel.targets.map((target) => {
+                    const outName =
+                      target.kind === 'disc_set'
+                        ? target.suggestedArchiveName
+                        : target.suggestedFilename;
+                    const isStarted = downloadStartedKey === `target-${target.id}`;
+                    return (
+                      <div
+                        key={target.id}
+                        className="px-3 py-2 flex items-center justify-between gap-3 hover:bg-crt-surface/60 transition-colors"
+                      >
+                        <div className="min-w-0 flex-1 space-y-0.5">
+                          <div className="font-mono text-xs text-crt-text truncate" title={outName}>
+                            {outName}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10px] text-crt-muted tabular-nums">
+                            <span>{formatBytes(target.sizeBytes)}</span>
+                            {target.detectedVersion && (
+                              <>
+                                <span>·</span>
+                                <span className="text-crt-phosphor">{target.detectedVersion}</span>
+                              </>
+                            )}
+                            {target.kind === 'disc_set' && (
+                              <>
+                                <span>·</span>
+                                <span>Clean Zip</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadVariant(romOutcomePanel.fileId, target)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          {isStarted ? (
+                            <Check className="h-3.5 w-3.5" />
+                          ) : (
+                            <Download className="h-3.5 w-3.5" />
+                          )}
+                          {isStarted ? 'Started' : 'Download'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {romOutcomePanel?.kind === 'patch_only_fallback' && (
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="text-xs font-medium text-crt-amber">
+                    {romOutcomePanel.patchOnly
+                      ? 'Patch files only — no standalone ROM found in this archive.'
+                      : 'No playable ROM files were detected inside this archive.'}
+                  </div>
+                  <div className="font-mono text-[11px] text-crt-muted truncate">
+                    {romOutcomePanel.sourceFilename}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <a
+                    href={`/api/items/${item.id}/download?fileId=${romOutcomePanel.fileId}`}
+                    download={romOutcomePanel.sourceFilename}
+                    onClick={() => setRomOutcomePanel(null)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Download Raw Archive
+                  </a>
+                  {isBrowsableArchiveName(romOutcomePanel.sourceFilename) && (
+                    <button
+                      type="button"
+                      disabled={browsingFileId === romOutcomePanel.fileId}
+                      onClick={() => void handleBrowseArchive(romOutcomePanel.fileId)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border border-crt-border hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap cursor-pointer disabled:opacity-50"
+                    >
+                      <FolderOpen className="h-3.5 w-3.5" />
+                      Inspect Archive
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => onExportToSdCard(item.id)}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap"
+                    onClick={() => setRomOutcomePanel(null)}
+                    aria-label="Dismiss notice"
+                    className="p-1 text-crt-muted hover:text-crt-text rounded cursor-pointer"
                   >
-                    <HardDrive className="h-3.5 w-3.5" />
-                    Install to Storage Device
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Unified Sticky Footer */}
+        {(() => {
+          const canInstallToDevice = Boolean(onExpressInstallToDevice || onExportToSdCard);
+          const footerPlan = resolveGameDetailFooterPlan({
+            hasDownloadedFile: Boolean(primaryDownloadFile),
+            canQueueRelease,
+            status: item.status,
+            hasFailedFiles,
+            mountedDeviceName,
+            canInstallToDevice,
+            installedAt: item.installedAt,
+            installedDeviceLabel: item.installedDeviceLabel,
+          });
+          const isPreparingPrimary = Boolean(
+            primaryDownloadFile && inspectingFileId === primaryDownloadFile.id,
+          );
+          const isPrimaryDownloadStarted = downloadStartedKey === 'primary';
+          const canBrowsePrimaryArchive = Boolean(
+            primaryDownloadFile && isBrowsableArchiveName(primaryDownloadFile.filename),
+          );
+          const handlePrimaryMountedInstall = () => {
+            setMoreMenuOpen(false);
+            if (onExpressInstallToDevice) {
+              onExpressInstallToDevice(item.id);
+            } else if (onExportToSdCard) {
+              onExportToSdCard(item.id);
+            }
+          };
+
+          return (
+            <footer className="px-6 py-3.5 border-t border-crt-border bg-crt-bg flex items-center justify-between gap-3 shrink-0">
+              <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+                {footerPlan.primaryAction === 'install_mounted' && primaryDownloadFile && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isInstallingToDevice}
+                      onClick={handlePrimaryMountedInstall}
+                      title={
+                        mountedDeviceName
+                          ? `One-click express install directly to ${mountedDeviceName}`
+                          : 'Install directly to mounted storage device'
+                      }
+                      className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-60 cursor-pointer"
+                    >
+                      {isInstallingToDevice ? (
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
+                      ) : (
+                        <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      {isInstallingToDevice ? 'Installing...' : footerPlan.installButtonLabel}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isPreparingPrimary}
+                      onClick={() => void handleDownloadRom(primaryDownloadFile.id, 'primary')}
+                      title="Download extracted, cleanly renamed ROM file"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+                    >
+                      {isPreparingPrimary ? (
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
+                      ) : isPrimaryDownloadStarted ? (
+                        <Check className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
+                      ) : (
+                        <Download className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      {isPreparingPrimary
+                        ? 'Preparing...'
+                        : isPrimaryDownloadStarted
+                          ? 'Download Started'
+                          : 'Download ROM'}
+                    </button>
+                  </>
+                )}
+
+                {footerPlan.primaryAction === 'download_rom' && primaryDownloadFile && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isPreparingPrimary}
+                      onClick={() => void handleDownloadRom(primaryDownloadFile.id, 'primary')}
+                      title="Download extracted, cleanly renamed ROM file"
+                      className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+                    >
+                      {isPreparingPrimary ? (
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
+                      ) : isPrimaryDownloadStarted ? (
+                        <Check className="h-3.5 w-3.5 shrink-0" />
+                      ) : (
+                        <Download className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      {isPreparingPrimary
+                        ? 'Preparing...'
+                        : isPrimaryDownloadStarted
+                          ? 'Download Started'
+                          : 'Download ROM'}
+                    </button>
+                    {footerPlan.secondaryAction === 'install_unmounted' && onExportToSdCard && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMoreMenuOpen(false);
+                          onExportToSdCard(item.id);
+                        }}
+                        title="Mount a storage device and install this game"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap cursor-pointer"
+                      >
+                        <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                        {footerPlan.installButtonLabel}
+                      </button>
+                    )}
+                  </>
+                )}
+
+                {footerPlan.primaryAction === 'retry_failed' && (
+                  <button
+                    type="button"
+                    disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
+                    title={!canSync ? 'Verify login in System Settings before retrying' : undefined}
+                    onClick={() => void handleRetry(undefined, false)}
+                    className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    <RotateCcw
+                      className={`h-3.5 w-3.5 shrink-0 ${retryingKey === 'release' || retryingItem ? 'animate-spin' : ''}`}
+                    />
+                    {retryingKey === 'release' || retryingItem ? 'Retrying...' : 'Retry Download'}
                   </button>
                 )}
-                <a
-                  href={`/api/items/${item.id}/download?fileId=${primaryDownloadFile.id}`}
-                  download={primaryDownloadFile.filename}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-border-strong text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap"
-                >
-                  <FileArchive className="h-3.5 w-3.5" />
-                  Raw Archive
-                </a>
-              </>
-            ) : canQueueRelease ? (
-              <button
-                type="button"
-                disabled={queueingDownload || !canSync}
-                title={
-                  !canSync
-                    ? 'Verify login in System Settings before downloading'
-                    : 'Queue this release and mirror its files to local storage'
-                }
-                onClick={() => void handleQueueReleaseDownload()}
-                className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-              >
-                <Download className="h-3.5 w-3.5" />
-                {queueingDownload ? 'Queueing...' : 'Download Release'}
-              </button>
-            ) : (
-              <span
-                title={
-                  item.status === 'queued' || item.status === 'downloading'
-                    ? 'Release is currently queued or downloading'
-                    : 'No mirrored ROM archive is currently available on disk'
-                }
-                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-elevated text-crt-muted border border-crt-border rounded opacity-60 cursor-not-allowed whitespace-nowrap"
-              >
-                <FileArchive className="h-3.5 w-3.5" />
-                {item.status === 'queued'
-                  ? 'Queued'
-                  : item.status === 'downloading'
-                    ? 'Downloading...'
-                    : 'ROM Unavailable'}
-              </span>
-            )}
 
-            <button
-              type="button"
-              disabled={fetchingMeta}
-              onClick={() => void handleFetchMetadata()}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-border-strong text-crt-text rounded transition-colors disabled:opacity-50 whitespace-nowrap"
-            >
-              <RefreshCw className={`h-3.5 w-3.5 ${fetchingMeta ? 'animate-spin' : ''}`} />
-              {fetchingMeta ? 'Refreshing...' : item.hasMetadata ? 'Refresh Metadata' : 'Fetch Metadata'}
-            </button>
+                {footerPlan.primaryAction === 'queue_release' && (
+                  <button
+                    type="button"
+                    disabled={queueingDownload || !canSync}
+                    title={
+                      !canSync
+                        ? 'Verify login in System Settings before downloading'
+                        : 'Queue this release and mirror its files to local storage'
+                    }
+                    onClick={() => void handleQueueReleaseDownload()}
+                    className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5 shrink-0" />
+                    {queueingDownload ? 'Queueing...' : 'Download Release'}
+                  </button>
+                )}
 
-            {hasFailedFiles && (
-              <>
-                <button
-                  type="button"
-                  disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
-                  title={
-                    !canSync
-                      ? 'Verify login in System Settings before retrying'
-                      : 'Simulate retry by verifying fresh download link resolution without downloading archives'
-                  }
-                  onClick={() => void handleRetry(undefined, true)}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-amber/70 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
-                >
-                  <FlaskConical className={`h-3.5 w-3.5 ${retryingKey === 'release-dry' ? 'animate-spin' : ''}`} />
-                  {retryingKey === 'release-dry' ? 'Checking...' : 'Dry Run Retry'}
-                </button>
-                <button
-                  type="button"
-                  disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
-                  title={!canSync ? 'Verify login in System Settings before retrying' : undefined}
-                  onClick={() => void handleRetry(undefined, false)}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
-                >
-                  <RotateCcw className={`h-3.5 w-3.5 ${retryingKey === 'release' || retryingItem ? 'animate-spin' : ''}`} />
-                  {retryingKey === 'release' || retryingItem ? 'Retrying...' : 'Retry Failed'}
-                </button>
-              </>
-            )}
-          </div>
+                {footerPlan.primaryAction === 'status_only' && (
+                  <span
+                    title={
+                      item.status === 'queued' || item.status === 'downloading'
+                        ? 'Release is currently queued or downloading'
+                        : 'No mirrored ROM archive is currently available on disk'
+                    }
+                    className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-elevated text-crt-muted border border-crt-border rounded opacity-60 cursor-not-allowed whitespace-nowrap"
+                  >
+                    <FileArchive className="h-3.5 w-3.5 shrink-0" />
+                    {item.status === 'queued'
+                      ? 'Queued'
+                      : item.status === 'downloading'
+                        ? 'Downloading...'
+                        : 'ROM Unavailable'}
+                  </span>
+                )}
+              </div>
 
-          <div className="flex items-center gap-2">
-            {confirmDelete ? (
-              <>
-                <button
-                  type="button"
-                  disabled={deleting}
-                  onClick={() => void handleDelete()}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-crt-crimson text-crt-bg hover:brightness-110 rounded transition-colors disabled:opacity-50"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  {deleting ? 'Deleting...' : 'Confirm Delete'}
-                </button>
-                <button
-                  type="button"
-                  disabled={deleting}
-                  onClick={() => setConfirmDelete(false)}
-                  className="px-3 py-2 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors"
-                >
-                  Cancel
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs border border-crt-border hover:border-crt-crimson text-crt-muted hover:text-crt-crimson rounded transition-colors"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                Delete
-              </button>
-            )}
-          </div>
-        </footer>
+              <div className="flex items-center gap-2 shrink-0">
+                {confirmDelete ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={deleting}
+                      onClick={() => void handleDelete()}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-crt-crimson text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      {deleting ? 'Deleting...' : 'Confirm Delete'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={deleting}
+                      onClick={() => setConfirmDelete(false)}
+                      className="px-3 py-2 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <div ref={moreMenuContainerRef} className="relative">
+                    <button
+                      type="button"
+                      aria-haspopup="menu"
+                      aria-expanded={moreMenuOpen}
+                      aria-label="More release actions"
+                      onClick={() => setMoreMenuOpen((open) => !open)}
+                      className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border rounded transition-colors whitespace-nowrap cursor-pointer ${
+                        moreMenuOpen
+                          ? 'border-crt-phosphor bg-crt-elevated text-crt-phosphor'
+                          : 'border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-border-strong text-crt-muted hover:text-crt-text'
+                      }`}
+                    >
+                      <MoreHorizontal className="h-4 w-4 shrink-0" />
+                      <span>More</span>
+                    </button>
+
+                    {moreMenuOpen && (
+                      <div
+                        role="menu"
+                        aria-label="Release actions"
+                        className="absolute right-0 bottom-full mb-2 w-60 z-30 border border-crt-border-strong bg-crt-surface rounded-md shadow-2xl py-1.5 text-xs"
+                      >
+                        {primaryDownloadFile && (
+                          <div className="py-0.5">
+                            {footerPlan.showReviewDeviceInstallInMore && onExportToSdCard && (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                onClick={() => {
+                                  setMoreMenuOpen(false);
+                                  onExportToSdCard(item.id);
+                                }}
+                                className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-text hover:bg-crt-elevated hover:text-crt-phosphor transition-colors cursor-pointer"
+                              >
+                                <SlidersHorizontal className="h-3.5 w-3.5 text-crt-muted shrink-0" />
+                                <span className="truncate">Review Device Install…</span>
+                              </button>
+                            )}
+                            {canBrowsePrimaryArchive && (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                disabled={browsingFileId === primaryDownloadFile.id}
+                                onClick={() => void handleBrowseArchive(primaryDownloadFile.id)}
+                                className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-text hover:bg-crt-elevated hover:text-crt-phosphor transition-colors disabled:opacity-50 cursor-pointer"
+                              >
+                                <FolderOpen className="h-3.5 w-3.5 text-crt-muted shrink-0" />
+                                <span className="truncate">
+                                  {browsingFileId === primaryDownloadFile.id
+                                    ? 'Opening Archive...'
+                                    : archiveBrowse?.fileId === primaryDownloadFile.id
+                                      ? 'Hide Archive Contents'
+                                      : 'Inspect Archive'}
+                                </span>
+                              </button>
+                            )}
+                            <a
+                              role="menuitem"
+                              href={`/api/items/${item.id}/download?fileId=${primaryDownloadFile.id}`}
+                              download={primaryDownloadFile.filename}
+                              onClick={() => setMoreMenuOpen(false)}
+                              className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-text hover:bg-crt-elevated hover:text-crt-phosphor transition-colors"
+                            >
+                              <FileArchive className="h-3.5 w-3.5 text-crt-muted shrink-0" />
+                              <span className="truncate">Download Raw Archive</span>
+                            </a>
+                          </div>
+                        )}
+
+                        {primaryDownloadFile && <div className="my-1 border-t border-crt-border" />}
+
+                        <div className="py-0.5">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={fetchingMeta}
+                            onClick={() => {
+                              setMoreMenuOpen(false);
+                              void handleFetchMetadata();
+                            }}
+                            className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-text hover:bg-crt-elevated hover:text-crt-phosphor transition-colors disabled:opacity-50 cursor-pointer"
+                          >
+                            <RefreshCw
+                              className={`h-3.5 w-3.5 text-crt-muted shrink-0 ${fetchingMeta ? 'animate-spin' : ''}`}
+                            />
+                            <span className="truncate">
+                              {fetchingMeta
+                                ? 'Refreshing Metadata...'
+                                : item.hasMetadata
+                                  ? 'Refresh Metadata'
+                                  : 'Fetch Metadata'}
+                            </span>
+                          </button>
+
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={togglingInstalled}
+                            onClick={() => {
+                              setMoreMenuOpen(false);
+                              void handleToggleInstalled(!item.installedAt);
+                            }}
+                            className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-text hover:bg-crt-elevated hover:text-crt-phosphor transition-colors disabled:opacity-50 cursor-pointer"
+                          >
+                            <HardDrive className="h-3.5 w-3.5 text-crt-muted shrink-0" />
+                            <span className="truncate">
+                              {togglingInstalled
+                                ? 'Updating Flag...'
+                                : item.installedAt
+                                  ? 'Clear Installed Flag'
+                                  : 'Mark as Installed'}
+                            </span>
+                          </button>
+
+                          {footerPlan.showRetryInMore && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
+                              onClick={() => {
+                                setMoreMenuOpen(false);
+                                void handleRetry(undefined, false);
+                              }}
+                              className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-text hover:bg-crt-elevated hover:text-crt-phosphor transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              <RotateCcw
+                                className={`h-3.5 w-3.5 text-crt-muted shrink-0 ${retryingKey === 'release' || retryingItem ? 'animate-spin' : ''}`}
+                              />
+                              <span className="truncate">
+                                {retryingKey === 'release' || retryingItem
+                                  ? 'Retrying Failed...'
+                                  : 'Retry Failed Files'}
+                              </span>
+                            </button>
+                          )}
+
+                          {hasFailedFiles && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              disabled={retryingKey !== null || retryingItem || activeRun || !canSync}
+                              onClick={() => {
+                                setMoreMenuOpen(false);
+                                void handleRetry(undefined, true);
+                              }}
+                              className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-amber hover:bg-crt-elevated transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              <FlaskConical
+                                className={`h-3.5 w-3.5 shrink-0 ${retryingKey === 'release-dry' ? 'animate-spin' : ''}`}
+                              />
+                              <span className="truncate">
+                                {retryingKey === 'release-dry' ? 'Checking Links...' : 'Dry Run Retry'}
+                              </span>
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="my-1 border-t border-crt-border" />
+
+                        <div className="py-0.5">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMoreMenuOpen(false);
+                              setConfirmDelete(true);
+                            }}
+                            className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-crimson hover:bg-crt-crimson/10 transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="h-3.5 w-3.5 shrink-0" />
+                            <span className="truncate">Delete Release</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </footer>
+          );
+        })()}
         </div>
       </div>
 

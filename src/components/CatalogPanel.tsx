@@ -4066,11 +4066,20 @@ export function CatalogPanel({
         activeTransfer={status.activeTransfer}
         canSync={Boolean(status.auth.hasCompletedLogin)}
         retryingItem={effectiveRetryingId === activeDetailItem?.id}
+        mountedDeviceName={sdRootHandle?.name || null}
+        isInstallingToDevice={Boolean(
+          installer.isBusy &&
+            activeDetailItem &&
+            installer.job?.itemIds.includes(activeDetailItem.id),
+        )}
         navigation={detailNavigation}
         onClose={closeDetailDrawer}
         onItemUpdated={handleItemUpdated}
         onRetryItem={handleRetry}
         onQueueDownload={onQueueDownload ? (ids) => handleQueueIds(ids) : undefined}
+        onExpressInstallToDevice={(id) =>
+          void installer.startExpressInstall([id], currentSmartFilterContext, knownItemMetaMap)
+        }
         onExportToSdCard={(id) =>
           void installer.openReviewQueue([id], currentSmartFilterContext, knownItemMetaMap)
         }
