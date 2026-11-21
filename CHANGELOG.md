@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.28.0] - 2026-11-21
+
+- Simplified and streamlined all actions in the **Game Details** drawer for a frictionless one-click path from discovery to playing:
+  - **One-Click Instant Download ROM**: Clicking **Download ROM** now immediately downloads the extracted, cleanly renamed ROM file (or clean `.zip` for disc sets) for single-ROM archives—eliminating the legacy two-step **Prepared ROM Export** panel. Archives containing 2+ playable ROM variants open a compact docked **Choose ROM Variant** strip directly above the footer, while patch-only archives surface a clean fallback to **Download Raw Archive** or **Inspect Archive**.
+  - **Mount-Aware Primary Install Action**: When a Storage Device is mounted, **Install to `<Device>`** (or **Reinstall to `<Device>`** if already installed on that volume) becomes the primary one-click Express Install CTA with **Download ROM** beside it; when no device is mounted, **Download ROM** takes primary focus with **Install to Device** alongside it.
+  - **Zero Duplicate Row Buttons**: Removed redundant `Prepared ROM`, `Inspect Archive`, and `Raw` buttons from single-file releases and catalog hint rows; multi-file releases show only a single clean **Download ROM** trigger per mirrored file (plus **Retry** on failed files).
+  - **Consolidated `More` Menu**: Moved secondary and maintenance tools (**Review Device Install…**, **Inspect Archive**, **Download Raw Archive**, **Refresh / Fetch Metadata**, **Mark / Clear Installed Flag**, **Dry Run Retry**, and **Delete Release** with two-step footer confirmation) into a single upward-opening **More (`···`)** menu with `Escape` and outside-click dismissal.
+
 ## [1.27.1] - 2026-11-21
 
 - Redesigned the left sidebar **Storage Device** section to blend seamlessly with **Service Telemetry**, **Mirrored Systems**, and **CRT Display**:
