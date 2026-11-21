@@ -70,6 +70,7 @@ import {
 } from '../shared/releaseTypeFilter.ts';
 import {
   classifySystemIndexFreshness,
+  diffRuntimeSyncSettings,
   diffSyncRules,
   doesCatalogReleaseMatchSyncRules,
   formatSyncRuleScopeSummary,
@@ -324,41 +325,98 @@ function isEphemeralPartFile(name: string): boolean {
   );
 }
 
-async function runWithConcurrency<T>(
+export async function runWithConcurrency<T>(
   items: readonly T[],
-  concurrency: number,
+  concurrency: number | (() => number),
   signal: AbortSignal,
   worker: (item: T, index: number) => Promise<void>,
+  subscribeConcurrency?: (onChange: () => void) => () => void,
 ): Promise<void> {
-  if (items.length === 0) return;
-  const workerCount = Math.max(1, Math.min(items.length, Math.floor(concurrency || 1)));
-  if (workerCount === 1) {
-    for (let i = 0; i < items.length; i += 1) {
-      if (signal.aborted) break;
-      await worker(items[i]!, i);
-    }
-    return;
-  }
+  if (items.length === 0 || signal.aborted) return;
 
-  let nextIdx = 0;
-  let fatalErr: unknown = null;
-  const runWorker = async () => {
-    while (!signal.aborted && fatalErr === null) {
-      const idx = nextIdx;
-      nextIdx += 1;
-      if (idx >= items.length) break;
-      try {
-        await worker(items[idx]!, idx);
-      } catch (err) {
-        if (fatalErr === null) {
-          fatalErr = err;
-        }
-        throw err;
-      }
-    }
+  const getTargetConcurrency = (): number => {
+    const raw = typeof concurrency === 'function' ? concurrency() : concurrency;
+    return Math.max(1, Math.min(items.length, Math.floor(Number(raw) || 1)));
   };
 
-  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  return new Promise<void>((resolve, reject) => {
+    let nextIdx = 0;
+    let activeWorkers = 0;
+    let fatalErr: unknown = null;
+    let settled = false;
+    let unsubscribe: (() => void) | undefined;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try {
+        unsubscribe?.();
+      } catch {
+        // Ignore unsubscribe error
+      }
+      if (fatalErr !== null) {
+        reject(fatalErr);
+      } else {
+        resolve();
+      }
+    };
+
+    const runWorker = async () => {
+      try {
+        while (!signal.aborted && fatalErr === null) {
+          // Graceful scale-down: if concurrency was lowered mid-batch, excess workers exit cleanly
+          if (activeWorkers > getTargetConcurrency()) {
+            break;
+          }
+          const idx = nextIdx;
+          if (idx >= items.length) {
+            break;
+          }
+          nextIdx += 1;
+          try {
+            await worker(items[idx]!, idx);
+          } catch (err) {
+            if (fatalErr === null) {
+              fatalErr = err;
+            }
+            break;
+          }
+          // Check if target concurrency increased while this item was in flight
+          maybeSpawnWorkers();
+        }
+      } finally {
+        activeWorkers -= 1;
+        if (!settled) {
+          if (!signal.aborted && fatalErr === null && nextIdx < items.length) {
+            maybeSpawnWorkers();
+          }
+          if (activeWorkers === 0) {
+            finish();
+          }
+        }
+      }
+    };
+
+    const maybeSpawnWorkers = () => {
+      if (settled || signal.aborted || fatalErr !== null) return;
+      const target = getTargetConcurrency();
+      while (activeWorkers < target && nextIdx < items.length && !signal.aborted && fatalErr === null) {
+        activeWorkers += 1;
+        void runWorker();
+      }
+    };
+
+    if (subscribeConcurrency) {
+      unsubscribe = subscribeConcurrency(() => {
+        maybeSpawnWorkers();
+      });
+    }
+
+    maybeSpawnWorkers();
+    if (activeWorkers === 0) {
+      finish();
+    }
+  });
 }
 
 export class ScraperOrchestrator extends EventEmitter {
@@ -376,6 +434,8 @@ export class ScraperOrchestrator extends EventEmitter {
   private abortController: AbortController | null = null;
   private lockRenewTimer: NodeJS.Timeout | null = null;
   private syncRulesRevision = 0;
+  private runtimeConfigRevision = 0;
+  private runtimeConfigListeners = new Set<() => void>();
   private shuttingDown = false;
   private inFlightAssetUpgrades = new Map<number, Promise<RepositoryItemRecord | null>>();
   private inFlightDetailHydrations = new Map<number, Promise<RepositoryItemRecord | null>>();
@@ -403,6 +463,23 @@ export class ScraperOrchestrator extends EventEmitter {
   private pendingDownloadQueueSet = new Set<number>();
   private inFlightDownloadIds = new Set<number>();
 
+  private subscribeRuntimeConfig = (listener: () => void): (() => void) => {
+    this.runtimeConfigListeners.add(listener);
+    return () => {
+      this.runtimeConfigListeners.delete(listener);
+    };
+  };
+
+  private notifyRuntimeConfigChanged(): void {
+    for (const listener of Array.from(this.runtimeConfigListeners)) {
+      try {
+        listener();
+      } catch {
+        // Ignore runtime config listener errors
+      }
+    }
+  }
+
   constructor() {
     super();
     const cfg = getInternalConfig();
@@ -412,7 +489,7 @@ export class ScraperOrchestrator extends EventEmitter {
       maxDelayMs: cfg.maxDelayMs,
       backoffMultiplier: cfg.backoffMultiplier,
     });
-    this.client = new RetroGameTalkClient(this.rateLimiter);
+    this.client = new RetroGameTalkClient(this.rateLimiter, () => getInternalConfig());
 
     let persistedAuthAt = getLastAuthenticatedAt();
     const hydrated = this.client.hydratePersistedSession(cfg, persistedAuthAt);
@@ -849,29 +926,84 @@ export class ScraperOrchestrator extends EventEmitter {
     this.reconfigureScheduler(nextCfg);
 
     const ruleDiff = diffSyncRules(prevCfg, nextCfg, nextCfg.discoveredSystems);
+    const runtimeDiff = diffRuntimeSyncSettings(prevCfg, nextCfg);
     let liveSyncReload: LiveSyncReloadReceipt | null = null;
 
     if (ruleDiff.changed) {
       this.syncRulesRevision += 1;
-      if (this.activeRun && isSyncRunEligibleForLiveRuleReload(this.activeRun)) {
-        const activeMode: 'incremental' | 'full' =
-          this.activeRun.mode === 'full' ? 'full' : 'incremental';
+    }
+    if (ruleDiff.changed || runtimeDiff.changed) {
+      this.runtimeConfigRevision += 1;
+      this.notifyRuntimeConfigChanged();
+    }
+
+    if (this.activeRun) {
+      const rulesApplied = ruleDiff.changed && isSyncRunEligibleForLiveRuleReload(this.activeRun);
+      const networkRuntimeApplied =
+        runtimeDiff.pacingChanged ||
+        runtimeDiff.concurrencyChanged ||
+        runtimeDiff.chunkingChanged ||
+        runtimeDiff.networkChanged;
+      const autoDownloadApplied =
+        runtimeDiff.autoDownloadChanged &&
+        this.activeRun.triggerType === 'scheduled' &&
+        this.activeRun.mode !== 'full';
+      const runtimeApplied = networkRuntimeApplied || autoDownloadApplied;
+
+      if (rulesApplied || runtimeApplied) {
+        const activeMode: 'incremental' | 'full' | 'download' | 'retry' =
+          this.activeRun.triggerType === 'download'
+            ? 'download'
+            : this.activeRun.triggerType === 'retry'
+              ? 'retry'
+              : this.activeRun.mode === 'full'
+                ? 'full'
+                : 'incremental';
         const activeDryRun = Boolean(this.activeRun.dryRun || this.activeRun.mode === 'dry_run');
+        const kind: 'rules' | 'runtime' | 'both' =
+          rulesApplied && runtimeApplied ? 'both' : rulesApplied ? 'rules' : 'runtime';
+
+        const summaryParts: string[] = [];
+        if (rulesApplied) summaryParts.push(ruleDiff.changeSummary);
+        if (runtimeApplied) summaryParts.push(runtimeDiff.changeSummary);
+        const combinedSummary = summaryParts.join(' · ');
+
         liveSyncReload = {
           applied: true,
           runId: this.activeRun.id,
           runMode: activeMode,
           dryRun: activeDryRun,
-          changeSummary: ruleDiff.changeSummary,
+          kind,
+          changeSummary: combinedSummary,
           scopeSummary: ruleDiff.scopeSummary,
         };
-        this.log(
-          'info',
-          `[Live Rules] Sync Rules updated mid-run — applying live after current file`,
-          `${ruleDiff.changeSummary} · Scope: ${ruleDiff.scopeSummary}`,
-          this.activeRun.id,
-        );
+
+        if (kind === 'rules') {
+          this.log(
+            'info',
+            `[Live Rules] Sync Rules updated mid-run — applying live after current file`,
+            `${ruleDiff.changeSummary} · Scope: ${ruleDiff.scopeSummary}`,
+            this.activeRun.id,
+          );
+        } else if (kind === 'runtime') {
+          this.log(
+            'info',
+            `[Live Sync] Runtime pacing & transfer settings updated mid-run — applying live now`,
+            runtimeDiff.changeSummary,
+            this.activeRun.id,
+          );
+        } else {
+          this.log(
+            'info',
+            `[Live Sync] Sync Rules & runtime settings updated mid-run — applying live now`,
+            `${combinedSummary} · Scope: ${ruleDiff.scopeSummary}`,
+            this.activeRun.id,
+          );
+        }
       }
+    }
+
+    if (ruleDiff.changed) {
       this.emitCatalogUpdated('sync_rules_updated');
     }
 
@@ -2560,7 +2692,11 @@ export class ScraperOrchestrator extends EventEmitter {
         const batchIds = this.pendingDownloadQueueIds.splice(0, this.pendingDownloadQueueIds.length);
         const totalInQueue = processedReleases + batchIds.length;
 
-        await runWithConcurrency(batchIds, cfg.maxConcurrency, signal, async (itemId) => {
+        await runWithConcurrency(
+          batchIds,
+          () => getInternalConfig().maxConcurrency,
+          signal,
+          async (itemId) => {
           if (signal.aborted) return;
           this.inFlightDownloadIds.add(itemId);
           this.pendingDownloadQueueSet.delete(itemId);
@@ -2648,7 +2784,7 @@ export class ScraperOrchestrator extends EventEmitter {
           } finally {
             this.inFlightDownloadIds.delete(itemId);
           }
-        });
+        }, this.subscribeRuntimeConfig);
       }
 
       const finalStatus = signal.aborted ? 'stopped' : 'completed';
@@ -2867,7 +3003,11 @@ export class ScraperOrchestrator extends EventEmitter {
       if (freshDownloads.length === 0) {
         throw new Error(`No downloadable archive files found on release page ${pageUrl}`);
       }
-      await runWithConcurrency(freshDownloads, cfg.maxConcurrency, signal, async (release) => {
+      await runWithConcurrency(
+        freshDownloads,
+        () => getInternalConfig().maxConcurrency,
+        signal,
+        async (release) => {
         if (signal.aborted) return;
         if (isDryRun) {
           const mirrored = resolveMirroredPaths(cfg.baseUrl, release.pageUrl || pageUrl, cfg.downloadDir, release.filename);
@@ -2899,7 +3039,7 @@ export class ScraperOrchestrator extends EventEmitter {
         if (outcome.skipped) skipped += 1;
         if (outcome.failed) failed += 1;
         bytes += outcome.bytes;
-      });
+      }, this.subscribeRuntimeConfig);
       return { downloaded, skipped, failed, bytes, wouldRecover };
     }
 
@@ -2934,7 +3074,11 @@ export class ScraperOrchestrator extends EventEmitter {
       return undefined;
     };
 
-    await runWithConcurrency(filesToRetry, cfg.maxConcurrency, signal, async (targetFile, fileIdx) => {
+    await runWithConcurrency(
+      filesToRetry,
+      () => getInternalConfig().maxConcurrency,
+      signal,
+      async (targetFile, fileIdx) => {
       if (signal.aborted) return;
       const matched = matchFreshDownload(targetFile);
 
@@ -3028,7 +3172,7 @@ export class ScraperOrchestrator extends EventEmitter {
       if (outcome.skipped) skipped += 1;
       if (outcome.failed) failed += 1;
       bytes += outcome.bytes;
-    });
+    }, this.subscribeRuntimeConfig);
 
     return { downloaded, skipped, failed, bytes, wouldRecover };
   }
@@ -3279,7 +3423,11 @@ export class ScraperOrchestrator extends EventEmitter {
         }
 
         let retryCompletedTargets = 0;
-        await runWithConcurrency(targets, cfg.maxConcurrency, signal, async (target, idx) => {
+        await runWithConcurrency(
+          targets,
+          () => getInternalConfig().maxConcurrency,
+          signal,
+          async (target, idx) => {
           if (signal.aborted) return;
           const item = getRepositoryItemById(target.id) || target;
           let filesToRetry = item.files.filter(
@@ -3374,7 +3522,7 @@ export class ScraperOrchestrator extends EventEmitter {
           });
           this.emitStatus();
           void idx;
-        });
+        }, this.subscribeRuntimeConfig);
 
         if (!signal.aborted && failed > 0 && downloaded === 0 && wouldRecover === 0 && skipped === 0) {
           throw new Error(`${isDryRun ? 'Dry-run batch retry' : 'Batch retry'} failed for all ${failed} file(s)`);
@@ -3473,6 +3621,7 @@ export class ScraperOrchestrator extends EventEmitter {
     let liveAllowedReleaseTypes = normalizeAllowedReleaseTypes(liveCfg.allowedReleaseTypes);
     let liveHasReleaseTypeFilter = liveAllowedReleaseTypes.length > 0;
     let observedRuleRevision = this.syncRulesRevision;
+    let observedRuntimeRevision = this.runtimeConfigRevision;
     let knownDiscoveredSystems: string[] = filterValidSystemSlugs(liveCfg.discoveredSystems).map((s) =>
       s.toLowerCase(),
     );
@@ -3570,10 +3719,19 @@ export class ScraperOrchestrator extends EventEmitter {
       const processedFileUrls = new Set<string>();
 
       const syncLiveRules = (): SyncRuleDiff | null => {
-        if (this.syncRulesRevision === observedRuleRevision) {
+        const rulesChanged = this.syncRulesRevision !== observedRuleRevision;
+        const runtimeChanged = this.runtimeConfigRevision !== observedRuntimeRevision;
+        if (!rulesChanged && !runtimeChanged) {
           return null;
         }
         const freshCfg = getInternalConfig();
+        observedRuntimeRevision = this.runtimeConfigRevision;
+
+        if (!rulesChanged) {
+          liveCfg = freshCfg;
+          return null;
+        }
+
         const combinedDiscovered = filterValidSystemSlugs([
           ...knownDiscoveredSystems,
           ...freshCfg.discoveredSystems,
@@ -3786,7 +3944,7 @@ export class ScraperOrchestrator extends EventEmitter {
               const mirroredAssets = await this.client.mirrorReleaseAssets(
                 effectiveMeta,
                 releaseLocalDir,
-                cfg,
+                liveCfg,
                 signal,
                 runLogger,
               );
@@ -3828,7 +3986,7 @@ export class ScraperOrchestrator extends EventEmitter {
             const mirroredAssets = await this.client.mirrorReleaseAssets(
               effectiveMeta,
               releaseLocalDir,
-              cfg,
+              liveCfg,
               signal,
               runLogger,
             );
@@ -3855,7 +4013,14 @@ export class ScraperOrchestrator extends EventEmitter {
           ...eligibleReleases.map((r) => r.remoteUrl),
         ]).size;
 
-        await runWithConcurrency(toDownload, liveCfg.maxConcurrency, signal, async (rel, fileIdx) => {
+        await runWithConcurrency(
+          toDownload,
+          () => {
+            syncLiveRules();
+            return liveCfg.maxConcurrency;
+          },
+          signal,
+          async (rel, fileIdx) => {
           if (signal.aborted) return;
 
           // Gracefully enforce live Sync Rule updates right before starting each next file
@@ -3924,7 +4089,7 @@ export class ScraperOrchestrator extends EventEmitter {
           if (outcome.failed) failedCount += 1;
           bytesDownloaded += outcome.bytes;
           persistCounters();
-        });
+        }, this.subscribeRuntimeConfig);
       };
 
       const inspectAndProcessReleasePage = async (
@@ -4251,25 +4416,34 @@ export class ScraperOrchestrator extends EventEmitter {
             releaseCandidates.push(relPageUrl);
           }
 
-          await runWithConcurrency(releaseCandidates, liveCfg.maxConcurrency, signal, async (relPageUrl) => {
-            if (signal.aborted) return;
-            syncLiveRules();
-            if (scopeSystemSlug && !isConsoleAllowedBySyncRules(scopeSystemSlug, liveCfg)) {
-              return;
-            }
-            const inspectPrefix = isDryRun
-              ? `Dry Run (${dryRunScopeTag}) inspecting`
-              : isDeltaMode
-                ? 'Inspecting delta candidate'
-                : 'Full Sync inspecting';
-            this.currentPhase = `${inspectPrefix}: ${this.formatRelativePhasePath(relPageUrl, liveCfg.baseUrl)}`;
-            this.emitStatus();
+          await runWithConcurrency(
+            releaseCandidates,
+            () => {
+              syncLiveRules();
+              return liveCfg.maxConcurrency;
+            },
+            signal,
+            async (relPageUrl) => {
+              if (signal.aborted) return;
+              syncLiveRules();
+              if (scopeSystemSlug && !isConsoleAllowedBySyncRules(scopeSystemSlug, liveCfg)) {
+                return;
+              }
+              const inspectPrefix = isDryRun
+                ? `Dry Run (${dryRunScopeTag}) inspecting`
+                : isDeltaMode
+                  ? 'Inspecting delta candidate'
+                  : 'Full Sync inspecting';
+              this.currentPhase = `${inspectPrefix}: ${this.formatRelativePhasePath(relPageUrl, liveCfg.baseUrl)}`;
+              this.emitStatus();
 
-            const res = await inspectAndProcessReleasePage(relPageUrl, undefined, cutoffMs);
-            if (res.newerThanCutoff) {
-              foundNewerReleaseOnPage = true;
-            }
-          });
+              const res = await inspectAndProcessReleasePage(relPageUrl, undefined, cutoffMs);
+              if (res.newerThanCutoff) {
+                foundNewerReleaseOnPage = true;
+              }
+            },
+            this.subscribeRuntimeConfig,
+          );
 
           const shouldFollowPagination =
             cutoffMs === null ||
@@ -4698,45 +4872,57 @@ export class ScraperOrchestrator extends EventEmitter {
                 : `[Live Rules] Full Sync expanded queue with ${pendingLiveItems.length} newly matched release(s)`,
               summaryExcludedByRules > 0 ? `${summaryExcludedByRules} cataloged release(s) excluded by Sync Rules` : null,
             );
-            for (let pIdx = 0; pIdx < pendingLiveItems.length; pIdx += 1) {
-              if (signal.aborted) break;
+            let mirroredProgressCount = 0;
+            await runWithConcurrency(
+              pendingLiveItems,
+              () => {
+                syncLiveRules();
+                return liveCfg.maxConcurrency;
+              },
+              signal,
+              async (item) => {
+                if (signal.aborted || rulesChangedDuringMirror) return;
 
-              const midDiff = syncLiveRules();
-              if (midDiff?.changed) {
-                runLogger(
-                  'info',
-                  `[Live Rules] Reloaded active Full Sync queue`,
-                  `${midDiff.changeSummary} · Recalculating pending matches`,
-                );
-                rulesChangedDuringMirror = true;
-                break;
-              }
+                const midDiff = syncLiveRules();
+                if (midDiff?.changed) {
+                  if (!rulesChangedDuringMirror) {
+                    runLogger(
+                      'info',
+                      `[Live Rules] Reloaded active Full Sync queue`,
+                      `${midDiff.changeSummary} · Recalculating pending matches`,
+                    );
+                  }
+                  rulesChangedDuringMirror = true;
+                  return;
+                }
 
-              const item = pendingLiveItems[pIdx];
-              if (!item.remoteUrl || !item.remoteUrl.startsWith('http')) continue;
-              const canonicalUrl = item.remoteUrl.split('#')[0];
+                if (!item.remoteUrl || !item.remoteUrl.startsWith('http')) return;
+                const canonicalUrl = item.remoteUrl.split('#')[0];
 
-              if (
-                !doesCatalogReleaseMatchSyncRules(
-                  {
-                    systemName: item.systemName,
-                    releaseType: item.releaseType,
-                    releaseTags: item.releaseTags,
-                    fileRoles: (item.files || []).map((f) => f.fileRole),
-                  },
-                  liveCfg,
-                )
-              ) {
-                skippedCount += 1;
-                continue;
-              }
+                if (
+                  !doesCatalogReleaseMatchSyncRules(
+                    {
+                      systemName: item.systemName,
+                      releaseType: item.releaseType,
+                      releaseTags: item.releaseTags,
+                      fileRoles: (item.files || []).map((f) => f.fileRole),
+                    },
+                    liveCfg,
+                  )
+                ) {
+                  skippedCount += 1;
+                  return;
+                }
 
-              checkedOrMirroredUrls.add(canonicalUrl);
-              this.setActiveSyncItemFromRecord(item);
-              this.currentPhase = `Full Sync · ${item.systemName} (${pIdx + 1}/${pendingLiveItems.length}): ${item.title}`;
-              this.emitStatus();
-              await inspectAndProcessReleasePage(item.remoteUrl, buildWpMetaHintFromItem(item), null);
-            }
+                checkedOrMirroredUrls.add(canonicalUrl);
+                mirroredProgressCount += 1;
+                this.setActiveSyncItemFromRecord(item);
+                this.currentPhase = `Full Sync · ${item.systemName} (${Math.min(mirroredProgressCount, pendingLiveItems.length)}/${pendingLiveItems.length}): ${item.title}`;
+                this.emitStatus();
+                await inspectAndProcessReleasePage(item.remoteUrl, buildWpMetaHintFromItem(item), null);
+              },
+              this.subscribeRuntimeConfig,
+            );
           }
 
           // Fallback HTML crawl for currently allowed consoles without WP REST CPT support
@@ -4902,70 +5088,84 @@ export class ScraperOrchestrator extends EventEmitter {
             return true;
           };
 
-          for (let pIdx = 0; pIdx < posts.length; pIdx += 1) {
-            if (signal.aborted) break;
-            const diff = syncLiveRules();
-            if (diff?.releaseTypesWidened) {
-              rulesWidened = true;
-            }
-            if (!isConsoleAllowedBySyncRules(systemSlug, liveCfg)) {
-              runLogger(
-                'info',
-                `[Live Rules] Stopping remaining releases in ${systemSlug}`,
-                'Console was removed from Target Consoles mid-run',
-              );
-              break;
-            }
-
-            const post = posts[pIdx];
-            if (!post.link) continue;
-            const canonicalLink = post.link.split('#')[0];
-            if (isReplayPass && visitedReleasePages.has(canonicalLink)) {
-              continue;
-            }
-
-            recordObservedTimestamp(post.dateGmt);
-            recordObservedTimestamp(post.modifiedGmt);
-            if (shouldSkipWpPostBeforeHtml(post)) {
-              persistCounters();
-              continue;
-            }
-            deltaMatchedCount += 1;
-            if (tryFastSkipWpPost(post)) {
-              continue;
-            }
-            if (isDeltaMode && isDryRun) {
-              const estBytes = estimateDownloadHintsBytes(post.downloadHints);
-              deltaWouldDownloadCount += 1;
-              deltaEstimatedBytes += estBytes;
-              const cEntry = deltaConsoleMap.get(canonicalSlug);
-              if (cEntry) {
-                cEntry.pendingCount += 1;
-                cEntry.estimatedBytes += estBytes;
-              } else {
-                deltaConsoleMap.set(canonicalSlug, {
-                  systemName: canonicalSlug,
-                  pendingCount: 1,
-                  estimatedBytes: estBytes,
-                });
+          let consoleRemovedMidPass = false;
+          let deltaProgressCount = 0;
+          await runWithConcurrency(
+            posts,
+            () => {
+              syncLiveRules();
+              return liveCfg.maxConcurrency;
+            },
+            signal,
+            async (post) => {
+              if (signal.aborted || consoleRemovedMidPass) return;
+              const diff = syncLiveRules();
+              if (diff?.releaseTypesWidened) {
+                rulesWidened = true;
               }
-              if (deltaSamples.length < 12) {
-                deltaSamples.push({
-                  title: post.title || post.link,
-                  systemName: canonicalSlug,
-                  releaseType: 'Delta Release',
-                  fileSizeBytes: estBytes,
-                  status: 'available',
-                });
+              if (!isConsoleAllowedBySyncRules(systemSlug, liveCfg)) {
+                if (!consoleRemovedMidPass) {
+                  consoleRemovedMidPass = true;
+                  runLogger(
+                    'info',
+                    `[Live Rules] Stopping remaining releases in ${systemSlug}`,
+                    'Console was removed from Target Consoles mid-run',
+                  );
+                }
+                return;
               }
-            }
-            this.setActiveSyncItemFromRecord(getRepositoryItemByRemoteUrl(canonicalLink));
-            this.currentPhase = isDeltaMode
-              ? `${isDryRun ? 'Dry Run (Incremental)' : 'Incremental'} · ${systemSlug} (${pIdx + 1}/${posts.length}): ${post.title || this.formatRelativePhasePath(post.link, liveCfg.baseUrl)}`
-              : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} · ${systemSlug} (${pIdx + 1}/${posts.length}): ${post.title || this.formatRelativePhasePath(post.link, liveCfg.baseUrl)}`;
-            this.emitStatus();
-            await inspectAndProcessReleasePage(post.link, post, isDeltaMode ? cutoffMs : null);
-          }
+
+              if (!post.link) return;
+              const canonicalLink = post.link.split('#')[0];
+              if (isReplayPass && visitedReleasePages.has(canonicalLink)) {
+                return;
+              }
+
+              recordObservedTimestamp(post.dateGmt);
+              recordObservedTimestamp(post.modifiedGmt);
+              if (shouldSkipWpPostBeforeHtml(post)) {
+                persistCounters();
+                return;
+              }
+              deltaMatchedCount += 1;
+              if (tryFastSkipWpPost(post)) {
+                return;
+              }
+              if (isDeltaMode && isDryRun) {
+                const estBytes = estimateDownloadHintsBytes(post.downloadHints);
+                deltaWouldDownloadCount += 1;
+                deltaEstimatedBytes += estBytes;
+                const cEntry = deltaConsoleMap.get(canonicalSlug);
+                if (cEntry) {
+                  cEntry.pendingCount += 1;
+                  cEntry.estimatedBytes += estBytes;
+                } else {
+                  deltaConsoleMap.set(canonicalSlug, {
+                    systemName: canonicalSlug,
+                    pendingCount: 1,
+                    estimatedBytes: estBytes,
+                  });
+                }
+                if (deltaSamples.length < 12) {
+                  deltaSamples.push({
+                    title: post.title || post.link,
+                    systemName: canonicalSlug,
+                    releaseType: 'Delta Release',
+                    fileSizeBytes: estBytes,
+                    status: 'available',
+                  });
+                }
+              }
+              deltaProgressCount += 1;
+              this.setActiveSyncItemFromRecord(getRepositoryItemByRemoteUrl(canonicalLink));
+              this.currentPhase = isDeltaMode
+                ? `${isDryRun ? 'Dry Run (Incremental)' : 'Incremental'} · ${systemSlug} (${Math.min(deltaProgressCount, posts.length)}/${posts.length}): ${post.title || this.formatRelativePhasePath(post.link, liveCfg.baseUrl)}`
+                : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} · ${systemSlug} (${Math.min(deltaProgressCount, posts.length)}/${posts.length}): ${post.title || this.formatRelativePhasePath(post.link, liveCfg.baseUrl)}`;
+              this.emitStatus();
+              await inspectAndProcessReleasePage(post.link, post, isDeltaMode ? cutoffMs : null);
+            },
+            this.subscribeRuntimeConfig,
+          );
 
           return { fastSkippedReleasesCount, fastSkippedFilesCount, rulesWidened };
         };
@@ -5100,6 +5300,7 @@ export class ScraperOrchestrator extends EventEmitter {
                 });
               }
 
+              syncLiveRules();
               const isIndexOnlyScheduled =
                 isDeltaMode && run.triggerType === 'scheduled' && !liveCfg.autoDownloadNewReleases;
 

@@ -51,7 +51,10 @@ import {
   groupSystemsByBrand,
   resolveSystemDisplayInfo,
 } from '../shared/systemCatalog';
-import { isSyncRunEligibleForLiveRuleReload } from '../shared/syncRuleMatcher';
+import {
+  formatLiveReloadRunLabel,
+  isSyncRunEligibleForLiveRuleReload,
+} from '../shared/syncRuleMatcher';
 import type {
   ConfigDirtyState,
   ConfigFocusRequest,
@@ -617,11 +620,10 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
         isDirtyRef.current = false;
         const liveReceipt = saveResult && 'liveSyncReload' in saveResult ? saveResult.liveSyncReload : null;
         if (liveReceipt?.applied) {
-          const modeLabel = liveReceipt.runMode === 'full' ? 'Full Sync' : 'Incremental Sync';
-          const dryLabel = liveReceipt.dryRun ? ' Dry Run' : '';
+          const modeLabel = formatLiveReloadRunLabel(liveReceipt);
           const detail = liveReceipt.changeSummary ? ` (${liveReceipt.changeSummary})` : '';
           setSaveMsg(
-            `Sync Rules saved — applied live to active ${modeLabel}${dryLabel} #${liveReceipt.runId}${detail}`,
+            `Sync Rules saved — applied live to active ${modeLabel} #${liveReceipt.runId}${detail}`,
           );
           saveNoticeTimerRef.current = window.setTimeout(() => {
             setSaveMsg(null);
@@ -683,12 +685,19 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
     const liveReloadTargetRun = isSyncRunEligibleForLiveRuleReload(status.activeRun)
       ? status.activeRun
       : null;
+    const hasUnsavedAutoDownloadEdit =
+      !autoDownloadLockedByEnv && autoDownloadNewReleases !== config.autoDownloadNewReleases;
+    const isScheduledIncrementalActive =
+      Boolean(liveReloadTargetRun) &&
+      liveReloadTargetRun?.triggerType === 'scheduled' &&
+      liveReloadTargetRun?.mode !== 'full';
     const hasUnsavedRuleEdits =
       dirtyState.changedSections.includes('Target Consoles') ||
-      dirtyState.changedSections.includes('Allowed Types');
+      dirtyState.changedSections.includes('Allowed Types') ||
+      (isScheduledIncrementalActive && hasUnsavedAutoDownloadEdit);
     const liveReloadHint =
       liveReloadTargetRun && hasUnsavedRuleEdits
-        ? `Active ${liveReloadTargetRun.mode === 'full' ? 'Full Sync' : 'Incremental Sync'}${liveReloadTargetRun.dryRun ? ' Dry Run' : ''} #${liveReloadTargetRun.id} running — saved rule changes will apply live after the current file.`
+        ? `Active ${formatLiveReloadRunLabel(liveReloadTargetRun)} #${liveReloadTargetRun.id} running — saved rule changes will apply live after the current file.`
         : null;
 
     return (

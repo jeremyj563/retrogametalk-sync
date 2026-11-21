@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.27.0] - 2026-11-21
+
+- Added **Universal Live Mid-Run Reload** for all sync-affecting settings across **Sync Rules** and **Request Pacing & Rate Protection**:
+  - **Immediate Adaptive Rate Limiter Updates**: Changing pacing profiles or spacing bounds (`baseDelayMs`, `minDelayMs`, `maxDelayMs`, `backoffMultiplier`) now immediately shifts the active delay on the very next request—raising pacing right away when slowing down and speeding up immediately when healthy, while preserving protective backoff during active HTTP 429 cooldowns.
+  - **Elastic Parallel Worker Scaling (`maxConcurrency`)**: Converted worker pools across Full Sync (Index-First & HTML crawl), Incremental Sync, Manual Catalog Download Queue, and Batch Retry to scale dynamically mid-batch—spawning additional workers immediately when scaling up and allowing excess workers to finish their current file cleanly when scaling down.
+  - **Live Transfer, Retry, Timeout & Auto-Download Reload**: `downloadChunkConcurrency`, `downloadChunkMinSizeMb`, `maxRetries`, `requestTimeoutMs`, `userAgent`, and `autoDownloadNewReleases` now hot-read from live configuration on the next request, retry attempt, or file transfer without restarting an active run.
+  - **Live Activity Logs & UI Save Receipts**: Saving Request Pacing & Rate Protection or Sync Rules during any active run (Full Sync, Incremental Sync, Dry Run, Download Queue, or Retry Failed) logs `[Live Sync]` / `[Live Rules]` entries in Activity Log and surfaces live-applied hints and confirmation receipts in the sticky save bar.
+
 ## [1.26.0] - 2026-11-21
 
 - Added **Device-Wide ROM Root & Subfolder Convention Inference** to automatic per-mount **Export Device Auto-Configure**:

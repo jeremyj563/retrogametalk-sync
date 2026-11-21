@@ -62,11 +62,42 @@ export class AdaptiveRateLimiter {
     maxDelayMs: number;
     backoffMultiplier: number;
   }): void {
+    const prevBaseDelayMs = this.baseDelayMs;
+    const prevDelayMs = this.currentDelayMs;
+    const now = Date.now();
+    const inActiveCooldown = this.cooldownUntilMs !== null && this.cooldownUntilMs > now;
+
     this.baseDelayMs = opts.baseDelayMs;
     this.minDelayMs = opts.minDelayMs;
     this.maxDelayMs = opts.maxDelayMs;
     this.backoffMultiplier = opts.backoffMultiplier;
+
+    if (opts.baseDelayMs > prevBaseDelayMs) {
+      // User slowed pacing down — immediately raise current delay to at least the new base delay
+      this.currentDelayMs = Math.max(this.currentDelayMs, opts.baseDelayMs);
+      this.consecutiveSuccesses = 0;
+    } else if (opts.baseDelayMs < prevBaseDelayMs) {
+      // User sped pacing up — apply immediately when healthy (not in active 429 cooldown or heavy backoff)
+      if (!inActiveCooldown && this.currentDelayMs <= prevBaseDelayMs * 1.15) {
+        this.currentDelayMs = opts.baseDelayMs;
+        this.consecutiveSuccesses = 0;
+      }
+    }
+
     this.currentDelayMs = Math.max(this.minDelayMs, Math.min(this.maxDelayMs, this.currentDelayMs));
+
+    if (this.cooldownUntilMs !== null && this.cooldownUntilMs - now > this.maxDelayMs) {
+      this.cooldownUntilMs = now + this.maxDelayMs;
+    }
+
+    if (this.currentDelayMs !== prevDelayMs) {
+      logServer(
+        'RATE_LIMITER',
+        'debug',
+        `Live pacing bounds updated: delay ${prevDelayMs}ms -> ${this.currentDelayMs}ms`,
+        `base=${this.baseDelayMs}ms, min=${this.minDelayMs}ms, max=${this.maxDelayMs}ms, backoff=${this.backoffMultiplier}x`,
+      );
+    }
   }
 
   async acquire(signal?: AbortSignal): Promise<void> {

@@ -734,6 +734,7 @@ export class RetroGameTalkClient {
   private httpClient: Impit;
   private activeBrowserProfile: Browser = 'chrome142';
   private rateLimiter: AdaptiveRateLimiter;
+  private liveConfigProvider?: () => ScraperConfigInternal;
   private wpTypesCache: Map<string, string> | null = null;
   private wpTypesCacheBaseUrl: string | null = null;
   private hostChunkCaps = new Map<string, { maxChunks: number; updatedAt: number }>();
@@ -748,13 +749,43 @@ export class RetroGameTalkClient {
     lastMessage: null,
   };
 
-  constructor(rateLimiter: AdaptiveRateLimiter) {
+  constructor(
+    rateLimiter: AdaptiveRateLimiter,
+    liveConfigProvider?: () => ScraperConfigInternal,
+  ) {
     this.rateLimiter = rateLimiter;
+    this.liveConfigProvider = liveConfigProvider;
     this.jar = this.loadCookieJar();
     this.httpClient = new Impit({
       browser: this.activeBrowserProfile,
       followRedirects: false,
     });
+  }
+
+  setLiveConfigProvider(provider: () => ScraperConfigInternal): void {
+    this.liveConfigProvider = provider;
+  }
+
+  private resolveLiveRuntimeConfig(fallback: ScraperConfigInternal): ScraperConfigInternal {
+    if (!this.liveConfigProvider) return fallback;
+    try {
+      const live = this.liveConfigProvider();
+      return {
+        ...fallback,
+        baseDelayMs: live.baseDelayMs,
+        minDelayMs: live.minDelayMs,
+        maxDelayMs: live.maxDelayMs,
+        backoffMultiplier: live.backoffMultiplier,
+        maxRetries: live.maxRetries,
+        maxConcurrency: live.maxConcurrency,
+        downloadChunkConcurrency: live.downloadChunkConcurrency,
+        downloadChunkMinSizeMb: live.downloadChunkMinSizeMb,
+        requestTimeoutMs: live.requestTimeoutMs,
+        userAgent: live.userAgent,
+      };
+    } catch {
+      return fallback;
+    }
   }
 
   private getEffectiveHostChunkConcurrency(urlStr: string, configured: number): number {
@@ -1138,21 +1169,22 @@ export class RetroGameTalkClient {
     let attempt = 0;
 
     while (true) {
+      const activeConfig = this.resolveLiveRuntimeConfig(config);
       await this.rateLimiter.acquire(signal);
 
       const started = performance.now();
       let cookieHeader = await this.jar.getCookieString(currentUrl);
       // Also forward root-domain cookies if a download subdomain (e.g. squall/rinoa.retrogametalk.com) needs them
       try {
-        if (!cookieHeader && isSameRootDomain(new URL(currentUrl).hostname, new URL(config.baseUrl).hostname)) {
-          cookieHeader = await this.jar.getCookieString(config.baseUrl);
+        if (!cookieHeader && isSameRootDomain(new URL(currentUrl).hostname, new URL(activeConfig.baseUrl).hostname)) {
+          cookieHeader = await this.jar.getCookieString(activeConfig.baseUrl);
         }
       } catch {
         // Ignore invalid baseUrl during fallback cookie lookup
       }
 
       const headers = new Headers(init.headers || {});
-      const trimmedUa = (config.userAgent || '').trim();
+      const trimmedUa = (activeConfig.userAgent || '').trim();
       // Preserve impit's matched browser profile User-Agent + Sec-CH-UA coherence unless a custom UA was explicitly configured
       if (trimmedUa && !DEFAULT_BROWSER_USER_AGENTS.has(trimmedUa)) {
         headers.set('User-Agent', trimmedUa);
@@ -1179,28 +1211,29 @@ export class RetroGameTalkClient {
           headers,
           body: init.body !== undefined && init.body !== null ? String(init.body) : undefined,
           redirect: 'manual',
-          timeout: timeoutMsOverride ?? config.requestTimeoutMs,
+          timeout: timeoutMsOverride ?? activeConfig.requestTimeoutMs,
           signal,
         });
       } catch (err) {
         const latency = performance.now() - started;
         if (signal?.aborted) throw err;
         this.rateLimiter.recordError(latency);
+        const retryCfg = this.resolveLiveRuntimeConfig(config);
         const nonRetryable = this.isNonRetryableNetworkError(err);
         const errDetails = formatErrorDetails(err);
         log?.(
           'debug',
           `[HTTP] Request exception after ${Math.round(latency)}ms: ${(init.method || 'GET').toUpperCase()} ${currentUrl}`,
-          `nonRetryable=${nonRetryable}, attempt=${attempt}/${config.maxRetries}, ${errDetails}`,
+          `nonRetryable=${nonRetryable}, attempt=${attempt}/${retryCfg.maxRetries}, ${errDetails}`,
         );
         if (nonRetryable) {
           throw err;
         }
         attempt += 1;
-        if (attempt > config.maxRetries) {
+        if (attempt > retryCfg.maxRetries) {
           throw err;
         }
-        log?.('warn', `Network retry (${attempt}/${config.maxRetries}) for ${currentUrl}`, this.formatNetworkError(err, currentUrl));
+        log?.('warn', `Network retry (${attempt}/${retryCfg.maxRetries}) for ${currentUrl}`, this.formatNetworkError(err, currentUrl));
         continue;
       }
 
@@ -1230,6 +1263,7 @@ export class RetroGameTalkClient {
       // Handle HTTP rate-limits & temporary upstream throttling
       if (res.status === 429 || res.status === 503) {
         await res.body?.cancel().catch(() => undefined);
+        const retryCfg = this.resolveLiveRuntimeConfig(config);
         const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
         const shouldEscalateGlobal = escalateGlobalThrottle || res.status === 429 || retryAfterSec !== undefined;
         const cooldownMs = this.rateLimiter.recordThrottle(retryAfterSec, latency, {
@@ -1240,13 +1274,13 @@ export class RetroGameTalkClient {
         log?.(
           'throttle',
           `HTTP ${res.status} rate limit from ${new URL(currentUrl).hostname}; backing off ${Math.round(cooldownMs / 1000)}s`,
-          `Attempt ${attempt}/${config.maxRetries}${retryAfterSec ? ` · Retry-After: ${retryAfterSec}s` : ''}`,
+          `Attempt ${attempt}/${retryCfg.maxRetries}${retryAfterSec ? ` · Retry-After: ${retryAfterSec}s` : ''}`,
         );
         if (!shouldEscalateGlobal) {
           throw new RangeThrottleError(res.status, cooldownMs, retryAfterSec, safeHostname(currentUrl), true);
         }
-        if (attempt > config.maxRetries) {
-          throw new Error(`Exceeded max retries (${config.maxRetries}) after HTTP ${res.status} from ${new URL(currentUrl).hostname}`);
+        if (attempt > retryCfg.maxRetries) {
+          throw new Error(`Exceeded max retries (${retryCfg.maxRetries}) after HTTP ${res.status} from ${new URL(currentUrl).hostname}`);
         }
         continue;
       }
@@ -1256,6 +1290,7 @@ export class RetroGameTalkClient {
         await res.body?.cancel().catch(() => undefined);
         const nextUrl = new URL(res.headers.get('location')!, currentUrl).toString();
         if (isThrottleErrorPageUrl(nextUrl)) {
+          const retryCfg = this.resolveLiveRuntimeConfig(config);
           const inferredStatus = inferThrottleStatusFromUrl(nextUrl);
           const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'));
           const shouldEscalateGlobal = escalateGlobalThrottle || inferredStatus === 429 || retryAfterSec !== undefined;
@@ -1267,12 +1302,12 @@ export class RetroGameTalkClient {
           log?.(
             'throttle',
             `HTTP ${inferredStatus} throttle redirect (${new URL(nextUrl).pathname}) from ${safeHostname(currentUrl)}; backing off ${Math.round(cooldownMs / 1000)}s`,
-            `Attempt ${attempt}/${config.maxRetries}${retryAfterSec ? ` · Retry-After: ${retryAfterSec}s` : ''}`,
+            `Attempt ${attempt}/${retryCfg.maxRetries}${retryAfterSec ? ` · Retry-After: ${retryAfterSec}s` : ''}`,
           );
           if (!shouldEscalateGlobal) {
             throw new RangeThrottleError(inferredStatus, cooldownMs, retryAfterSec, safeHostname(currentUrl), true);
           }
-          if (attempt > config.maxRetries) {
+          if (attempt > retryCfg.maxRetries) {
             throw new RangeThrottleError(inferredStatus, cooldownMs, retryAfterSec, safeHostname(currentUrl));
           }
           continue;
@@ -1296,12 +1331,13 @@ export class RetroGameTalkClient {
       if (res.status >= 500) {
         await res.body?.cancel().catch(() => undefined);
         this.rateLimiter.recordError(latency);
+        const retryCfg = this.resolveLiveRuntimeConfig(config);
         attempt += 1;
-        log?.('debug', `[HTTP] Server HTTP ${res.status} on ${currentUrl}`, `attempt=${attempt}/${config.maxRetries}, latency=${Math.round(latency)}ms`);
-        if (attempt > config.maxRetries) {
+        log?.('debug', `[HTTP] Server HTTP ${res.status} on ${currentUrl}`, `attempt=${attempt}/${retryCfg.maxRetries}, latency=${Math.round(latency)}ms`);
+        if (attempt > retryCfg.maxRetries) {
           throw new Error(`Target server error HTTP ${res.status} at ${currentUrl}`);
         }
-        log?.('warn', `Server HTTP ${res.status}; retrying (${attempt}/${config.maxRetries})`, currentUrl);
+        log?.('warn', `Server HTTP ${res.status}; retrying (${attempt}/${retryCfg.maxRetries})`, currentUrl);
         continue;
       }
 
@@ -3149,7 +3185,8 @@ export class RetroGameTalkClient {
         // Keep default Sec-Fetch-Site
       }
     }
-    const trimmedUa = (config.userAgent || '').trim();
+    const liveBinaryCfg = this.resolveLiveRuntimeConfig(config);
+    const trimmedUa = (liveBinaryCfg.userAgent || '').trim();
     if (trimmedUa && !DEFAULT_BROWSER_USER_AGENTS.has(trimmedUa)) {
       headers.set('User-Agent', trimmedUa);
     }
@@ -3300,10 +3337,12 @@ export class RetroGameTalkClient {
     }
 
     // Decouple binary archive transfer timeout from short API/page requestTimeoutMs
-    const streamTimeoutMs = Math.min(600_000, Math.max(config.requestTimeoutMs * 6, 180_000));
-    const maxStreamAttempts = Math.min(4, Math.max(1, (config.maxRetries ?? 2) + 1));
-    const configuredChunkConcurrency = Math.max(1, Math.min(4, Math.round(config.downloadChunkConcurrency ?? 1)));
-    const chunkThresholdBytes = Math.max(4, Math.min(128, Math.round(config.downloadChunkMinSizeMb ?? 32))) * 1024 * 1024;
+    // Refresh live runtime config so mid-run changes to chunks, timeout, retries, and User-Agent take effect immediately
+    const liveDownloadCfg = this.resolveLiveRuntimeConfig(config);
+    let streamTimeoutMs = Math.min(600_000, Math.max(liveDownloadCfg.requestTimeoutMs * 6, 180_000));
+    let maxStreamAttempts = Math.min(4, Math.max(1, (liveDownloadCfg.maxRetries ?? 2) + 1));
+    let configuredChunkConcurrency = Math.max(1, Math.min(4, Math.round(liveDownloadCfg.downloadChunkConcurrency ?? 1)));
+    let chunkThresholdBytes = Math.max(4, Math.min(128, Math.round(liveDownloadCfg.downloadChunkMinSizeMb ?? 32))) * 1024 * 1024;
     let activeDownloadUrl = release.downloadUrl;
     let triedEntityDecodedFallback = false;
     let effectiveChunks = this.getEffectiveHostChunkConcurrency(activeDownloadUrl, configuredChunkConcurrency);
@@ -3313,6 +3352,17 @@ export class RetroGameTalkClient {
     for (let streamAttempt = 1; streamAttempt <= maxStreamAttempts; streamAttempt += 1) {
       if (signal.aborted) {
         throw new DOMException('Aborted', 'AbortError');
+      }
+      if (streamAttempt > 1) {
+        const retryLiveCfg = this.resolveLiveRuntimeConfig(config);
+        streamTimeoutMs = Math.min(600_000, Math.max(retryLiveCfg.requestTimeoutMs * 6, 180_000));
+        maxStreamAttempts = Math.min(4, Math.max(1, (retryLiveCfg.maxRetries ?? 2) + 1));
+        configuredChunkConcurrency = Math.max(1, Math.min(4, Math.round(retryLiveCfg.downloadChunkConcurrency ?? 1)));
+        chunkThresholdBytes = Math.max(4, Math.min(128, Math.round(retryLiveCfg.downloadChunkMinSizeMb ?? 32))) * 1024 * 1024;
+        effectiveChunks = Math.min(
+          effectiveChunks,
+          this.getEffectiveHostChunkConcurrency(activeDownloadUrl, configuredChunkConcurrency),
+        );
       }
 
       let partPath: string | null = null;
@@ -3696,7 +3746,10 @@ export class RetroGameTalkClient {
           try {
             let firstResponseConsumed = false;
             let currentWaveThrottleRetries = 0;
-            const maxWaveThrottleRetries = Math.max(2, config.maxRetries + 1);
+            const maxWaveThrottleRetries = Math.max(
+              2,
+              this.resolveLiveRuntimeConfig(config).maxRetries + 1,
+            );
 
             while (true) {
               const allMissing = findMissingByteRanges(totalBytes, committedRanges);

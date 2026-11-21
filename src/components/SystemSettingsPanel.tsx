@@ -25,11 +25,13 @@ import {
   detectPacingProfile,
   type PacingProfileDefinition,
 } from '../shared/requestPacing';
+import { formatLiveReloadRunLabel } from '../shared/syncRuleMatcher';
 import type {
   AuthTestResult,
   ConfigDirtyState,
   ConfigFocusRequest,
   ConfigPanelHandle,
+  LiveSyncReloadReceipt,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
 } from '../types';
@@ -43,7 +45,9 @@ interface SystemSettingsPanelProps {
   status: ServiceStatusSnapshot;
   focusRequest?: ConfigFocusRequest | null;
   onDirtyChange?: (state: ConfigDirtyState) => void;
-  onSaveConfig: (patch: Partial<ScraperConfigPublic> & { password?: string }) => Promise<void>;
+  onSaveConfig: (
+    patch: Partial<ScraperConfigPublic> & { password?: string },
+  ) => Promise<{ liveSyncReload?: LiveSyncReloadReceipt | null } | void>;
   onRefreshConfig: () => Promise<void>;
 }
 
@@ -404,13 +408,27 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
       setSaveMsg(null);
       setSaveErr(null);
       try {
-        await onSaveConfig(buildSavePayload());
+        const saveResult = await onSaveConfig(buildSavePayload());
         isDirtyRef.current = false;
-        setSaveMsg('System Settings saved');
-        saveNoticeTimerRef.current = window.setTimeout(() => {
-          setSaveMsg(null);
-          saveNoticeTimerRef.current = null;
-        }, 3500);
+        const liveReceipt =
+          saveResult && 'liveSyncReload' in saveResult ? saveResult.liveSyncReload : null;
+        if (liveReceipt?.applied) {
+          const runLabel = formatLiveReloadRunLabel(liveReceipt);
+          const detail = liveReceipt.changeSummary ? ` (${liveReceipt.changeSummary})` : '';
+          setSaveMsg(
+            `System Settings saved — applied live to active ${runLabel} #${liveReceipt.runId}${detail}`,
+          );
+          saveNoticeTimerRef.current = window.setTimeout(() => {
+            setSaveMsg(null);
+            saveNoticeTimerRef.current = null;
+          }, 6000);
+        } else {
+          setSaveMsg('System Settings saved');
+          saveNoticeTimerRef.current = window.setTimeout(() => {
+            setSaveMsg(null);
+            saveNoticeTimerRef.current = null;
+          }, 3500);
+        }
         return true;
       } catch (err) {
         setSaveErr(err instanceof Error ? err.message : String(err));
@@ -480,6 +498,11 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
       activeProfileId === 'custom'
         ? 'Custom Tuning'
         : PACING_PROFILES.find((p) => p.id === activeProfileId)?.label ?? 'Balanced';
+
+    const liveReloadHint =
+      status.activeRun && dirtyState.changedSections.includes('Request Pacing')
+        ? `Active ${formatLiveReloadRunLabel(status.activeRun)} #${status.activeRun.id} running — saved pacing, concurrency, chunk, timeout & retry changes will apply live immediately.`
+        : null;
 
     return (
       <form
@@ -1083,6 +1106,7 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
           saving={saving}
           saveMsg={saveMsg}
           saveErr={saveErr}
+          infoHint={liveReloadHint}
           onDiscard={discardChanges}
         />
       </form>

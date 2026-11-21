@@ -2135,7 +2135,7 @@ export default function App() {
                   status={status}
                   focusRequest={configFocus}
                   onDirtyChange={setConfigDirty}
-                  onSaveConfig={handleSaveConfigVoid}
+                  onSaveConfig={handleSaveConfig}
                   onRefreshConfig={loadInitialData}
                 />
               )}
