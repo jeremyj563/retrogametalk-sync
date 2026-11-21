@@ -43,16 +43,19 @@ async function bootstrap() {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // Kubernetes readiness probe (verifies SQLite + writable DOWNLOAD_DIR)
+  // Kubernetes readiness probe (verifies SQLite + writable DOWNLOAD_DIR without walking disk)
   app.get('/readyz', (_req, res) => {
     try {
-      const snap = orchestrator.getStatusSnapshot();
-      const schema = getSchemaMigrationReport();
-      if (!snap.storage.writable) {
+      const readiness = orchestrator.getReadinessSnapshot();
+      if (!readiness.writable) {
         res.status(503).json({ status: 'not_ready', reason: 'DOWNLOAD_DIR not writable' });
         return;
       }
-      res.status(200).json({ status: 'ready', podId: snap.podId, schemaVersion: schema.currentVersion });
+      res.status(200).json({
+        status: 'ready',
+        podId: readiness.podId,
+        schemaVersion: readiness.schemaVersion,
+      });
     } catch (err) {
       res.status(503).json({ status: 'not_ready', reason: String(err) });
     }

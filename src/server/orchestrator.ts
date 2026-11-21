@@ -482,6 +482,16 @@ export class ScraperOrchestrator extends EventEmitter {
     }
   }
 
+  private diskStatsCache: {
+    downloadDir: string;
+    collectedAtMs: number;
+    storage: StorageStats;
+    systemDiskUsage: Map<string, { filesOnDisk: number; bytesOnDisk: number }>;
+  } | null = null;
+  private diskStatsRefreshPromise: Promise<void> | null = null;
+  private diskStatsDirty = true;
+  private lastWritableCheck: { downloadDir: string; checkedAtMs: number; writable: boolean } | null = null;
+
   constructor() {
     super();
     const cfg = getInternalConfig();
@@ -519,6 +529,7 @@ export class ScraperOrchestrator extends EventEmitter {
     );
 
     this.reconfigureScheduler(refreshedCfg);
+    this.scheduleDiskStatsRefresh(refreshedCfg.downloadDir, true);
 
     if (authSnap.hasCompletedLogin && refreshedCfg.username && refreshedCfg.password) {
       setTimeout(() => {
@@ -763,6 +774,9 @@ export class ScraperOrchestrator extends EventEmitter {
   }
 
   private emitCatalogUpdated(reason: string, itemId?: number): void {
+    if (reason === 'file_downloaded' || reason === 'deleted' || reason === 'file_skipped') {
+      this.diskStatsDirty = true;
+    }
     this.emit('catalog_updated', {
       reason,
       itemId: itemId ?? null,
@@ -1077,11 +1091,15 @@ export class ScraperOrchestrator extends EventEmitter {
     return result;
   }
 
-  private collectStorageAndSystemDiskStats(downloadDir: string): {
-    storage: StorageStats;
-    systemDiskUsage: Map<string, { filesOnDisk: number; bytesOnDisk: number }>;
-  } {
-    const dataDir = getDataDir();
+  private checkDownloadDirWritable(downloadDir: string, ttlMs = 15_000): boolean {
+    const now = Date.now();
+    if (
+      this.lastWritableCheck &&
+      this.lastWritableCheck.downloadDir === downloadDir &&
+      now - this.lastWritableCheck.checkedAtMs < ttlMs
+    ) {
+      return this.lastWritableCheck.writable;
+    }
     let writable = false;
     try {
       fs.mkdirSync(downloadDir, { recursive: true });
@@ -1092,64 +1110,19 @@ export class ScraperOrchestrator extends EventEmitter {
     } catch {
       writable = false;
     }
+    this.lastWritableCheck = { downloadDir, checkedAtMs: now, writable };
+    return writable;
+  }
 
-    let totalFilesOnDisk = 0;
-    let totalBytesOnDisk = 0;
-    const systemDiskUsage = new Map<string, { filesOnDisk: number; bytesOnDisk: number }>();
-
-    const walk = (dir: string, depth = 0, topLevelSystem: string | null = null) => {
-      if (depth > 6) return;
-      let entries: fs.Dirent[];
-      try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      for (const entry of entries) {
-        if (
-          entry.name.startsWith('.') ||
-          isEphemeralPartFile(entry.name) ||
-          entry.name === 'scraper.db' ||
-          entry.name === 'scraper.db-wal' ||
-          entry.name === 'scraper.db-shm' ||
-          entry.name === 'cookies.json' ||
-          entry.name === 'metadata.json' ||
-          entry.name === 'screenshots' ||
-          /^cover\.(jpg|jpeg|png|webp|gif)$/i.test(entry.name)
-        ) {
-          continue;
-        }
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          const nextSystem = depth === 0 ? entry.name.toLowerCase() : topLevelSystem;
-          walk(full, depth + 1, nextSystem);
-        } else if (entry.isFile()) {
-          try {
-            const st = fs.statSync(full);
-            totalFilesOnDisk += 1;
-            totalBytesOnDisk += st.size;
-            if (topLevelSystem) {
-              const bucket = systemDiskUsage.get(topLevelSystem);
-              if (bucket) {
-                bucket.filesOnDisk += 1;
-                bucket.bytesOnDisk += st.size;
-              } else {
-                systemDiskUsage.set(topLevelSystem, {
-                  filesOnDisk: 1,
-                  bytesOnDisk: st.size,
-                });
-              }
-            }
-          } catch {
-            // Skip unreadable entry
-          }
-        }
-      }
-    };
-
-    if (fs.existsSync(downloadDir)) {
-      walk(downloadDir);
-    }
+  private collectLightweightStorageMetadata(downloadDir: string): {
+    dataDir: string;
+    writable: boolean;
+    sqliteBytes: number;
+    diskFreeBytes: number | null;
+    diskTotalBytes: number | null;
+  } {
+    const dataDir = getDataDir();
+    const writable = this.checkDownloadDirWritable(downloadDir);
 
     let sqliteBytes = 0;
     for (const dbFile of ['scraper.db', 'scraper.db-wal', 'scraper.db-shm']) {
@@ -1173,6 +1146,83 @@ export class ScraperOrchestrator extends EventEmitter {
       // Optional on platforms without statfsSync
     }
 
+    return { dataDir, writable, sqliteBytes, diskFreeBytes, diskTotalBytes };
+  }
+
+  private async collectStorageAndSystemDiskStatsAsync(downloadDir: string): Promise<{
+    storage: StorageStats;
+    systemDiskUsage: Map<string, { filesOnDisk: number; bytesOnDisk: number }>;
+  }> {
+    const { dataDir, writable, sqliteBytes, diskFreeBytes, diskTotalBytes } =
+      this.collectLightweightStorageMetadata(downloadDir);
+
+    let totalFilesOnDisk = 0;
+    let totalBytesOnDisk = 0;
+    const systemDiskUsage = new Map<string, { filesOnDisk: number; bytesOnDisk: number }>();
+    let visitedDirs = 0;
+
+    const walk = async (dir: string, depth = 0, topLevelSystem: string | null = null): Promise<void> => {
+      if (depth > 6 || this.shuttingDown) return;
+      visitedDirs += 1;
+      if (visitedDirs % 25 === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      let entries: fs.Dirent[];
+      try {
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (this.shuttingDown) return;
+        if (
+          entry.name.startsWith('.') ||
+          isEphemeralPartFile(entry.name) ||
+          entry.name === 'scraper.db' ||
+          entry.name === 'scraper.db-wal' ||
+          entry.name === 'scraper.db-shm' ||
+          entry.name === 'cookies.json' ||
+          entry.name === 'metadata.json' ||
+          entry.name === 'screenshots' ||
+          /^cover\.(jpg|jpeg|png|webp|gif)$/i.test(entry.name)
+        ) {
+          continue;
+        }
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          const nextSystem = depth === 0 ? entry.name.toLowerCase() : topLevelSystem;
+          await walk(full, depth + 1, nextSystem);
+        } else if (entry.isFile()) {
+          try {
+            const st = await fs.promises.stat(full);
+            totalFilesOnDisk += 1;
+            totalBytesOnDisk += st.size;
+            if (topLevelSystem) {
+              const bucket = systemDiskUsage.get(topLevelSystem);
+              if (bucket) {
+                bucket.filesOnDisk += 1;
+                bucket.bytesOnDisk += st.size;
+              } else {
+                systemDiskUsage.set(topLevelSystem, {
+                  filesOnDisk: 1,
+                  bytesOnDisk: st.size,
+                });
+              }
+            }
+          } catch {
+            // Skip unreadable entry
+          }
+        }
+      }
+    };
+
+    try {
+      await fs.promises.access(downloadDir);
+      await walk(downloadDir);
+    } catch {
+      // Directory does not exist yet
+    }
+
     return {
       storage: {
         downloadDir,
@@ -1185,6 +1235,81 @@ export class ScraperOrchestrator extends EventEmitter {
         diskTotalBytes,
       },
       systemDiskUsage,
+    };
+  }
+
+  private scheduleDiskStatsRefresh(downloadDir: string, force = false): void {
+    if (this.shuttingDown || this.diskStatsRefreshPromise) return;
+    const now = Date.now();
+    const cached = this.diskStatsCache;
+    const sameDir = cached?.downloadDir === downloadDir;
+    const ageMs = cached ? now - cached.collectedAtMs : Infinity;
+    const minIntervalMs = this.diskStatsDirty ? 10_000 : 30_000;
+    if (!force && sameDir && ageMs < minIntervalMs) {
+      return;
+    }
+
+    this.diskStatsDirty = false;
+    const wasCold = !this.diskStatsCache || this.diskStatsCache.downloadDir !== downloadDir;
+    this.diskStatsRefreshPromise = this.collectStorageAndSystemDiskStatsAsync(downloadDir)
+      .then((result) => {
+        this.diskStatsCache = {
+          downloadDir,
+          collectedAtMs: Date.now(),
+          storage: result.storage,
+          systemDiskUsage: result.systemDiskUsage,
+        };
+        if (wasCold && !this.shuttingDown) {
+          this.emitStatus();
+        }
+      })
+      .catch(() => {
+        // Keep last good disk stats snapshot on transient I/O errors
+      })
+      .finally(() => {
+        this.diskStatsRefreshPromise = null;
+      });
+  }
+
+  private collectStorageAndSystemDiskStats(downloadDir: string): {
+    storage: StorageStats;
+    systemDiskUsage: Map<string, { filesOnDisk: number; bytesOnDisk: number }>;
+  } {
+    this.scheduleDiskStatsRefresh(downloadDir, false);
+    if (this.diskStatsCache && this.diskStatsCache.downloadDir === downloadDir) {
+      return {
+        storage: {
+          ...this.diskStatsCache.storage,
+          writable: this.checkDownloadDirWritable(downloadDir),
+        },
+        systemDiskUsage: this.diskStatsCache.systemDiskUsage,
+      };
+    }
+
+    const { dataDir, writable, sqliteBytes, diskFreeBytes, diskTotalBytes } =
+      this.collectLightweightStorageMetadata(downloadDir);
+    return {
+      storage: {
+        downloadDir,
+        dataDir,
+        writable,
+        totalFilesOnDisk: 0,
+        totalBytesOnDisk: 0,
+        sqliteBytes,
+        diskFreeBytes,
+        diskTotalBytes,
+      },
+      systemDiskUsage: new Map(),
+    };
+  }
+
+  getReadinessSnapshot(): { podId: string; writable: boolean; schemaVersion: number } {
+    const cfg = getInternalConfig();
+    const schema = getSchemaMigrationReport();
+    return {
+      podId: POD_ID,
+      writable: this.checkDownloadDirWritable(cfg.downloadDir),
+      schemaVersion: schema.currentVersion,
     };
   }
 
@@ -2185,7 +2310,14 @@ export class ScraperOrchestrator extends EventEmitter {
   getStatusSnapshot(): ServiceStatusSnapshot {
     const cfg = getInternalConfig();
     const { totals, systems: dbSystems, releaseTypes } = getCatalogTotalsAndSystems();
-    const { storage, systemDiskUsage } = this.collectStorageAndSystemDiskStats(cfg.downloadDir);
+    const { storage: rawStorage, systemDiskUsage } = this.collectStorageAndSystemDiskStats(cfg.downloadDir);
+    const storage: StorageStats =
+      !this.diskStatsCache && rawStorage.totalBytesOnDisk === 0 && totals.totalBytesMirrored > 0
+        ? {
+            ...rawStorage,
+            totalBytesOnDisk: totals.totalBytesMirrored,
+          }
+        : rawStorage;
     const nextRun = this.cronJob?.nextRun();
 
     const systems = dbSystems.map((sys) => {
@@ -5920,6 +6052,24 @@ export class ScraperOrchestrator extends EventEmitter {
       return { downloaded: true, skipped: false, failed: false, bytes: res.bytes };
     } catch (err) {
       unregisterWorker();
+      if (signal.aborted) {
+        upsertReleaseFile({
+          releaseId,
+          targetFileId: initial.file.id,
+          remoteUrl: release.remoteUrl,
+          downloadUrl: release.downloadUrl,
+          remotePath,
+          localPath: initial.file.localPath,
+          filename: release.filename,
+          displayLabel,
+          fileRole,
+          status: 'available',
+          errorMessage: null,
+          lastRunId: runId,
+        });
+        this.emitCatalogUpdated('file_aborted', releaseId);
+        return { downloaded: false, skipped: false, failed: false, bytes: 0 };
+      }
       const errMsg = err instanceof Error ? err.message : String(err);
       upsertReleaseFile({
         releaseId,
@@ -5935,10 +6085,8 @@ export class ScraperOrchestrator extends EventEmitter {
         errorMessage: errMsg,
         lastRunId: runId,
       });
-      if (!signal.aborted) {
-        runLogger('debug', `[Download] Failure details for "${release.filename}"`, `localPath="${expectedLocalPath}", ${formatErrorDetails(err)}`);
-        runLogger('error', `Failed ${release.filename}: ${errMsg}`, release.downloadUrl);
-      }
+      runLogger('debug', `[Download] Failure details for "${release.filename}"`, `localPath="${expectedLocalPath}", ${formatErrorDetails(err)}`);
+      runLogger('error', `Failed ${release.filename}: ${errMsg}`, release.downloadUrl);
       this.emitCatalogUpdated('file_failed', releaseId);
       return { downloaded: false, skipped: false, failed: true, bytes: 0 };
     }
