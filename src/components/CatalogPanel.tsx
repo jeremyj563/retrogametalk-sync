@@ -2932,7 +2932,7 @@ export function CatalogPanel({
                         className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                       >
                         <HardDrive className="h-3.5 w-3.5 shrink-0" />
-                        Install to Storage Device ({selectionSummary.installableIds.length.toLocaleString()})
+                        Install Options ({selectionSummary.installableIds.length.toLocaleString()})
                       </button>
                     </>
                   )}
