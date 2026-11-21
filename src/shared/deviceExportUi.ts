@@ -7,19 +7,27 @@ import {
 } from './romNaming.ts';
 import {
   classifyDiscoveredConsoleDiff,
+  inferDeviceConventions,
   type AutoConfigConsoleDiff,
   type DeviceAutoConfigResult,
+  type DeviceInferredConventions,
   type DiscoveredConsoleCandidate,
   type DiscoveredConsoleMapping,
 } from './storageAutoConfig.ts';
 import {
+  applyFolderCasingStyle,
   createDefaultStorageFolderConfig,
+  DEFAULT_ROM_TYPE_SUBFOLDERS,
+  getStorageRomCategoryShortLabel,
   normalizeStorageFolderConfig,
   resolveBaseSystemFolder,
   resolveDefaultSystemFolder,
   resolveTargetStorageFolder,
+  sanitizeRelativeStoragePath,
+  STORAGE_ROM_CATEGORY_KEYS,
   type StorageFolderMappingConfig,
   type StorageRomCategoryKey,
+  type SystemTypeFolderOverride,
 } from './storageFolderMappings.ts';
 import { canonicalizeSystemSlug, resolveSystemDisplayInfo } from './systemCatalog.ts';
 
@@ -38,10 +46,10 @@ export const ROM_NAMING_TOKEN_HELPERS: readonly NamingTokenHelper[] = [
   { token: '{origName}', label: 'Original inner filename' },
 ];
 
-export type ConsolePathSource = 'manual' | 'auto' | 'default';
+export type ConsolePathSource = 'manual' | 'auto' | 'inferred' | 'default';
 
 export interface LiveExportDestinationSample {
-  id: 'retail' | 'hack' | 'translation';
+  id: 'retail' | 'hack' | 'translation' | 'new_console';
   label: string;
   systemSlug: string;
   systemLabel: string;
@@ -54,6 +62,17 @@ export interface LiveExportDestinationSample {
 export interface ComposeEffectiveFolderOptions {
   chosenPathBySlug?: Readonly<Record<string, string>>;
   includeTypeSubfolders?: boolean;
+}
+
+export interface InferredConventionSummary {
+  newConsolePattern: string | null;
+  observedSubfolders: Array<{
+    category: StorageRomCategoryKey;
+    label: string;
+    folder: string;
+  }>;
+  unseenCasingLabel: string | null;
+  hasAnyInferredConvention: boolean;
 }
 
 function findStoredKeyByDisplayName<T>(
@@ -95,11 +114,35 @@ function findAutoMatchForSlug(
   return null;
 }
 
+function isStandaloneNonRomSlug(slug: string): boolean {
+  const clean = slug.trim().toLowerCase();
+  return clean === 'bios-files' || clean === 'bios' || clean === 'soundtracks';
+}
+
+function getEffectiveDeviceConventions(
+  autoConfigResult: DeviceAutoConfigResult | null | undefined,
+  chosenPathBySlug?: Readonly<Record<string, string>>,
+): DeviceInferredConventions | null {
+  if (!autoConfigResult || autoConfigResult.matches.length === 0) return null;
+  if (chosenPathBySlug && Object.keys(chosenPathBySlug).length > 0) {
+    return inferDeviceConventions(
+      autoConfigResult.detectedRomRoot,
+      autoConfigResult.matches,
+      chosenPathBySlug,
+    );
+  }
+  return (
+    autoConfigResult.conventions ??
+    inferDeviceConventions(autoConfigResult.detectedRomRoot, autoConfigResult.matches)
+  );
+}
+
 /**
- * 3-layer effective folder composer:
- *   Layer 1: Universal defaults (resolved implicitly by resolveTargetStorageFolder)
- *   Layer 2: Session-scoped auto-configured paths for the currently mounted device
- *   Layer 3: Saved manual overrides (always take priority over auto-detected paths)
+ * 4-tier effective folder composer:
+ *   Tier 1: Saved manual overrides (always take top priority)
+ *   Tier 2: Exact detected console folders & each console's own detected subfolders
+ *   Tier 3: Mounted device inferred conventions (nested ROM root + cross-console subfolder naming/casing)
+ *   Tier 4: Universal defaults + saved global folder organization
  */
 export function composeEffectiveStorageFolderConfig(
   savedManualConfig: StorageFolderMappingConfig | null | undefined,
@@ -115,17 +158,58 @@ export function composeEffectiveStorageFolderConfig(
 
   const chosenPathBySlug = options.chosenPathBySlug ?? {};
   const includeTypeSubfolders = options.includeTypeSubfolders ?? true;
+  const conventions = getEffectiveDeviceConventions(autoConfigResult, chosenPathBySlug);
 
   const mergedSystemFolders: Record<string, string> = { ...manual.systemFolders };
-  const mergedTypeOverrides = { ...manual.systemTypeOverrides };
+  const mergedTypeOverrides: Record<string, SystemTypeFolderOverride> = {
+    ...manual.systemTypeOverrides,
+  };
 
+  // Tier 3: Device-wide ROM-type subfolder naming & casing propagation across all consoles on this device
+  const applyDeviceSubfolders = Boolean(
+    includeTypeSubfolders && conventions?.hasInferredTypeSubfolders,
+  );
+  const effectiveTypeSubfoldersEnabled = applyDeviceSubfolders
+    ? true
+    : manual.typeSubfoldersEnabled;
+
+  const effectiveGlobalTypeSubfolders: Record<StorageRomCategoryKey, string> = {
+    ...manual.globalTypeSubfolders,
+  };
+
+  if (applyDeviceSubfolders && conventions) {
+    for (const category of STORAGE_ROM_CATEGORY_KEYS) {
+      const observedName = conventions.inferredTypeSubfolders[category];
+      if (category === 'retail') {
+        if (observedName) {
+          effectiveGlobalTypeSubfolders.retail = observedName;
+        }
+        continue;
+      }
+      if (observedName) {
+        effectiveGlobalTypeSubfolders[category] = observedName;
+      } else {
+        const defaultName = DEFAULT_ROM_TYPE_SUBFOLDERS[category];
+        const manualName = manual.globalTypeSubfolders[category];
+        // Respect explicit custom global subfolder names; otherwise match detected casing style on unseen types
+        if (manualName === defaultName) {
+          effectiveGlobalTypeSubfolders[category] = applyFolderCasingStyle(
+            defaultName,
+            conventions.inferredSubfolderCasing,
+          );
+        }
+      }
+    }
+  }
+
+  // Tier 2: Exact detected console folders & per-console disk subfolders
   for (const match of autoConfigResult.matches) {
     const chosenPath = chosenPathBySlug[match.canonicalSlug] || match.recommendedPath;
     const activeCandidate =
       match.candidates.find((c) => c.relativePath === chosenPath) ?? match.candidates[0];
     if (!activeCandidate) continue;
 
-    // Layer 3 (explicit manual base folder) always wins over Layer 2 (auto-detected)
+    // Tier 1 (explicit manual base folder) always wins over Tier 2 (auto-detected)
     const manualBaseKey = findStoredKeyByDisplayName(match.canonicalSlug, manual.systemFolders);
     const hasManualBase =
       manualBaseKey !== null &&
@@ -134,13 +218,16 @@ export function composeEffectiveStorageFolderConfig(
         resolveDefaultSystemFolder(match.canonicalSlug);
 
     if (!hasManualBase) {
-      mergedSystemFolders[match.canonicalSlug] = activeCandidate.relativePath;
+      const cleanDetected = sanitizeRelativeStoragePath(activeCandidate.relativePath);
+      if (cleanDetected) {
+        mergedSystemFolders[match.canonicalSlug.toLowerCase()] = cleanDetected;
+      }
     }
 
-    // Layer 3 (explicit manual type override) always wins over Layer 2 detected subfolders
+    // Tier 1 (explicit manual type override) always wins over Tier 2 detected subfolders
     if (includeTypeSubfolders) {
       const detectedSubs = activeCandidate.detectedTypeSubfolders;
-      const detectedKeys = Object.keys(detectedSubs);
+      const detectedKeys = Object.keys(detectedSubs) as StorageRomCategoryKey[];
       if (detectedKeys.length > 0) {
         const manualOverrideKey = findStoredKeyByDisplayName(
           match.canonicalSlug,
@@ -156,26 +243,45 @@ export function composeEffectiveStorageFolderConfig(
                 Object.keys(existingManualOverride.subfolders).length > 0)),
         );
         if (!hasManualOverride) {
-          mergedTypeOverrides[match.canonicalSlug] = {
-            mode: 'enabled',
-            subfolders: { ...detectedSubs },
-          };
+          const perConsoleDiffSubs: Partial<Record<StorageRomCategoryKey, string>> = {};
+          for (const cat of detectedKeys) {
+            const cleanedSub = sanitizeRelativeStoragePath(detectedSubs[cat] || '');
+            if (cleanedSub && cleanedSub !== effectiveGlobalTypeSubfolders[cat]) {
+              perConsoleDiffSubs[cat] = cleanedSub;
+            }
+          }
+          if (!effectiveTypeSubfoldersEnabled || Object.keys(perConsoleDiffSubs).length > 0) {
+            mergedTypeOverrides[match.canonicalSlug.toLowerCase()] = {
+              mode: 'enabled',
+              ...(Object.keys(perConsoleDiffSubs).length > 0
+                ? { subfolders: perConsoleDiffSubs }
+                : {}),
+            };
+          }
         }
       }
     }
   }
 
-  return normalizeStorageFolderConfig({
-    ...manual,
+  return {
+    typeSubfoldersEnabled: effectiveTypeSubfoldersEnabled,
+    globalTypeSubfolders: effectiveGlobalTypeSubfolders,
     systemFolders: mergedSystemFolders,
     systemTypeOverrides: mergedTypeOverrides,
-  });
+    ...(conventions?.inferredRomRoot
+      ? {
+          runtimeBaseRomRoot: conventions.inferredRomRoot,
+          runtimeConsoleCasing: conventions.inferredConsoleCasing,
+        }
+      : {}),
+  };
 }
 
 export function resolveConsolePathSource(
   slug: string,
   savedManualConfig: StorageFolderMappingConfig | null | undefined,
   autoConfigResult: DeviceAutoConfigResult | null | undefined,
+  options: ComposeEffectiveFolderOptions = {},
 ): ConsolePathSource {
   const manual = normalizeStorageFolderConfig(
     savedManualConfig ?? createDefaultStorageFolderConfig(),
@@ -202,7 +308,71 @@ export function resolveConsolePathSource(
   if (findAutoMatchForSlug(autoConfigResult, slug)) {
     return 'auto';
   }
+  const conventions = getEffectiveDeviceConventions(autoConfigResult, options.chosenPathBySlug);
+  const includeTypeSubfolders = options.includeTypeSubfolders ?? true;
+  if (conventions) {
+    const hasRootInference = Boolean(conventions.inferredRomRoot) && !isStandaloneNonRomSlug(slug);
+    const hasSubfolderInference = Boolean(
+      includeTypeSubfolders && conventions.hasInferredTypeSubfolders,
+    );
+    if (hasRootInference || hasSubfolderInference) {
+      return 'inferred';
+    }
+  }
   return 'default';
+}
+
+export function summarizeDeviceInferredConventions(
+  autoConfigResult: DeviceAutoConfigResult | null | undefined,
+  options: ComposeEffectiveFolderOptions = {},
+): InferredConventionSummary {
+  const conventions = getEffectiveDeviceConventions(autoConfigResult, options.chosenPathBySlug);
+  if (!conventions) {
+    return {
+      newConsolePattern: null,
+      observedSubfolders: [],
+      unseenCasingLabel: null,
+      hasAnyInferredConvention: false,
+    };
+  }
+
+  const includeTypeSubfolders = options.includeTypeSubfolders ?? true;
+  const placeholderLeaf =
+    conventions.inferredConsoleCasing === 'lower' ? '<system>' : '<SYSTEM>';
+  const newConsolePattern = conventions.inferredRomRoot
+    ? `/${conventions.inferredRomRoot}/${placeholderLeaf}`
+    : null;
+
+  const observedSubfolders: InferredConventionSummary['observedSubfolders'] = [];
+  if (includeTypeSubfolders && conventions.hasInferredTypeSubfolders) {
+    for (const category of STORAGE_ROM_CATEGORY_KEYS) {
+      if (category === 'retail') continue;
+      const folder = conventions.inferredTypeSubfolders[category];
+      if (folder) {
+        observedSubfolders.push({
+          category,
+          label: getStorageRomCategoryShortLabel(category),
+          folder,
+        });
+      }
+    }
+  }
+
+  const unseenCasingLabel =
+    includeTypeSubfolders && conventions.hasInferredTypeSubfolders
+      ? conventions.inferredSubfolderCasing === 'lower'
+        ? 'lowercase'
+        : conventions.inferredSubfolderCasing === 'upper'
+          ? 'UPPERCASE'
+          : 'Title Case'
+      : null;
+
+  return {
+    newConsolePattern,
+    observedSubfolders,
+    unseenCasingLabel,
+    hasAnyInferredConvention: Boolean(newConsolePattern) || observedSubfolders.length > 0,
+  };
 }
 
 interface SampleGameMetadata {
@@ -348,7 +518,21 @@ function getSampleMetaForSlug(slug: string): SampleGameMetadata {
 export interface LiveExportPreviewContext {
   savedManualConfig?: StorageFolderMappingConfig | null;
   autoConfigResult?: DeviceAutoConfigResult | null;
+  chosenPathBySlug?: Readonly<Record<string, string>>;
+  includeTypeSubfolders?: boolean;
 }
+
+const NEW_CONSOLE_PREVIEW_CANDIDATES: readonly string[] = [
+  'n64-roms',
+  'gba-roms',
+  'psx-iso',
+  'snes-roms',
+  'nes-roms',
+  'genesis-roms',
+  'gbc-roms',
+  'gb-roms',
+  'nds-roms',
+];
 
 export function buildLiveExportDestinations(
   effectiveFolderConfig: StorageFolderMappingConfig,
@@ -357,6 +541,10 @@ export function buildLiveExportDestinations(
 ): LiveExportDestinationSample[] {
   const savedManual = context.savedManualConfig ?? effectiveFolderConfig;
   const autoResult = context.autoConfigResult ?? null;
+  const resolveOpts: ComposeEffectiveFolderOptions = {
+    chosenPathBySlug: context.chosenPathBySlug,
+    includeTypeSubfolders: context.includeTypeSubfolders,
+  };
 
   let retailSlug = 'snes-roms';
   let hackSlug = 'snes-roms';
@@ -444,7 +632,7 @@ export function buildLiveExportDestinations(
     namingConfig,
   );
 
-  return [
+  const samples: LiveExportDestinationSample[] = [
     {
       id: 'retail',
       label: 'Retail ROM',
@@ -453,7 +641,7 @@ export function buildLiveExportDestinations(
       folderPath: retailFolder,
       filename: retailFile,
       fullPath: `/${retailFolder}/${retailFile}`,
-      source: resolveConsolePathSource(retailSlug, savedManual, autoResult),
+      source: resolveConsolePathSource(retailSlug, savedManual, autoResult, resolveOpts),
     },
     {
       id: 'hack',
@@ -463,7 +651,7 @@ export function buildLiveExportDestinations(
       folderPath: hackFolder,
       filename: hackFile,
       fullPath: `/${hackFolder}/${hackFile}`,
-      source: resolveConsolePathSource(hackSlug, savedManual, autoResult),
+      source: resolveConsolePathSource(hackSlug, savedManual, autoResult, resolveOpts),
     },
     {
       id: 'translation',
@@ -473,9 +661,87 @@ export function buildLiveExportDestinations(
       folderPath: translationFolder,
       filename: translationFile,
       fullPath: `/${translationFolder}/${translationFile}`,
-      source: resolveConsolePathSource(translationSlug, savedManual, autoResult),
+      source: resolveConsolePathSource(translationSlug, savedManual, autoResult, resolveOpts),
     },
   ];
+
+  // When a mounted device has an inferred ROM root or subfolder convention, add a 4th row
+  // demonstrating exactly where a brand-new (not yet present) console will be created automatically.
+  const conventions = getEffectiveDeviceConventions(autoResult, context.chosenPathBySlug);
+  const includeTypeSubfolders = context.includeTypeSubfolders ?? true;
+  const hasActiveSubfolderInference = Boolean(
+    includeTypeSubfolders && conventions?.hasInferredTypeSubfolders,
+  );
+  if (conventions && (conventions.inferredRomRoot || hasActiveSubfolderInference)) {
+    const newConsoleSlug =
+      NEW_CONSOLE_PREVIEW_CANDIDATES.find((slug) => !findAutoMatchForSlug(autoResult, slug)) ??
+      'n64-roms';
+    const newMeta = getSampleMetaForSlug(newConsoleSlug);
+    const showHomebrewExample =
+      hasActiveSubfolderInference && !conventions.inferredTypeSubfolders.homebrew;
+    const category: StorageRomCategoryKey = hasActiveSubfolderInference
+      ? showHomebrewExample
+        ? 'homebrew'
+        : 'hack'
+      : 'retail';
+
+    const newFolder = resolveTargetStorageFolder(newConsoleSlug, category, effectiveFolderConfig);
+    const newFile =
+      category === 'homebrew'
+        ? formatPreparedRomName(
+            {
+              title: `${newMeta.systemLabel} Homebrew Demo`,
+              systemName: newConsoleSlug,
+              regions: ['World'],
+              fileRole: 'Homebrew',
+              innerFilename: `${newMeta.systemLabel.toLowerCase()}_homebrew${newMeta.ext}`,
+            },
+            newMeta.ext,
+            namingConfig,
+          )
+        : category === 'hack'
+          ? formatPreparedRomName(
+              {
+                title: newMeta.hackTitle,
+                systemName: newConsoleSlug,
+                regions: ['USA'],
+                fileRole: 'Hack',
+                archiveFilename: newMeta.hackArchive,
+                innerFilename: newMeta.hackInner,
+              },
+              newMeta.ext,
+              namingConfig,
+            )
+          : formatPreparedRomName(
+              {
+                title: newMeta.retailTitle,
+                systemName: newConsoleSlug,
+                regions: [newMeta.retailRegion],
+                fileRole: 'ROM',
+                innerFilename: newMeta.retailInner,
+              },
+              newMeta.ext,
+              namingConfig,
+            );
+
+    samples.push({
+      id: 'new_console',
+      label: 'New console',
+      systemSlug: newConsoleSlug,
+      systemLabel:
+        category === 'homebrew'
+          ? `${newMeta.systemLabel} · Homebrew`
+          : category === 'hack'
+            ? `${newMeta.systemLabel} · Hack`
+            : newMeta.systemLabel,
+      folderPath: newFolder,
+      filename: newFile,
+      fullPath: `/${newFolder}/${newFile}`,
+      source: resolveConsolePathSource(newConsoleSlug, savedManual, autoResult, resolveOpts),
+    });
+  }
+
+  return samples;
 }
 
 export function getActiveManualOverrideSlugs(

@@ -88,16 +88,68 @@ test('normalizes decorated folder names and classifies ROM-type subfolder aliase
   assert.equal(normalizeFolderToken('02_SFC'), 'sfc');
 
   assert.equal(classifyRomTypeSubfolderName('ROM Hacks'), 'hack');
+  assert.equal(classifyRomTypeSubfolderName('hacks'), 'hack');
   assert.equal(classifyRomTypeSubfolderName('English Translations'), 'translations');
+  assert.equal(classifyRomTypeSubfolderName('trans'), 'translations');
+  assert.equal(classifyRomTypeSubfolderName('transl'), 'translations');
   assert.equal(classifyRomTypeSubfolderName('T-En'), 'translations');
+  assert.equal(classifyRomTypeSubfolderName('eng'), 'translations');
   assert.equal(classifyRomTypeSubfolderName('Homebrew'), 'homebrew');
+  assert.equal(classifyRomTypeSubfolderName('hb'), 'homebrew');
   assert.equal(classifyRomTypeSubfolderName('Ports'), 'port');
   assert.equal(classifyRomTypeSubfolderName('Undubs'), 'undub');
   assert.equal(classifyRomTypeSubfolderName('Prototypes'), 'demo_proto');
   assert.equal(classifyRomTypeSubfolderName('Unlicensed'), 'bootleg');
+  assert.equal(classifyRomTypeSubfolderName('unlic'), 'bootleg');
   assert.equal(classifyRomTypeSubfolderName('BIOS'), 'bios');
   assert.equal(classifyRomTypeSubfolderName('PSX2PSP'), 'psx2psp');
   assert.equal(classifyRomTypeSubfolderName('Random Misc Folder'), null);
+});
+
+test('infers device-wide ROM root, console leaf casing, majority subfolder names, and subfolder casing style', () => {
+  const customLowerTree: ScannedDirNode[] = [
+    node('', { name: 'HANDHELD_SD', childDirs: ['Roms'] }),
+    node('Roms', { childDirs: ['SNES', 'NES', 'GBA'] }),
+    node('Roms/SNES', { childDirs: ['hacks', 'BIOS'], sampleExtensions: ['sfc'], fileCount: 25 }),
+    node('Roms/NES', { childDirs: ['trans', 'hacks'], sampleExtensions: ['nes'], fileCount: 18 }),
+    node('Roms/GBA', { sampleExtensions: ['gba'], fileCount: 12 }),
+  ];
+  const lowerRes = discoverStorageFolderMappings(customLowerTree, { rootLabel: 'HANDHELD_SD' });
+  assert.equal(lowerRes.conventions.inferredRomRoot, 'Roms');
+  assert.equal(lowerRes.conventions.inferredConsoleCasing, 'upper');
+  assert.equal(lowerRes.conventions.hasInferredTypeSubfolders, true);
+  assert.equal(lowerRes.conventions.inferredSubfolderCasing, 'lower');
+  assert.equal(lowerRes.conventions.inferredTypeSubfolders.hack, 'hacks');
+  assert.equal(lowerRes.conventions.inferredTypeSubfolders.translations, 'trans');
+
+  // EmuDeck lowercase console folders + uppercase subfolder style
+  const deckTree: ScannedDirNode[] = [
+    node('', { name: 'DECK_SD', childDirs: ['Emulation'] }),
+    node('Emulation', { childDirs: ['roms'] }),
+    node('Emulation/roms', { childDirs: ['snes', 'gba', 'psx'] }),
+    node('Emulation/roms/snes', { childDirs: ['HACKS', 'TRANS'], sampleExtensions: ['sfc'], fileCount: 10 }),
+    node('Emulation/roms/gba', { sampleExtensions: ['gba'], fileCount: 8 }),
+    node('Emulation/roms/psx', { sampleExtensions: ['chd'], fileCount: 4 }),
+  ];
+  const deckRes = discoverStorageFolderMappings(deckTree, { rootLabel: 'DECK_SD' });
+  assert.equal(deckRes.conventions.inferredRomRoot, 'Emulation/roms');
+  assert.equal(deckRes.conventions.inferredConsoleCasing, 'lower');
+  assert.equal(deckRes.conventions.inferredSubfolderCasing, 'upper');
+  assert.equal(deckRes.conventions.inferredTypeSubfolders.hack, 'HACKS');
+  assert.equal(deckRes.conventions.inferredTypeSubfolders.translations, 'TRANS');
+
+  // Analogue Pocket does not fabricate synthetic Assets/*/common roots for unseen consoles
+  const pocketTree: ScannedDirNode[] = [
+    node('', { name: 'POCKET_SD', childDirs: ['Assets'] }),
+    node('Assets', { childDirs: ['snes', 'gba'] }),
+    node('Assets/snes', { childDirs: ['common'] }),
+    node('Assets/snes/common', { sampleExtensions: ['sfc'], fileCount: 10 }),
+    node('Assets/gba', { childDirs: ['common'] }),
+    node('Assets/gba/common', { sampleExtensions: ['gba'], fileCount: 8 }),
+  ];
+  const pocketRes = discoverStorageFolderMappings(pocketTree, { rootLabel: 'POCKET_SD' });
+  assert.equal(pocketRes.detectedRomRoot, 'Assets/*/common');
+  assert.equal(pocketRes.conventions.inferredRomRoot, '');
 });
 
 test('discovers OnionOS / GarlicOS nested Roms/ layout and ignores metadata folders', () => {

@@ -11,6 +11,7 @@ import {
   resolveConsolePathSource,
   searchConsolesForOverride,
   shouldAutoExpandAdvancedNaming,
+  summarizeDeviceInferredConventions,
   summarizeNamingOptions,
 } from '../src/shared/deviceExportUi.ts';
 import { DEFAULT_ROM_NAMING_TEMPLATE } from '../src/shared/romNaming.ts';
@@ -48,26 +49,100 @@ test('composeEffectiveStorageFolderConfig enforces 3-layer precedence: defaults 
     'Roms/SFC/ROM Hacks',
   );
   assert.equal(resolveTargetStorageFolder('gba-roms', 'retail', effectiveMiyoo), 'Roms/GBA');
+  // Existing flat GBA inherits the device's detected ROM Hacks subfolder convention
+  assert.equal(resolveTargetStorageFolder('gba-roms', 'hack', effectiveMiyoo), 'Roms/GBA/ROM Hacks');
+  // Brand-new N64 console inherits the mounted device's Roms/ root + subfolder convention
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'retail', effectiveMiyoo), 'Roms/N64');
+  assert.equal(
+    resolveTargetStorageFolder('n64-roms', 'hack', effectiveMiyoo),
+    'Roms/N64/ROM Hacks',
+  );
+  // Standalone BIOS is never nested under Roms/
+  assert.equal(resolveTargetStorageFolder('bios-files', 'bios', effectiveMiyoo), 'BIOS');
   // Manual override wins over auto-detected Roms/FC
   assert.equal(resolveTargetStorageFolder('nes-roms', 'retail', effectiveMiyoo), 'MyPinnedNES');
 
   assert.equal(resolveConsolePathSource('snes-roms', savedManual, miyooScan), 'auto');
   assert.equal(resolveConsolePathSource('nes-roms', savedManual, miyooScan), 'manual');
-  assert.equal(resolveConsolePathSource('n64-roms', savedManual, miyooScan), 'default');
+  assert.equal(resolveConsolePathSource('n64-roms', savedManual, miyooScan), 'inferred');
+  assert.equal(resolveConsolePathSource('n64-roms', savedManual, null), 'default');
 
-  // Disabling detected subfolders for this session keeps SNES hacks in Roms/SFC
+  // Disabling detected subfolders for this session keeps SNES hacks in Roms/SFC and N64 flat in Roms/N64
   const effectiveNoSub = composeEffectiveStorageFolderConfig(savedManual, miyooScan, {
     includeTypeSubfolders: false,
   });
   assert.equal(resolveTargetStorageFolder('snes-roms', 'hack', effectiveNoSub), 'Roms/SFC');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'hack', effectiveNoSub), 'Roms/N64');
 
-  // Ejecting device clears auto-detected paths immediately while preserving saved manual override
+  // Ejecting device clears auto-detected and inferred paths immediately while preserving saved manual override
   const effectiveEjected = composeEffectiveStorageFolderConfig(savedManual, null);
   assert.equal(resolveTargetStorageFolder('snes-roms', 'retail', effectiveEjected), 'SNES');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'retail', effectiveEjected), 'N64');
   assert.equal(resolveTargetStorageFolder('nes-roms', 'retail', effectiveEjected), 'MyPinnedNES');
 });
 
-test('buildLiveExportDestinations adapts to detected mounted device consoles and reports path sources', () => {
+test('propagates device subfolder conventions like SNES/hacks and NES/trans across all consoles and matches casing on unseen types', () => {
+  const handheldNodes: ScannedDirNode[] = [
+    { relativePath: '', name: 'RETRO_SD', depth: 0, childDirs: ['Roms'], sampleExtensions: [], fileCount: 0 },
+    { relativePath: 'Roms', name: 'Roms', depth: 1, childDirs: ['SNES', 'NES', 'GBA'], sampleExtensions: [], fileCount: 0 },
+    { relativePath: 'Roms/SNES', name: 'SNES', depth: 2, childDirs: ['hacks'], sampleExtensions: ['sfc'], fileCount: 24 },
+    { relativePath: 'Roms/NES', name: 'NES', depth: 2, childDirs: ['trans'], sampleExtensions: ['nes'], fileCount: 16 },
+    { relativePath: 'Roms/GBA', name: 'GBA', depth: 2, childDirs: [], sampleExtensions: ['gba'], fileCount: 12 },
+  ];
+  const scan = discoverStorageFolderMappings(handheldNodes, {
+    rootLabel: 'RETRO_SD',
+    preferredSlugs: ['snes-roms', 'nes-roms', 'gba-roms'],
+  });
+
+  const savedManual = createDefaultStorageFolderConfig();
+  // Explicitly force GBA flat via saved manual override
+  savedManual.systemTypeOverrides['gba-roms'] = { mode: 'disabled' };
+
+  const effective = composeEffectiveStorageFolderConfig(savedManual, scan);
+
+  // SNES keeps its own hacks, inherits NES's trans, and gets lowercase homebrew
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'hack', effective), 'Roms/SNES/hacks');
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'translations', effective), 'Roms/SNES/trans');
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'homebrew', effective), 'Roms/SNES/homebrew');
+  // NES keeps its own trans and inherits SNES's hacks
+  assert.equal(resolveTargetStorageFolder('nes-roms', 'translations', effective), 'Roms/NES/trans');
+  assert.equal(resolveTargetStorageFolder('nes-roms', 'hack', effective), 'Roms/NES/hacks');
+  // Manual flat override on GBA wins over device-wide subfolder inference
+  assert.equal(resolveTargetStorageFolder('gba-roms', 'hack', effective), 'Roms/GBA');
+  // Brand-new N64 inherits Roms/N64 + hacks/trans + lowercase unseen homebrew & ports
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'retail', effective), 'Roms/N64');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'hack', effective), 'Roms/N64/hacks');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'translations', effective), 'Roms/N64/trans');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'homebrew', effective), 'Roms/N64/homebrew');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'port', effective), 'Roms/N64/ports');
+
+  const summary = summarizeDeviceInferredConventions(scan);
+  assert.equal(summary.hasAnyInferredConvention, true);
+  assert.equal(summary.newConsolePattern, '/Roms/<SYSTEM>');
+  assert.equal(summary.unseenCasingLabel, 'lowercase');
+  assert.deepEqual(
+    summary.observedSubfolders.map((s) => `${s.category}:${s.folder}`),
+    ['translations:trans', 'hack:hacks'],
+  );
+
+  // Swapping to EmuDeck lowercase console folders creates Emulation/roms/n64
+  const deckNodes: ScannedDirNode[] = [
+    { relativePath: '', name: 'DECK_SD', depth: 0, childDirs: ['Emulation'], sampleExtensions: [], fileCount: 0 },
+    { relativePath: 'Emulation', name: 'Emulation', depth: 1, childDirs: ['roms'], sampleExtensions: [], fileCount: 0 },
+    { relativePath: 'Emulation/roms', name: 'roms', depth: 2, childDirs: ['snes', 'gba', 'psx'], sampleExtensions: [], fileCount: 0 },
+    { relativePath: 'Emulation/roms/snes', name: 'snes', depth: 3, childDirs: ['HACKS'], sampleExtensions: ['sfc'], fileCount: 10 },
+    { relativePath: 'Emulation/roms/gba', name: 'gba', depth: 3, childDirs: [], sampleExtensions: ['gba'], fileCount: 8 },
+    { relativePath: 'Emulation/roms/psx', name: 'psx', depth: 3, childDirs: [], sampleExtensions: ['chd'], fileCount: 6 },
+  ];
+  const deckScan = discoverStorageFolderMappings(deckNodes, { rootLabel: 'DECK_SD' });
+  const effectiveDeck = composeEffectiveStorageFolderConfig(createDefaultStorageFolderConfig(), deckScan);
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'retail', effectiveDeck), 'Emulation/roms/n64');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'hack', effectiveDeck), 'Emulation/roms/n64/HACKS');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'homebrew', effectiveDeck), 'Emulation/roms/n64/HOMEBREW');
+  assert.equal(summarizeDeviceInferredConventions(deckScan).newConsolePattern, '/Emulation/roms/<system>');
+});
+
+test('buildLiveExportDestinations adapts to detected mounted device consoles and includes inferred new-console preview', () => {
   const misterNodes: ScannedDirNode[] = [
     { relativePath: '', name: 'MISTER_SD', depth: 0, childDirs: ['games'], sampleExtensions: [], fileCount: 0 },
     { relativePath: 'games', name: 'games', depth: 1, childDirs: ['SNES', 'Genesis'], sampleExtensions: [], fileCount: 0 },
@@ -95,14 +170,17 @@ test('buildLiveExportDestinations adapts to detected mounted device consoles and
     },
   );
 
-  assert.equal(samples.length, 3);
+  assert.equal(samples.length, 4);
   assert.equal(samples[0]?.folderPath, 'games/SNES');
   assert.equal(samples[0]?.source, 'auto');
   assert.equal(samples[1]?.folderPath, 'games/SNES/Hacks');
   assert.equal(samples[1]?.source, 'auto');
-  assert.equal(samples[2]?.folderPath, 'games/Genesis');
+  assert.equal(samples[2]?.folderPath, 'games/Genesis/Translations');
   assert.equal(samples[2]?.systemLabel, 'Genesis');
   assert.equal(samples[2]?.source, 'auto');
+  assert.equal(samples[3]?.id, 'new_console');
+  assert.equal(samples[3]?.folderPath, 'games/N64/Homebrew');
+  assert.equal(samples[3]?.source, 'inferred');
 });
 
 test('getActiveManualOverrideSlugs and searchConsolesForOverride power zero-wall manual overrides', () => {

@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.26.0] - 2026-11-21
+
+- Added **Device-Wide ROM Root & Subfolder Convention Inference** to automatic per-mount **Export Device Auto-Configure**:
+  - **Nested ROM Root Inheritance for New Consoles**: When a mounted device uses a nested ROM directory (such as `Roms/`, `games/`, or `Emulation/roms/`), installing games for a console not yet on the card automatically creates its folder inside that detected ROM root while matching the device's dominant console folder casing (e.g., `/Roms/N64`, `/games/N64`, `/Emulation/roms/n64`)—while keeping standalone `BIOS` / `OST` folders protected and leaving Analogue Pocket `Assets/*/common` paths untouched.
+  - **Cross-Console Subfolder Naming & Casing Propagation**: Expanded shorthand ROM-type subfolder recognition (`trans`, `transl`, `eng`, `t-en`, `tl`, `hb`, `unlic`, `hacks`, `mods`, etc.) and propagated detected subfolder conventions across every console on the mounted device. Unseen ROM categories (such as Homebrew or Ports on a card with `SNES/hacks` and `NES/trans`) automatically adopt the device's dominant casing style (`homebrew`, `ports`).
+  - **Inferred Convention Preview on Device Export**: Added an unboxed convention summary line (`New consoles → /Roms/<SYSTEM> · Subfolders: Hacks → /hacks · Translations → /trans · Unseen types → lowercase`) and an explicit **`New console`** (`· Inferred`) destination preview row inside the Live Export Destination Preview card. Saved manual overrides continue to take top priority and all inferred conventions clear automatically on eject or device swap.
+
 ## [1.25.0] - 2026-11-20
 
 - Made **Export Device Auto-Configure** automatic by default on every storage device mount and eliminated the scrolling wall of consoles on **Device Export**:

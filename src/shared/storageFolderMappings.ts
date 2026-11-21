@@ -29,11 +29,19 @@ export interface SystemTypeFolderOverride {
   subfolders?: Partial<Record<StorageRomCategoryKey, string>>;
 }
 
+export type FolderCasingStyle = 'lower' | 'upper' | 'title';
+
+export type ConsoleLeafCasingStyle = 'lower' | 'upper' | 'default';
+
 export interface StorageFolderMappingConfig {
   typeSubfoldersEnabled: boolean;
   globalTypeSubfolders: Record<StorageRomCategoryKey, string>;
   systemFolders: Record<string, string>;
   systemTypeOverrides: Record<string, SystemTypeFolderOverride>;
+  /** Session-only base ROM root inferred from the mounted device (never persisted). */
+  runtimeBaseRomRoot?: string;
+  /** Session-only console leaf casing inferred from the mounted device (never persisted). */
+  runtimeConsoleCasing?: ConsoleLeafCasingStyle;
 }
 
 export interface StorageRomCategoryMeta {
@@ -489,6 +497,19 @@ export function createDefaultStorageFolderConfig(): StorageFolderMappingConfig {
   };
 }
 
+export function applyFolderCasingStyle(name: string, style: FolderCasingStyle): string {
+  const clean = sanitizeRelativeStoragePath(name);
+  if (!clean) return '';
+  if (style === 'lower') return clean.toLowerCase();
+  if (style === 'upper') return clean.toUpperCase();
+  return clean;
+}
+
+function isStandaloneNonRomSystem(systemName: string): boolean {
+  const clean = systemName.trim().toLowerCase();
+  return clean === 'bios-files' || clean === 'bios' || clean === 'soundtracks';
+}
+
 export function resolveDefaultSystemFolder(systemName: string): string {
   const clean = systemName.trim().toLowerCase();
   if (!clean) return 'ROMS';
@@ -657,7 +678,23 @@ export function resolveBaseSystemFolder(
     const cleaned = sanitizeRelativeStoragePath(custom);
     if (cleaned) return cleaned;
   }
-  return resolveDefaultSystemFolder(systemName);
+
+  const defaultLeaf = resolveDefaultSystemFolder(systemName);
+  const runtimeRoot = config?.runtimeBaseRomRoot
+    ? sanitizeRelativeStoragePath(config.runtimeBaseRomRoot)
+    : '';
+  if (runtimeRoot && !isStandaloneNonRomSystem(systemName)) {
+    const casedLeaf =
+      config?.runtimeConsoleCasing === 'lower'
+        ? defaultLeaf.toLowerCase()
+        : config?.runtimeConsoleCasing === 'upper'
+          ? defaultLeaf.toUpperCase()
+          : defaultLeaf;
+    const combined = sanitizeRelativeStoragePath(`${runtimeRoot}/${casedLeaf}`);
+    if (combined) return combined;
+  }
+
+  return defaultLeaf;
 }
 
 export function isTypeSubfoldersActiveForSystem(
