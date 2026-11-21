@@ -81,7 +81,7 @@ export function SdCardExportModal({
   }, [modalOpen, closeModal]);
 
   const rows = job?.rows || [];
-  const storageConfig = config.storageFolderConfig;
+  const storageConfig = installer.effectiveStorageFolderConfig;
 
   const customizedCount = useMemo(() => {
     const slugs = new Set<string>([

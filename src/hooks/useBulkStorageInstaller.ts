@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { composeEffectiveStorageFolderConfig } from '../shared/deviceExportUi';
 import { classifyReleaseTagToTypeKey } from '../shared/releaseTypeFilter';
 import { sanitizeFat32Filename } from '../shared/romNaming';
 import {
@@ -6,6 +7,10 @@ import {
   type SmartInspectItemInput,
   type SmartRomFilterContext,
 } from '../shared/smartRomPicker';
+import {
+  discoverStorageFolderMappings,
+  type DeviceAutoConfigResult,
+} from '../shared/storageAutoConfig';
 import {
   classifyStorageRomCategory,
   resolveTargetStorageFolder,
@@ -28,6 +33,7 @@ import {
   pickSdCardRootDirectory,
   registerWrittenEntryInScan,
   resolveOrCreateSubdirectory,
+  scanStorageDirectoryTree,
   scanTargetFolder,
   streamHttpPayloadToSdFile,
   type SdDirectoryHandle,
@@ -314,8 +320,37 @@ export function useBulkStorageInstaller({
   const [folderScans, setFolderScans] = useState<Record<string, SdScanFolderResult>>({});
   const [scanningCard, setScanningCard] = useState(false);
 
+  // Automatic per-mounted-device Auto-Configure state (session-scoped; clears on eject/switch)
+  const [autoConfigPhase, setAutoConfigPhase] = useState<'idle' | 'scanning' | 'ready' | 'error'>(
+    'idle',
+  );
+  const [autoConfigProgress, setAutoConfigProgress] = useState<{
+    directoriesScanned: number;
+    currentPath: string;
+  }>({ directoriesScanned: 0, currentPath: '' });
+  const [autoConfigResult, setAutoConfigResult] = useState<DeviceAutoConfigResult | null>(null);
+  const [autoConfigError, setAutoConfigError] = useState<string | null>(null);
+  const [autoConfigChosenPaths, setAutoConfigChosenPaths] = useState<Record<string, string>>({});
+  const [autoConfigIncludeSubfolders, setAutoConfigIncludeSubfolders] = useState<boolean>(true);
+
+  const effectiveStorageFolderConfig = useMemo(
+    () =>
+      composeEffectiveStorageFolderConfig(config?.storageFolderConfig, autoConfigResult, {
+        chosenPathBySlug: autoConfigChosenPaths,
+        includeTypeSubfolders: autoConfigIncludeSubfolders,
+      }),
+    [
+      config?.storageFolderConfig,
+      autoConfigResult,
+      autoConfigChosenPaths,
+      autoConfigIncludeSubfolders,
+    ],
+  );
+
   const configRef = useRef(config);
   configRef.current = config;
+  const effectiveStorageFolderConfigRef = useRef(effectiveStorageFolderConfig);
+  effectiveStorageFolderConfigRef.current = effectiveStorageFolderConfig;
   const debugLoggingRef = useRef(debugLogging);
   debugLoggingRef.current = debugLogging;
   const sdRootHandleRef = useRef(sdRootHandle);
@@ -327,6 +362,15 @@ export function useBulkStorageInstaller({
 
   const jobSeqRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const autoConfigAbortRef = useRef<AbortController | null>(null);
+  const autoConfigPromiseRef = useRef<Promise<DeviceAutoConfigResult | null> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      autoConfigAbortRef.current?.abort();
+      autoConfigAbortRef.current = null;
+    };
+  }, []);
 
   const emitSdDebug = useCallback(
     (message: string, detail?: string, alsoPostToServer = false) => {
@@ -346,6 +390,130 @@ export function useBulkStorageInstaller({
   const isBusy =
     job?.phase === 'inspecting' || job?.phase === 'running' || job?.phase === 'canceling';
 
+  const clearAutoConfigState = useCallback(() => {
+    autoConfigAbortRef.current?.abort();
+    autoConfigAbortRef.current = null;
+    autoConfigPromiseRef.current = null;
+    setAutoConfigPhase('idle');
+    setAutoConfigProgress({ directoriesScanned: 0, currentPath: '' });
+    setAutoConfigResult(null);
+    setAutoConfigError(null);
+    setAutoConfigChosenPaths({});
+    setAutoConfigIncludeSubfolders(true);
+  }, []);
+
+  const runDeviceAutoConfigure = useCallback(
+    (rootHandle: SdDirectoryHandle): Promise<DeviceAutoConfigResult | null> => {
+      autoConfigAbortRef.current?.abort();
+      const abortController = new AbortController();
+      autoConfigAbortRef.current = abortController;
+
+      setAutoConfigError(null);
+      setAutoConfigResult(null);
+      setAutoConfigChosenPaths({});
+      setAutoConfigIncludeSubfolders(true);
+      setAutoConfigProgress({ directoriesScanned: 0, currentPath: rootHandle.name || '' });
+      setAutoConfigPhase('scanning');
+
+      const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const scanPromise = (async (): Promise<DeviceAutoConfigResult | null> => {
+        try {
+          const nodes = await scanStorageDirectoryTree(rootHandle, {
+            signal: abortController.signal,
+            onProgress: (prog) => {
+              if (!abortController.signal.aborted) {
+                setAutoConfigProgress(prog);
+              }
+            },
+          });
+          if (abortController.signal.aborted) return null;
+
+          const durationMs = Math.max(
+            1,
+            Math.round(
+              (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt,
+            ),
+          );
+          const cfg = configRef.current;
+          const configuredFilterSlugs = (cfg?.systemFilter || '')
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const preferredSlugs = [
+            ...(cfg?.discoveredSystems || []),
+            ...configuredFilterSlugs,
+            ...Object.keys(cfg?.storageFolderConfig?.systemFolders || {}),
+            ...Object.keys(cfg?.storageFolderConfig?.systemTypeOverrides || {}),
+          ];
+          const result = discoverStorageFolderMappings(nodes, {
+            rootLabel: rootHandle.name || 'Storage Device',
+            preferredSlugs,
+            durationMs,
+          });
+          if (abortController.signal.aborted) return null;
+
+          const initialChosen: Record<string, string> = {};
+          for (const match of result.matches) {
+            initialChosen[match.canonicalSlug] = match.recommendedPath;
+          }
+
+          effectiveStorageFolderConfigRef.current = composeEffectiveStorageFolderConfig(
+            cfg?.storageFolderConfig,
+            result,
+            {
+              chosenPathBySlug: initialChosen,
+              includeTypeSubfolders: true,
+            },
+          );
+          setAutoConfigChosenPaths(initialChosen);
+          setAutoConfigResult(result);
+          setAutoConfigPhase('ready');
+          emitSdDebug(
+            `Auto-configured "${rootHandle.name}": ${result.detectedLayoutLabel} (${result.matches.length} consoles in ${durationMs}ms)`,
+          );
+          return result;
+        } catch (err) {
+          if (isAbortError(err) || abortController.signal.aborted) {
+            setAutoConfigPhase('idle');
+            return null;
+          }
+          const msg = err instanceof Error ? err.message : String(err);
+          emitSdDebug('Automatic device auto-configure failed', msg, true);
+          setAutoConfigError(msg || 'Failed auto-configuring the mounted storage device.');
+          setAutoConfigPhase('error');
+          return null;
+        } finally {
+          if (autoConfigAbortRef.current === abortController) {
+            autoConfigAbortRef.current = null;
+            autoConfigPromiseRef.current = null;
+          }
+        }
+      })();
+
+      autoConfigPromiseRef.current = scanPromise;
+      return scanPromise;
+    },
+    [emitSdDebug],
+  );
+
+  const applyMountedHandle = useCallback(
+    (handle: SdDirectoryHandle | null) => {
+      sdRootHandleRef.current = handle;
+      setSdRootHandle(handle);
+      setFolderScans({});
+      if (!handle) {
+        clearAutoConfigState();
+        effectiveStorageFolderConfigRef.current = composeEffectiveStorageFolderConfig(
+          configRef.current?.storageFolderConfig,
+          null,
+        );
+        return;
+      }
+      void runDeviceAutoConfigure(handle);
+    },
+    [clearAutoConfigState, runDeviceAutoConfigure],
+  );
+
   const promptMountSdCard = useCallback(async (): Promise<SdDirectoryHandle | null> => {
     setMountError(null);
     const support = isFileSystemAccessSupported();
@@ -356,8 +524,7 @@ export function useBulkStorageInstaller({
     }
     try {
       const handle = await pickSdCardRootDirectory();
-      sdRootHandleRef.current = handle;
-      setSdRootHandle(handle);
+      applyMountedHandle(handle);
       emitSdDebug(`Mounted storage root "${handle.name}"`);
       return handle;
     } catch (err) {
@@ -371,7 +538,7 @@ export function useBulkStorageInstaller({
       );
       return null;
     }
-  }, [emitSdDebug]);
+  }, [applyMountedHandle, emitSdDebug]);
 
   const syncInstalledIdsToServer = useCallback(
     async (ids: number[], deviceLabel: string) => {
@@ -402,7 +569,7 @@ export function useBulkStorageInstaller({
     const handle = sdRootHandleRef.current;
     const currentJob = jobRef.current;
     const currentRows = currentJob?.rows || [];
-    const storageCfg = configRef.current?.storageFolderConfig;
+    const storageCfg = effectiveStorageFolderConfigRef.current;
 
     let foldersToScan: string[] = [];
     if (explicitFolders && explicitFolders.length > 0) {
@@ -450,12 +617,12 @@ export function useBulkStorageInstaller({
     }
   }, [emitSdDebug]);
 
-  // Re-scan target folders if the user updates Storage Folder Mappings in Operations while a device is mounted
+  // Re-scan target folders if effective folder mappings change while a device is mounted
   useEffect(() => {
     if (sdRootHandle && job && job.phase === 'ready') {
       void rescanMountedSdFolders();
     }
-  }, [config?.storageFolderConfig, sdRootHandle, job?.phase, rescanMountedSdFolders]);
+  }, [effectiveStorageFolderConfig, sdRootHandle, job?.phase, rescanMountedSdFolders]);
 
   const writeSingleRowToDevice = useCallback(
     async (
@@ -478,7 +645,7 @@ export function useBulkStorageInstaller({
       const cfg = configRef.current;
       const sanitizeFat32 = cfg?.romSanitizeFat32 ?? true;
       const maxFilenameLen = cfg?.romMaxFilenameLen ?? 0;
-      const storageCfg = cfg?.storageFolderConfig;
+      const storageCfg = effectiveStorageFolderConfigRef.current;
 
       let rowBytes = 0;
       let upgradedOldName: string | null = null;
@@ -686,6 +853,10 @@ export function useBulkStorageInstaller({
         if (!activeHandle) {
           return false;
         }
+      }
+
+      if (autoConfigPromiseRef.current) {
+        await autoConfigPromiseRef.current;
       }
 
       setMountError(null);
@@ -993,8 +1164,11 @@ export function useBulkStorageInstaller({
       });
 
       try {
+        if (autoConfigPromiseRef.current) {
+          await autoConfigPromiseRef.current;
+        }
         const allTargetFolders = new Set<string>();
-        const storageCfg = configRef.current?.storageFolderConfig;
+        const storageCfg = effectiveStorageFolderConfigRef.current;
         for (let offset = 0; offset < cleanIds.length; offset += REVIEW_INSPECT_CHUNK_SIZE) {
           if (controller.signal.aborted) {
             throw new DOMException('Inspection canceled.', 'AbortError');
@@ -1109,6 +1283,10 @@ export function useBulkStorageInstaller({
     if (!activeHandle) {
       activeHandle = await promptMountSdCard();
       if (!activeHandle) return;
+    }
+
+    if (autoConfigPromiseRef.current) {
+      await autoConfigPromiseRef.current;
     }
 
     const selectedRows = currentJob.rows.filter((r) => r.selectedTargetIds.length > 0);
@@ -1436,13 +1614,35 @@ export function useBulkStorageInstaller({
 
   return {
     sdRootHandle,
-    setSdRootHandle: (handle: SdDirectoryHandle | null) => {
-      sdRootHandleRef.current = handle;
-      setSdRootHandle(handle);
-    },
+    setSdRootHandle: applyMountedHandle,
     promptMountSdCard,
     mountError,
     clearMountError: () => setMountError(null),
+    autoConfigPhase,
+    autoConfigProgress,
+    autoConfigResult,
+    autoConfigError,
+    autoConfigChosenPaths,
+    autoConfigIncludeSubfolders,
+    effectiveStorageFolderConfig,
+    rescanAutoConfigure: () => {
+      if (sdRootHandleRef.current) {
+        return runDeviceAutoConfigure(sdRootHandleRef.current);
+      }
+      return Promise.resolve(null);
+    },
+    cancelAutoConfigure: () => {
+      autoConfigAbortRef.current?.abort();
+      autoConfigAbortRef.current = null;
+      setAutoConfigPhase('idle');
+    },
+    setAutoConfigCandidatePath: (slug: string, relativePath: string) => {
+      setAutoConfigChosenPaths((prev) => ({
+        ...prev,
+        [slug]: relativePath,
+      }));
+    },
+    setAutoConfigIncludeSubfolders,
     modalOpen,
     openModal: () => setModalOpen(true),
     closeModal: () => setModalOpen(false),

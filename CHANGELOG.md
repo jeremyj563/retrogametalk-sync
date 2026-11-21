@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.25.0] - 2026-11-20
+
+- Made **Export Device Auto-Configure** automatic by default on every storage device mount and eliminated the scrolling wall of consoles on **Device Export**:
+  - **Automatic Per-Mount Discovery**: Mounting or switching any storage device (from the left sidebar drive bay or Device Export) now runs Auto-Configure immediately and activates the detected layout for that mounted device session using a 3-layer precedence model (`Universal Defaults` → `Mounted Device Auto-Config` → `Saved Manual Overrides`). Swapping handhelds, MiSTer SD cards, or flash carts switches paths automatically while keeping saved manual overrides untouched.
+  - **Front-and-Center Device-Aware Live Export Destination Preview**: Placed the Active Storage Device card and Live Export Destination Preview directly at the top of **Device Export**, dynamically previewing real consoles detected on the mounted device with clear source indicators (`Auto-detected`, `Manual override`, `Default`) and a collapsed-by-default `Inspect N detected folders` disclosure.
+  - **Zero-Wall Manual Console Overrides**: Replaced the 75+ console scrolling list with a compact **Active Manual Overrides** list (single-line empty state when none are needed) paired with an instant **Search-to-Add** console combobox covering all known, synced, and detected systems.
+  - **Quiet Sidebar Drive Bay Feedback**: Mounting from Catalog or Monitor displays a live `Scanning` LED state, settles into a quiet layout summary inside the LCD (`OnionOS / GarlicOS · 12 consoles`), and offers a direct **Preview Paths** shortcut to Device Export—while Express Install and Export Queue immediately write to the auto-configured paths.
+
 ## [1.24.0] - 2026-11-20
 
 - Simplified and unified the **Device Export** settings page into a clear, guided two-step flow:
