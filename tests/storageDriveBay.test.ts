@@ -65,6 +65,20 @@ test('resolveStorageDriveBayState maps mount, busy transfer, standby, and insecu
   assert.deepEqual(
     resolveStorageDriveBayState({
       hasMountedHandle: true,
+      isBusy: false,
+      isScanningAutoConfig: true,
+      support: { supported: true, code: 'supported' },
+    }),
+    {
+      state: 'scanning',
+      statusLabel: 'Scanning',
+      ledMode: 'writing',
+    },
+  );
+
+  assert.deepEqual(
+    resolveStorageDriveBayState({
+      hasMountedHandle: true,
       isBusy: true,
       support: { supported: true, code: 'supported' },
     }),

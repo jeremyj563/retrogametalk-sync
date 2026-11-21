@@ -441,7 +441,6 @@ export default function App() {
       : null,
   );
   const configFocusNonceRef = useRef(initialRouteRef.current.target ? 1 : 0);
-  const [autoConfigureRequest, setAutoConfigureRequest] = useState<{ nonce: number } | null>(null);
   const configPanelRef = useRef<ConfigPanelHandle | null>(null);
   const [configDirty, setConfigDirty] = useState<ConfigDirtyState>({
     isDirty: false,
@@ -1498,8 +1497,7 @@ export default function App() {
     [requestSectionChange],
   );
 
-  const handleAutoConfigureMountedDevice = useCallback(() => {
-    setAutoConfigureRequest((prev) => ({ nonce: (prev?.nonce ?? 0) + 1 }));
+  const handlePreviewMountedDevicePaths = useCallback(() => {
     navigateToConfigTarget('storageMappings');
   }, [navigateToConfigTarget]);
 
@@ -1992,7 +1990,7 @@ export default function App() {
             {/* Persistent Recessed Storage Device Drive Bay */}
             <StorageDeviceSidebarDock
               installer={bulkInstaller}
-              onAutoConfigureDevice={handleAutoConfigureMountedDevice}
+              onPreviewDevicePaths={handlePreviewMountedDevicePaths}
             />
 
             {/* Real Daemon & Storage Telemetry Readout */}
@@ -2010,7 +2008,7 @@ export default function App() {
               <MirroredSystemsSidebar
                 systems={status.systems}
                 totalBytesOnDisk={status.storage.totalBytesOnDisk}
-                storageFolderConfig={config?.storageFolderConfig}
+                storageFolderConfig={bulkInstaller.effectiveStorageFolderConfig}
               />
             )}
 
@@ -2126,8 +2124,6 @@ export default function App() {
                   status={status}
                   installer={bulkInstaller}
                   focusRequest={configFocus}
-                  autoConfigureRequest={autoConfigureRequest}
-                  onAutoConfigureRequestHandled={() => setAutoConfigureRequest(null)}
                   onDirtyChange={setConfigDirty}
                   onSaveConfig={handleSaveConfigVoid}
                 />
