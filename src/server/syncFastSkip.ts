@@ -128,6 +128,12 @@ export function evaluateReleaseFastSkip(input: ReleaseFastSkipInput): ReleaseFas
 
     const hasTypeFilter = allowedReleaseTypes.length > 0;
     const mutableAllowedTypes = [...allowedReleaseTypes];
+    const siblingFilenames = Array.from(
+      new Set([
+        ...hints.map((h) => (h.filename || '').trim()).filter(Boolean),
+        ...files.map((f) => (f.filename || '').trim()).filter(Boolean),
+      ]),
+    );
     const hintRoles = hints.map((h) =>
       classifyFileRole(h.filename, h.filename, {
         genres: post.genres,
@@ -135,6 +141,7 @@ export function evaluateReleaseFastSkip(input: ReleaseFastSkipInput): ReleaseFas
         sources: post.sources,
         title: post.title || undefined,
         systemName: systemSlug,
+        siblingFilenames,
       }),
     );
     const baseMetaTags = deriveReleaseTags(
@@ -170,6 +177,127 @@ export function evaluateReleaseFastSkip(input: ReleaseFastSkipInput): ReleaseFas
     skip: true,
     reason: 'already_downloaded',
     verifiedFilesCount: files.length,
+  };
+}
+
+/**
+ * Index-First Full Sync fast-skip evaluator for cataloged SQLite releases.
+ *
+ * Returns true when a release has already mirrored every policy-eligible file on disk
+ * (ignoring sibling files/hints that are excluded by the active Release Type filter),
+ * AND every policy-eligible `downloadHint` is already covered on disk (so widening
+ * Sync Rules immediately detects newly-eligible files without re-fetching unchanged pages).
+ */
+export function isReleaseFullyMirroredForRules(
+  item: RepositoryItemRecord,
+  allowedReleaseTypes: readonly string[],
+  fileExistsWithBytes: FileExistsChecker = defaultFileExistsWithBytes,
+): {
+  satisfied: boolean;
+  verifiedFilesCount: number;
+} {
+  if (item.status === 'skipped') {
+    return { satisfied: true, verifiedFilesCount: Math.max(1, (item.files || []).length) };
+  }
+
+  const files = item.files || [];
+  if (files.length === 0) {
+    return { satisfied: false, verifiedFilesCount: 0 };
+  }
+
+  const hasTypeFilter = allowedReleaseTypes.length > 0;
+  const mutableAllowedTypes = [...allowedReleaseTypes];
+  const hints = item.metadata?.downloadHints || [];
+  const siblingFilenames = Array.from(
+    new Set([
+      ...files.map((f) => (f.filename || '').trim()).filter(Boolean),
+      ...hints.map((h) => (h.filename || '').trim()).filter(Boolean),
+    ]),
+  );
+
+  const ctx = {
+    genres: item.genres,
+    languages: item.languages,
+    sources: item.sources,
+    title: item.title,
+    systemName: item.systemName,
+    siblingFilenames,
+  };
+
+  const fileRoles = files.map((f) => classifyFileRole(f.filename, f.displayLabel || f.filename, ctx));
+  const hintRoles = hints.map((h) => classifyFileRole(h.filename, h.filename, ctx));
+  const baseMetaTags = deriveReleaseTags(
+    {
+      genres: item.genres,
+      languages: item.languages,
+      sources: item.sources,
+      systemName: item.systemName,
+    },
+    [...fileRoles, ...hintRoles],
+  );
+
+  let verifiedEligibleCount = 0;
+  const verifiedDownloadKeys = new Set<string>();
+
+  for (let i = 0; i < files.length; i += 1) {
+    const file = files[i];
+    const isVerifiedOnDisk =
+      (file.status === 'downloaded' || file.status === 'skipped') &&
+      Boolean(file.localPath) &&
+      fileExistsWithBytes(file.localPath);
+
+    if (isVerifiedOnDisk) {
+      if (file.filename) {
+        verifiedDownloadKeys.add(normalizeFilenameKey(file.filename));
+      }
+      if (file.localPath) {
+        verifiedDownloadKeys.add(normalizeFilenameKey(path.basename(file.localPath)));
+      }
+    }
+
+    let isEligible = true;
+    if (hasTypeFilter) {
+      const fileTypeKeys = classifyFileRoleToTypeKeys(fileRoles[i], baseMetaTags, item.systemName);
+      isEligible = evaluateReleaseTypeMatch(fileTypeKeys, mutableAllowedTypes).allowed;
+    }
+
+    if (!isEligible) {
+      continue;
+    }
+
+    if (!isVerifiedOnDisk) {
+      return { satisfied: false, verifiedFilesCount: 0 };
+    }
+    verifiedEligibleCount += 1;
+  }
+
+  // Verify every policy-eligible download hint is already covered by a verified on-disk file
+  let eligibleHintsCount = 0;
+  for (let i = 0; i < hints.length; i += 1) {
+    const hintName = (hints[i].filename || '').trim();
+    if (!hintName) continue;
+
+    if (hasTypeFilter) {
+      const hintTypeKeys = classifyFileRoleToTypeKeys(hintRoles[i], baseMetaTags, item.systemName);
+      if (!evaluateReleaseTypeMatch(hintTypeKeys, mutableAllowedTypes).allowed) {
+        continue;
+      }
+    }
+
+    eligibleHintsCount += 1;
+    if (!verifiedDownloadKeys.has(normalizeFilenameKey(hintName))) {
+      return { satisfied: false, verifiedFilesCount: 0 };
+    }
+  }
+
+  if (verifiedEligibleCount === 0 && eligibleHintsCount === 0) {
+    // No eligible files or hints exist under current Sync Rules
+    return { satisfied: hasTypeFilter, verifiedFilesCount: 0 };
+  }
+
+  return {
+    satisfied: verifiedEligibleCount > 0,
+    verifiedFilesCount: verifiedEligibleCount,
   };
 }
 

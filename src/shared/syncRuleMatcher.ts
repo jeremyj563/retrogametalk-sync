@@ -140,20 +140,19 @@ export function doesCatalogReleaseMatchSyncRules(
         ? [release.releaseType]
         : [];
 
-  const releaseKeys = classifyReleaseTagsToTypeKeys(tags, release.systemName);
-  if (evaluateReleaseTypeMatch(releaseKeys, allowedTypes).allowed) {
-    return true;
-  }
-
-  const fileRoles = release.fileRoles || [];
-  for (const role of fileRoles) {
-    const roleKeys = classifyFileRoleToTypeKeys(role, tags, release.systemName);
-    if (evaluateReleaseTypeMatch(roleKeys, allowedTypes).allowed) {
-      return true;
+  const fileRoles = (release.fileRoles || []).map((r) => r.trim()).filter(Boolean);
+  if (fileRoles.length > 0) {
+    for (const role of fileRoles) {
+      const roleKeys = classifyFileRoleToTypeKeys(role, tags, release.systemName);
+      if (evaluateReleaseTypeMatch(roleKeys, allowedTypes).allowed) {
+        return true;
+      }
     }
+    return false;
   }
 
-  return false;
+  const releaseKeys = classifyReleaseTagsToTypeKeys(tags, release.systemName);
+  return evaluateReleaseTypeMatch(releaseKeys, allowedTypes).allowed;
 }
 
 export function formatSyncRuleScopeSummary(

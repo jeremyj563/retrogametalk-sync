@@ -29,6 +29,7 @@ import {
   markCatalogItemsQueuedDetailed,
   markCatalogReleaseFailed,
   mergeCatalogReleaseDetailMetadata,
+  persistDiscoveredReleaseDownloadHints,
   queryRepositoryItemIds,
   recordSuccessfulLogin,
   releaseDistributedLock,
@@ -58,6 +59,7 @@ import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import {
   defaultFileExistsWithBytes,
   evaluateReleaseFastSkip,
+  isReleaseFullyMirroredForRules,
   partitionAlreadyDownloadedFiles,
 } from './syncFastSkip.ts';
 import { estimateDownloadHintsBytes } from '../shared/fileSize.ts';
@@ -1750,6 +1752,12 @@ export class ScraperOrchestrator extends EventEmitter {
       runLogger,
     );
 
+    const siblingFilenames = Array.from(
+      new Set([
+        ...item.files.map((f) => f.filename),
+        ...(wpData?.downloadHints ?? item.metadata?.downloadHints ?? []).map((h) => h.filename),
+      ]),
+    );
     const fileRoles = item.files.map((f) =>
       classifyFileRole(f.filename, f.displayLabel, {
         genres: wpData?.genres ?? item.genres,
@@ -1757,6 +1765,7 @@ export class ScraperOrchestrator extends EventEmitter {
         sources: wpData?.sources ?? item.sources,
         title: wpData?.title ?? item.title,
         systemName: item.systemName,
+        siblingFilenames,
       }),
     );
 
@@ -1867,6 +1876,7 @@ export class ScraperOrchestrator extends EventEmitter {
                 filename: h.filename,
                 displayLabel: '',
               }));
+        const roleSiblingFilenames = roleInputs.map((f) => f.filename);
         const fileRoles = roleInputs.map((f) =>
           classifyFileRole(f.filename, f.displayLabel, {
             genres: wpData?.genres ?? existing.genres,
@@ -1874,6 +1884,7 @@ export class ScraperOrchestrator extends EventEmitter {
             sources: wpData?.sources ?? existing.sources,
             title: wpData?.title ?? existing.title,
             systemName: existing.systemName,
+            siblingFilenames: roleSiblingFilenames,
           }),
         );
 
@@ -2269,6 +2280,7 @@ export class ScraperOrchestrator extends EventEmitter {
     const mirrored = resolveMirroredPaths(cfg.baseUrl, link, cfg.downloadDir, 'probe.zip');
     const releaseDir = path.dirname(mirrored.localPath);
     const remotePath = path.relative(path.resolve(cfg.downloadDir), releaseDir).split(path.sep).join('/');
+    const hintFilenames = (post.downloadHints || []).map((h) => h.filename);
     const fileRoles = (post.downloadHints || []).map((h) =>
       classifyFileRole(h.filename, '', {
         genres: post.genres,
@@ -2276,6 +2288,7 @@ export class ScraperOrchestrator extends EventEmitter {
         sources: post.sources,
         title: post.title || undefined,
         systemName: canonicalSystem,
+        siblingFilenames: hintFilenames,
       }),
     );
     const baseMeta = this.client.extractReleaseMetadata('', link, post, fileRoles);
@@ -2952,6 +2965,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
       if (!isDryRun) {
         const allRoleInputs = freshDownloads.length > 0 ? freshDownloads : item.files;
+        const allRoleFilenames = allRoleInputs.map((f) => f.filename);
         const fileRoles = allRoleInputs.map((f) =>
           classifyFileRole(f.filename, f.displayLabel || f.filename, {
             genres: wpData?.genres ?? item.genres,
@@ -2959,6 +2973,7 @@ export class ScraperOrchestrator extends EventEmitter {
             sources: wpData?.sources ?? item.sources,
             title: wpData?.title ?? item.title,
             systemName: item.systemName,
+            siblingFilenames: allRoleFilenames,
           }),
         );
 
@@ -3805,6 +3820,7 @@ export class ScraperOrchestrator extends EventEmitter {
         }
 
         // Reconcile releaseTags using all discovered files on the page + WP taxonomy metadata
+        const pageFilenames = uniqueReleases.map((r) => r.filename);
         let effectiveMeta = preloadedMeta;
         if (effectiveMeta) {
           const fileRoles = uniqueReleases.map((r) =>
@@ -3814,10 +3830,23 @@ export class ScraperOrchestrator extends EventEmitter {
               sources: effectiveMeta!.sources,
               title: effectiveMeta!.title,
               systemName,
+              siblingFilenames: pageFilenames,
             }),
           );
+          const mergedHintsByKey = new Map<string, { filename: string; fileSize: string }>();
+          for (const existingHint of effectiveMeta.downloadHints || []) {
+            const key = existingHint.filename.trim().toLowerCase();
+            if (key) mergedHintsByKey.set(key, existingHint);
+          }
+          for (const rel of uniqueReleases) {
+            const key = rel.filename.trim().toLowerCase();
+            if (key && !mergedHintsByKey.has(key)) {
+              mergedHintsByKey.set(key, { filename: rel.filename, fileSize: '' });
+            }
+          }
           effectiveMeta = {
             ...effectiveMeta,
+            downloadHints: Array.from(mergedHintsByKey.values()),
             releaseTags: deriveReleaseTags(
               {
                 genres: effectiveMeta.genres,
@@ -3828,6 +3857,15 @@ export class ScraperOrchestrator extends EventEmitter {
               fileRoles,
             ),
           };
+        }
+
+        // Persist discovered filenames into SQLite metadata_json.downloadHints so future Full Syncs
+        // know concrete per-file roles even when all files on the page are excluded by Type Filter
+        if (!isDryRun) {
+          persistDiscoveredReleaseDownloadHints(
+            canonicalPageUrl,
+            uniqueReleases.map((r) => ({ filename: r.filename })),
+          );
         }
 
         // Re-check live Sync Rules before per-file filtering or catalog writes
@@ -3854,6 +3892,7 @@ export class ScraperOrchestrator extends EventEmitter {
               sources: effectiveMeta?.sources,
               title: effectiveMeta?.title || rel.title,
               systemName,
+              siblingFilenames: pageFilenames,
             });
             const fileTypeKeys = classifyFileRoleToTypeKeys(role, baseMetaTags, systemName);
             const match = evaluateReleaseTypeMatch(fileTypeKeys, liveAllowedReleaseTypes);
@@ -4043,6 +4082,7 @@ export class ScraperOrchestrator extends EventEmitter {
               sources: effectiveMeta?.sources,
               title: effectiveMeta?.title || rel.title,
               systemName,
+              siblingFilenames: pageFilenames,
             });
             const fileTypeKeys = classifyFileRoleToTypeKeys(
               role,
@@ -4150,6 +4190,7 @@ export class ScraperOrchestrator extends EventEmitter {
             return { newerThanCutoff: false };
           }
 
+          const prelimHintFilenames = (wpData?.downloadHints || []).map((h) => h.filename);
           const prelimHintRoles = (wpData?.downloadHints || []).map((h) =>
             classifyFileRole(h.filename, '', {
               genres: wpData?.genres,
@@ -4157,6 +4198,7 @@ export class ScraperOrchestrator extends EventEmitter {
               sources: wpData?.sources,
               title: wpData?.title || undefined,
               systemName: inferredSys,
+              siblingFilenames: prelimHintFilenames,
             }),
           );
           const prelimMeta = this.client.extractReleaseMetadata(
@@ -4185,10 +4227,18 @@ export class ScraperOrchestrator extends EventEmitter {
 
           // Pre-nonce Release Type Allowlist gate: skip disallowed releases before resolving download links
           if (liveHasReleaseTypeFilter) {
-            const prelimTypeKeys = classifyReleaseTagsToTypeKeys(
-              prelimMeta.releaseTags || [],
-              prelimMeta.consoleName || inferredSys,
-            );
+            const prelimSystem = prelimMeta.consoleName || inferredSys;
+            const prelimTags = prelimMeta.releaseTags || [];
+            const prelimTypeKeys =
+              prelimHintRoles.length > 0
+                ? Array.from(
+                    new Set(
+                      prelimHintRoles.flatMap((role) =>
+                        classifyFileRoleToTypeKeys(role, prelimTags, prelimSystem),
+                      ),
+                    ),
+                  )
+                : classifyReleaseTagsToTypeKeys(prelimTags, prelimSystem);
             const match = evaluateReleaseTypeMatch(prelimTypeKeys, liveAllowedReleaseTypes);
             if (!match.allowed) {
               typeSkippedReleaseUrls.add(canonicalRelUrl);
@@ -4224,6 +4274,7 @@ export class ScraperOrchestrator extends EventEmitter {
             }
           }
           const combined = Array.from(combinedMap.values());
+          const combinedFilenames = combined.map((r) => r.filename);
 
           const fileRoles = combined.map((r) =>
             classifyFileRole(r.filename, r.displayLabel || r.filename, {
@@ -4232,6 +4283,7 @@ export class ScraperOrchestrator extends EventEmitter {
               sources: wpData?.sources,
               title: wpData?.title || r.title,
               systemName: r.systemName,
+              siblingFilenames: combinedFilenames,
             }),
           );
           const releaseMeta = this.client.extractReleaseMetadata(
@@ -4357,6 +4409,7 @@ export class ScraperOrchestrator extends EventEmitter {
               signal,
               runLogger,
             );
+            const inlineFilenames = inlineDynamic.map((r) => r.filename);
             const inlineRoles = inlineDynamic.map((r) =>
               classifyFileRole(r.filename, r.displayLabel || r.filename, {
                 genres: wpData?.genres,
@@ -4364,6 +4417,7 @@ export class ScraperOrchestrator extends EventEmitter {
                 sources: wpData?.sources,
                 title: wpData?.title || r.title,
                 systemName: r.systemName,
+                siblingFilenames: inlineFilenames,
               }),
             );
             const inlineMeta = this.client.extractReleaseMetadata(
@@ -4749,22 +4803,17 @@ export class ScraperOrchestrator extends EventEmitter {
               continue;
             }
             const files = item.files || [];
-            const hasAllFilesOnDisk =
-              item.status === 'skipped' ||
-              (item.status === 'downloaded' &&
-                files.length > 0 &&
-                files.every(
-                  (f) =>
-                    (f.status === 'downloaded' || f.status === 'skipped') &&
-                    Boolean(f.localPath) &&
-                    defaultFileExistsWithBytes(f.localPath),
-                ));
+            const mirroredCheck = isReleaseFullyMirroredForRules(
+              item,
+              liveAllowedReleaseTypes,
+              defaultFileExistsWithBytes,
+            );
 
-            if (hasAllFilesOnDisk) {
+            if (mirroredCheck.satisfied) {
               if (!verifiedOnDiskUrls.has(canonicalUrl)) {
                 verifiedOnDiskUrls.add(canonicalUrl);
                 checkedOrMirroredUrls.add(canonicalUrl);
-                const countUnits = Math.max(1, files.length);
+                const countUnits = Math.max(1, mirroredCheck.verifiedFilesCount || files.length);
                 newFound += countUnits;
                 skippedCount += countUnits;
                 summaryAlreadyOnDisk += 1;
@@ -4806,6 +4855,7 @@ export class ScraperOrchestrator extends EventEmitter {
               seenMatchedUrls.add(canonicalUrl);
               if (getRepositoryItemByRemoteUrl(canonicalUrl)) continue;
 
+              const simHintFilenames = (sim.post.downloadHints || []).map((h) => h.filename);
               const hintRoles = (sim.post.downloadHints || []).map((h) =>
                 classifyFileRole(h.filename, '', {
                   genres: sim.post.genres,
@@ -4813,6 +4863,7 @@ export class ScraperOrchestrator extends EventEmitter {
                   sources: sim.post.sources,
                   title: sim.post.title || undefined,
                   systemName: sim.systemSlug,
+                  siblingFilenames: simHintFilenames,
                 }),
               );
               const wpTags = deriveReleaseTags(
@@ -4899,13 +4950,33 @@ export class ScraperOrchestrator extends EventEmitter {
                 if (!item.remoteUrl || !item.remoteUrl.startsWith('http')) return;
                 const canonicalUrl = item.remoteUrl.split('#')[0];
 
+                const workerSiblingFilenames = Array.from(
+                  new Set([
+                    ...(item.files || []).map((f) => f.filename),
+                    ...(item.metadata?.downloadHints || []).map((h) => h.filename),
+                  ]),
+                );
+                const workerHintRoles = (item.metadata?.downloadHints || []).map((h) =>
+                  classifyFileRole(h.filename, '', {
+                    genres: item.genres,
+                    languages: item.languages,
+                    sources: item.sources,
+                    title: item.title,
+                    systemName: item.systemName,
+                    siblingFilenames: workerSiblingFilenames,
+                  }),
+                );
+                const workerFileRoles = Array.from(
+                  new Set([...(item.files || []).map((f) => f.fileRole), ...workerHintRoles]),
+                );
+
                 if (
                   !doesCatalogReleaseMatchSyncRules(
                     {
                       systemName: item.systemName,
                       releaseType: item.releaseType,
                       releaseTags: item.releaseTags,
-                      fileRoles: (item.files || []).map((f) => f.fileRole),
+                      fileRoles: workerFileRoles,
                     },
                     liveCfg,
                   )
@@ -5018,6 +5089,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
           const shouldSkipWpPostBeforeHtml = (post: WpPostMetadata): boolean => {
             if (!liveHasReleaseTypeFilter) return false;
+            const hintFilenames = (post.downloadHints || []).map((h) => h.filename);
             const hintRoles = (post.downloadHints || []).map((h) =>
               classifyFileRole(h.filename, '', {
                 genres: post.genres,
@@ -5025,6 +5097,7 @@ export class ScraperOrchestrator extends EventEmitter {
                 sources: post.sources,
                 title: post.title || undefined,
                 systemName: systemSlug,
+                siblingFilenames: hintFilenames,
               }),
             );
             const wpTags = deriveReleaseTags(
@@ -5036,7 +5109,16 @@ export class ScraperOrchestrator extends EventEmitter {
               },
               hintRoles,
             );
-            const wpTypeKeys = classifyReleaseTagsToTypeKeys(wpTags, systemSlug);
+            const wpTypeKeys =
+              hintRoles.length > 0
+                ? Array.from(
+                    new Set(
+                      hintRoles.flatMap((role) =>
+                        classifyFileRoleToTypeKeys(role, wpTags, systemSlug),
+                      ),
+                    ),
+                  )
+                : classifyReleaseTagsToTypeKeys(wpTags, systemSlug);
             const match = evaluateReleaseTypeMatch(wpTypeKeys, liveAllowedReleaseTypes);
             if (!match.allowed) {
               if (post.link) {
@@ -5545,12 +5627,20 @@ export class ScraperOrchestrator extends EventEmitter {
     const remotePath = release.remotePath || mirrored.remotePath;
     const expectedLocalPath = path.resolve(cfg.downloadDir, remotePath);
     const displayLabel = release.displayLabel || release.filename;
+    const siblingFilenames = Array.from(
+      new Set([
+        release.filename,
+        ...(parentContext?.files || []).map((f) => f.filename),
+        ...(parentContext?.metadata?.downloadHints || []).map((h) => h.filename),
+      ]),
+    );
     const fileRole = classifyFileRole(release.filename, displayLabel, {
       genres: parentContext?.genres,
       languages: parentContext?.languages,
       sources: parentContext?.sources,
       title: parentContext?.title || release.title,
       systemName: parentContext?.systemName || release.systemName,
+      siblingFilenames,
     });
 
     const initial = upsertReleaseFile({
