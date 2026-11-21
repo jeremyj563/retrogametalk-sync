@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.29.1] - 2026-11-21
+
+- Eliminated main-thread event-loop stalls that could trigger Kubernetes `livenessProbe` timeouts (`SIGTERM` restarts) on large libraries and Docker Desktop / k3d filesystems:
+  - **Cached Per-File Role Lookup (`json_extract`)**: Replaced uncached full-table `metadata_json` scans on `/api/items`, `/api/sync/preflight`, and rule-sync queries with an in-memory cached role map populated via SQLite `json_extract(metadata_json, '$.downloadHints')` and incrementally updated per release on writes.
+  - **Non-Blocking Cached Disk Stats & Lightweight `/readyz`**: Converted recursive repository disk-usage scans from synchronous `fs.readdirSync`/`fs.statSync` calls (previously running on every status emission and every 15s readiness probe) into an async, event-loop-yielding background refresh with TTL caching, and switched `/readyz` to a lightweight cached writability + SQLite check.
+  - **Clean `SIGTERM` / Stop Abort Handling**: Downloads aborted by `SIGTERM` or manual Stop now reset cleanly to `available` instead of being recorded as `failed` (`AbortError`) in the Failed Queue.
+
 ## [1.29.0] - 2026-11-21
 
 - Fixed false-positive release type misclassifications and repeating Full Sync type-filter skip loops across all 11 curated release types:

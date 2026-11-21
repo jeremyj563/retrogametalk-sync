@@ -272,6 +272,7 @@ export function initDb(): Database.Database {
     db.prepare(`DELETE FROM sqlite_sequence WHERE name = 'sync_runs'`).run();
   }
 
+  invalidateReleaseFileRolesCache();
   return db;
 }
 
@@ -1088,6 +1089,7 @@ export function recomputeReleaseRollup(releaseId: number): RepositoryItemRecord 
     releaseId,
   );
 
+  refreshReleaseFileRolesCacheForRelease(releaseId);
   return getCatalogReleaseById(releaseId);
 }
 
@@ -1350,7 +1352,9 @@ export function upsertIndexedWpRelease(input: {
     JSON.stringify(mergedMetadata),
   );
 
-  return getCatalogReleaseByRemoteUrl(canonicalUrl)!;
+  const saved = getCatalogReleaseByRemoteUrl(canonicalUrl)!;
+  refreshReleaseFileRolesCacheForRelease(saved.id);
+  return saved;
 }
 
 export function updateCatalogCoverPath(releaseId: number, coverLocalPath: string): void {
@@ -1818,6 +1822,7 @@ export function persistDiscoveredReleaseDownloadHints(
   getDb()
     .prepare('UPDATE catalog_releases SET metadata_json = ? WHERE id = ?')
     .run(JSON.stringify(metaObj), row.id);
+  refreshReleaseFileRolesCacheForRelease(Number(row.id));
   return true;
 }
 
@@ -1938,8 +1943,129 @@ function listStatusFacetCounts(): Record<string, number> {
   };
 }
 
+let releaseFileRolesCache: Map<number, string[]> | null = null;
+let releaseFileRolesCacheDb: Database.Database | null = null;
+
+export function invalidateReleaseFileRolesCache(): void {
+  releaseFileRolesCache = null;
+  releaseFileRolesCacheDb = null;
+}
+
+function parseDownloadHintFilenames(downloadHintsJson: string | null): string[] {
+  if (!downloadHintsJson) return [];
+  try {
+    const parsed = JSON.parse(downloadHintsJson) as { filename?: unknown }[];
+    if (!Array.isArray(parsed)) return [];
+    const names: string[] = [];
+    for (const h of parsed) {
+      const name = typeof h?.filename === 'string' ? h.filename.trim() : '';
+      if (name) names.push(name);
+    }
+    return names;
+  } catch {
+    return [];
+  }
+}
+
+function computeFileRolesForSingleRelease(
+  releaseRow: {
+    id: number;
+    title: string;
+    system_name: string;
+    genres_json: string | null;
+    languages_json: string | null;
+    sources_json: string | null;
+    download_hints_json: string | null;
+  },
+  recordedFiles: { filename: string | null; file_role: string | null }[],
+): string[] {
+  const recordedFilenameSet = new Set<string>();
+  const recordedRawFilenames: string[] = [];
+  const rolesList: string[] = [];
+
+  for (const f of recordedFiles) {
+    const fname = String(f.filename || '').trim();
+    const role = String(f.file_role || '').trim();
+    if (fname) {
+      recordedFilenameSet.add(fname.toLowerCase());
+      recordedRawFilenames.push(fname);
+    }
+    if (role) {
+      rolesList.push(role);
+    }
+  }
+
+  const hintNames = parseDownloadHintFilenames(releaseRow.download_hints_json);
+  if (hintNames.length > 0) {
+    const siblingFilenames = Array.from(new Set([...recordedRawFilenames, ...hintNames]));
+    const ctx = {
+      genres: parseJsonStringArray(releaseRow.genres_json),
+      languages: parseJsonStringArray(releaseRow.languages_json),
+      sources: parseJsonStringArray(releaseRow.sources_json),
+      title: releaseRow.title,
+      systemName: releaseRow.system_name,
+      siblingFilenames,
+    };
+    for (const hintName of hintNames) {
+      if (recordedFilenameSet.has(hintName.toLowerCase())) {
+        continue;
+      }
+      rolesList.push(classifyFileRole(hintName, hintName, ctx));
+    }
+  }
+
+  return rolesList;
+}
+
+function refreshReleaseFileRolesCacheForRelease(releaseId: number): void {
+  const conn = getDb();
+  if (!releaseFileRolesCache || releaseFileRolesCacheDb !== conn) {
+    return;
+  }
+
+  const releaseRow = conn
+    .prepare(
+      `SELECT id, title, system_name, genres_json, languages_json, sources_json,
+              json_extract(metadata_json, '$.downloadHints') AS download_hints_json
+       FROM catalog_releases
+       WHERE id = ?`,
+    )
+    .get(releaseId) as
+    | {
+        id: number;
+        title: string;
+        system_name: string;
+        genres_json: string | null;
+        languages_json: string | null;
+        sources_json: string | null;
+        download_hints_json: string | null;
+      }
+    | undefined;
+
+  if (!releaseRow) {
+    releaseFileRolesCache.delete(releaseId);
+    return;
+  }
+
+  const recordedFiles = conn
+    .prepare('SELECT filename, file_role FROM catalog_release_files WHERE release_id = ?')
+    .all(releaseId) as { filename: string | null; file_role: string | null }[];
+
+  const roles = computeFileRolesForSingleRelease(releaseRow, recordedFiles);
+  if (roles.length > 0) {
+    releaseFileRolesCache.set(releaseId, roles);
+  } else {
+    releaseFileRolesCache.delete(releaseId);
+  }
+}
+
 function loadAllReleaseFileRolesMap(): Map<number, string[]> {
-  const fileRows = getDb()
+  const conn = getDb();
+  if (releaseFileRolesCache && releaseFileRolesCacheDb === conn) {
+    return releaseFileRolesCache;
+  }
+
+  const fileRows = conn
     .prepare('SELECT release_id, filename, file_role FROM catalog_release_files')
     .all() as { release_id: number; filename: string | null; file_role: string | null }[];
 
@@ -1972,13 +2098,15 @@ function loadAllReleaseFileRolesMap(): Map<number, string[]> {
     }
   }
 
-  // Also classify indexed `metadata_json.downloadHints` so catalog-only releases (no recorded files
-  // yet) and partially-mirrored releases evaluate concrete per-file roles consistently with Sync.
-  const metaRows = getDb()
+  // Extract ONLY `$.downloadHints` inside SQLite so multi-KB HTML descriptions & screenshots are
+  // never copied into V8 heap or JSON-parsed on the Node.js event loop.
+  const metaRows = conn
     .prepare(
-      `SELECT id, title, system_name, genres_json, languages_json, sources_json, metadata_json
+      `SELECT id, title, system_name, genres_json, languages_json, sources_json,
+              json_extract(metadata_json, '$.downloadHints') AS download_hints_json
        FROM catalog_releases
-       WHERE metadata_json IS NOT NULL AND metadata_json LIKE '%downloadHints%'`,
+       WHERE metadata_json IS NOT NULL
+         AND json_extract(metadata_json, '$.downloadHints') IS NOT NULL`,
     )
     .all() as {
     id: number;
@@ -1987,22 +2115,11 @@ function loadAllReleaseFileRolesMap(): Map<number, string[]> {
     genres_json: string | null;
     languages_json: string | null;
     sources_json: string | null;
-    metadata_json: string | null;
+    download_hints_json: string | null;
   }[];
 
   for (const row of metaRows) {
-    if (!row.metadata_json) continue;
-    let hintNames: string[] = [];
-    try {
-      const parsed = JSON.parse(row.metadata_json) as { downloadHints?: { filename?: unknown }[] };
-      if (Array.isArray(parsed?.downloadHints)) {
-        hintNames = parsed.downloadHints
-          .map((h) => (typeof h?.filename === 'string' ? h.filename.trim() : ''))
-          .filter(Boolean);
-      }
-    } catch {
-      continue;
-    }
+    const hintNames = parseDownloadHintFilenames(row.download_hints_json);
     if (hintNames.length === 0) continue;
 
     const rid = Number(row.id);
@@ -2031,6 +2148,8 @@ function loadAllReleaseFileRolesMap(): Map<number, string[]> {
     }
   }
 
+  releaseFileRolesCache = map;
+  releaseFileRolesCacheDb = conn;
   return map;
 }
 
@@ -3336,6 +3455,11 @@ export function deleteRepositoryItemsByIds(ids: number[]): RepositoryItemRecord[
   const items = rows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || []));
 
   getDb().prepare(`DELETE FROM catalog_releases WHERE id IN (${placeholders})`).run(...validIds);
+  if (releaseFileRolesCache) {
+    for (const id of validIds) {
+      releaseFileRolesCache.delete(id);
+    }
+  }
   return items;
 }
 
@@ -3380,6 +3504,7 @@ export function deleteRepositoryItemsByLocalPaths(absPaths: string[]): number {
   });
 
   tx();
+  invalidateReleaseFileRolesCache();
   return deleted;
 }
 
