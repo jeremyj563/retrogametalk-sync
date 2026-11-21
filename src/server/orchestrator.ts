@@ -100,6 +100,7 @@ import {
 } from './archiveService.ts';
 import { formatErrorDetails, isDebugLoggingEnabled, logServer } from './logger.ts';
 import type {
+  ActiveRunProgress,
   ActiveSyncItemSummary,
   ActiveTransferState,
   ArchiveBrowseListing,
@@ -430,6 +431,7 @@ export class ScraperOrchestrator extends EventEmitter {
   private activeTransfers = new Map<string, ActiveTransferState>();
   private activeTransferOrder: string[] = [];
   private activeSyncItem: ActiveSyncItemSummary | null = null;
+  private activeRunProgress: ActiveRunProgress | null = null;
   private transferHistory: TransferSpeedSample[] = [];
   private lastTransferSampleMs = 0;
   private currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
@@ -2197,11 +2199,32 @@ export class ScraperOrchestrator extends EventEmitter {
     };
   }
 
+  private setRunProgress(
+    processed: number,
+    total: number,
+    scope: 'queue' | 'system',
+    systemName: string | null = null,
+  ): void {
+    const cleanTotal = Math.max(0, Math.floor(total));
+    if (cleanTotal <= 0) {
+      this.activeRunProgress = null;
+      return;
+    }
+    const cleanProcessed = Math.max(0, Math.min(Math.floor(processed), cleanTotal));
+    this.activeRunProgress = {
+      processed: cleanProcessed,
+      total: cleanTotal,
+      scope,
+      systemName,
+    };
+  }
+
   private clearAllActiveTransfers(): void {
     this.activeTransfers.clear();
     this.activeTransferOrder = [];
     this.activeTransfer = null;
     this.activeSyncItem = null;
+    this.activeRunProgress = null;
     this.emit('transfer', null);
   }
 
@@ -2340,6 +2363,7 @@ export class ScraperOrchestrator extends EventEmitter {
       activeTransfer: this.activeTransfer,
       activeTransfers: this.getOrderedActiveTransfers(),
       activeSyncItem: this.activeSyncItem,
+      runProgress: this.activeRunProgress,
       transferHistory: [...this.transferHistory],
       currentPhase: this.currentPhase,
       nextScheduledRunAt: cfg.scheduleEnabled && nextRun ? nextRun.toISOString() : null,
@@ -2737,6 +2761,14 @@ export class ScraperOrchestrator extends EventEmitter {
         marked.alreadyDownloadedIds.length + (filterPreview?.alreadyDownloadedCount ?? 0);
 
       if (newlyAddedIds.length > 0) {
+        if (this.activeRunProgress && this.activeRunProgress.scope === 'queue') {
+          this.setRunProgress(
+            this.activeRunProgress.processed,
+            this.activeRunProgress.total + newlyAddedIds.length,
+            'queue',
+            null,
+          );
+        }
         this.log(
           'info',
           `Appended ${newlyAddedIds.length} release(s) to active download queue (Run #${this.activeRun.id})${
@@ -2776,6 +2808,7 @@ export class ScraperOrchestrator extends EventEmitter {
     this.pendingDownloadQueueSet = new Set(marked.queuedIds);
     this.inFlightDownloadIds.clear();
     this.activeRun = run;
+    this.setRunProgress(0, marked.queuedIds.length, 'queue', null);
     this.abortController = new AbortController();
     this.currentPhase = `Downloading ${marked.queuedIds.length} queued release${marked.queuedIds.length === 1 ? '' : 's'}`;
 
@@ -2860,8 +2893,10 @@ export class ScraperOrchestrator extends EventEmitter {
             );
 
             processedReleases += 1;
+            const liveQueueTotal = totalInQueue + this.pendingDownloadQueueIds.length;
             this.setActiveSyncItemFromRecord(item);
-            this.currentPhase = `Queue (${processedReleases}/${totalInQueue}): ${item.systemName} / ${item.title}`;
+            this.setRunProgress(processedReleases, liveQueueTotal, 'queue', null);
+            this.currentPhase = `Queue (${processedReleases}/${liveQueueTotal}): ${item.systemName} / ${item.title}`;
             this.emitStatus();
 
             try {
@@ -3595,6 +3630,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
           retryCompletedTargets += 1;
           this.setActiveSyncItemFromRecord(item);
+          this.setRunProgress(retryCompletedTargets, targets.length, 'queue', null);
           this.currentPhase = `${phasePrefix} (${Math.min(retryCompletedTargets, targets.length)}/${targets.length}): ${item.systemName} / ${item.title}`;
           this.emitStatus();
 
@@ -4832,6 +4868,7 @@ export class ScraperOrchestrator extends EventEmitter {
               const completedCount = refreshedConsolesSet.size;
               const totalActiveConsoles = Math.max(completedCount, liveTargetSystems.length);
               this.activeSyncItem = null;
+              this.activeRunProgress = null;
               this.currentPhase = needsFullIndex
                 ? `${isDryRun ? 'Dry Run · ' : ''}Indexing ${systemSlug} (${completedCount}/${totalActiveConsoles})`
                 : `${isDryRun ? 'Dry Run · ' : ''}Delta check ${systemSlug} (${completedCount}/${totalActiveConsoles})`;
@@ -5056,6 +5093,7 @@ export class ScraperOrchestrator extends EventEmitter {
               summaryExcludedByRules > 0 ? `${summaryExcludedByRules} cataloged release(s) excluded by Sync Rules` : null,
             );
             let mirroredProgressCount = 0;
+            this.setRunProgress(0, pendingLiveItems.length, 'queue', null);
             await runWithConcurrency(
               pendingLiveItems,
               () => {
@@ -5120,6 +5158,7 @@ export class ScraperOrchestrator extends EventEmitter {
                 checkedOrMirroredUrls.add(canonicalUrl);
                 mirroredProgressCount += 1;
                 this.setActiveSyncItemFromRecord(item);
+                this.setRunProgress(mirroredProgressCount, pendingLiveItems.length, 'queue', null);
                 this.currentPhase = `Full Sync · ${item.systemName} (${Math.min(mirroredProgressCount, pendingLiveItems.length)}/${pendingLiveItems.length}): ${item.title}`;
                 this.emitStatus();
                 await inspectAndProcessReleasePage(item.remoteUrl, buildWpMetaHintFromItem(item), null);
@@ -5372,6 +5411,7 @@ export class ScraperOrchestrator extends EventEmitter {
               }
               deltaProgressCount += 1;
               this.setActiveSyncItemFromRecord(getRepositoryItemByRemoteUrl(canonicalLink));
+              this.setRunProgress(deltaProgressCount, posts.length, 'system', systemSlug);
               this.currentPhase = isDeltaMode
                 ? `${isDryRun ? 'Dry Run (Incremental)' : 'Incremental'} · ${systemSlug} (${Math.min(deltaProgressCount, posts.length)}/${posts.length}): ${post.title || this.formatRelativePhasePath(post.link, liveCfg.baseUrl)}`
                 : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} · ${systemSlug} (${Math.min(deltaProgressCount, posts.length)}/${posts.length}): ${post.title || this.formatRelativePhasePath(post.link, liveCfg.baseUrl)}`;
@@ -5430,6 +5470,7 @@ export class ScraperOrchestrator extends EventEmitter {
             }
 
             this.activeSyncItem = null;
+            this.activeRunProgress = null;
             this.currentPhase = isDeltaMode
               ? `${isDryRun ? 'Dry Run (Incremental)' : 'Checking'} ${systemSlug} (${scopeLabel}) since ${effectiveCutoffIso!.slice(0, 16).replace('T', ' ')} UTC`
               : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} (${scopeLabel}): enumerating ${systemSlug}`;

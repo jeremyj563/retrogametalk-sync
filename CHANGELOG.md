@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.30.1] - 2026-11-21
+
+- Fixed the sync progress counter (e.g., `5/47`) intermittently disappearing from the main **Monitor** status bar during active runs:
+  - **Structured Server-Side `runProgress`**: Added a dedicated `runProgress` field (`processed`, `total`, `scope`, `systemName`) to `ServiceStatusSnapshot` across Full Sync, Incremental Sync, Download Queue (including mid-run queue additions), and Batch Retry runs.
+  - **Consistent Status Header Rendering**: Updated `parseSyncStatusHeader` and the Monitor panel to read `status.runProgress` directly during active file transfers, parallel downloads, inter-file handoffs, tab switches, and page refreshes instead of relying solely on transient `currentPhase` strings.
+
 ## [1.30.0] - 2026-11-21
 
 - Redesigned the **Storage Device Installer** flow and naming end-to-end to make installing single games and batches effortless and clear:
