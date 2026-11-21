@@ -147,6 +147,32 @@ export function parseComparableVersion(text: string): ComparableVersion {
   }
   if (bestSemver) return bestSemver;
 
+  // 1b. Bare dotted version inside parentheses/brackets (e.g. "(1.2)", "(English 1.4)", "[2.0.1]")
+  const bareDottedMatches = Array.from(
+    cleaned.matchAll(
+      /[\(\[][^\)\]]*?(?:^|[\s._\-[(\]])(\d+\.\d+(?:\.\d+){0,2})([a-z])?(?!\s*(?:mb|gb|kb|tb|mhz|ghz|hz|fps|bit)\b)(?=$|[\s._\-)\]])[^\)\]]*[\)\]]/gi,
+    ),
+  );
+  let bestBareDotted: ComparableVersion | null = null;
+  for (const m of bareDottedMatches) {
+    const rawNum = m[1];
+    const letter = m[2] ? m[2].toLowerCase().charCodeAt(0) - 96 : 0;
+    const localStage = parseStageModifier(m[0]);
+    const candidate: ComparableVersion = {
+      hasVersion: true,
+      schemeRank: 4,
+      numericParts: parseNumericSegments(rawNum),
+      letterSuffix: Math.max(0, letter),
+      stageRank: localStage.stageRank !== STAGE_RANK.STABLE ? localStage.stageRank : stageInfo.stageRank,
+      stageNumber: localStage.stageRank !== STAGE_RANK.STABLE ? localStage.stageNumber : stageInfo.stageNumber,
+      rawLabel: `v${rawNum}${m[2] || ''}`,
+    };
+    if (!bestBareDotted || compareComparableVersions(candidate, bestBareDotted) > 0) {
+      bestBareDotted = candidate;
+    }
+  }
+  if (bestBareDotted) return bestBareDotted;
+
   // 2. ISO / compact date stamp (e.g. Build 2026-03-14, 2025-11-08, 20251108)
   const isoDateMatch = cleaned.match(
     /(?:^|[\s._\-[(\]])(?:build\s*)?(20\d{2})[-._](0[1-9]|1[0-2])[-._](0[1-9]|[12]\d|3[01])(?=$|[\s._\-)\]])/i,

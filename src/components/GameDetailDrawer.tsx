@@ -49,6 +49,7 @@ import {
   buildPreparedRomDownloadUrl,
   resolveGameDetailFooterPlan,
   resolveRomDownloadOutcome,
+  selectPrimaryDownloadFile,
   shouldShowPerFileDownloadButton,
   triggerBrowserFileDownload,
   type RomDownloadOutcome,
@@ -1003,8 +1004,7 @@ export function GameDetailDrawer({
     ? `/api/items/${item.id}/asset?kind=cover${assetVersion}`
     : `/api/items/${item.id}/asset?kind=cover&lazy=1${assetVersion}`;
   const sourceUrl = item.metadata?.sourcePageUrl || item.remoteUrl.split('#')[0];
-  const primaryDownloadFile =
-    item.files.find((f) => f.status === 'downloaded' || f.status === 'skipped') || null;
+  const primaryDownloadFile = selectPrimaryDownloadFile(item);
   const hasFailedFiles = item.status === 'failed' || item.status === 'partial' || item.files.some((f) => f.status === 'failed');
   const canQueueRelease =
     Boolean(onQueueDownload) &&
@@ -2238,7 +2238,7 @@ export function GameDetailDrawer({
                       type="button"
                       disabled={isPreparingPrimary}
                       onClick={() => void handleDownloadRom(primaryDownloadFile.id, 'primary')}
-                      title="Download extracted, cleanly renamed ROM file"
+                      title={`Download extracted ROM (${primaryDownloadFile.filename})`}
                       className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
                     >
                       {isPreparingPrimary ? (
@@ -2263,7 +2263,7 @@ export function GameDetailDrawer({
                       type="button"
                       disabled={isPreparingPrimary}
                       onClick={() => void handleDownloadRom(primaryDownloadFile.id, 'primary')}
-                      title="Download extracted, cleanly renamed ROM file"
+                      title={`Download extracted ROM (${primaryDownloadFile.filename})`}
                       className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
                     >
                       {isPreparingPrimary ? (
