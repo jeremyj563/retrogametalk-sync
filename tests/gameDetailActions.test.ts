@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { ArchiveInspectResult, PlayableExportTarget } from '../src/types';
+import type { ArchiveInspectResult, PlayableExportTarget, ReleaseFileRecord } from '../src/types';
 import {
   buildPreparedRomDownloadUrl,
   formatDeviceActionLabel,
   resolveGameDetailFooterPlan,
   resolveRomDownloadOutcome,
+  selectPrimaryDownloadFile,
   shouldShowPerFileDownloadButton,
 } from '../src/utils/gameDetailActions';
 
@@ -77,7 +78,7 @@ test('resolveRomDownloadOutcome triggers instant clean zip download for single d
   }
 });
 
-test('resolveRomDownloadOutcome returns variant picker for archives with 2+ playable ROMs', () => {
+test('resolveRomDownloadOutcome returns variant picker ordered latest-version-first for archives with 2+ playable ROMs', () => {
   const targets = [
     makeTarget({ id: 'rev-a', displayName: 'Game (Rev 1).sfc', suggestedFilename: 'Game (Rev 1).sfc' }),
     makeTarget({ id: 'rev-b', displayName: 'Game (Rev 2).sfc', suggestedFilename: 'Game (Rev 2).sfc' }),
@@ -88,6 +89,8 @@ test('resolveRomDownloadOutcome returns variant picker for archives with 2+ play
   if (outcome.kind === 'variant_picker') {
     assert.equal(outcome.targets.length, 2);
     assert.equal(outcome.fileId, 7);
+    assert.equal(outcome.targets[0].id, 'rev-b');
+    assert.equal(outcome.targets[1].id, 'rev-a');
   }
 });
 
@@ -253,4 +256,95 @@ test('buildPreparedRomDownloadUrl encodes target id and filename safely', () => 
     url,
     '/api/items/15/download-rom?fileId=3&targetId=folder%2Fgame+%231.sfc&name=Game+%5Bv1.2%5D.sfc',
   );
+});
+
+function makeFile(overrides: Partial<ReleaseFileRecord> = {}): ReleaseFileRecord {
+  return {
+    id: 1,
+    releaseId: 42,
+    remoteUrl: 'https://retrogametalk.com/dl/1',
+    downloadUrl: 'https://retrogametalk.com/dl/1',
+    remotePath: 'snes-rom/game/Game (v1.0).zip',
+    localPath: '/run/repo/snes-rom/game/Game (v1.0).zip',
+    filename: 'Game (v1.0).zip',
+    displayLabel: 'Game (v1.0).zip',
+    fileRole: 'Hack',
+    fileSizeBytes: 1_000_000,
+    status: 'downloaded',
+    errorMessage: null,
+    lastRunId: 1,
+    discoveredAt: '2026-01-01T00:00:00.000Z',
+    downloadedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+test('selectPrimaryDownloadFile picks the latest semantic, bare dotted, revision, and maturity version', () => {
+  const semverPick = selectPrimaryDownloadFile({
+    files: [
+      makeFile({ id: 10, filename: 'Super Mario World Redux (v1.2).zip', displayLabel: 'Super Mario World Redux (v1.2).zip' }),
+      makeFile({ id: 11, filename: 'Super Mario World Redux (v1.10).zip', displayLabel: 'Super Mario World Redux (v1.10).zip' }),
+      makeFile({ id: 12, filename: 'Super Mario World Redux (v1.9).zip', displayLabel: 'Super Mario World Redux (v1.9).zip' }),
+      makeFile({ id: 13, filename: 'Super Mario World Redux (v2.0).zip', status: 'failed' }),
+    ],
+  });
+  assert.equal(semverPick?.id, 11);
+
+  const bareDottedPick = selectPrimaryDownloadFile({
+    files: [
+      makeFile({ id: 20, filename: 'Pokemon Unbound (1.2).zip', displayLabel: 'Pokemon Unbound (1.2).zip' }),
+      makeFile({ id: 21, filename: 'Pokemon Unbound (2.1.1).zip', displayLabel: 'Pokemon Unbound (2.1.1).zip' }),
+    ],
+  });
+  assert.equal(bareDottedPick?.id, 21);
+
+  const stagePick = selectPrimaryDownloadFile({
+    files: [
+      makeFile({ id: 30, filename: 'Chrono Trigger+ (v2.0 Beta 2).zip', displayLabel: 'v2.0 Beta 2' }),
+      makeFile({ id: 31, filename: 'Chrono Trigger+ (v2.0).zip', displayLabel: 'v2.0' }),
+      makeFile({ id: 32, filename: 'Chrono Trigger+ (v2.0 Final).zip', displayLabel: 'v2.0 Final' }),
+    ],
+  });
+  assert.equal(stagePick?.id, 32);
+
+  const revPick = selectPrimaryDownloadFile({
+    files: [
+      makeFile({ id: 40, filename: 'Legend of Zelda (USA) (Rev 1).zip', fileRole: 'ROM' }),
+      makeFile({ id: 41, filename: 'Legend of Zelda (USA) (Rev 2).zip', fileRole: 'ROM' }),
+    ],
+  });
+  assert.equal(revPick?.id, 41);
+});
+
+test('selectPrimaryDownloadFile prefers latest modified playable ROM over bundled Original ROM, standalone patches, or legacy files', () => {
+  const picked = selectPrimaryDownloadFile({
+    files: [
+      makeFile({ id: 1, filename: 'Mother 3 (Japan) (v2.0).zip', displayLabel: 'Original ROM', fileRole: 'Original ROM' }),
+      makeFile({ id: 2, filename: 'Mother 3 (English v1.2).zip', displayLabel: 'Mother 3 (English v1.2)', fileRole: 'English Translation' }),
+      makeFile({ id: 3, filename: 'Mother 3 (English v1.3).zip', displayLabel: 'Mother 3 (English v1.3)', fileRole: 'English Translation' }),
+      makeFile({ id: 4, filename: 'Mother 3 (English v1.4).bps', displayLabel: 'Mother 3 Patch v1.4', fileRole: 'Patch' }),
+      makeFile({ id: 5, filename: 'Mother 3 (Old v1.9).zip', displayLabel: 'Old archive', fileRole: 'English Translation' }),
+    ],
+  });
+  assert.equal(picked?.id, 3);
+});
+
+test('selectPrimaryDownloadFile prefers newer downloadedAt and higher id when unversioned', () => {
+  const picked = selectPrimaryDownloadFile({
+    files: [
+      makeFile({
+        id: 100,
+        filename: 'Castlevania (USA).zip',
+        displayLabel: 'Castlevania (USA).zip',
+        downloadedAt: '2026-01-01T00:00:00.000Z',
+      }),
+      makeFile({
+        id: 101,
+        filename: 'Castlevania (USA) (Fixed).zip',
+        displayLabel: 'Castlevania (USA) (Fixed).zip',
+        downloadedAt: '2026-06-15T00:00:00.000Z',
+      }),
+    ],
+  });
+  assert.equal(picked?.id, 101);
 });

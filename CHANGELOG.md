@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.29.2] - 2026-11-21
+
+- Fixed **Game Details → Download ROM** always selecting the latest playable version when multiple versions are present:
+  - **Version-Aware Primary File Selection**: Replaced first-row SQLite selection with version- and role-aware ranking (`v1.10 > v1.9`, bare dotted versions like `(2.1.1) > (1.2)`, maturity `Final > stable > Beta`, `Rev 2 > Rev 1`, `Rev B > Rev A`, and release dates) while prioritizing primary playable releases over bundled unmodified Original ROMs, standalone patches, demos, or legacy archives.
+  - **Newest-First Multi-ROM Variant Picker**: Sorted multi-ROM archive variant picker targets latest-version-first (with Disc 1 before Disc 2 when equal) and surfaced the selected version filename in the **Download ROM** button tooltip.
+
 ## [1.29.1] - 2026-11-21
 
 - Eliminated main-thread event-loop stalls that could trigger Kubernetes `livenessProbe` timeouts (`SIGTERM` restarts) on large libraries and Docker Desktop / k3d filesystems:
