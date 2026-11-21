@@ -180,10 +180,186 @@ export function formatSyncRuleScopeSummary(
 export interface LiveSyncReloadReceipt {
   applied: boolean;
   runId: number;
-  runMode: 'incremental' | 'full';
+  runMode: 'incremental' | 'full' | 'download' | 'retry';
   dryRun: boolean;
+  kind?: 'rules' | 'runtime' | 'both';
   changeSummary: string;
   scopeSummary: string;
+}
+
+export function formatLiveReloadRunLabel(run: {
+  runMode?: 'incremental' | 'full' | 'download' | 'retry' | string;
+  mode?: string;
+  triggerType?: string;
+  dryRun?: boolean;
+}): string {
+  const mode =
+    run.runMode ??
+    (run.triggerType === 'download'
+      ? 'download'
+      : run.triggerType === 'retry'
+        ? 'retry'
+        : run.mode === 'full'
+          ? 'full'
+          : 'incremental');
+  const baseLabel =
+    mode === 'full'
+      ? 'Full Sync'
+      : mode === 'download'
+        ? 'Download Queue'
+        : mode === 'retry'
+          ? 'Retry Failed'
+          : 'Incremental Sync';
+  return run.dryRun ? `${baseLabel} Dry Run` : baseLabel;
+}
+
+export interface RuntimeSyncSettingsConfigLike {
+  baseDelayMs?: number | null;
+  minDelayMs?: number | null;
+  maxDelayMs?: number | null;
+  backoffMultiplier?: number | null;
+  maxRetries?: number | null;
+  maxConcurrency?: number | null;
+  downloadChunkConcurrency?: number | null;
+  downloadChunkMinSizeMb?: number | null;
+  requestTimeoutMs?: number | null;
+  userAgent?: string | null;
+  autoDownloadNewReleases?: boolean | null;
+}
+
+export interface RuntimeSyncSettingsDiff {
+  changed: boolean;
+  pacingChanged: boolean;
+  concurrencyChanged: boolean;
+  chunkingChanged: boolean;
+  networkChanged: boolean;
+  autoDownloadChanged: boolean;
+  changedFields: string[];
+  changeSummary: string;
+}
+
+function formatMsCompact(ms: number): string {
+  if (ms >= 1000 && ms % 1000 === 0) {
+    return `${ms / 1000}s`;
+  }
+  return `${ms}ms`;
+}
+
+export function diffRuntimeSyncSettings(
+  prevConfig: RuntimeSyncSettingsConfigLike,
+  nextConfig: RuntimeSyncSettingsConfigLike,
+): RuntimeSyncSettingsDiff {
+  const parts: string[] = [];
+  const changedFields: string[] = [];
+
+  const prevBase = Number(prevConfig.baseDelayMs ?? 0);
+  const nextBase = Number(nextConfig.baseDelayMs ?? 0);
+  const prevMin = Number(prevConfig.minDelayMs ?? 0);
+  const nextMin = Number(nextConfig.minDelayMs ?? 0);
+  const prevMax = Number(prevConfig.maxDelayMs ?? 0);
+  const nextMax = Number(nextConfig.maxDelayMs ?? 0);
+  const prevBackoff = Number(prevConfig.backoffMultiplier ?? 0);
+  const nextBackoff = Number(nextConfig.backoffMultiplier ?? 0);
+
+  let pacingChanged = false;
+  if (prevBase !== nextBase) {
+    pacingChanged = true;
+    changedFields.push('baseDelayMs');
+    parts.push(`Delay ${formatMsCompact(prevBase)}→${formatMsCompact(nextBase)}`);
+  }
+  if (prevMin !== nextMin) {
+    pacingChanged = true;
+    changedFields.push('minDelayMs');
+    if (prevBase === nextBase) {
+      parts.push(`Min delay ${formatMsCompact(prevMin)}→${formatMsCompact(nextMin)}`);
+    }
+  }
+  if (prevMax !== nextMax) {
+    pacingChanged = true;
+    changedFields.push('maxDelayMs');
+    if (prevBase === nextBase) {
+      parts.push(`Max cooldown ${formatMsCompact(prevMax)}→${formatMsCompact(nextMax)}`);
+    }
+  }
+  if (Math.abs(prevBackoff - nextBackoff) >= 0.001) {
+    pacingChanged = true;
+    changedFields.push('backoffMultiplier');
+    parts.push(`Backoff ${prevBackoff.toFixed(1)}x→${nextBackoff.toFixed(1)}x`);
+  }
+
+  const prevWorkers = Number(prevConfig.maxConcurrency ?? 1);
+  const nextWorkers = Number(nextConfig.maxConcurrency ?? 1);
+  const concurrencyChanged = prevWorkers !== nextWorkers;
+  if (concurrencyChanged) {
+    changedFields.push('maxConcurrency');
+    parts.push(`Workers ${prevWorkers}→${nextWorkers}`);
+  }
+
+  const prevChunks = Number(prevConfig.downloadChunkConcurrency ?? 1);
+  const nextChunks = Number(nextConfig.downloadChunkConcurrency ?? 1);
+  const prevChunkMb = Number(prevConfig.downloadChunkMinSizeMb ?? 32);
+  const nextChunkMb = Number(nextConfig.downloadChunkMinSizeMb ?? 32);
+  let chunkingChanged = false;
+  if (prevChunks !== nextChunks) {
+    chunkingChanged = true;
+    changedFields.push('downloadChunkConcurrency');
+    parts.push(`Chunks ${prevChunks}x→${nextChunks}x`);
+  }
+  if (prevChunkMb !== nextChunkMb) {
+    chunkingChanged = true;
+    changedFields.push('downloadChunkMinSizeMb');
+    parts.push(`Chunk threshold ${prevChunkMb}→${nextChunkMb} MiB`);
+  }
+
+  const prevRetries = Number(prevConfig.maxRetries ?? 0);
+  const nextRetries = Number(nextConfig.maxRetries ?? 0);
+  const prevTimeout = Number(prevConfig.requestTimeoutMs ?? 0);
+  const nextTimeout = Number(nextConfig.requestTimeoutMs ?? 0);
+  const prevUa = String(prevConfig.userAgent ?? '').trim();
+  const nextUa = String(nextConfig.userAgent ?? '').trim();
+  let networkChanged = false;
+  if (prevRetries !== nextRetries) {
+    networkChanged = true;
+    changedFields.push('maxRetries');
+    parts.push(`Retries ${prevRetries}→${nextRetries}`);
+  }
+  if (prevTimeout !== nextTimeout) {
+    networkChanged = true;
+    changedFields.push('requestTimeoutMs');
+    parts.push(`Timeout ${formatMsCompact(prevTimeout)}→${formatMsCompact(nextTimeout)}`);
+  }
+  if (prevUa !== nextUa) {
+    networkChanged = true;
+    changedFields.push('userAgent');
+    parts.push('User-Agent updated');
+  }
+
+  const autoDownloadChanged =
+    prevConfig.autoDownloadNewReleases !== undefined &&
+    nextConfig.autoDownloadNewReleases !== undefined &&
+    Boolean(prevConfig.autoDownloadNewReleases) !== Boolean(nextConfig.autoDownloadNewReleases);
+  if (autoDownloadChanged) {
+    changedFields.push('autoDownloadNewReleases');
+    parts.push(
+      nextConfig.autoDownloadNewReleases
+        ? 'Scheduled auto-download enabled'
+        : 'Scheduled auto-download paused',
+    );
+  }
+
+  const changed =
+    pacingChanged || concurrencyChanged || chunkingChanged || networkChanged || autoDownloadChanged;
+
+  return {
+    changed,
+    pacingChanged,
+    concurrencyChanged,
+    chunkingChanged,
+    networkChanged,
+    autoDownloadChanged,
+    changedFields,
+    changeSummary: parts.join(' · ') || 'No runtime changes',
+  };
 }
 
 export interface SyncRuleDiff {
