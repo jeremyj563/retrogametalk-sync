@@ -13,6 +13,8 @@ import {
   sanitizeRelativeStoragePath,
   STORAGE_ROM_CATEGORY_KEYS,
   UNIVERSAL_SYSTEM_FOLDER_DEFAULTS,
+  type ConsoleLeafCasingStyle,
+  type FolderCasingStyle,
   type StorageFolderMappingConfig,
   type StorageRomCategoryKey,
   type SystemTypeFolderOverride,
@@ -54,10 +56,24 @@ export interface DiscoveredConsoleMapping {
   detectedTypeSubfolders: Partial<Record<StorageRomCategoryKey, string>>;
 }
 
+export interface DeviceInferredConventions {
+  /** Nested ROM root where newly created console folders belong (e.g. "Roms", "games", "Emulation/roms"), or "" for root/Pocket. */
+  inferredRomRoot: string;
+  /** Dominant leaf casing style for detected console folders under the ROM root. */
+  inferredConsoleCasing: ConsoleLeafCasingStyle;
+  /** Majority exact folder name observed on disk for each detected ROM category (e.g. { hack: "hacks", translations: "trans" }). */
+  inferredTypeSubfolders: Partial<Record<StorageRomCategoryKey, string>>;
+  /** Dominant casing style across observed ROM-type subfolder names on the device. */
+  inferredSubfolderCasing: FolderCasingStyle;
+  /** True when at least one non-retail ROM-type subfolder was observed on the device. */
+  hasInferredTypeSubfolders: boolean;
+}
+
 export interface DeviceAutoConfigResult {
   rootLabel: string;
   detectedLayoutLabel: string;
   detectedRomRoot: string;
+  conventions: DeviceInferredConventions;
   matches: DiscoveredConsoleMapping[];
   unmatchedFolders: string[];
   stats: {
@@ -627,7 +643,12 @@ const ROM_TYPE_SUBFOLDER_ALIASES: Readonly<Record<StorageRomCategoryKey, readonl
     'translations',
     'translation',
     'translated',
+    'trans',
+    'transl',
     'ten',
+    'teng',
+    'tl',
+    'eng',
     'english',
     'englishtranslations',
     'englishtranslation',
@@ -636,12 +657,26 @@ const ROM_TYPE_SUBFOLDER_ALIASES: Readonly<Record<StorageRomCategoryKey, readonl
     'fan',
     'fantranslations',
   ],
-  hack: ['hacks', 'hack', 'romhacks', 'romhack', 'mods', 'mod', 'redux', 'msu1', 'randomizers', 'colorizations'],
-  homebrew: ['homebrew', 'homebrews', 'indie', 'doujin', 'aftermarket', 'pd'],
+  hack: [
+    'hacks',
+    'hack',
+    'romhacks',
+    'romhack',
+    'mods',
+    'mod',
+    'redux',
+    'msu1',
+    'randomizers',
+    'colorizations',
+    'patched',
+    'improvements',
+    'improvement',
+  ],
+  homebrew: ['homebrew', 'homebrews', 'hb', 'indie', 'doujin', 'aftermarket', 'pd'],
   port: ['ports', 'port', 'decomp', 'decomps', 'decompilation', 'decompilations'],
   undub: ['undubs', 'undub'],
   demo_proto: ['prototypes', 'prototype', 'protos', 'proto', 'demos', 'demo', 'betas', 'beta', 'unreleased', 'samples'],
-  bootleg: ['unlicensed', 'bootleg', 'bootlegs', 'pirate', 'pirates', 'multicarts', 'hacksunlicensed'],
+  bootleg: ['unlicensed', 'unlic', 'bootleg', 'bootlegs', 'pirate', 'pirates', 'multicarts', 'hacksunlicensed'],
   bios: ['bios', 'firmware', 'system'],
   dlc: ['dlc', 'updates', 'update', 'addons', 'addon'],
   psx2psp: ['psx2psp', 'eboot', 'eboots', 'psn'],
@@ -804,6 +839,128 @@ function inferLayoutLabel(
     return `Nested ROM Root (${detectedRomRoot}/)`;
   }
   return 'Direct Console Folders (Root)';
+}
+
+const ACRONYM_SUBFOLDER_CATEGORIES = new Set<StorageRomCategoryKey>(['bios', 'dlc', 'psx2psp']);
+
+function classifyFolderNameCasing(name: string): FolderCasingStyle | null {
+  const letters = name.replace(/[^a-zA-Z]/g, '');
+  if (!letters) return null;
+  if (letters === letters.toLowerCase()) return 'lower';
+  if (letters === letters.toUpperCase()) return 'upper';
+  return 'title';
+}
+
+/**
+ * Infers device-wide folder conventions (nested ROM root, console leaf casing,
+ * majority ROM-type subfolder names, and dominant subfolder casing style)
+ * from the active discovered console mappings on a mounted storage device.
+ */
+export function inferDeviceConventions(
+  detectedRomRoot: string,
+  matches: readonly DiscoveredConsoleMapping[],
+  chosenPathBySlug?: Readonly<Record<string, string>>,
+): DeviceInferredConventions {
+  const cleanDetectedRoot =
+    detectedRomRoot && detectedRomRoot !== 'Assets/*/common'
+      ? sanitizeRelativeStoragePath(detectedRomRoot)
+      : '';
+
+  // 1. Infer dominant console leaf casing under the ROM root (e.g. EmuDeck lowercase vs OnionOS uppercase)
+  let lowerLeafCount = 0;
+  let upperLeafCount = 0;
+  let totalLetteredLeafCount = 0;
+
+  // 2. Tally exact subfolder names per category across all active candidates
+  const countsByCategory = new Map<StorageRomCategoryKey, Map<string, number>>();
+  const casingVotes: Record<FolderCasingStyle, number> = { lower: 0, upper: 0, title: 0 };
+  const fallbackCasingVotes: Record<FolderCasingStyle, number> = { lower: 0, upper: 0, title: 0 };
+
+  for (const match of matches) {
+    const chosenPath = chosenPathBySlug?.[match.canonicalSlug] || match.recommendedPath;
+    const activeCandidate =
+      match.candidates.find((c) => c.relativePath === chosenPath) ?? match.candidates[0];
+    if (!activeCandidate) continue;
+
+    if (
+      match.canonicalSlug !== 'bios-files' &&
+      match.canonicalSlug !== 'soundtracks' &&
+      activeCandidate.parentPath.toLowerCase() === cleanDetectedRoot.toLowerCase()
+    ) {
+      const leaf = activeCandidate.relativePath.split('/').pop() || '';
+      const leafCasing = classifyFolderNameCasing(leaf);
+      if (leafCasing) {
+        totalLetteredLeafCount += 1;
+        if (leafCasing === 'lower') lowerLeafCount += 1;
+        else if (leafCasing === 'upper') upperLeafCount += 1;
+      }
+    }
+
+    const entries = Object.entries(activeCandidate.detectedTypeSubfolders) as [
+      StorageRomCategoryKey,
+      string,
+    ][];
+    for (const [category, rawFolderName] of entries) {
+      const cleanName = sanitizeRelativeStoragePath(rawFolderName);
+      if (!cleanName) continue;
+      let freqMap = countsByCategory.get(category);
+      if (!freqMap) {
+        freqMap = new Map<string, number>();
+        countsByCategory.set(category, freqMap);
+      }
+      freqMap.set(cleanName, (freqMap.get(cleanName) ?? 0) + 1);
+
+      const casing = classifyFolderNameCasing(cleanName);
+      if (casing) {
+        fallbackCasingVotes[casing] += 1;
+        if (!ACRONYM_SUBFOLDER_CATEGORIES.has(category)) {
+          casingVotes[casing] += 1;
+        }
+      }
+    }
+  }
+
+  let inferredConsoleCasing: ConsoleLeafCasingStyle = 'default';
+  if (totalLetteredLeafCount > 0) {
+    if (lowerLeafCount / totalLetteredLeafCount >= 0.6) {
+      inferredConsoleCasing = 'lower';
+    } else if (upperLeafCount / totalLetteredLeafCount >= 0.6) {
+      inferredConsoleCasing = 'upper';
+    }
+  }
+
+  const inferredTypeSubfolders: Partial<Record<StorageRomCategoryKey, string>> = {};
+  for (const category of STORAGE_ROM_CATEGORY_KEYS) {
+    const freqMap = countsByCategory.get(category);
+    if (!freqMap || freqMap.size === 0) continue;
+    const ranked = Array.from(freqMap.entries()).sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      return a[0].localeCompare(b[0]);
+    });
+    inferredTypeSubfolders[category] = ranked[0]![0];
+  }
+
+  const totalNonAcronymVotes = casingVotes.lower + casingVotes.upper + casingVotes.title;
+  const activeVotes = totalNonAcronymVotes > 0 ? casingVotes : fallbackCasingVotes;
+
+  let inferredSubfolderCasing: FolderCasingStyle = 'title';
+  if (activeVotes.lower > activeVotes.title && activeVotes.lower >= activeVotes.upper) {
+    inferredSubfolderCasing = 'lower';
+  } else if (activeVotes.upper > activeVotes.title && activeVotes.upper > activeVotes.lower) {
+    inferredSubfolderCasing = 'upper';
+  }
+
+  const hasInferredTypeSubfolders = Object.keys(inferredTypeSubfolders).some(
+    (key) => key !== 'retail',
+  );
+
+  return {
+    inferredRomRoot: cleanDetectedRoot,
+    inferredConsoleCasing,
+    inferredTypeSubfolders,
+    inferredSubfolderCasing,
+    hasInferredTypeSubfolders,
+  };
 }
 
 /**
@@ -1121,11 +1278,13 @@ export function discoverStorageFolderMappings(
 
   const detectedRomRoot = matches.length > 0 ? dominantCluster : '';
   const detectedLayoutLabel = inferLayoutLabel(detectedRomRoot, matches);
+  const conventions = inferDeviceConventions(detectedRomRoot, matches);
 
   return {
     rootLabel,
     detectedLayoutLabel,
     detectedRomRoot,
+    conventions,
     matches,
     unmatchedFolders,
     stats: {

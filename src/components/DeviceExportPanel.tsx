@@ -29,6 +29,7 @@ import {
   resolveConsolePathSource,
   ROM_NAMING_TOKEN_HELPERS,
   shouldAutoExpandAdvancedNaming,
+  summarizeDeviceInferredConventions,
   summarizeNamingOptions,
 } from '../shared/deviceExportUi';
 import { ROM_NAMING_PRESETS } from '../shared/romNaming';
@@ -180,6 +181,15 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
       }).length;
     }, [autoConfigResult, autoConfigChosenPaths]);
 
+    const inferredConventions = useMemo(
+      () =>
+        summarizeDeviceInferredConventions(autoConfigResult, {
+          chosenPathBySlug: autoConfigChosenPaths,
+          includeTypeSubfolders: autoConfigIncludeSubfolders,
+        }),
+      [autoConfigResult, autoConfigChosenPaths, autoConfigIncludeSubfolders],
+    );
+
     const liveDestinations = useMemo(
       () =>
         buildLiveExportDestinations(
@@ -192,6 +202,8 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
           {
             savedManualConfig: storageFolderConfig,
             autoConfigResult,
+            chosenPathBySlug: autoConfigChosenPaths,
+            includeTypeSubfolders: autoConfigIncludeSubfolders,
           },
         ),
       [
@@ -201,6 +213,8 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
         romMaxFilenameLen,
         storageFolderConfig,
         autoConfigResult,
+        autoConfigChosenPaths,
+        autoConfigIncludeSubfolders,
       ],
     );
 
@@ -329,6 +343,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
 
     const sourceLabelMap = {
       auto: 'Auto-detected',
+      inferred: 'Inferred',
       manual: 'Manual override',
       default: 'Default',
     } as const;
@@ -461,7 +476,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
           )}
 
           {/* Front-and-Center Live Export Destination Preview */}
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-crt-muted">
               <span>Where your games will be written</span>
               <span>
@@ -470,6 +485,49 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
                   : 'Default layout + manual overrides + filename style'}
               </span>
             </div>
+
+            {mountedHandle &&
+              autoConfigPhase === 'ready' &&
+              inferredConventions.hasAnyInferredConvention && (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-mono text-crt-muted">
+                  {inferredConventions.newConsolePattern && (
+                    <span>
+                      New consoles →{' '}
+                      <span className="text-crt-text">
+                        {inferredConventions.newConsolePattern}
+                      </span>
+                    </span>
+                  )}
+                  {inferredConventions.observedSubfolders.length > 0 && (
+                    <>
+                      {inferredConventions.newConsolePattern && (
+                        <span aria-hidden="true">·</span>
+                      )}
+                      <span>
+                        Subfolders:{' '}
+                        {inferredConventions.observedSubfolders.map((entry, idx) => (
+                          <span key={entry.category}>
+                            {idx > 0 && <span aria-hidden="true"> · </span>}
+                            {entry.label} →{' '}
+                            <span className="text-crt-phosphor">/{entry.folder}</span>
+                          </span>
+                        ))}
+                      </span>
+                    </>
+                  )}
+                  {inferredConventions.unseenCasingLabel && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span>
+                        Unseen types →{' '}
+                        <span className="text-crt-text">
+                          {inferredConventions.unseenCasingLabel}
+                        </span>
+                      </span>
+                    </>
+                  )}
+                </div>
+              )}
 
             <div className="divide-y divide-crt-border/80 border border-crt-border bg-crt-bg rounded px-3.5">
               {liveDestinations.map((sample) => (
@@ -484,7 +542,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
                       className={`text-[11px] ${
                         sample.source === 'manual'
                           ? 'text-crt-amber'
-                          : sample.source === 'auto'
+                          : sample.source === 'auto' || sample.source === 'inferred'
                             ? 'text-crt-phosphor'
                             : 'text-crt-muted'
                       }`}
@@ -542,7 +600,8 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
                           className="accent-crt-phosphor"
                         />
                         <span>
-                          Use detected ROM-type subfolders ({detectedWithSubfoldersCount})
+                          Apply detected subfolder convention across device (
+                          {detectedWithSubfoldersCount} matched)
                         </span>
                       </label>
                     )}
