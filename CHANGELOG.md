@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.29.0] - 2026-11-21
+
+- Fixed false-positive release type misclassifications and repeating Full Sync type-filter skip loops across all 11 curated release types:
+  - **Accurate Base-Dump vs. Hack / Mod Classification**: Tightened `Original ROM` detection so legitimate ROM hacks, QoL patches, and community mods containing region tags (`(USA)`, `(U)`, `(Europe)`, `(E)`, `(Japan)`) and mod/version cues (`v1.x`, `QoL`, `No-Touch`, `Touchless`, `FastText`, `Hard Mode`, `Coop`, `NTSC Patched`, `Singleplayer`, `Slot-2`, `Enhanced`, etc.) are classified by their true release type instead of being skipped as `Retail ROM`. Unmodified base dumps bundled alongside modified siblings (e.g., `Salamander (Japan).zip` next to `Salamander - Enhanced (Japan).zip`, or unpatched dumps on Translation/Undub pages) continue to classify as `Original ROM`.
+  - **Bracket-Scoped Language Detection & Full 11-Type Audit**: Scoped language detection to bracket/parenthesis tags and explicit translation phrases while guarding false-positive title phrases (such as *Quest 64 French Vanilla*, *The Italian Job*, or *Graphics Polish*), added `(T+XX)` / `(T-XX)` support across all curated languages plus `Other Languages`, guarded `"Roster Update"` hacks from false `DLC` matches, and completed filename/context classification across `Undub`, `Machine Translation`, `PSX2PSP / Eboot`, `Homebrew / Indie / Doujin / Aftermarket`, `Port`, `BIOS`, `Prototype / Demo`, `Bootleg / Pirate`, and `DLC`.
+  - **Zero Infinite Full Sync Skip Loops**: Aligned release-level Sync Rule evaluation across Full Sync, Incremental Sync, Monitor Sync Readiness preflight, and Catalog filters to inspect concrete per-file roles (combining recorded files and persisted `downloadHints`), automatically caching discovered filenames even when every file on a release page is excluded by policy. Updated Index-First Full Sync Phase 2 to use policy-aware multi-file fast-skip verification so already-mirrored multi-file releases skip cleanly while still reacting immediately if Sync Rules are widened.
+  - **SQLite Schema Migration `v23`**: Automatically reclassifies existing catalog file roles and parent release tags on startup using the updated sibling-aware classifier.
+
 ## [1.28.0] - 2026-11-21
 
 - Simplified and streamlined all actions in the **Game Details** drawer for a frictionless one-click path from discovery to playing:

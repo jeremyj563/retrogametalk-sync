@@ -8,7 +8,12 @@ import {
   filterValidSystemSlugs,
   sanitizeSystemFilterString,
 } from '../shared/systemCatalog.ts';
-import { decodeHtmlEntities, hasHtmlEntities } from './releaseTags.ts';
+import {
+  classifyFileRole,
+  decodeHtmlEntities,
+  deriveReleaseTags,
+  hasHtmlEntities,
+} from './releaseTags.ts';
 import type { AppliedMigrationRecord, DatabaseMigrationReport } from './types.ts';
 
 export interface MigrationContext {
@@ -1036,6 +1041,160 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
               : 0;
 
         updateReleaseStmt.run(nextStatus, firstError, nextBytes, latestDownloadedAt, releaseId);
+      }
+    },
+  },
+  {
+    version: 23,
+    name: 'reclassify_file_roles_and_release_tags',
+    description:
+      'Reclassify catalog file roles and release tags using sibling-aware Original ROM detection, bracket-scoped translation matching, and full 11-type taxonomy coverage',
+    up: (db) => {
+      const parseJsonArray = (raw: string | null): string[] => {
+        if (!raw) return [];
+        try {
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed.map((v) => String(v)) : [];
+        } catch {
+          return [];
+        }
+      };
+
+      const fileRows = db
+        .prepare(
+          `SELECT id, release_id, filename, display_label, file_role
+           FROM catalog_release_files
+           ORDER BY id ASC`,
+        )
+        .all() as {
+        id: number;
+        release_id: number;
+        filename: string;
+        display_label: string | null;
+        file_role: string | null;
+      }[];
+
+      const filesByRelease = new Map<number, typeof fileRows>();
+      for (const f of fileRows) {
+        const rid = Number(f.release_id);
+        const list = filesByRelease.get(rid);
+        if (list) list.push(f);
+        else filesByRelease.set(rid, [f]);
+      }
+
+      const releaseRows = db
+        .prepare(
+          `SELECT id, title, system_name, release_type, release_tags_json,
+                  genres_json, languages_json, sources_json, metadata_json
+           FROM catalog_releases`,
+        )
+        .all() as {
+        id: number;
+        title: string;
+        system_name: string;
+        release_type: string | null;
+        release_tags_json: string | null;
+        genres_json: string | null;
+        languages_json: string | null;
+        sources_json: string | null;
+        metadata_json: string | null;
+      }[];
+
+      const updateFileRoleStmt = db.prepare(
+        'UPDATE catalog_release_files SET file_role = ? WHERE id = ?',
+      );
+      const updateReleaseTagsStmt = db.prepare(
+        `UPDATE catalog_releases
+         SET release_type = ?, release_tags_json = ?, metadata_json = ?
+         WHERE id = ?`,
+      );
+
+      for (const rel of releaseRows) {
+        const rid = Number(rel.id);
+        const genres = parseJsonArray(rel.genres_json);
+        const languages = parseJsonArray(rel.languages_json);
+        const sources = parseJsonArray(rel.sources_json);
+        const children = filesByRelease.get(rid) || [];
+
+        let parsedMeta: Record<string, unknown> | null = null;
+        const hintNames: string[] = [];
+        if (rel.metadata_json) {
+          try {
+            const obj = JSON.parse(rel.metadata_json) as Record<string, unknown>;
+            if (obj && typeof obj === 'object') {
+              parsedMeta = obj;
+              if (Array.isArray(obj.downloadHints)) {
+                for (const h of obj.downloadHints) {
+                  if (h && typeof h === 'object' && typeof (h as { filename?: unknown }).filename === 'string') {
+                    const name = (h as { filename: string }).filename.trim();
+                    if (name) hintNames.push(name);
+                  }
+                }
+              }
+            }
+          } catch {
+            // Preserve malformed metadata_json as-is
+          }
+        }
+
+        const siblingFilenames = Array.from(
+          new Set([
+            ...children.map((c) => (c.filename || '').trim()).filter(Boolean),
+            ...hintNames,
+          ]),
+        );
+        const ctx = {
+          genres,
+          languages,
+          sources,
+          title: rel.title,
+          systemName: rel.system_name,
+          siblingFilenames,
+        };
+
+        const nextRoles: string[] = [];
+        for (const child of children) {
+          const nextRole = classifyFileRole(
+            child.filename,
+            child.display_label || child.filename,
+            ctx,
+          );
+          nextRoles.push(nextRole);
+          if (nextRole !== (child.file_role || '')) {
+            updateFileRoleStmt.run(nextRole, child.id);
+          }
+        }
+
+        const hintRoles =
+          children.length === 0
+            ? hintNames.map((name) => classifyFileRole(name, name, ctx))
+            : [];
+
+        const nextTags = deriveReleaseTags(
+          { genres, languages, sources, systemName: rel.system_name },
+          children.length > 0 ? nextRoles : hintRoles,
+        );
+        const nextPrimary = nextTags[0] || 'Retail ROM';
+        const nextTagsJson = JSON.stringify(nextTags);
+
+        let nextMetaJson = rel.metadata_json;
+        if (parsedMeta) {
+          const prevMetaTagsJson = JSON.stringify(
+            Array.isArray(parsedMeta.releaseTags) ? parsedMeta.releaseTags : [],
+          );
+          if (prevMetaTagsJson !== nextTagsJson) {
+            parsedMeta.releaseTags = nextTags;
+            nextMetaJson = JSON.stringify(parsedMeta);
+          }
+        }
+
+        if (
+          nextPrimary !== (rel.release_type || '') ||
+          nextTagsJson !== (rel.release_tags_json || '[]') ||
+          nextMetaJson !== rel.metadata_json
+        ) {
+          updateReleaseTagsStmt.run(nextPrimary, nextTagsJson, nextMetaJson, rid);
+        }
       }
     },
   },

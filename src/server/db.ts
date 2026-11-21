@@ -1645,6 +1645,15 @@ export function updateCatalogReleaseMetadata(
     );
 
     // Reclassify child file roles using the refreshed RGT taxonomy context
+    const existingHintNames = (metadata.downloadHints || [])
+      .map((h) => (h.filename || '').trim())
+      .filter(Boolean);
+    const siblingFilenames = Array.from(
+      new Set([
+        ...existing.files.map((f) => (f.filename || '').trim()).filter(Boolean),
+        ...existingHintNames,
+      ]),
+    );
     for (const file of existing.files) {
       const nextRole = classifyFileRole(file.filename, file.displayLabel, {
         genres,
@@ -1652,6 +1661,7 @@ export function updateCatalogReleaseMetadata(
         sources,
         title: metadata.title,
         systemName: existing.systemName,
+        siblingFilenames,
       });
       getDb().prepare('UPDATE catalog_release_files SET file_role = ? WHERE id = ?').run(nextRole, file.id);
     }
@@ -1707,6 +1717,15 @@ export function mergeCatalogReleaseDetailMetadata(
       id,
     );
 
+    const existingHintNames = (metadata.downloadHints || [])
+      .map((h) => (h.filename || '').trim())
+      .filter(Boolean);
+    const siblingFilenames = Array.from(
+      new Set([
+        ...existing.files.map((f) => (f.filename || '').trim()).filter(Boolean),
+        ...existingHintNames,
+      ]),
+    );
     for (const file of existing.files) {
       const nextRole = classifyFileRole(file.filename, file.displayLabel, {
         genres,
@@ -1714,6 +1733,7 @@ export function mergeCatalogReleaseDetailMetadata(
         sources,
         title: metadata.title,
         systemName: existing.systemName,
+        siblingFilenames,
       });
       getDb().prepare('UPDATE catalog_release_files SET file_role = ? WHERE id = ?').run(nextRole, file.id);
     }
@@ -1721,6 +1741,84 @@ export function mergeCatalogReleaseDetailMetadata(
 
   tx();
   return recomputeReleaseRollup(id);
+}
+
+/**
+ * Persist discovered download filenames into `metadata_json.downloadHints` for an already-indexed
+ * catalog release when every file on the page was excluded by the active Release Type policy.
+ * This lets Index-First Full Sync, Preflight, and Catalog Sync Rules evaluate concrete file roles
+ * on subsequent runs without repeatedly re-fetching the same release page.
+ */
+export function persistDiscoveredReleaseDownloadHints(
+  remoteUrl: string,
+  hints: { filename: string; fileSize?: string | null }[],
+): boolean {
+  const canonical = remoteUrl.split('#')[0];
+  const cleanHints = hints
+    .map((h) => ({
+      filename: (h.filename || '').trim(),
+      fileSize: h.fileSize ?? null,
+    }))
+    .filter((h) => h.filename.length > 0);
+  if (!canonical || cleanHints.length === 0) return false;
+
+  const row = getDb()
+    .prepare(
+      `SELECT id, title, system_name, genres_json, languages_json, sources_json, metadata_json
+       FROM catalog_releases
+       WHERE remote_url = ?`,
+    )
+    .get(canonical) as
+    | {
+        id: number;
+        title: string;
+        system_name: string;
+        genres_json: string | null;
+        languages_json: string | null;
+        sources_json: string | null;
+        metadata_json: string | null;
+      }
+    | undefined;
+  if (!row) return false;
+
+  let metaObj: Record<string, unknown> = {};
+  if (row.metadata_json) {
+    try {
+      const parsed = JSON.parse(row.metadata_json);
+      if (parsed && typeof parsed === 'object') {
+        metaObj = parsed as Record<string, unknown>;
+      }
+    } catch {
+      metaObj = {};
+    }
+  }
+
+  const existingHints = Array.isArray(metaObj.downloadHints)
+    ? (metaObj.downloadHints as { filename?: string; fileSize?: string | null }[])
+    : [];
+  const mergedByKey = new Map<string, { filename: string; fileSize: string | null }>();
+  for (const h of existingHints) {
+    const name = (h?.filename || '').trim();
+    if (!name) continue;
+    mergedByKey.set(name.toLowerCase(), {
+      filename: name,
+      fileSize: h.fileSize ?? null,
+    });
+  }
+  for (const h of cleanHints) {
+    const key = h.filename.toLowerCase();
+    const prev = mergedByKey.get(key);
+    mergedByKey.set(key, {
+      filename: h.filename,
+      fileSize: h.fileSize ?? prev?.fileSize ?? null,
+    });
+  }
+
+  metaObj.downloadHints = Array.from(mergedByKey.values());
+  getDb()
+    .prepare('UPDATE catalog_releases SET metadata_json = ? WHERE id = ?')
+    .run(JSON.stringify(metaObj), row.id);
+  return true;
 }
 
 export function getCatalogReleaseById(id: number): RepositoryItemRecord | null {
@@ -1841,21 +1939,98 @@ function listStatusFacetCounts(): Record<string, number> {
 }
 
 function loadAllReleaseFileRolesMap(): Map<number, string[]> {
-  const rows = getDb()
-    .prepare('SELECT release_id, file_role FROM catalog_release_files')
-    .all() as { release_id: number; file_role: string | null }[];
-  const map = new Map<number, string[]>();
-  for (const row of rows) {
+  const fileRows = getDb()
+    .prepare('SELECT release_id, filename, file_role FROM catalog_release_files')
+    .all() as { release_id: number; filename: string | null; file_role: string | null }[];
+
+  const recordedByRelease = new Map<
+    number,
+    { filenames: Set<string>; roles: string[]; rawFilenames: string[] }
+  >();
+  for (const row of fileRows) {
     const rid = Number(row.release_id);
     const role = String(row.file_role || '').trim();
-    if (!role) continue;
-    const list = map.get(rid);
-    if (list) {
-      list.push(role);
-    } else {
-      map.set(rid, [role]);
+    const fname = String(row.filename || '').trim();
+    let entry = recordedByRelease.get(rid);
+    if (!entry) {
+      entry = { filenames: new Set(), roles: [], rawFilenames: [] };
+      recordedByRelease.set(rid, entry);
+    }
+    if (fname) {
+      entry.filenames.add(fname.toLowerCase());
+      entry.rawFilenames.push(fname);
+    }
+    if (role) {
+      entry.roles.push(role);
     }
   }
+
+  const map = new Map<number, string[]>();
+  for (const [rid, entry] of recordedByRelease.entries()) {
+    if (entry.roles.length > 0) {
+      map.set(rid, [...entry.roles]);
+    }
+  }
+
+  // Also classify indexed `metadata_json.downloadHints` so catalog-only releases (no recorded files
+  // yet) and partially-mirrored releases evaluate concrete per-file roles consistently with Sync.
+  const metaRows = getDb()
+    .prepare(
+      `SELECT id, title, system_name, genres_json, languages_json, sources_json, metadata_json
+       FROM catalog_releases
+       WHERE metadata_json IS NOT NULL AND metadata_json LIKE '%downloadHints%'`,
+    )
+    .all() as {
+    id: number;
+    title: string;
+    system_name: string;
+    genres_json: string | null;
+    languages_json: string | null;
+    sources_json: string | null;
+    metadata_json: string | null;
+  }[];
+
+  for (const row of metaRows) {
+    if (!row.metadata_json) continue;
+    let hintNames: string[] = [];
+    try {
+      const parsed = JSON.parse(row.metadata_json) as { downloadHints?: { filename?: unknown }[] };
+      if (Array.isArray(parsed?.downloadHints)) {
+        hintNames = parsed.downloadHints
+          .map((h) => (typeof h?.filename === 'string' ? h.filename.trim() : ''))
+          .filter(Boolean);
+      }
+    } catch {
+      continue;
+    }
+    if (hintNames.length === 0) continue;
+
+    const rid = Number(row.id);
+    const recorded = recordedByRelease.get(rid);
+    const siblingFilenames = Array.from(
+      new Set([...(recorded?.rawFilenames || []), ...hintNames]),
+    );
+    const ctx = {
+      genres: parseJsonStringArray(row.genres_json),
+      languages: parseJsonStringArray(row.languages_json),
+      sources: parseJsonStringArray(row.sources_json),
+      title: row.title,
+      systemName: row.system_name,
+      siblingFilenames,
+    };
+
+    const rolesList = map.get(rid) ?? [];
+    for (const hintName of hintNames) {
+      if (recorded?.filenames.has(hintName.toLowerCase())) {
+        continue;
+      }
+      rolesList.push(classifyFileRole(hintName, hintName, ctx));
+    }
+    if (rolesList.length > 0) {
+      map.set(rid, rolesList);
+    }
+  }
+
   return map;
 }
 
