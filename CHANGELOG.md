@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.24.0] - 2026-11-20
+
+- Simplified and unified the **Device Export** settings page into a clear, guided two-step flow:
+  - Added a top **Live Export Destination Preview** strip combining your active console folder, ROM-type routing, and filename preset into real end-to-end sample paths (`Retail`, `ROM Hack`, `Translation`).
+  - Reordered sections to put **01. Console Folders** first and **02. ROM Filename Formatting** second, placing the primary **Auto-Configure** action directly in the Console Folders header and removing nested card clutter.
+  - Eliminated the duplicate stacked Auto-Configure console list by merging scan review directly into the **single console table** with a temporary `Scan Matches` tab, inline `/old → /detected` path diffs, multi-candidate pickers, and one-click **Apply & Save** (plus **Apply to Draft**).
+  - Tucked advanced options—default ROM-type subfolder names, per-console subfolder overrides, custom filename token templates (with clickable token buttons), max filename length, and FAT32 sanitization—into clean progressive disclosures that keep everyday defaults effortless.
+
 ## [1.23.0] - 2026-11-20
 
 - Moved **Mount Storage Device** out of the crowded Catalog toolbar row into a permanent **Storage Device** recessed hardware drive bay in the left sidebar (directly below the main navigation switcher):
