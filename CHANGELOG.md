@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.30.0] - 2026-11-21
+
+- Redesigned the **Storage Device Installer** flow and naming end-to-end to make installing single games and batches effortless and clear:
+  - **Consistent, Intuitive Naming**: Renamed **More → Review Device Install…** to **Install Options…**, renamed the bulk bar's secondary button to **Install Options (N)** alongside **Express Install (N)**, renamed **Open Queue** on the progress dock to **View Details**, and replaced the legacy *Install Prepared ROMs to Storage Device* dialog title with contextual headings (**Install to `<Device>`** / **Install `<N>` Games to `<Device>`**).
+  - **Pre-Selected Latest Playable Version by Default**: Opening Install Options now automatically pre-selects the latest/recommended playable ROM for every game (instead of leaving multi-version releases unchecked with a disabled CTA), so every game is immediately ready to install in one click.
+  - **Unified Per-Game Layout & Clear Destination Paths**: Grouped multi-archive releases into a single clean game row (instead of duplicate cards per archive) with an upfront **Device & Destination Folder** summary strip and exact full-path previews (`Device/Folder/Filename.ext`) plus on-demand inline **Rename**.
+  - **Effortless Version Picking & Batch Controls**: Added 1-click single-pick version switching (with an optional **Pick multiple** toggle for multi-variant or multi-disc installs), plus batch filter tabs (**All**, **Multiple versions**, **Already on device**) and 1-click **Skip already installed** for multi-game installs.
+
 ## [1.29.2] - 2026-11-21
 
 - Fixed **Game Details → Download ROM** always selecting the latest playable version when multiple versions are present:

@@ -1,27 +1,34 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
-  ArrowDown,
   Check,
   CheckCircle2,
-  Download,
+  ChevronDown,
+  ChevronUp,
+  Folder,
   FolderInput,
   FolderTree,
   HardDrive,
   Loader2,
+  Pencil,
   RefreshCw,
   Square,
   X,
   XCircle,
 } from 'lucide-react';
-import {
-  resolveRowTargetCategoryAndFolder,
-  type BulkStorageInstallerController,
-} from '../hooks/useBulkStorageInstaller';
-import { getStorageRomCategoryShortLabel } from '../shared/storageFolderMappings';
+import type { BulkStorageInstallerController } from '../hooks/useBulkStorageInstaller';
 import type { ScraperConfigPublic } from '../types';
+import {
+  buildInstallModalTitle,
+  formatDevicePath,
+  groupInstallRowsByGame,
+  summarizeDestinationFolders,
+  type GroupedInstallGame,
+  type GroupedInstallOption,
+} from '../utils/deviceInstallView';
 import { formatBytes } from '../utils/format';
-import { findUpgradeCandidateOnCard, isFileSystemAccessSupported } from '../utils/sdCardFs';
+import { formatDeviceActionLabel } from '../utils/gameDetailActions';
+import { isFileSystemAccessSupported } from '../utils/sdCardFs';
 
 interface SdCardExportModalProps {
   installer: BulkStorageInstallerController;
@@ -29,9 +36,10 @@ interface SdCardExportModalProps {
   onEditFolderMappings: () => void;
 }
 
+type BatchFilterTab = 'all' | 'versions' | 'installed';
+
 export function SdCardExportModal({
   installer,
-  config,
   onEditFolderMappings,
 }: SdCardExportModalProps) {
   const {
@@ -50,77 +58,80 @@ export function SdCardExportModal({
     cancelInstall,
     dismissJob,
     toggleTargetSelection,
-    selectAllVariantsForRow,
-    autoPickSmartPrimaries,
+    selectOnlyTargetForItem,
+    toggleGameIncluded,
+    setAllGamesIncluded,
+    excludeItemIds,
     updateRowTargetName,
   } = installer;
 
   const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
 
-  // Spotlight & round-robin jump state for unresolved multi-ROM items
-  const rowElementRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const jumpCursorRef = useRef(-1);
-  const spotlightNonceRef = useRef(0);
-  const [spotlightItem, setSpotlightItem] = useState<{ itemId: number; nonce: number } | null>(null);
+  // UI-only disclosure states reset cleanly per job
+  const [expandedGameIds, setExpandedGameIds] = useState<Record<number, boolean>>({});
+  const [multiPickByItemId, setMultiPickByItemId] = useState<Record<number, boolean>>({});
+  const [editingOptionKey, setEditingOptionKey] = useState<string | null>(null);
+  const [activeFilter, setActiveFilter] = useState<BatchFilterTab>('all');
 
   useEffect(() => {
-    jumpCursorRef.current = -1;
-    setSpotlightItem(null);
+    setExpandedGameIds({});
+    setMultiPickByItemId({});
+    setEditingOptionKey(null);
+    setActiveFilter('all');
   }, [job?.jobId]);
 
   useEffect(() => {
     if (!modalOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (editingOptionKey) {
+          e.preventDefault();
+          setEditingOptionKey(null);
+          return;
+        }
         e.preventDefault();
         closeModal();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [modalOpen, closeModal]);
+  }, [modalOpen, closeModal, editingOptionKey]);
 
   const rows = job?.rows || [];
   const storageConfig = installer.effectiveStorageFolderConfig;
+  const deviceName = sdRootHandle?.name || null;
+  const shortDeviceName = formatDeviceActionLabel(deviceName, 20);
 
-  const customizedCount = useMemo(() => {
-    const slugs = new Set<string>([
-      ...Object.keys(storageConfig.systemFolders),
-      ...Object.keys(storageConfig.systemTypeOverrides),
-    ]);
-    return slugs.size;
-  }, [storageConfig.systemFolders, storageConfig.systemTypeOverrides]);
+  const games = useMemo<GroupedInstallGame[]>(() => {
+    if (!job) return [];
+    return groupInstallRowsByGame({
+      rows,
+      storageConfig,
+      filterContext: job.filterContext,
+      folderScans,
+      deviceName,
+    });
+  }, [job, rows, storageConfig, folderScans, deviceName]);
 
-  // Compute unresolved multi-ROM items (items with >1 competing playable variants and 0 currently checked)
-  const unresolvedMultiItems = useMemo(() => {
-    const selectedByItem = new Map<number, number>();
-    const firstRowKeyByItem = new Map<number, string>();
-    const multiItemOrder: number[] = [];
-    const seenMulti = new Set<number>();
+  const destinationSummary = useMemo(() => summarizeDestinationFolders(games), [games]);
 
-    for (const row of rows) {
-      selectedByItem.set(
-        row.itemId,
-        (selectedByItem.get(row.itemId) || 0) + row.selectedTargetIds.length,
-      );
-      if (row.isMultiChoiceItem && !seenMulti.has(row.itemId)) {
-        seenMulti.add(row.itemId);
-        multiItemOrder.push(row.itemId);
-        firstRowKeyByItem.set(row.itemId, row.rowKey);
-      }
+  // Reset filter tab if it becomes empty after rescans/changes
+  const gamesWithVersionsCount = useMemo(
+    () => games.filter((g) => g.hasMultipleOptions).length,
+    [games],
+  );
+  const alreadyOnDeviceGamesCount = useMemo(
+    () => games.filter((g) => g.allSelectedAlreadyOnDevice).length,
+    [games],
+  );
+
+  useEffect(() => {
+    if (activeFilter === 'versions' && gamesWithVersionsCount === 0) {
+      setActiveFilter('all');
+    } else if (activeFilter === 'installed' && alreadyOnDeviceGamesCount === 0) {
+      setActiveFilter('all');
     }
-
-    const out: { itemId: number; firstRowKey: string }[] = [];
-    for (const itemId of multiItemOrder) {
-      if ((selectedByItem.get(itemId) || 0) === 0) {
-        const firstRowKey = firstRowKeyByItem.get(itemId);
-        if (firstRowKey) {
-          out.push({ itemId, firstRowKey });
-        }
-      }
-    }
-    return out;
-  }, [rows]);
+  }, [activeFilter, gamesWithVersionsCount, alreadyOnDeviceGamesCount]);
 
   if (!modalOpen || !job) return null;
 
@@ -129,20 +140,309 @@ export function SdCardExportModal({
   const isCanceling = job.phase === 'canceling';
   const isFinished =
     job.phase === 'completed' || job.phase === 'canceled' || job.phase === 'error';
+  const isSingleGame = job.itemIds.length === 1;
 
-  const totalSelectedTargets = rows.reduce((acc, r) => acc + r.selectedTargetIds.length, 0);
+  const installableGames = games.filter((g) => !g.hasNoPlayableRom && !g.isPlaceholder);
+  const selectedGames = games.filter((g) => g.selectedOptions.length > 0);
+  const selectedFilesCount = games.reduce((sum, g) => sum + g.selectedOptions.length, 0);
+  const totalSelectedBytes = games.reduce((sum, g) => sum + g.totalSelectedBytes, 0);
 
-  const handleJumpToNextUnresolved = () => {
-    if (unresolvedMultiItems.length === 0) return;
-    const nextIdx = (jumpCursorRef.current + 1) % unresolvedMultiItems.length;
-    jumpCursorRef.current = nextIdx;
-    const target = unresolvedMultiItems[nextIdx];
-    const el = rowElementRefs.current[target.firstRowKey];
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const selectedAlreadyOnDeviceIds = new Set(
+    selectedGames.filter((g) => g.allSelectedAlreadyOnDevice).map((g) => g.itemId),
+  );
+  const allInstallableSelected =
+    installableGames.length > 0 && selectedGames.length === installableGames.length;
+
+  const visibleGames = games.filter((g) => {
+    if (activeFilter === 'versions') return g.hasMultipleOptions;
+    if (activeFilter === 'installed') return g.allSelectedAlreadyOnDevice;
+    return true;
+  });
+
+  const modalTitle = buildInstallModalTitle({
+    phase: job.phase,
+    itemCount: job.itemIds.length,
+    deviceName,
+  });
+
+  const modalSubtitle = isRunning
+    ? 'You can close this window — installation continues in the background.'
+    : isFinished
+      ? job.phase === 'completed'
+        ? 'All selected games have been processed.'
+        : job.phase === 'canceled'
+          ? 'Installation was stopped before finishing.'
+          : 'Installation encountered an error.'
+      : isSingleGame
+        ? 'Extracts the playable ROM directly into the matching console folder on your device.'
+        : 'Latest playable version is pre-selected for each game. Review folders or adjust any game below.';
+
+  const singleGame = isSingleGame ? games[0] || null : null;
+
+  const renderWriteStatusText = (game: GroupedInstallGame) => {
+    if (game.writeState === 'written' || game.writeState === 'upgraded') {
+      return (
+        <span className="inline-flex items-center gap-1 text-crt-phosphor">
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+          <span className="truncate">{game.writeDetail || 'Installed'}</span>
+        </span>
+      );
     }
-    const nextNonce = ++spotlightNonceRef.current;
-    setSpotlightItem({ itemId: target.itemId, nonce: nextNonce });
+    if (game.writeState === 'error') {
+      return (
+        <span className="inline-flex items-center gap-1 text-crt-crimson">
+          <XCircle className="h-3.5 w-3.5 shrink-0" />
+          <span className="truncate">{game.writeDetail || game.errorMessage || 'Failed'}</span>
+        </span>
+      );
+    }
+    if (game.writeState === 'canceled') {
+      return <span className="text-crt-amber">{game.writeDetail || 'Canceled'}</span>;
+    }
+    if (game.writeState === 'writing' || game.writeState === 'inspecting') {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-crt-amber">
+          <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+          <span>{game.writeDetail || 'Working...'}</span>
+        </span>
+      );
+    }
+    if (game.writeState === 'skipped' && (isRunning || isFinished || game.hasNoPlayableRom)) {
+      return (
+        <span className="text-crt-muted truncate">
+          {game.writeDetail || game.errorMessage || 'Skipped'}
+        </span>
+      );
+    }
+    if (game.allSelectedAlreadyOnDevice) {
+      return <span className="text-crt-muted">Already on {shortDeviceName}</span>;
+    }
+    if (game.hasUpgradeOnDevice) {
+      return <span className="text-crt-amber">Replaces older version</span>;
+    }
+    return null;
+  };
+
+  const renderOptionList = (game: GroupedInstallGame) => {
+    const isMultiPick = Boolean(multiPickByItemId[game.itemId]) || game.selectedOptions.length > 1;
+    const distinctFolders = new Set(game.options.map((o) => o.targetFolder)).size;
+
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-2 text-xs">
+          <span className="font-medium text-crt-muted">
+            {isMultiPick
+              ? `Choose versions to install (${game.selectedOptions.length} of ${game.options.length} selected)`
+              : `Version (${game.options.length} available)`}
+          </span>
+          <button
+            type="button"
+            disabled={isBusy}
+            onClick={() =>
+              setMultiPickByItemId((prev) => ({
+                ...prev,
+                [game.itemId]: !isMultiPick,
+              }))
+            }
+            className="text-xs text-crt-muted hover:text-crt-phosphor transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+          >
+            {isMultiPick ? 'Single-pick mode' : 'Pick multiple'}
+          </button>
+        </div>
+
+        <div className="border border-crt-border rounded bg-crt-bg divide-y divide-crt-border">
+          {game.options.map((opt) => {
+            const handleActivate = () => {
+              if (isBusy) return;
+              if (isMultiPick) {
+                toggleTargetSelection(opt.rowKey, opt.target.id);
+              } else {
+                selectOnlyTargetForItem(game.itemId, opt.rowKey, opt.target.id);
+              }
+            };
+
+            const metaParts: Array<{ text: string; tone?: 'phosphor' | 'amber' | 'muted' }> = [];
+            if (opt.isRecommended) {
+              metaParts.push({
+                text: opt.smartReason || 'Recommended',
+                tone: 'phosphor',
+              });
+            }
+            if (
+              opt.versionLabel &&
+              (!opt.smartReason ||
+                !opt.smartReason.toLowerCase().includes(opt.versionLabel.toLowerCase()))
+            ) {
+              metaParts.push({ text: opt.versionLabel });
+            }
+            metaParts.push({ text: opt.categoryLabel });
+            if (distinctFolders > 1) {
+              metaParts.push({ text: formatDevicePath(deviceName, opt.targetFolder) });
+            }
+            if (opt.deviceStatus === 'installed') {
+              metaParts.push({ text: `Already on ${shortDeviceName}` });
+            } else if (opt.deviceStatus === 'upgrade' && opt.replacesEntryName) {
+              metaParts.push({
+                text: `Replaces ${opt.replacesEntryName}`,
+                tone: 'amber',
+              });
+            }
+            if (game.hasMultipleArchives && opt.fileRole) {
+              metaParts.push({ text: opt.fileRole });
+            }
+
+            return (
+              <button
+                key={opt.optionKey}
+                type="button"
+                disabled={isBusy}
+                onClick={handleActivate}
+                className={`w-full px-3.5 py-2.5 text-left flex items-start gap-3 transition-colors cursor-pointer disabled:cursor-not-allowed ${
+                  opt.isSelected ? 'bg-crt-phosphor/[0.06]' : 'hover:bg-crt-surface/70'
+                }`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center border transition-colors ${
+                    isMultiPick ? 'rounded-[3px]' : 'rounded-full'
+                  } ${
+                    opt.isSelected
+                      ? 'border-crt-phosphor bg-crt-phosphor text-crt-bg'
+                      : 'border-crt-border-strong bg-crt-surface'
+                  }`}
+                >
+                  {opt.isSelected &&
+                    (isMultiPick ? (
+                      <Check className="h-3 w-3 stroke-[2.5]" />
+                    ) : (
+                      <span className="h-1.5 w-1.5 rounded-full bg-crt-bg" />
+                    ))}
+                </span>
+
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <span
+                      className={`font-mono text-xs truncate ${
+                        opt.isSelected ? 'text-crt-text font-medium' : 'text-crt-text/85'
+                      }`}
+                    >
+                      {opt.target.displayName}
+                    </span>
+                    <span className="font-mono text-[11px] text-crt-muted tabular-nums whitespace-nowrap shrink-0">
+                      {formatBytes(opt.target.sizeBytes)}
+                    </span>
+                  </div>
+
+                  {metaParts.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 font-mono text-[11px] text-crt-muted">
+                      {metaParts.map((part, idx) => (
+                        <span key={`${opt.optionKey}-meta-${idx}`} className="inline-flex items-center gap-1.5">
+                          {idx > 0 && <span aria-hidden="true">·</span>}
+                          <span
+                            className={
+                              part.tone === 'phosphor'
+                                ? 'text-crt-phosphor'
+                                : part.tone === 'amber'
+                                  ? 'text-crt-amber'
+                                  : undefined
+                            }
+                          >
+                            {part.text}
+                          </span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  const renderEditableDestinationRow = (opt: GroupedInstallOption) => {
+    const isEditing = editingOptionKey === opt.optionKey;
+    const folderPrefix = formatDevicePath(deviceName, opt.targetFolder);
+
+    return (
+      <div
+        key={`dest-${opt.optionKey}`}
+        className="flex flex-col gap-1.5 rounded border border-crt-border bg-crt-bg px-3.5 py-2.5"
+      >
+        {isEditing ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-xs text-crt-muted shrink-0">{folderPrefix}</span>
+            <input
+              type="text"
+              autoFocus
+              value={opt.outputName}
+              disabled={isBusy}
+              aria-label={`Output filename for ${opt.target.displayName}`}
+              onChange={(e) => updateRowTargetName(opt.rowKey, opt.target.id, e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === 'Escape') {
+                  e.preventDefault();
+                  setEditingOptionKey(null);
+                }
+              }}
+              className="min-w-[14rem] flex-1 px-2.5 py-1 text-xs font-mono bg-crt-surface border border-crt-phosphor rounded text-crt-text focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => setEditingOptionKey(null)}
+              className="px-2.5 py-1 text-xs font-medium bg-crt-phosphor text-crt-bg rounded hover:brightness-110 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Done
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0 font-mono text-xs truncate" title={opt.fullDestinationPath}>
+              <span className="text-crt-muted">{folderPrefix}</span>
+              <span className="text-crt-text font-medium">
+                {opt.target.kind === 'disc_set'
+                  ? `${opt.outputName.replace(/\.zip$/i, '')}/`
+                  : opt.outputName}
+              </span>
+            </div>
+            {!isBusy && !isFinished && (
+              <button
+                type="button"
+                onClick={() => setEditingOptionKey(opt.optionKey)}
+                className="inline-flex items-center gap-1 text-xs text-crt-muted hover:text-crt-phosphor transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Pencil className="h-3 w-3 shrink-0" />
+                <span>Rename</span>
+              </button>
+            )}
+          </div>
+        )}
+
+        {opt.deviceStatus === 'upgrade' && opt.replacesEntryName && (
+          <p className="font-mono text-[11px] text-crt-amber">
+            Replaces older file on {shortDeviceName}: {opt.replacesEntryName}
+          </p>
+        )}
+        {opt.deviceStatus === 'installed' && (
+          <p className="font-mono text-[11px] text-crt-muted">
+            Already on {shortDeviceName} — will be skipped unless renamed.
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  const renderPrimaryCtaLabel = () => {
+    if (!sdRootHandle) {
+      return isSingleGame
+        ? 'Choose Device & Install'
+        : `Choose Device & Install ${selectedGames.length.toLocaleString()} Game${selectedGames.length === 1 ? '' : 's'}`;
+    }
+    return isSingleGame
+      ? `Install to ${shortDeviceName}`
+      : `Install ${selectedGames.length.toLocaleString()} Game${selectedGames.length === 1 ? '' : 's'} to ${shortDeviceName}`;
   };
 
   return (
@@ -150,98 +450,140 @@ export function SdCardExportModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xs p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="Install Prepared ROMs to Storage Device"
+      aria-label={modalTitle}
       onClick={(e) => {
         if (e.target === e.currentTarget) closeModal();
       }}
     >
-      <div className="crt-canvas crt-drawer-panel w-full max-w-4xl max-h-[90vh] bg-crt-surface border border-crt-border-strong rounded-md flex flex-col shadow-2xl overflow-hidden">
+      <div
+        className={`crt-canvas crt-drawer-panel w-full ${
+          isSingleGame ? 'max-w-2xl' : 'max-w-3xl'
+        } max-h-[86vh] bg-crt-surface border border-crt-border-strong rounded-md flex flex-col shadow-2xl overflow-hidden`}
+      >
         {/* Header */}
         <header className="px-6 py-4 border-b border-crt-border bg-crt-bg flex items-center justify-between gap-4 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
             <HardDrive className="h-5 w-5 text-crt-phosphor shrink-0" />
             <div className="min-w-0">
               <h2 className="font-display text-lg font-semibold text-crt-text truncate">
-                {job.mode === 'express'
-                  ? 'Express Storage Device Installer'
-                  : 'Install Prepared ROMs to Storage Device'}
+                {modalTitle}
               </h2>
-              <p className="text-xs text-crt-muted truncate">
-                {isBusy
-                  ? 'Transfers continue in the background if you close this window.'
-                  : 'Extracts playable ROMs & ODE disc sets directly into configured console folders on your target storage device.'}
-              </p>
+              <p className="text-xs text-crt-muted truncate">{modalSubtitle}</p>
             </div>
           </div>
           <button
             type="button"
             onClick={closeModal}
-            aria-label="Close storage device installer"
-            title={isBusy ? 'Hide window (installation continues in background)' : 'Close window'}
-            className="p-2 border border-crt-border hover:border-crt-phosphor text-crt-muted hover:text-crt-text rounded transition-colors cursor-pointer"
+            aria-label="Close device installer"
+            title={isBusy ? 'Hide window (installation continues in background)' : 'Close'}
+            className="p-2 border border-crt-border hover:border-crt-phosphor text-crt-muted hover:text-crt-text rounded transition-colors cursor-pointer shrink-0"
           >
             <X className="h-4 w-4" />
           </button>
         </header>
 
-        {/* Device Mount & Read-Only Folder Routing Strip */}
-        <div className="px-6 py-4 border-b border-crt-border bg-crt-surface space-y-3 shrink-0">
+        {/* Destination & Device Strip */}
+        <div className="px-6 py-3.5 border-b border-crt-border bg-crt-bg/50 space-y-2.5 shrink-0">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2.5">
-              {fsSupport.supported ? (
-                <button
-                  type="button"
-                  disabled={isRunning}
-                  onClick={() => void promptMountSdCard()}
-                  className={`inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
-                    sdRootHandle
-                      ? 'border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/15'
-                      : 'border-crt-phosphor bg-crt-phosphor text-crt-bg hover:brightness-110'
-                  }`}
-                >
-                  <HardDrive className="h-3.5 w-3.5 shrink-0" />
-                  {sdRootHandle
-                    ? `Device Mounted: ${sdRootHandle.name} (Change)`
-                    : 'Mount Storage Device / Target Folder'}
-                </button>
+            <div className="flex flex-wrap items-center gap-2.5 min-w-0 text-xs">
+              {sdRootHandle ? (
+                <>
+                  <span className="text-crt-muted">Device</span>
+                  <span className="font-mono font-semibold text-crt-phosphor truncate max-w-[16rem]">
+                    {sdRootHandle.name}
+                  </span>
+                  {fsSupport.supported && !isRunning && (
+                    <>
+                      <span aria-hidden="true" className="text-crt-muted">
+                        ·
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void promptMountSdCard()}
+                        className="text-crt-muted hover:text-crt-text hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Switch
+                      </button>
+                    </>
+                  )}
+                  {!isRunning && (
+                    <>
+                      <span aria-hidden="true" className="text-crt-muted">
+                        ·
+                      </span>
+                      <button
+                        type="button"
+                        disabled={scanningCard}
+                        onClick={() => void rescanMountedSdFolders()}
+                        className="inline-flex items-center gap-1 text-crt-muted hover:text-crt-text hover:underline whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+                      >
+                        <RefreshCw
+                          className={`h-3 w-3 shrink-0 ${scanningCard ? 'animate-spin' : ''}`}
+                        />
+                        <span>{scanningCard ? 'Scanning...' : 'Rescan'}</span>
+                      </button>
+                    </>
+                  )}
+                </>
+              ) : fsSupport.supported ? (
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className="text-crt-muted">No storage device selected</span>
+                  <button
+                    type="button"
+                    disabled={isRunning}
+                    onClick={() => void promptMountSdCard()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded border border-crt-phosphor/70 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                  >
+                    <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                    <span>Choose Device Folder</span>
+                  </button>
+                </div>
               ) : (
-                <span className="text-xs font-mono text-crt-amber">{fsSupport.reason}</span>
+                <span className="font-mono text-crt-amber">{fsSupport.reason}</span>
               )}
-
-              <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-crt-muted">
-                <span>
-                  {storageConfig.typeSubfoldersEnabled
-                    ? 'ROM Type subfolders enabled'
-                    : 'Single console folder'}
-                  {customizedCount > 0
-                    ? ` · ${customizedCount} custom console${customizedCount === 1 ? '' : 's'}`
-                    : ''}
-                </span>
-                <span aria-hidden="true">·</span>
-                <button
-                  type="button"
-                  onClick={onEditFolderMappings}
-                  title="Open Storage Device Folder Mappings in Device Export"
-                  className="inline-flex items-center gap-1.5 text-xs font-mono text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <FolderTree className="h-3.5 w-3.5 shrink-0" />
-                  <span>Edit in Device Export</span>
-                </button>
-              </div>
             </div>
 
-            {sdRootHandle && (
-              <button
-                type="button"
-                disabled={scanningCard || isRunning}
-                onClick={() => void rescanMountedSdFolders()}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
-              >
-                <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${scanningCard ? 'animate-spin' : ''}`} />
-                {scanningCard ? 'Scanning Device...' : 'Rescan Device'}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={onEditFolderMappings}
+              title="Configure console destination folders in Device Export"
+              className="inline-flex items-center gap-1.5 text-xs text-crt-muted hover:text-crt-phosphor transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <FolderTree className="h-3.5 w-3.5 shrink-0" />
+              <span>Change folders</span>
+            </button>
           </div>
+
+          {/* Clear Destination Path Summary */}
+          {!isInspecting && destinationSummary.length > 0 && (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-mono text-crt-muted">
+              <Folder className="h-3.5 w-3.5 text-crt-phosphor/80 shrink-0" />
+              <span className="font-sans text-crt-muted">
+                {destinationSummary.length === 1 ? 'Folder' : 'Folders'}
+              </span>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0">
+                {destinationSummary.slice(0, 4).map((entry, idx) => (
+                  <span
+                    key={entry.folder}
+                    className="inline-flex items-center gap-1.5 min-w-0"
+                  >
+                    {idx > 0 && <span aria-hidden="true">·</span>}
+                    <span className="text-crt-text truncate">
+                      {formatDevicePath(deviceName, entry.folder)}
+                    </span>
+                    {!isSingleGame && (
+                      <span className="text-crt-muted tabular-nums">({entry.gameCount})</span>
+                    )}
+                  </span>
+                ))}
+                {destinationSummary.length > 4 && (
+                  <span className="text-crt-muted tabular-nums">
+                    · +{destinationSummary.length - 4} more
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
           {mountError && (
             <div className="flex items-center gap-2 text-xs font-mono text-crt-amber">
@@ -250,26 +592,25 @@ export function SdCardExportModal({
             </div>
           )}
 
-          {/* Live progress summary bar when actively running or finished */}
+          {/* Live Transfer Progress */}
           {(isRunning || isFinished) && (
-            <div className="pt-2 border-t border-crt-border space-y-2">
+            <div className="pt-2 border-t border-crt-border space-y-1.5">
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono tabular-nums">
-                <span className="text-crt-text">
+                <span className="text-crt-text truncate">
                   {isCanceling
                     ? 'Stopping active transfer...'
                     : isRunning
-                      ? `Installing ${metrics.completedItems} / ${metrics.totalItems} games`
+                      ? `Installing ${metrics.completedItems} / ${metrics.totalItems} game${metrics.totalItems === 1 ? '' : 's'}${job.currentTitle ? ` · ${job.currentTitle}` : ''}`
                       : job.phase === 'canceled'
                         ? `Stopped at ${metrics.completedItems} / ${metrics.totalItems} games`
                         : job.phase === 'error'
                           ? `Error after ${metrics.completedItems} / ${metrics.totalItems} games`
-                          : `Completed ${metrics.completedItems} / ${metrics.totalItems} games`}
-                  {job.currentTitle && isRunning ? ` · ${job.currentTitle}` : ''}
+                          : `Completed ${metrics.completedItems} / ${metrics.totalItems} game${metrics.totalItems === 1 ? '' : 's'}`}
                 </span>
-                <span className="text-crt-muted">
+                <span className="text-crt-muted whitespace-nowrap shrink-0">
                   {[
-                    metrics.writtenItems > 0 ? `${metrics.writtenItems} written` : null,
-                    metrics.upgradedItems > 0 ? `${metrics.upgradedItems} upgraded` : null,
+                    metrics.writtenItems > 0 ? `${metrics.writtenItems} installed` : null,
+                    metrics.upgradedItems > 0 ? `${metrics.upgradedItems} updated` : null,
                     metrics.skippedItems > 0 ? `${metrics.skippedItems} already on device` : null,
                     metrics.failedItems > 0 ? `${metrics.failedItems} failed` : null,
                     metrics.canceledItems > 0 ? `${metrics.canceledItems} canceled` : null,
@@ -295,310 +636,345 @@ export function SdCardExportModal({
           )}
         </div>
 
-        {/* Queue Body */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-3">
+        {/* Modal Body */}
+        <div className="flex-1 overflow-y-auto">
           {job.errorMessage && (
-            <div className="border border-crt-crimson/50 bg-crt-crimson/10 p-4 rounded text-xs font-mono text-crt-crimson">
+            <div className="mx-6 mt-4 border border-crt-crimson/50 bg-crt-crimson/10 p-3.5 rounded text-xs font-mono text-crt-crimson">
               {job.errorMessage}
             </div>
           )}
 
-          {rows.length === 0 ? (
-            <div className="p-10 text-center text-xs text-crt-muted border border-crt-border bg-crt-bg rounded">
+          {games.length === 0 ? (
+            <div className="p-10 text-center text-xs text-crt-muted">
               No archived releases queued for installation.
             </div>
-          ) : (
-            rows.map((row) => {
-              const resolvedTargetMeta = row.targets.map((t) =>
-                resolveRowTargetCategoryAndFolder(row, t, storageConfig, job.filterContext),
-              );
-              const distinctRowFolders = Array.from(
-                new Set(
-                  resolvedTargetMeta.length > 0
-                    ? resolvedTargetMeta.map((m) => m.folder)
-                    : [
-                        resolveRowTargetCategoryAndFolder(
-                          row,
-                          null,
-                          storageConfig,
-                          job.filterContext,
-                        ).folder,
-                      ],
-                ),
-              );
-              const primaryRowFolder = distinctRowFolders[0] || 'ROMS';
+          ) : isSingleGame && singleGame ? (
+            /* Single-Game Focused View */
+            <div className="p-6 space-y-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <h3 className="font-display text-base font-semibold text-crt-text">
+                    {singleGame.title}
+                  </h3>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-xs text-crt-muted">
+                    {singleGame.systemName && <span>{singleGame.systemName}</span>}
+                    {singleGame.primaryPreviewOption && (
+                      <>
+                        {singleGame.systemName && <span aria-hidden="true">·</span>}
+                        <span>{singleGame.primaryPreviewOption.categoryLabel}</span>
+                      </>
+                    )}
+                    {singleGame.totalSelectedBytes > 0 && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="tabular-nums">
+                          {formatBytes(singleGame.totalSelectedBytes)}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div className="font-mono text-xs shrink-0">
+                  {renderWriteStatusText(singleGame)}
+                </div>
+              </div>
 
-              const isMulti = row.targets.length > 1 || row.isMultiChoiceItem;
-              const isSpotlighted = spotlightItem?.itemId === row.itemId;
-
-              return (
-                <div
-                  key={row.rowKey}
-                  ref={(node) => {
-                    rowElementRefs.current[row.rowKey] = node;
-                  }}
-                  className="relative scroll-mt-4 border border-crt-border bg-crt-bg rounded p-4 space-y-3"
-                >
-                  {isSpotlighted && spotlightItem && (
-                    <div
-                      key={`multi-spotlight-${row.rowKey}-${spotlightItem.nonce}`}
-                      aria-hidden="true"
-                      className="pointer-events-none absolute -inset-px rounded crt-section-spotlight"
-                    />
+              {singleGame.isPlaceholder ? (
+                <div className="flex items-center gap-2.5 py-6 text-xs font-mono text-crt-muted">
+                  <Loader2 className="h-4 w-4 animate-spin text-crt-phosphor shrink-0" />
+                  <span>Inspecting archive contents...</span>
+                </div>
+              ) : singleGame.hasNoPlayableRom ? (
+                <div className="rounded border border-crt-amber/40 bg-crt-amber/10 p-4 text-xs text-crt-amber">
+                  {singleGame.errorMessage ||
+                    'This archive does not contain a directly playable ROM file.'}
+                </div>
+              ) : (
+                <>
+                  {/* Destination File Preview */}
+                  {singleGame.selectedOptions.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium text-crt-muted">
+                        {singleGame.selectedOptions.length === 1
+                          ? 'Will be saved to'
+                          : `Will save ${singleGame.selectedOptions.length} files`}
+                      </p>
+                      <div className="space-y-2">
+                        {singleGame.selectedOptions.map((opt) => renderEditableDestinationRow(opt))}
+                      </div>
+                    </div>
                   )}
 
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0 space-y-0.5">
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        <span className="font-display font-semibold text-crt-text">{row.title}</span>
-                        {row.systemName && (
-                          <>
-                            <span className="font-mono text-crt-muted">·</span>
-                            <span className="font-mono text-crt-phosphor">
-                              /{primaryRowFolder}/
-                              {distinctRowFolders.length > 1
-                                ? ` (+${distinctRowFolders.length - 1} folder)`
-                                : ''}
-                            </span>
-                          </>
-                        )}
-                        {row.fileRole && row.fileRole !== 'ROM' && (
-                          <>
-                            <span className="font-mono text-crt-muted">·</span>
-                            <span className="font-mono text-[11px] text-crt-muted">{row.fileRole}</span>
-                          </>
-                        )}
-                        {row.ignoredEntriesCount > 0 && (
-                          <>
-                            <span className="font-mono text-crt-muted">·</span>
-                            <span className="font-mono text-[11px] text-crt-muted">
-                              strips {row.ignoredEntriesCount} junk file
-                              {row.ignoredEntriesCount === 1 ? '' : 's'}
-                            </span>
-                          </>
-                        )}
-                      </div>
-                      <p className="font-mono text-[11px] text-crt-muted truncate">
-                        Source: {row.sourceFilename}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center gap-2 font-mono text-[11px] shrink-0">
-                      {row.writeState === 'written' || row.writeState === 'upgraded' ? (
-                        <span className="inline-flex items-center gap-1 text-crt-phosphor">
-                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                          {row.writeDetail}
-                        </span>
-                      ) : row.writeState === 'error' ? (
-                        <span className="inline-flex items-center gap-1 text-crt-crimson">
-                          <XCircle className="h-3.5 w-3.5 shrink-0" />
-                          {row.writeDetail || row.error}
-                        </span>
-                      ) : row.writeState === 'canceled' ? (
-                        <span className="text-crt-amber">{row.writeDetail || 'Canceled'}</span>
-                      ) : row.writeState === 'skipped' ? (
-                        <span className="text-crt-muted">
-                          {row.writeDetail || row.error || 'Skipped'}
-                        </span>
-                      ) : row.writeState === 'writing' || row.writeState === 'inspecting' ? (
-                        <span className="inline-flex items-center gap-1.5 text-crt-amber">
-                          <Loader2 className="h-3 w-3 animate-spin shrink-0" />
-                          {row.writeDetail || 'Working...'}
-                        </span>
-                      ) : (
-                        <span className="text-crt-muted">{row.writeDetail || ''}</span>
-                      )}
-                    </div>
+                  {/* Inline Version / Variant Selector when 2+ playable choices exist */}
+                  {singleGame.hasMultipleOptions && !isRunning && !isFinished && (
+                    <div className="pt-1">{renderOptionList(singleGame)}</div>
+                  )}
+                </>
+              )}
+            </div>
+          ) : (
+            /* Multi-Game Batch View */
+            <div>
+              {/* Batch Filter & Quick Actions Bar */}
+              {!isRunning && !isFinished && !isInspecting && games.length > 1 && (
+                <div className="sticky top-0 z-10 px-6 py-2.5 border-b border-crt-border bg-crt-surface/95 backdrop-blur flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setActiveFilter('all')}
+                      className={`px-2.5 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        activeFilter === 'all'
+                          ? 'bg-crt-elevated text-crt-text'
+                          : 'text-crt-muted hover:text-crt-text'
+                      }`}
+                    >
+                      All ({games.length})
+                    </button>
+                    {gamesWithVersionsCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveFilter('versions')}
+                        className={`px-2.5 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          activeFilter === 'versions'
+                            ? 'bg-crt-elevated text-crt-text'
+                            : 'text-crt-muted hover:text-crt-text'
+                        }`}
+                      >
+                        Multiple versions ({gamesWithVersionsCount})
+                      </button>
+                    )}
+                    {alreadyOnDeviceGamesCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveFilter('installed')}
+                        className={`px-2.5 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          activeFilter === 'installed'
+                            ? 'bg-crt-elevated text-crt-text'
+                            : 'text-crt-muted hover:text-crt-text'
+                        }`}
+                      >
+                        Already on device ({alreadyOnDeviceGamesCount})
+                      </button>
+                    )}
                   </div>
 
-                  {row.targets.length > 0 && (
-                    <div className="space-y-2 pt-2 border-t border-crt-border">
-                      {isMulti && !isRunning && (
-                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                          <span className="text-crt-amber font-mono">
-                            {row.targets.length > 1
-                              ? `${row.targets.length} playable files inside archive — pick variant(s) to install:`
-                              : 'Multi-file release variant — confirm selection:'}
-                          </span>
-                          <div className="flex items-center gap-3">
-                            {row.recommendedTargetIds.length > 0 &&
-                              row.selectedTargetIds.length === 0 && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    for (const recId of row.recommendedTargetIds) {
-                                      if (!row.selectedTargetIds.includes(recId)) {
-                                        toggleTargetSelection(row.rowKey, recId);
-                                      }
-                                    }
-                                  }}
-                                  className="text-xs font-mono text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
-                                >
-                                  Select Smart Primary
-                                </button>
+                  <div className="flex items-center gap-3">
+                    {selectedAlreadyOnDeviceIds.size > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => excludeItemIds(selectedAlreadyOnDeviceIds)}
+                        className="text-xs text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Skip already installed ({selectedAlreadyOnDeviceIds.size})
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setAllGamesIncluded(!allInstallableSelected)}
+                      className="text-xs text-crt-muted hover:text-crt-text hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      {allInstallableSelected ? 'Deselect all' : 'Select all'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Unified Per-Game List */}
+              <div className="divide-y divide-crt-border">
+                {visibleGames.map((game) => {
+                  const isIncluded = game.selectedOptions.length > 0;
+                  const isExpanded = Boolean(expandedGameIds[game.itemId]);
+                  const primaryOpt = game.primaryPreviewOption;
+                  const isSingleSelectedOption = game.selectedOptions.length === 1;
+                  const singleSelectedOpt = isSingleSelectedOption ? game.selectedOptions[0] : null;
+                  const isEditingThisRow =
+                    singleSelectedOpt !== null && editingOptionKey === singleSelectedOpt.optionKey;
+
+                  return (
+                    <div
+                      key={game.itemId}
+                      className={`px-6 py-3.5 transition-colors ${
+                        !isIncluded && !game.isPlaceholder && !isRunning && !isFinished
+                          ? 'opacity-55'
+                          : ''
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        {!isRunning && !isFinished && (
+                          <input
+                            type="checkbox"
+                            checked={isIncluded}
+                            disabled={isBusy || game.hasNoPlayableRom || game.isPlaceholder}
+                            aria-label={`Include ${game.title}`}
+                            onChange={() => toggleGameIncluded(game.itemId)}
+                            className="accent-crt-phosphor mt-1 shrink-0 cursor-pointer disabled:cursor-not-allowed"
+                          />
+                        )}
+
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex flex-wrap items-baseline justify-between gap-2">
+                            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0">
+                              <span className="font-display text-sm font-semibold text-crt-text truncate">
+                                {game.title}
+                              </span>
+                              {game.systemName && (
+                                <span className="font-mono text-[11px] text-crt-muted">
+                                  {game.systemName}
+                                </span>
                               )}
-                            {row.targets.length > 1 && (
-                              <button
-                                type="button"
-                                onClick={() => selectAllVariantsForRow(row.rowKey)}
-                                className="text-xs font-mono text-crt-muted hover:text-crt-text hover:underline whitespace-nowrap shrink-0 cursor-pointer"
-                              >
-                                Select All Variants
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      )}
-
-                      {row.targets.map((target, idx) => {
-                        const checked = row.selectedTargetIds.includes(target.id);
-                        const isRecommended = row.recommendedTargetIds.includes(target.id);
-                        const smartReason = row.smartReasonsByTargetId[target.id];
-                        const outName =
-                          row.outputNamesByTargetId[target.id] ?? target.suggestedFilename;
-
-                        const targetMeta =
-                          resolvedTargetMeta[idx] ||
-                          resolveRowTargetCategoryAndFolder(
-                            row,
-                            target,
-                            storageConfig,
-                            job.filterContext,
-                          );
-                        const targetFolder = targetMeta.folder;
-                        const scan = folderScans[targetFolder];
-                        const cardCheck = findUpgradeCandidateOnCard(outName, scan);
-                        const browserDownloadHref = `/api/items/${row.itemId}/download-rom?fileId=${row.fileId}&targetId=${encodeURIComponent(target.id)}&name=${encodeURIComponent(outName)}`;
-
-                        return (
-                          <div
-                            key={target.id}
-                            className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 py-1.5 text-xs"
-                          >
-                            <label className="flex items-start gap-2.5 min-w-0 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                disabled={isBusy}
-                                onChange={() => toggleTargetSelection(row.rowKey, target.id)}
-                                className="accent-crt-phosphor mt-1 shrink-0"
-                              />
-                              <div className="min-w-0">
-                                <div className="font-mono text-crt-text truncate">
-                                  {target.displayName}
-                                  <span className="text-crt-muted ml-2 tabular-nums">
-                                    ({formatBytes(target.sizeBytes)})
+                              {game.totalSelectedBytes > 0 && (
+                                <>
+                                  <span aria-hidden="true" className="font-mono text-[11px] text-crt-muted">
+                                    ·
                                   </span>
-                                </div>
-                                <div className="font-mono text-[11px] text-crt-muted flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                                  <span>
-                                    {target.kind === 'disc_set'
-                                      ? `ODE subfolder /${targetFolder}/${outName}/`
-                                      : `Target: /${targetFolder}/`}
+                                  <span className="font-mono text-[11px] text-crt-muted tabular-nums">
+                                    {formatBytes(game.totalSelectedBytes)}
                                   </span>
-                                  <span aria-hidden="true">·</span>
-                                  <span>{getStorageRomCategoryShortLabel(targetMeta.category)}</span>
-                                  {target.detectedVersion && (
-                                    <>
-                                      <span aria-hidden="true">·</span>
-                                      <span className="text-crt-text">{target.detectedVersion}</span>
-                                    </>
-                                  )}
-                                  {isRecommended && smartReason && (
-                                    <>
-                                      <span aria-hidden="true">·</span>
-                                      <span className="text-crt-phosphor">{smartReason}</span>
-                                    </>
-                                  )}
-                                  {cardCheck.exactMatch && (
-                                    <>
-                                      <span aria-hidden="true">·</span>
-                                      <span>Already on storage device</span>
-                                    </>
-                                  )}
-                                  {cardCheck.olderEntryName && (
-                                    <>
-                                      <span aria-hidden="true">·</span>
-                                      <span className="text-crt-amber">
-                                        Replaces older: {cardCheck.olderEntryName}
-                                      </span>
-                                    </>
-                                  )}
-                                </div>
-                              </div>
-                            </label>
+                                </>
+                              )}
+                            </div>
 
-                            <div className="flex items-center gap-2 shrink-0">
-                              <input
-                                type="text"
-                                value={outName}
-                                disabled={isBusy}
-                                aria-label={`Output filename for ${target.displayName}`}
-                                onChange={(e) =>
-                                  updateRowTargetName(row.rowKey, target.id, e.target.value)
-                                }
-                                className="w-72 sm:w-80 px-2.5 py-1 text-xs font-mono bg-crt-surface border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-60"
-                              />
-                              <a
-                                href={browserDownloadHref}
-                                download={target.kind === 'disc_set' ? `${outName}.zip` : outName}
-                                title="Download directly via browser instead"
-                                className="p-1.5 border border-crt-border hover:border-crt-phosphor text-crt-muted hover:text-crt-phosphor rounded transition-colors"
-                              >
-                                <Download className="h-3.5 w-3.5" />
-                              </a>
+                            <div className="font-mono text-[11px] shrink-0">
+                              {renderWriteStatusText(game)}
                             </div>
                           </div>
-                        );
-                      })}
+
+                          {/* Destination Preview Line or Inline Rename */}
+                          {game.isPlaceholder ? (
+                            <p className="font-mono text-[11px] text-crt-muted">
+                              Checking archive...
+                            </p>
+                          ) : game.hasNoPlayableRom ? (
+                            <p className="font-mono text-[11px] text-crt-muted">
+                              {game.errorMessage || 'No playable ROM found'}
+                            </p>
+                          ) : isEditingThisRow && singleSelectedOpt ? (
+                            <div className="pt-1">
+                              {renderEditableDestinationRow(singleSelectedOpt)}
+                            </div>
+                          ) : (
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div
+                                className="min-w-0 font-mono text-[11px] text-crt-muted truncate"
+                                title={primaryOpt?.fullDestinationPath}
+                              >
+                                {game.selectedOptions.length > 1 && primaryOpt ? (
+                                  <>
+                                    <span className="text-crt-text">
+                                      {game.selectedOptions.length} files
+                                    </span>
+                                    <span className="mx-1.5">→</span>
+                                    <span>{formatDevicePath(deviceName, primaryOpt.targetFolder)}</span>
+                                  </>
+                                ) : primaryOpt ? (
+                                  <>
+                                    <span>
+                                      {formatDevicePath(deviceName, primaryOpt.targetFolder)}
+                                    </span>
+                                    <span className="text-crt-text">
+                                      {primaryOpt.target.kind === 'disc_set'
+                                        ? `${primaryOpt.outputName.replace(/\.zip$/i, '')}/`
+                                        : primaryOpt.outputName}
+                                    </span>
+                                  </>
+                                ) : null}
+                              </div>
+
+                              {!isRunning && !isFinished && (
+                                <div className="flex items-center gap-3 shrink-0">
+                                  {game.hasMultipleOptions && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setExpandedGameIds((prev) => ({
+                                          ...prev,
+                                          [game.itemId]: !isExpanded,
+                                        }))
+                                      }
+                                      className="inline-flex items-center gap-1 text-xs text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                                    >
+                                      <span>
+                                        {game.selectedOptions.length > 1
+                                          ? `${game.selectedOptions.length} of ${game.options.length} versions`
+                                          : `Change version (${game.options.length})`}
+                                      </span>
+                                      {isExpanded ? (
+                                        <ChevronUp className="h-3.5 w-3.5 shrink-0" />
+                                      ) : (
+                                        <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+                                      )}
+                                    </button>
+                                  )}
+
+                                  {singleSelectedOpt && (
+                                    <button
+                                      type="button"
+                                      title="Rename output filename"
+                                      onClick={() =>
+                                        setEditingOptionKey(singleSelectedOpt.optionKey)
+                                      }
+                                      className="inline-flex items-center gap-1 text-xs text-crt-muted hover:text-crt-text transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                                    >
+                                      <Pencil className="h-3 w-3 shrink-0" />
+                                      <span>Rename</span>
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Inline Version Picker Expansion */}
+                          {isExpanded && game.hasMultipleOptions && !isRunning && !isFinished && (
+                            <div className="pt-3">{renderOptionList(game)}</div>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                  )}
-                </div>
-              );
-            })
+                  );
+                })}
+              </div>
+            </div>
           )}
         </div>
 
         {/* Footer */}
         <footer className="px-6 py-3.5 border-t border-crt-border bg-crt-bg flex flex-wrap items-center justify-between gap-3 shrink-0">
-          <div className="flex flex-wrap items-center gap-2 text-xs font-mono tabular-nums">
-            {!isRunning && !isInspecting && unresolvedMultiItems.length > 0 ? (
-              <>
-                <button
-                  type="button"
-                  onClick={handleJumpToNextUnresolved}
-                  title="Scroll to the next multi-ROM item awaiting variant selection"
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 border border-crt-amber/70 bg-crt-amber/10 hover:bg-crt-amber/20 text-crt-amber rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <span>
-                    {unresolvedMultiItems.length} multi-ROM item
-                    {unresolvedMultiItems.length === 1 ? '' : 's'} awaiting variant selection
-                  </span>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-semibold">Next</span>
-                  <ArrowDown className="h-3.5 w-3.5 shrink-0" />
-                </button>
-                <button
-                  type="button"
-                  onClick={autoPickSmartPrimaries}
-                  title="Automatically select the latest context-matched Primary ROM for all unresolved items"
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 border border-crt-phosphor/60 bg-crt-phosphor/10 hover:bg-crt-phosphor/20 text-crt-phosphor rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <Check className="h-3.5 w-3.5 shrink-0" />
-                  <span>Auto-Pick Smart Primaries</span>
-                </button>
-              </>
-            ) : isInspecting ? (
+          <div className="text-xs font-mono tabular-nums text-crt-muted">
+            {isInspecting ? (
               <span className="text-crt-amber">
-                Inspecting archives ({rows.filter((r) => !r.isPlaceholder).length} / {rows.length})...
+                Checking archives ({games.filter((g) => !g.isPlaceholder).length} / {games.length})...
               </span>
             ) : isRunning ? (
               <span className="text-crt-phosphor">
-                {metrics.completedItems} / {metrics.totalItems} games processed
+                {metrics.completedItems} / {metrics.totalItems} game
+                {metrics.totalItems === 1 ? '' : 's'} processed
+              </span>
+            ) : isFinished ? (
+              <span>
+                {[
+                  metrics.writtenItems + metrics.upgradedItems > 0
+                    ? `${metrics.writtenItems + metrics.upgradedItems} installed`
+                    : null,
+                  metrics.skippedItems > 0 ? `${metrics.skippedItems} already on device` : null,
+                  metrics.failedItems > 0 ? `${metrics.failedItems} failed` : null,
+                  metrics.totalBytesWritten > 0 ? formatBytes(metrics.totalBytesWritten) : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ') || 'Complete'}
+              </span>
+            ) : selectedFilesCount === 0 ? (
+              <span>Select at least one game to install</span>
+            ) : isSingleGame ? (
+              <span>
+                {selectedFilesCount === 1 ? '1 file ready' : `${selectedFilesCount} files ready`}
+                {totalSelectedBytes > 0 ? ` · ${formatBytes(totalSelectedBytes)}` : ''}
               </span>
             ) : (
-              <span className="text-crt-muted">
-                {totalSelectedTargets} playable target{totalSelectedTargets === 1 ? '' : 's'} ready
+              <span>
+                {selectedGames.length.toLocaleString()} of {installableGames.length.toLocaleString()}{' '}
+                games selected
+                {totalSelectedBytes > 0 ? ` · ${formatBytes(totalSelectedBytes)}` : ''}
               </span>
             )}
           </div>
@@ -623,38 +999,48 @@ export function SdCardExportModal({
                   {isCanceling ? 'Canceling...' : 'Cancel Install'}
                 </button>
               </>
-            ) : (
+            ) : isFinished ? (
               <>
-                {isFinished && (
+                {job.phase !== 'completed' && (
                   <button
                     type="button"
-                    onClick={dismissJob}
-                    className="px-3.5 py-2 text-xs border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    onClick={closeModal}
+                    className="px-3.5 py-2 text-xs border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Clear Queue
+                    Close
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={dismissJob}
+                  className="px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Done
+                </button>
+              </>
+            ) : (
+              <>
                 <button
                   type="button"
                   onClick={closeModal}
                   className="px-3.5 py-2 text-xs border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
-                  Close
+                  Cancel
                 </button>
-                {job.mode === 'review' && job.phase !== 'completed' && (
+                {job.mode === 'review' && (
                   <button
                     type="button"
-                    disabled={totalSelectedTargets === 0}
+                    disabled={selectedFilesCount === 0 || isInspecting}
                     title={
                       !sdRootHandle
-                        ? 'Prompts to mount your target storage device and begins installing'
+                        ? 'Choose your storage device folder and start installing'
                         : undefined
                     }
                     onClick={() => void startReviewWrite()}
                     className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors disabled:opacity-45 disabled:cursor-not-allowed whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <FolderInput className="h-3.5 w-3.5 shrink-0" />
-                    {`Install ${totalSelectedTargets} Item${totalSelectedTargets === 1 ? '' : 's'} to Storage Device`}
+                    <span>{renderPrimaryCtaLabel()}</span>
                   </button>
                 )}
               </>

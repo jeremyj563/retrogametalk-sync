@@ -2402,10 +2402,11 @@ export function GameDetailDrawer({
                                   setMoreMenuOpen(false);
                                   onExportToSdCard(item.id);
                                 }}
+                                title="Choose version, rename ROM, or preview destination folder before installing"
                                 className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-text hover:bg-crt-elevated hover:text-crt-phosphor transition-colors cursor-pointer"
                               >
                                 <SlidersHorizontal className="h-3.5 w-3.5 text-crt-muted shrink-0" />
-                                <span className="truncate">Review Device Install…</span>
+                                <span className="truncate">Install Options…</span>
                               </button>
                             )}
                             {canBrowsePrimaryArchive && (

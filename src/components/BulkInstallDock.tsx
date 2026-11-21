@@ -131,7 +131,7 @@ export function BulkInstallDock({ installer }: BulkInstallDockProps) {
             onClick={openModal}
             className="px-2.5 py-1 text-xs font-medium border border-crt-border-strong bg-crt-bg hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            Open Queue
+            View Details
           </button>
 
           {isRunning ? (

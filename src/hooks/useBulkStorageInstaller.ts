@@ -254,18 +254,14 @@ function buildRowsFromInspectedItem(
     }
 
     let initialSelected: string[] = [];
-    if (mode === 'express') {
-      initialSelected = recommendedForFile;
-    } else if (!hasCompetingVariants) {
-      // Single playable ROM or complete single-version multi-disc set: auto-select cleanly
-      initialSelected = recommendedForFile.length > 0
-        ? recommendedForFile
-        : insp.playableTargets.length === 1
-          ? [insp.playableTargets[0].id]
-          : [];
-    } else {
-      // Review mode with competing variants/versions: leave unselected for user review or 1-click Smart Auto-Pick
-      initialSelected = [];
+    if (recommendedForFile.length > 0) {
+      initialSelected = [...recommendedForFile];
+    } else if (totalRecommendedCount === 0 && insp.playableTargets.length > 0) {
+      // Fallback when Smart Primary had no explicit pick: select the first playable target on the first playable archive
+      const alreadyFallbackPicked = builtRows.some((r) => r.selectedTargetIds.length > 0);
+      if (!alreadyFallbackPicked) {
+        initialSelected = [insp.playableTargets[0].id];
+      }
     }
 
     builtRows.push({
@@ -1514,6 +1510,139 @@ export function useBulkStorageInstaller({
     });
   }, []);
 
+  /**
+   * Switches a game cleanly to a single chosen version/variant across all of its archive rows.
+   */
+  const selectOnlyTargetForItem = useCallback(
+    (itemId: number, rowKey: string, targetId: string) => {
+      setJob((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          rows: prev.rows.map((row) => {
+            if (row.itemId !== itemId) return row;
+            if (row.rowKey === rowKey) {
+              return { ...row, selectedTargetIds: [targetId] };
+            }
+            return { ...row, selectedTargetIds: [] };
+          }),
+        };
+      });
+    },
+    [],
+  );
+
+  /**
+   * Toggles an entire game on or off in the install queue. When re-enabling a game,
+   * restores its Smart Recommended version(s) (or first playable target).
+   */
+  const toggleGameIncluded = useCallback((itemId: number) => {
+    setJob((prev) => {
+      if (!prev) return prev;
+      const itemRows = prev.rows.filter((r) => r.itemId === itemId);
+      const currentlyIncluded = itemRows.some((r) => r.selectedTargetIds.length > 0);
+      if (currentlyIncluded) {
+        return {
+          ...prev,
+          rows: prev.rows.map((row) =>
+            row.itemId === itemId ? { ...row, selectedTargetIds: [] } : row,
+          ),
+        };
+      }
+      const hasAnyRecommended = itemRows.some((r) => r.recommendedTargetIds.length > 0);
+      let assignedFallback = false;
+      return {
+        ...prev,
+        rows: prev.rows.map((row) => {
+          if (row.itemId !== itemId) return row;
+          if (hasAnyRecommended) {
+            return { ...row, selectedTargetIds: [...row.recommendedTargetIds] };
+          }
+          if (!assignedFallback && row.targets.length > 0) {
+            assignedFallback = true;
+            return { ...row, selectedTargetIds: [row.targets[0].id] };
+          }
+          return { ...row, selectedTargetIds: [] };
+        }),
+      };
+    });
+  }, []);
+
+  /**
+   * Selects or deselects every installable game in the queue.
+   */
+  const setAllGamesIncluded = useCallback((included: boolean) => {
+    setJob((prev) => {
+      if (!prev) return prev;
+      if (!included) {
+        return {
+          ...prev,
+          rows: prev.rows.map((row) => ({ ...row, selectedTargetIds: [] })),
+        };
+      }
+      const hasRecommendedByItem = new Map<number, boolean>();
+      for (const r of prev.rows) {
+        if (r.recommendedTargetIds.length > 0) {
+          hasRecommendedByItem.set(r.itemId, true);
+        }
+      }
+      const fallbackAssigned = new Set<number>();
+      return {
+        ...prev,
+        rows: prev.rows.map((row) => {
+          if (row.targets.length === 0) return row;
+          if (hasRecommendedByItem.get(row.itemId)) {
+            return { ...row, selectedTargetIds: [...row.recommendedTargetIds] };
+          }
+          if (!fallbackAssigned.has(row.itemId)) {
+            fallbackAssigned.add(row.itemId);
+            return { ...row, selectedTargetIds: [row.targets[0].id] };
+          }
+          return { ...row, selectedTargetIds: [] };
+        }),
+      };
+    });
+  }, []);
+
+  /**
+   * Unchecks a specific set of games (e.g., games already present on the mounted storage device).
+   */
+  const excludeItemIds = useCallback((itemIds: Set<number>) => {
+    if (itemIds.size === 0) return;
+    setJob((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        rows: prev.rows.map((row) =>
+          itemIds.has(row.itemId) ? { ...row, selectedTargetIds: [] } : row,
+        ),
+      };
+    });
+  }, []);
+
+  const resetItemToRecommended = useCallback((itemId: number) => {
+    setJob((prev) => {
+      if (!prev) return prev;
+      const itemRows = prev.rows.filter((r) => r.itemId === itemId);
+      const hasAnyRecommended = itemRows.some((r) => r.recommendedTargetIds.length > 0);
+      let assignedFallback = false;
+      return {
+        ...prev,
+        rows: prev.rows.map((row) => {
+          if (row.itemId !== itemId) return row;
+          if (hasAnyRecommended) {
+            return { ...row, selectedTargetIds: [...row.recommendedTargetIds] };
+          }
+          if (!assignedFallback && row.targets.length > 0) {
+            assignedFallback = true;
+            return { ...row, selectedTargetIds: [row.targets[0].id] };
+          }
+          return { ...row, selectedTargetIds: [] };
+        }),
+      };
+    });
+  }, []);
+
   const updateRowTargetName = useCallback((rowKey: string, targetId: string, nextName: string) => {
     setJob((prev) => {
       if (!prev) return prev;
@@ -1659,6 +1788,11 @@ export function useBulkStorageInstaller({
     dismissJob,
     toggleTargetSelection,
     selectAllVariantsForRow,
+    selectOnlyTargetForItem,
+    toggleGameIncluded,
+    setAllGamesIncluded,
+    excludeItemIds,
+    resetItemToRecommended,
     autoPickSmartPrimaries,
     updateRowTargetName,
   };
