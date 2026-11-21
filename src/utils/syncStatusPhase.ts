@@ -1,4 +1,9 @@
-import type { ActiveSyncItemSummary, ActiveTransferState, SyncRunRecord } from '../types';
+import type {
+  ActiveRunProgress,
+  ActiveSyncItemSummary,
+  ActiveTransferState,
+  SyncRunRecord,
+} from '../types';
 
 export type SyncStatusSubjectKind = 'download' | 'title' | 'path' | 'detail' | 'idle';
 
@@ -48,13 +53,34 @@ function inferSystemFromRelativePath(relPath: string): string | null {
   return null;
 }
 
+export function formatRunProgressLabel(
+  runProgress: ActiveRunProgress | null | undefined,
+  systemName: string | null,
+): string | null {
+  if (!runProgress || !Number.isFinite(runProgress.total) || runProgress.total <= 0) {
+    return null;
+  }
+  if (
+    runProgress.scope === 'system' &&
+    systemName &&
+    runProgress.systemName &&
+    runProgress.systemName.toLowerCase() !== systemName.toLowerCase()
+  ) {
+    return null;
+  }
+  const total = Math.max(1, Math.floor(runProgress.total));
+  const processed = Math.max(0, Math.min(Math.floor(runProgress.processed), total));
+  return `${processed}/${total}`;
+}
+
 export function parseSyncStatusHeader(params: {
   currentPhase: string;
   activeRun: SyncRunRecord | null;
   activeTransfer: ActiveTransferState | null;
   parallelTransferCount: number;
+  runProgress?: ActiveRunProgress | null;
 }): ParsedSyncStatusHeader {
-  const { currentPhase, activeRun, activeTransfer, parallelTransferCount } = params;
+  const { currentPhase, activeRun, activeTransfer, parallelTransferCount, runProgress } = params;
   const phase = (currentPhase || '').trim();
   const runSyncType = deriveRunSyncTypeLabel(activeRun);
 
@@ -91,10 +117,11 @@ export function parseSyncStatusHeader(params: {
     const workerCount = Math.max(parallelTransferCount, activeTransfer.activeWorkers ?? 1, 1);
     const resolvedTitle = (activeTransfer.itemTitle || '').trim();
     const subject = resolvedTitle || activeTransfer.filename;
+    const transferSystem = activeTransfer.systemName || null;
     return {
       syncType: runSyncType ?? 'Sync',
-      systemName: activeTransfer.systemName || null,
-      progressLabel: null,
+      systemName: transferSystem,
+      progressLabel: formatRunProgressLabel(runProgress, transferSystem),
       actionPrefix: null,
       subject,
       subjectKind: resolvedTitle ? 'title' : 'download',
@@ -105,10 +132,11 @@ export function parseSyncStatusHeader(params: {
   // 3b. Inter-file or phase-text download fallbacks (when activeTransfer snapshot is momentarily null)
   const syncingItemMatch = phase.match(/^Syncing\s+·\s+([^\s:]+):\s+(.+)$/i);
   if (syncingItemMatch) {
+    const sys = syncingItemMatch[1].trim() || null;
     return {
       syncType: runSyncType ?? 'Sync',
-      systemName: syncingItemMatch[1].trim() || null,
-      progressLabel: null,
+      systemName: sys,
+      progressLabel: formatRunProgressLabel(runProgress, sys),
       actionPrefix: null,
       subject: syncingItemMatch[2].trim(),
       subjectKind: 'title',
@@ -121,10 +149,11 @@ export function parseSyncStatusHeader(params: {
   );
   if (parallelDlMatch) {
     const workerCount = Math.max(2, Number(parallelDlMatch[1]) || 2);
+    const sys = parallelDlMatch[2].trim() || null;
     return {
       syncType: runSyncType ?? 'Sync',
-      systemName: parallelDlMatch[2].trim() || null,
-      progressLabel: null,
+      systemName: sys,
+      progressLabel: formatRunProgressLabel(runProgress, sys),
       actionPrefix: null,
       subject: parallelDlMatch[3].trim(),
       subjectKind: 'download',
@@ -134,10 +163,11 @@ export function parseSyncStatusHeader(params: {
 
   const singleDlMatch = phase.match(/^Downloading\s+([^/]+?)\s*\/\s*(.+)$/i);
   if (singleDlMatch) {
+    const sys = singleDlMatch[1].trim() || null;
     return {
       syncType: runSyncType ?? 'Sync',
-      systemName: singleDlMatch[1].trim() || null,
-      progressLabel: null,
+      systemName: sys,
+      progressLabel: formatRunProgressLabel(runProgress, sys),
       actionPrefix: null,
       subject: singleDlMatch[2].trim(),
       subjectKind: 'download',

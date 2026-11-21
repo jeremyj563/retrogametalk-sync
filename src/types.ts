@@ -395,6 +395,13 @@ export interface SystemBreakdown {
   lastActivityAt: string | null;
 }
 
+export interface ActiveRunProgress {
+  processed: number;
+  total: number;
+  scope: 'queue' | 'system';
+  systemName: string | null;
+}
+
 export interface ServiceStatusSnapshot {
   podId: string;
   uptimeSeconds: number;
@@ -411,6 +418,7 @@ export interface ServiceStatusSnapshot {
   activeTransfer: ActiveTransferState | null;
   activeTransfers?: ActiveTransferState[];
   activeSyncItem?: ActiveSyncItemSummary | null;
+  runProgress?: ActiveRunProgress | null;
   transferHistory: TransferSpeedSample[];
   currentPhase: string;
   nextScheduledRunAt: string | null;

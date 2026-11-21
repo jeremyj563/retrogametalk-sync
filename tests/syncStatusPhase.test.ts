@@ -551,5 +551,66 @@ test('keeps Hero Showcase box art untouched on click and gates inline Opening cu
   );
 });
 
+test('preserves structured runProgress counter during active transfers, parallel downloads, and inter-file handoffs', () => {
+  const fullRun = makeRun({ id: 55, mode: 'full', triggerType: 'manual' });
+  const ndsTransfer = makeTransfer({
+    itemId: 501,
+    itemTitle: 'Dragon Quest IX',
+    filename: 'Dragon Quest IX.7z',
+    systemName: 'nds-roms',
+  });
+
+  // Queue-scoped progress stays visible during active downloads even without prior phase caching (e.g. after refresh/tab switch)
+  const duringTransfer = parseSyncStatusHeader({
+    currentPhase: 'Downloading nds-roms / Dragon Quest IX.7z',
+    activeRun: fullRun,
+    activeTransfer: ndsTransfer,
+    parallelTransferCount: 2,
+    runProgress: { processed: 5, total: 47, scope: 'queue', systemName: null },
+  });
+  assert.equal(duringTransfer.syncType, 'Full Sync');
+  assert.equal(duringTransfer.systemName, 'nds-roms');
+  assert.equal(duringTransfer.progressLabel, '5/47');
+
+  // Inter-file handoff ("Syncing · nds-roms: ...") keeps the counter without flashing blank
+  const duringHandoff = parseSyncStatusHeader({
+    currentPhase: 'Syncing · nds-roms: Dragon Quest IX',
+    activeRun: fullRun,
+    activeTransfer: null,
+    parallelTransferCount: 0,
+    runProgress: { processed: 6, total: 47, scope: 'queue', systemName: null },
+  });
+  assert.equal(duringHandoff.progressLabel, '6/47');
+
+  // Parallel download phase fallback without activeTransfer snapshot preserves progress
+  const duringParallelFallback = parseSyncStatusHeader({
+    currentPhase: 'Downloading 2 files in parallel (primary: nds-roms / Dragon Quest IX.7z)',
+    activeRun: fullRun,
+    activeTransfer: null,
+    parallelTransferCount: 2,
+    runProgress: { processed: 7, total: 47, scope: 'queue', systemName: null },
+  });
+  assert.equal(duringParallelFallback.progressLabel, '7/47');
+
+  // System-scoped progress matches same console and omits mismatched console
+  const sameSystem = parseSyncStatusHeader({
+    currentPhase: 'Downloading nds-roms / Dragon Quest IX.7z',
+    activeRun: fullRun,
+    activeTransfer: ndsTransfer,
+    parallelTransferCount: 1,
+    runProgress: { processed: 3, total: 12, scope: 'system', systemName: 'nds-roms' },
+  });
+  assert.equal(sameSystem.progressLabel, '3/12');
+
+  const mismatchedSystem = parseSyncStatusHeader({
+    currentPhase: 'Downloading nds-roms / Dragon Quest IX.7z',
+    activeRun: fullRun,
+    activeTransfer: ndsTransfer,
+    parallelTransferCount: 1,
+    runProgress: { processed: 3, total: 12, scope: 'system', systemName: 'gba-roms' },
+  });
+  assert.equal(mismatchedSystem.progressLabel, null);
+});
+
 
 

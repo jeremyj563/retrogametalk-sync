@@ -736,8 +736,15 @@ export function OverviewPanel({
         activeRun: status.activeRun,
         activeTransfer: status.activeTransfer,
         parallelTransferCount: parallelTransfers.length,
+        runProgress: status.runProgress ?? null,
       }),
-    [status.currentPhase, status.activeRun, status.activeTransfer, parallelTransfers.length],
+    [
+      status.currentPhase,
+      status.activeRun,
+      status.activeTransfer,
+      status.runProgress,
+      parallelTransfers.length,
+    ],
   );
 
   // Preserve the system item counter (e.g. "9/424") seamlessly when phase hands off to "Downloading..."
