@@ -4,6 +4,17 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.31.0] - 2026-11-22
+
+- Added direct one-click **Install** / **Reinstall** buttons to **Catalog** items (both Box-Art Grid cards and List rows) so downloaded games can be installed directly to a mounted storage device without opening the Game Details drawer.
+- Added immediate, live byte-level storage device installation progress across the **Game Details** drawer, **Catalog** items, **Bulk Install Dock**, and **Install to Device** modal:
+  - **Instant Progress Strip in Game Details**: Clicking **Install to `<Device>`** immediately reveals a live progress strip anchored above the sticky footer showing stage (`Inspecting archive…`, `Extracting ROM…`, `Installing to <Device>`, `Finalizing on <Device>…`), destination path, live bytes written / total, transfer speed (`MB/s`), percent bar, inline **Cancel**, and a dismissible completion/error summary.
+  - **Live Byte Streaming Telemetry**: Instrumented File System Access API transfers with throttled byte progress and transfer rate reporting so large ROMs (hundreds of MB to multi-GB) smoothly advance from 0% to 100% across all install surfaces.
+
+## [1.30.4] - 2026-11-22
+
+- Added concise tooltips to **Catalog** view and indexer action buttons (**Refresh**, **Rescan**, **Pause Indexing**, and **Index All Remaining Consoles**) so it is clear at a glance whether an action queries local SQLite, rescans local disk, or fetches remote metadata from RetroGameTalk.
+
 ## [1.30.3] - 2026-11-22
 
 - Fixed live mid-run Sync Rule reloads and made newly added consoles appear in the **Catalog** immediately:

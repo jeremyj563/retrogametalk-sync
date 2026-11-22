@@ -1,4 +1,10 @@
-import type { ExportQueueRow, ExportRowWriteState } from '../hooks/useBulkStorageInstaller';
+import type {
+  BulkInstallJobState,
+  BulkInstallMetrics,
+  DeviceInstallStage,
+  ExportQueueRow,
+  ExportRowWriteState,
+} from '../hooks/useBulkStorageInstaller';
 import { resolveRowTargetCategoryAndFolder } from '../hooks/useBulkStorageInstaller';
 import {
   compareComparableVersions,
@@ -11,6 +17,7 @@ import {
   type StorageFolderMappingConfig,
 } from '../shared/storageFolderMappings';
 import type { PlayableExportTarget } from '../types';
+import { formatBytes } from './format';
 import { findUpgradeCandidateOnCard, type SdScanFolderResult } from './sdCardFs';
 
 export type OptionDeviceStatus = 'new' | 'installed' | 'upgrade';
@@ -332,4 +339,392 @@ export function summarizeDestinationFolders(
       totalBytes: stats.totalBytes,
     }))
     .sort((a, b) => b.gameCount - a.gameCount || a.folder.localeCompare(b.folder));
+}
+
+export type ItemDeviceInstallStatus =
+  | 'idle'
+  | 'active'
+  | 'queued'
+  | 'completed'
+  | 'error'
+  | 'canceled';
+
+export type ItemDeviceInstallBarMode = 'idle' | 'preparing' | 'determinate' | 'indeterminate';
+
+export interface ResolvedItemDeviceInstallState {
+  status: ItemDeviceInstallStatus;
+  isActive: boolean;
+  isFinished: boolean;
+  stage: DeviceInstallStage | 'queued' | 'canceling' | null;
+  mode: ItemDeviceInstallBarMode;
+  percent: number | null;
+  bytesWritten: number;
+  totalBytes: number | null;
+  bytesLabel: string;
+  speedLabel: string;
+  stageLabel: string;
+  filename: string | null;
+  destinationPath: string | null;
+  fileSequenceLabel: string | null;
+  outcomeKind: 'written' | 'upgraded' | 'skipped' | 'error' | 'canceled' | null;
+  outcomeSummary: string | null;
+  isBatchJob: boolean;
+  batchCompletedItems: number;
+  batchTotalItems: number;
+  jobId: number | null;
+}
+
+const IDLE_ITEM_DEVICE_INSTALL: ResolvedItemDeviceInstallState = {
+  status: 'idle',
+  isActive: false,
+  isFinished: false,
+  stage: null,
+  mode: 'idle',
+  percent: null,
+  bytesWritten: 0,
+  totalBytes: null,
+  bytesLabel: '',
+  speedLabel: '',
+  stageLabel: '',
+  filename: null,
+  destinationPath: null,
+  fileSequenceLabel: null,
+  outcomeKind: null,
+  outcomeSummary: null,
+  isBatchJob: false,
+  batchCompletedItems: 0,
+  batchTotalItems: 0,
+  jobId: null,
+};
+
+/**
+ * Resolves live device installation progress or finished outcome for a specific catalog item.
+ * Shared across GameDetailDrawer, Catalog grid cards, and Catalog list rows.
+ */
+export function resolveItemDeviceInstallState(
+  itemId: number,
+  job: BulkInstallJobState | null,
+  metrics: Pick<BulkInstallMetrics, 'completedItems' | 'totalItems'> | null,
+  deviceName: string | null,
+): ResolvedItemDeviceInstallState {
+  if (!job || !job.itemIds.includes(itemId)) {
+    return IDLE_ITEM_DEVICE_INSTALL;
+  }
+
+  // Do not show active/finished progress for a review queue that hasn't started writing yet
+  if (job.mode === 'review' && (job.phase === 'inspecting' || job.phase === 'ready')) {
+    return IDLE_ITEM_DEVICE_INSTALL;
+  }
+
+  const targetLabel = (deviceName || '').trim() || 'device';
+  const isBatchJob = job.itemIds.length > 1;
+  const batchCompletedItems = metrics?.completedItems ?? 0;
+  const batchTotalItems = metrics?.totalItems ?? job.itemIds.length;
+  const jobIsBusy = job.phase === 'running' || job.phase === 'inspecting' || job.phase === 'canceling';
+  const isCanceling = job.phase === 'canceling';
+
+  const active = job.activeTransfer;
+  if (jobIsBusy && active && active.itemId === itemId) {
+    const destPath =
+      active.destinationFolder && active.filename
+        ? `/${active.destinationFolder.replace(/^\/+|\/+$/g, '')}/${active.filename}`
+        : active.filename || null;
+    const fileSequenceLabel =
+      active.totalFiles > 1 ? `File ${active.fileIndex}/${active.totalFiles}` : null;
+    const speedLabel =
+      active.bytesPerSec && active.bytesPerSec > 0 ? `${formatBytes(active.bytesPerSec)}/s` : '';
+
+    if (isCanceling) {
+      return {
+        status: 'active',
+        isActive: true,
+        isFinished: false,
+        stage: 'canceling',
+        mode: 'preparing',
+        percent: active.percent,
+        bytesWritten: active.bytesWritten,
+        totalBytes: active.totalBytes,
+        bytesLabel: 'Stopping transfer…',
+        speedLabel: '',
+        stageLabel: `Stopping install to ${targetLabel}…`,
+        filename: active.filename,
+        destinationPath: destPath,
+        fileSequenceLabel,
+        outcomeKind: null,
+        outcomeSummary: null,
+        isBatchJob,
+        batchCompletedItems,
+        batchTotalItems,
+        jobId: job.jobId,
+      };
+    }
+
+    if (active.stage === 'scanning_device') {
+      return {
+        status: 'active',
+        isActive: true,
+        isFinished: false,
+        stage: 'scanning_device',
+        mode: 'preparing',
+        percent: null,
+        bytesWritten: 0,
+        totalBytes: null,
+        bytesLabel: `Scanning folders on ${targetLabel}…`,
+        speedLabel: '',
+        stageLabel: `Preparing ${targetLabel}…`,
+        filename: null,
+        destinationPath: null,
+        fileSequenceLabel: null,
+        outcomeKind: null,
+        outcomeSummary: null,
+        isBatchJob,
+        batchCompletedItems,
+        batchTotalItems,
+        jobId: job.jobId,
+      };
+    }
+
+    if (active.stage === 'inspecting') {
+      return {
+        status: 'active',
+        isActive: true,
+        isFinished: false,
+        stage: 'inspecting',
+        mode: 'preparing',
+        percent: null,
+        bytesWritten: 0,
+        totalBytes: null,
+        bytesLabel: 'Inspecting archive…',
+        speedLabel: '',
+        stageLabel: `Preparing install to ${targetLabel}…`,
+        filename: null,
+        destinationPath: null,
+        fileSequenceLabel: null,
+        outcomeKind: null,
+        outcomeSummary: null,
+        isBatchJob,
+        batchCompletedItems,
+        batchTotalItems,
+        jobId: job.jobId,
+      };
+    }
+
+    if (active.stage === 'extracting') {
+      return {
+        status: 'active',
+        isActive: true,
+        isFinished: false,
+        stage: 'extracting',
+        mode: 'preparing',
+        percent: null,
+        bytesWritten: active.bytesWritten,
+        totalBytes: active.totalBytes,
+        bytesLabel: active.totalBytes
+          ? `Extracting ROM (${formatBytes(active.totalBytes)})…`
+          : 'Extracting ROM from archive…',
+        speedLabel: '',
+        stageLabel: `Extracting for ${targetLabel}…`,
+        filename: active.filename,
+        destinationPath: destPath,
+        fileSequenceLabel,
+        outcomeKind: null,
+        outcomeSummary: null,
+        isBatchJob,
+        batchCompletedItems,
+        batchTotalItems,
+        jobId: job.jobId,
+      };
+    }
+
+    if (active.stage === 'finalizing') {
+      const bytesLabel =
+        active.totalBytes && active.totalBytes > 0
+          ? `${formatBytes(active.bytesWritten)} / ${formatBytes(active.totalBytes)} · Finalizing…`
+          : active.bytesWritten > 0
+            ? `${formatBytes(active.bytesWritten)} · Finalizing…`
+            : `Finalizing on ${targetLabel}…`;
+      return {
+        status: 'active',
+        isActive: true,
+        isFinished: false,
+        stage: 'finalizing',
+        mode: 'determinate',
+        percent: 100,
+        bytesWritten: active.bytesWritten,
+        totalBytes: active.totalBytes ?? active.bytesWritten,
+        bytesLabel,
+        speedLabel: '',
+        stageLabel: `Finalizing on ${targetLabel}…`,
+        filename: active.filename,
+        destinationPath: destPath,
+        fileSequenceLabel,
+        outcomeKind: null,
+        outcomeSummary: null,
+        isBatchJob,
+        batchCompletedItems,
+        batchTotalItems,
+        jobId: job.jobId,
+      };
+    }
+
+    // stage === 'writing'
+    const isDeterminate = active.totalBytes !== null && active.totalBytes > 0 && active.percent !== null;
+    const bytesLabel = isDeterminate
+      ? `${formatBytes(active.bytesWritten)} / ${formatBytes(active.totalBytes!)}`
+      : active.bytesWritten > 0
+        ? formatBytes(active.bytesWritten)
+        : `Writing to ${targetLabel}…`;
+
+    return {
+      status: 'active',
+      isActive: true,
+      isFinished: false,
+      stage: 'writing',
+      mode: isDeterminate ? 'determinate' : 'indeterminate',
+      percent: isDeterminate ? active.percent : null,
+      bytesWritten: active.bytesWritten,
+      totalBytes: active.totalBytes,
+      bytesLabel,
+      speedLabel,
+      stageLabel: `Installing to ${targetLabel}`,
+      filename: active.filename,
+      destinationPath: destPath,
+      fileSequenceLabel,
+      outcomeKind: null,
+      outcomeSummary: null,
+      isBatchJob,
+      batchCompletedItems,
+      batchTotalItems,
+      jobId: job.jobId,
+    };
+  }
+
+  const itemRows = job.rows.filter((r) => r.itemId === itemId);
+  if (itemRows.length === 0) {
+    return IDLE_ITEM_DEVICE_INSTALL;
+  }
+
+  const { writeState, writeDetail } = resolveAggregateWriteState(itemRows);
+  const totalBytesWritten = itemRows.reduce((sum, r) => sum + (r.bytesWritten || 0), 0);
+
+  if (jobIsBusy && (writeState === 'pending' || writeState === 'inspecting' || writeState === 'writing')) {
+    return {
+      status: writeState === 'pending' ? 'queued' : 'active',
+      isActive: true,
+      isFinished: false,
+      stage: isCanceling
+        ? 'canceling'
+        : writeState === 'inspecting'
+          ? 'inspecting'
+          : writeState === 'writing'
+            ? 'extracting'
+            : 'queued',
+      mode: 'preparing',
+      percent: null,
+      bytesWritten: totalBytesWritten,
+      totalBytes: null,
+      bytesLabel:
+        writeState === 'inspecting'
+          ? 'Inspecting archive…'
+          : isBatchJob
+            ? `Queued · ${batchCompletedItems}/${batchTotalItems} games done`
+            : `Preparing install to ${targetLabel}…`,
+      speedLabel: '',
+      stageLabel:
+        writeState === 'pending'
+          ? `Queued for ${targetLabel}`
+          : `Installing to ${targetLabel}`,
+      filename: null,
+      destinationPath: null,
+      fileSequenceLabel: null,
+      outcomeKind: null,
+      outcomeSummary: null,
+      isBatchJob,
+      batchCompletedItems,
+      batchTotalItems,
+      jobId: job.jobId,
+    };
+  }
+
+  if (writeState === 'written' || writeState === 'upgraded' || writeState === 'skipped') {
+    return {
+      status: 'completed',
+      isActive: false,
+      isFinished: true,
+      stage: null,
+      mode: 'idle',
+      percent: 100,
+      bytesWritten: totalBytesWritten,
+      totalBytes: totalBytesWritten > 0 ? totalBytesWritten : null,
+      bytesLabel: totalBytesWritten > 0 ? formatBytes(totalBytesWritten) : '',
+      speedLabel: '',
+      stageLabel:
+        writeState === 'upgraded'
+          ? `Updated on ${targetLabel}`
+          : writeState === 'skipped'
+            ? `Already on ${targetLabel}`
+            : `Installed to ${targetLabel}`,
+      filename: null,
+      destinationPath: null,
+      fileSequenceLabel: null,
+      outcomeKind: writeState,
+      outcomeSummary: writeDetail,
+      isBatchJob,
+      batchCompletedItems,
+      batchTotalItems,
+      jobId: job.jobId,
+    };
+  }
+
+  if (writeState === 'error' || job.phase === 'error') {
+    return {
+      status: 'error',
+      isActive: false,
+      isFinished: true,
+      stage: null,
+      mode: 'idle',
+      percent: null,
+      bytesWritten: totalBytesWritten,
+      totalBytes: null,
+      bytesLabel: '',
+      speedLabel: '',
+      stageLabel: `Install to ${targetLabel} failed`,
+      filename: null,
+      destinationPath: null,
+      fileSequenceLabel: null,
+      outcomeKind: 'error',
+      outcomeSummary: writeDetail || job.errorMessage || 'Device install failed',
+      isBatchJob,
+      batchCompletedItems,
+      batchTotalItems,
+      jobId: job.jobId,
+    };
+  }
+
+  if (writeState === 'canceled' || job.phase === 'canceled') {
+    return {
+      status: 'canceled',
+      isActive: false,
+      isFinished: true,
+      stage: null,
+      mode: 'idle',
+      percent: null,
+      bytesWritten: totalBytesWritten,
+      totalBytes: null,
+      bytesLabel: '',
+      speedLabel: '',
+      stageLabel: `Install to ${targetLabel} canceled`,
+      filename: null,
+      destinationPath: null,
+      fileSequenceLabel: null,
+      outcomeKind: 'canceled',
+      outcomeSummary: writeDetail || 'Canceled by user',
+      isBatchJob,
+      batchCompletedItems,
+      batchTotalItems,
+      jobId: job.jobId,
+    };
+  }
+
+  return IDLE_ITEM_DEVICE_INSTALL;
 }

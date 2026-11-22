@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ExportQueueRow } from '../src/hooks/useBulkStorageInstaller.ts';
+import type {
+  BulkInstallJobState,
+  ExportQueueRow,
+} from '../src/hooks/useBulkStorageInstaller.ts';
 import {
   DEFAULT_ROM_TYPE_SUBFOLDERS,
   type StorageFolderMappingConfig,
@@ -10,6 +13,7 @@ import {
   buildInstallModalTitle,
   formatDevicePath,
   groupInstallRowsByGame,
+  resolveItemDeviceInstallState,
   summarizeDestinationFolders,
 } from '../src/utils/deviceInstallView.ts';
 import { registerWrittenEntryInScan, type SdScanFolderResult } from '../src/utils/sdCardFs.ts';
@@ -248,4 +252,214 @@ test('buildInstallModalTitle and formatDevicePath produce clean human-friendly h
     formatDevicePath('Roms', 'PS1', 'Final Fantasy VII.zip', true),
     'Roms/PS1/Final Fantasy VII/',
   );
+});
+
+function makeJob(overrides: Partial<BulkInstallJobState> = {}): BulkInstallJobState {
+  return {
+    jobId: 42,
+    mode: 'express',
+    phase: 'running',
+    itemIds: [10],
+    filterContext: {},
+    rows: [makeRow({ itemId: 10, writeState: 'writing' })],
+    currentTitle: 'Chrono Trigger',
+    activeTransfer: null,
+    errorMessage: null,
+    startedAt: '2026-11-22T00:00:00.000Z',
+    finishedAt: null,
+    ...overrides,
+  };
+}
+
+test('resolveItemDeviceInstallState transitions cleanly from inspecting -> extracting -> writing -> finalizing -> completed', () => {
+  const inspectingJob = makeJob({
+    activeTransfer: {
+      itemId: 10,
+      rowKey: '10-placeholder',
+      title: 'Chrono Trigger',
+      stage: 'inspecting',
+      filename: null,
+      destinationFolder: null,
+      bytesWritten: 0,
+      totalBytes: null,
+      percent: null,
+      bytesPerSec: null,
+      fileIndex: 1,
+      totalFiles: 1,
+    },
+  });
+  const inspecting = resolveItemDeviceInstallState(
+    10,
+    inspectingJob,
+    { completedItems: 0, totalItems: 1 },
+    'Roms',
+  );
+  assert.equal(inspecting.status, 'active');
+  assert.equal(inspecting.isActive, true);
+  assert.equal(inspecting.mode, 'preparing');
+  assert.equal(inspecting.stage, 'inspecting');
+  assert.equal(inspecting.percent, null);
+
+  const extractingJob = makeJob({
+    activeTransfer: {
+      itemId: 10,
+      rowKey: '10-100',
+      title: 'Chrono Trigger',
+      stage: 'extracting',
+      filename: 'Chrono Trigger.chd',
+      destinationFolder: 'PSX',
+      bytesWritten: 0,
+      totalBytes: 500 * 1024 * 1024,
+      percent: null,
+      bytesPerSec: null,
+      fileIndex: 1,
+      totalFiles: 1,
+    },
+  });
+  const extracting = resolveItemDeviceInstallState(
+    10,
+    extractingJob,
+    { completedItems: 0, totalItems: 1 },
+    'Roms',
+  );
+  assert.equal(extracting.stage, 'extracting');
+  assert.equal(extracting.mode, 'preparing');
+  assert.equal(extracting.destinationPath, '/PSX/Chrono Trigger.chd');
+  assert.match(extracting.bytesLabel, /500(\.0)? MB/);
+
+  const writingJob = makeJob({
+    activeTransfer: {
+      itemId: 10,
+      rowKey: '10-100',
+      title: 'Chrono Trigger',
+      stage: 'writing',
+      filename: 'Chrono Trigger.chd',
+      destinationFolder: 'PSX',
+      bytesWritten: 250 * 1024 * 1024,
+      totalBytes: 500 * 1024 * 1024,
+      percent: 50,
+      bytesPerSec: 20 * 1024 * 1024,
+      fileIndex: 1,
+      totalFiles: 2,
+    },
+  });
+  const writing = resolveItemDeviceInstallState(
+    10,
+    writingJob,
+    { completedItems: 0, totalItems: 1 },
+    'Roms',
+  );
+  assert.equal(writing.status, 'active');
+  assert.equal(writing.mode, 'determinate');
+  assert.equal(writing.percent, 50);
+  assert.equal(writing.fileSequenceLabel, 'File 1/2');
+  assert.match(writing.bytesLabel, /250(\.0)? MB \/ 500(\.0)? MB/);
+  assert.match(writing.speedLabel, /20(\.0)? MB\/s/);
+
+  const finalizingJob = makeJob({
+    activeTransfer: {
+      itemId: 10,
+      rowKey: '10-100',
+      title: 'Chrono Trigger',
+      stage: 'finalizing',
+      filename: 'Chrono Trigger.chd',
+      destinationFolder: 'PSX',
+      bytesWritten: 500 * 1024 * 1024,
+      totalBytes: 500 * 1024 * 1024,
+      percent: 100,
+      bytesPerSec: null,
+      fileIndex: 1,
+      totalFiles: 1,
+    },
+  });
+  const finalizing = resolveItemDeviceInstallState(
+    10,
+    finalizingJob,
+    { completedItems: 0, totalItems: 1 },
+    'Roms',
+  );
+  assert.equal(finalizing.stage, 'finalizing');
+  assert.equal(finalizing.mode, 'determinate');
+  assert.equal(finalizing.percent, 100);
+
+  const completedJob = makeJob({
+    phase: 'completed',
+    rows: [
+      makeRow({
+        itemId: 10,
+        writeState: 'written',
+        writeDetail: 'Saved to /PSX · 500.0 MB',
+        bytesWritten: 500 * 1024 * 1024,
+      }),
+    ],
+    activeTransfer: null,
+  });
+  const completed = resolveItemDeviceInstallState(
+    10,
+    completedJob,
+    { completedItems: 1, totalItems: 1 },
+    'Roms',
+  );
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.isActive, false);
+  assert.equal(completed.isFinished, true);
+  assert.equal(completed.outcomeKind, 'written');
+  assert.equal(completed.outcomeSummary, 'Saved to /PSX · 500.0 MB');
+  assert.equal(completed.stageLabel, 'Installed to Roms');
+});
+
+test('resolveItemDeviceInstallState handles idle review queues, queued batch items, and error/cancel states', () => {
+  const readyReview = makeJob({ mode: 'review', phase: 'ready' });
+  assert.equal(
+    resolveItemDeviceInstallState(10, readyReview, { completedItems: 0, totalItems: 1 }, 'Roms')
+      .status,
+    'idle',
+  );
+
+  const batchJob = makeJob({
+    itemIds: [10, 20],
+    rows: [
+      makeRow({ itemId: 10, writeState: 'writing' }),
+      makeRow({ rowKey: '20-200', itemId: 20, title: 'Mother 3', writeState: 'pending' }),
+    ],
+    activeTransfer: {
+      itemId: 10,
+      rowKey: '10-100',
+      title: 'Chrono Trigger',
+      stage: 'writing',
+      filename: 'Chrono Trigger.sfc',
+      destinationFolder: 'SNES',
+      bytesWritten: 1024,
+      totalBytes: 4096,
+      percent: 25,
+      bytesPerSec: 1024,
+      fileIndex: 1,
+      totalFiles: 1,
+    },
+  });
+  const queuedItem = resolveItemDeviceInstallState(
+    20,
+    batchJob,
+    { completedItems: 0, totalItems: 2 },
+    'Roms',
+  );
+  assert.equal(queuedItem.status, 'queued');
+  assert.equal(queuedItem.isActive, true);
+  assert.equal(queuedItem.isBatchJob, true);
+  assert.match(queuedItem.bytesLabel, /0\/2 games done/);
+
+  const erroredJob = makeJob({
+    phase: 'error',
+    errorMessage: 'Disk full',
+    rows: [makeRow({ itemId: 10, writeState: 'error', writeDetail: 'Disk full' })],
+  });
+  const errored = resolveItemDeviceInstallState(
+    10,
+    erroredJob,
+    { completedItems: 1, totalItems: 1 },
+    'Roms',
+  );
+  assert.equal(errored.status, 'error');
+  assert.equal(errored.outcomeKind, 'error');
+  assert.equal(errored.outcomeSummary, 'Disk full');
 });

@@ -356,6 +356,14 @@ export function isAbortError(err: unknown): boolean {
   return false;
 }
 
+export type SdStreamStage = 'extracting' | 'writing' | 'finalizing';
+
+export interface SdStreamProgressUpdate {
+  bytesWritten: number;
+  totalBytes: number | null;
+  bytesPerSec: number | null;
+}
+
 export async function streamHttpPayloadToSdFile(
   url: string,
   dirHandle: SdDirectoryHandle,
@@ -363,16 +371,22 @@ export async function streamHttpPayloadToSdFile(
   options?: {
     signal?: AbortSignal;
     hadExistingFile?: boolean;
+    expectedBytes?: number | null;
+    onStage?: (stage: SdStreamStage) => void;
+    onProgress?: (progress: SdStreamProgressUpdate) => void;
     onDebug?: (message: string, detail?: string) => void;
   },
 ): Promise<number> {
   const signal = options?.signal;
   const onDebug = options?.onDebug;
+  const onStage = options?.onStage;
+  const onProgress = options?.onProgress;
   if (signal?.aborted) {
     throw new DOMException('Installation canceled by user.', 'AbortError');
   }
 
   onDebug?.(`Extracting & streaming "${filename}"`, url);
+  onStage?.('extracting');
 
   let res: Response;
   try {
@@ -396,6 +410,14 @@ export async function streamHttpPayloadToSdFile(
     onDebug?.(`HTTP ${res.status} extracting "${filename}"`, cleanErr || url);
     throw new Error(cleanErr || `Extraction failed (HTTP ${res.status})`);
   }
+
+  const rawContentLength = Number(res.headers.get('content-length'));
+  const totalBytes =
+    Number.isFinite(rawContentLength) && rawContentLength > 0
+      ? rawContentLength
+      : options?.expectedBytes && options.expectedBytes > 0
+        ? options.expectedBytes
+        : null;
 
   let existedBefore = Boolean(options?.hadExistingFile);
   if (!existedBefore) {
@@ -435,10 +457,18 @@ export async function streamHttpPayloadToSdFile(
     throw new Error(`Cannot open write stream for "${filename}": ${msg}`);
   }
 
+  const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
   let written = 0;
   try {
     if (res.body) {
       const reader = res.body.getReader();
+      let startedWritingAt = 0;
+      let lastProgressAt = 0;
+      let sampleWindowStartAt = 0;
+      let sampleWindowStartBytes = 0;
+      let smoothedSpeed: number | null = null;
+      let reportedWritingStage = false;
+
       while (true) {
         if (signal?.aborted) {
           await reader.cancel().catch(() => undefined);
@@ -451,21 +481,70 @@ export async function streamHttpPayloadToSdFile(
             await reader.cancel().catch(() => undefined);
             throw new DOMException('Installation canceled by user.', 'AbortError');
           }
+          const tNow = nowMs();
+          if (!reportedWritingStage) {
+            reportedWritingStage = true;
+            startedWritingAt = tNow;
+            sampleWindowStartAt = tNow;
+            sampleWindowStartBytes = 0;
+            onStage?.('writing');
+          }
           await writable.write(value);
           written += value.byteLength;
+
+          const afterWrite = nowMs();
+          const shouldEmit = lastProgressAt === 0 || afterWrite - lastProgressAt >= 100;
+          if (shouldEmit && onProgress) {
+            lastProgressAt = afterWrite;
+            const windowMs = afterWrite - sampleWindowStartAt;
+            const totalElapsedMs = afterWrite - startedWritingAt;
+            if (windowMs >= 250) {
+              const instant = ((written - sampleWindowStartBytes) * 1000) / windowMs;
+              smoothedSpeed =
+                smoothedSpeed === null ? instant : smoothedSpeed * 0.55 + instant * 0.45;
+              sampleWindowStartAt = afterWrite;
+              sampleWindowStartBytes = written;
+            } else if (smoothedSpeed === null && totalElapsedMs >= 100) {
+              smoothedSpeed = (written * 1000) / totalElapsedMs;
+            }
+            onProgress({
+              bytesWritten: written,
+              totalBytes,
+              bytesPerSec:
+                smoothedSpeed !== null && Number.isFinite(smoothedSpeed) && smoothedSpeed > 0
+                  ? Math.round(smoothedSpeed)
+                  : null,
+            });
+          }
         }
       }
+      onProgress?.({
+        bytesWritten: written,
+        totalBytes: totalBytes ?? written,
+        bytesPerSec:
+          smoothedSpeed !== null && Number.isFinite(smoothedSpeed) && smoothedSpeed > 0
+            ? Math.round(smoothedSpeed)
+            : null,
+      });
+      onStage?.('finalizing');
       await writable.close();
       onDebug?.(`Wrote "${filename}" (${written} bytes)`);
       return written;
     }
 
+    onStage?.('writing');
     const buf = await res.arrayBuffer();
     if (signal?.aborted) {
       throw new DOMException('Installation canceled by user.', 'AbortError');
     }
     await writable.write(buf);
     written = buf.byteLength;
+    onProgress?.({
+      bytesWritten: written,
+      totalBytes: totalBytes ?? written,
+      bytesPerSec: null,
+    });
+    onStage?.('finalizing');
     await writable.close();
     onDebug?.(`Wrote "${filename}" (${written} bytes)`);
     return written;
