@@ -2,8 +2,8 @@ apiVersion: v2
 name: retrogametalk-sync
 description: Continuous authenticated scraper and local repository mirror for retrogametalk.com with adaptive rate limiting and a CRT phosphor control console.
 type: application
-version: 1.30.1
-appVersion: "1.30.1"
+version: 1.30.2
+appVersion: "1.30.2"
 keywords:
   - retrogametalk
   - roms

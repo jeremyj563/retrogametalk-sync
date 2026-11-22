@@ -31,6 +31,7 @@ import {
   mergeCatalogReleaseDetailMetadata,
   persistDiscoveredReleaseDownloadHints,
   queryRepositoryItemIds,
+  recomputeReleaseRollup,
   recordSuccessfulLogin,
   releaseDistributedLock,
   saveDiscoveredSystems,
@@ -466,6 +467,7 @@ export class ScraperOrchestrator extends EventEmitter {
   private pendingDownloadQueueIds: number[] = [];
   private pendingDownloadQueueSet = new Set<number>();
   private inFlightDownloadIds = new Set<number>();
+  private ruleFilteredDownloadIds = new Set<number>();
 
   private subscribeRuntimeConfig = (listener: () => void): (() => void) => {
     this.runtimeConfigListeners.add(listener);
@@ -2734,6 +2736,8 @@ export class ScraperOrchestrator extends EventEmitter {
       throw new Error('No downloadable or pending catalog releases matched your selection.');
     }
 
+    const isRuleScopedQueue = Boolean(options.filters?.syncRules);
+
     // Append cleanly to an already-active download queue run without duplicating pending or in-flight releases
     if (this.activeRun && this.activeRun.triggerType === 'download') {
       const activeOrPendingIds = new Set<number>([
@@ -2742,6 +2746,7 @@ export class ScraperOrchestrator extends EventEmitter {
       ]);
       const marked = markCatalogItemsQueuedDetailed(resolvedIds, this.activeRun.id, {
         activeOrPendingIds,
+        allowIncompleteRuleDownloads: isRuleScopedQueue,
       });
 
       const newlyAddedIds: number[] = [];
@@ -2749,6 +2754,9 @@ export class ScraperOrchestrator extends EventEmitter {
         if (!this.pendingDownloadQueueSet.has(id) && !this.inFlightDownloadIds.has(id)) {
           this.pendingDownloadQueueSet.add(id);
           this.pendingDownloadQueueIds.push(id);
+          if (isRuleScopedQueue) {
+            this.ruleFilteredDownloadIds.add(id);
+          }
           newlyAddedIds.push(id);
         }
       }
@@ -2794,7 +2802,9 @@ export class ScraperOrchestrator extends EventEmitter {
       throw new Error(`Another pod holds distributed lock "${lockKey}"`);
     }
 
-    const marked = markCatalogItemsQueuedDetailed(resolvedIds, null);
+    const marked = markCatalogItemsQueuedDetailed(resolvedIds, null, {
+      allowIncompleteRuleDownloads: isRuleScopedQueue,
+    });
     if (marked.queuedIds.length === 0) {
       releaseDistributedLock(lockKey, POD_ID);
       if (marked.alreadyQueuedIds.length > 0) {
@@ -2807,6 +2817,7 @@ export class ScraperOrchestrator extends EventEmitter {
     this.pendingDownloadQueueIds = [...marked.queuedIds];
     this.pendingDownloadQueueSet = new Set(marked.queuedIds);
     this.inFlightDownloadIds.clear();
+    this.ruleFilteredDownloadIds = isRuleScopedQueue ? new Set(marked.queuedIds) : new Set();
     this.activeRun = run;
     this.setRunProgress(0, marked.queuedIds.length, 'queue', null);
     this.abortController = new AbortController();
@@ -2878,6 +2889,7 @@ export class ScraperOrchestrator extends EventEmitter {
           if (signal.aborted) return;
           this.inFlightDownloadIds.add(itemId);
           this.pendingDownloadQueueSet.delete(itemId);
+          const applyReleaseTypeFilter = this.ruleFilteredDownloadIds.has(itemId);
           try {
             const item = getRepositoryItemById(itemId);
             if (!item) return;
@@ -2909,6 +2921,7 @@ export class ScraperOrchestrator extends EventEmitter {
                 signal,
                 runLogger,
                 false,
+                applyReleaseTypeFilter,
               );
               attemptedFiles += Math.max(
                 filesToDownload.length,
@@ -2963,6 +2976,7 @@ export class ScraperOrchestrator extends EventEmitter {
             this.emitStatus();
           } finally {
             this.inFlightDownloadIds.delete(itemId);
+            this.ruleFilteredDownloadIds.delete(itemId);
           }
         }, this.subscribeRuntimeConfig);
       }
@@ -3002,9 +3016,20 @@ export class ScraperOrchestrator extends EventEmitter {
         runLogger('error', `Download queue #${run.id} failed: ${msg}`);
       }
     } finally {
+      const remainingUnprocessed = Array.from(
+        new Set([...this.pendingDownloadQueueIds, ...this.inFlightDownloadIds]),
+      );
+      for (const id of remainingUnprocessed) {
+        try {
+          recomputeReleaseRollup(id);
+        } catch {
+          // ignore rollup cleanup errors during teardown
+        }
+      }
       this.pendingDownloadQueueIds = [];
       this.pendingDownloadQueueSet.clear();
       this.inFlightDownloadIds.clear();
+      this.ruleFilteredDownloadIds.clear();
       if (this.lockRenewTimer) {
         clearInterval(this.lockRenewTimer);
         this.lockRenewTimer = null;
@@ -3090,6 +3115,7 @@ export class ScraperOrchestrator extends EventEmitter {
     signal: AbortSignal,
     runLogger: LoggerFn,
     isDryRun = false,
+    applyReleaseTypeFilter = false,
   ): Promise<{ downloaded: number; skipped: number; failed: number; bytes: number; wouldRecover: number }> {
     let downloaded = 0;
     let skipped = 0;
@@ -3180,13 +3206,74 @@ export class ScraperOrchestrator extends EventEmitter {
       }
     }
 
-    // Release was interrupted mid-metadata before any child file rows were created: seed & download all discovered archives
+    // Release was interrupted mid-metadata before any child file rows were created, OR was queued
+    // via Sync Rules with additional policy-eligible sibling files to fetch: seed & download discovered archives.
     if (filesToRetry.length === 0) {
       if (freshDownloads.length === 0) {
         throw new Error(`No downloadable archive files found on release page ${pageUrl}`);
       }
+
+      let targetDownloads = freshDownloads;
+      if (applyReleaseTypeFilter) {
+        const liveAllowedTypes = normalizeAllowedReleaseTypes(getInternalConfig().allowedReleaseTypes);
+        if (liveAllowedTypes.length > 0) {
+          const latestItem = getRepositoryItemById(item.id) || item;
+          const siblingFilenames = Array.from(
+            new Set([
+              ...freshDownloads.map((d) => (d.filename || '').trim()).filter(Boolean),
+              ...latestItem.files.map((f) => (f.filename || '').trim()).filter(Boolean),
+            ]),
+          );
+          const roleCtx = {
+            genres: latestItem.genres,
+            languages: latestItem.languages,
+            sources: latestItem.sources,
+            title: latestItem.title,
+            systemName: latestItem.systemName,
+            siblingFilenames,
+          };
+          const freshRoles = freshDownloads.map((d) =>
+            classifyFileRole(d.filename, d.displayLabel || d.filename, roleCtx),
+          );
+          const baseMetaTags = deriveReleaseTags(
+            {
+              genres: latestItem.genres,
+              languages: latestItem.languages,
+              sources: latestItem.sources,
+              systemName: latestItem.systemName,
+            },
+            freshRoles,
+          );
+          targetDownloads = freshDownloads.filter((rel, idx) => {
+            const fileTypeKeys = classifyFileRoleToTypeKeys(
+              freshRoles[idx],
+              baseMetaTags,
+              latestItem.systemName,
+            );
+            const match = evaluateReleaseTypeMatch(fileTypeKeys, liveAllowedTypes);
+            if (!match.allowed) {
+              runLogger(
+                'info',
+                `[Type Filter] Skipped ${rel.filename}`,
+                `Detected type: ${match.detectedLabels.join(', ') || freshRoles[idx]} (excluded by policy)`,
+              );
+              return false;
+            }
+            return true;
+          });
+          if (targetDownloads.length === 0) {
+            persistDiscoveredReleaseDownloadHints(
+              pageUrl,
+              freshDownloads.map((d) => ({ filename: d.filename, fileSize: null })),
+            );
+            recomputeReleaseRollup(item.id);
+            return { downloaded, skipped, failed, bytes, wouldRecover };
+          }
+        }
+      }
+
       await runWithConcurrency(
-        freshDownloads,
+        targetDownloads,
         () => getInternalConfig().maxConcurrency,
         signal,
         async (release) => {
@@ -3222,6 +3309,9 @@ export class ScraperOrchestrator extends EventEmitter {
         if (outcome.failed) failed += 1;
         bytes += outcome.bytes;
       }, this.subscribeRuntimeConfig);
+      if (!isDryRun) {
+        recomputeReleaseRollup(item.id);
+      }
       return { downloaded, skipped, failed, bytes, wouldRecover };
     }
 

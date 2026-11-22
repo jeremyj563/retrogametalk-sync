@@ -11,7 +11,13 @@ import {
   isCatalogStatusQueueable,
 } from '../shared/catalogSelection.ts';
 import { normalizeCatalogSort } from '../shared/catalogSort.ts';
-import { normalizeAllowedReleaseTypes } from '../shared/releaseTypeFilter.ts';
+import { parseHumanFileSizeToBytes } from '../shared/fileSize.ts';
+import {
+  classifyFileRoleToTypeKeys,
+  evaluateReleaseTypeMatch,
+  normalizeAllowedReleaseTypes,
+} from '../shared/releaseTypeFilter.ts';
+import { normalizeFilenameKey } from './syncFastSkip.ts';
 import {
   createDefaultStorageFolderConfig,
   normalizeStorageFolderConfig,
@@ -1374,6 +1380,7 @@ export function markCatalogItemsQueuedDetailed(
   runId?: number | null,
   options?: {
     activeOrPendingIds?: ReadonlySet<number>;
+    allowIncompleteRuleDownloads?: boolean;
   },
 ): MarkCatalogItemsQueuedResult {
   const cleanIds = Array.from(
@@ -1384,6 +1391,11 @@ export function markCatalogItemsQueuedDetailed(
   }
 
   const activeOrPendingIds = options?.activeOrPendingIds;
+  const allowIncompleteRuleDownloads = Boolean(options?.allowIncompleteRuleDownloads);
+  const ruleIndexMap = allowIncompleteRuleDownloads ? loadAllReleaseRuleIndexMap() : null;
+  const allowedTypes = allowIncompleteRuleDownloads
+    ? normalizeAllowedReleaseTypes(getPublicConfig().allowedReleaseTypes)
+    : [];
 
   const tx = getDb().transaction(() => {
     const queuedIds: number[] = [];
@@ -1401,7 +1413,32 @@ export function markCatalogItemsQueuedDetailed(
         continue;
       }
 
-      if (row.status === 'downloaded' || row.status === 'skipped') {
+      if (row.status === 'skipped') {
+        alreadyDownloadedIds.push(releaseId);
+        continue;
+      }
+
+      if (row.status === 'downloaded') {
+        if (allowIncompleteRuleDownloads && ruleIndexMap) {
+          const coverage = evaluateReleaseRuleMirrorCoverage(
+            row.status,
+            ruleIndexMap.get(releaseId),
+            allowedTypes,
+          );
+          if (!coverage.fullyMirrored) {
+            getDb()
+              .prepare(`
+                UPDATE catalog_releases
+                SET status = 'queued',
+                    error_message = NULL,
+                    last_run_id = COALESCE(?, last_run_id)
+                WHERE id = ?
+              `)
+              .run(runId ?? null, releaseId);
+            queuedIds.push(releaseId);
+            continue;
+          }
+        }
         alreadyDownloadedIds.push(releaseId);
         continue;
       }
@@ -1943,83 +1980,276 @@ function listStatusFacetCounts(): Record<string, number> {
   };
 }
 
-let releaseFileRolesCache: Map<number, string[]> | null = null;
-let releaseFileRolesCacheDb: Database.Database | null = null;
-
-export function invalidateReleaseFileRolesCache(): void {
-  releaseFileRolesCache = null;
-  releaseFileRolesCacheDb = null;
+interface CachedReleaseFileCoverage {
+  filenameKey: string;
+  basenameKey: string;
+  role: string;
+  isMirrored: boolean;
+  fileSizeBytes: number;
 }
 
-function parseDownloadHintFilenames(downloadHintsJson: string | null): string[] {
+interface CachedReleaseHintCoverage {
+  filenameKey: string;
+  role: string;
+  estimatedBytes: number;
+}
+
+interface CachedReleaseRuleData {
+  systemName: string;
+  fileRoles: string[];
+  baseMetaTags: string[];
+  files: CachedReleaseFileCoverage[];
+  hints: CachedReleaseHintCoverage[];
+}
+
+interface ReleaseRuleCacheReleaseRow {
+  id: number;
+  title: string;
+  system_name: string;
+  genres_json: string | null;
+  languages_json: string | null;
+  sources_json: string | null;
+  download_hints_json: string | null;
+}
+
+interface ReleaseRuleCacheFileRow {
+  filename: string | null;
+  display_label: string | null;
+  local_path: string | null;
+  file_role: string | null;
+  status: string | null;
+  file_size_bytes: number | null;
+}
+
+let releaseRuleIndexCache: Map<number, CachedReleaseRuleData> | null = null;
+let releaseRuleIndexCacheDb: Database.Database | null = null;
+
+export function invalidateReleaseFileRolesCache(): void {
+  releaseRuleIndexCache = null;
+  releaseRuleIndexCacheDb = null;
+}
+
+function parseDownloadHints(
+  downloadHintsJson: string | null,
+): { filename: string; fileSize: string | null }[] {
   if (!downloadHintsJson) return [];
   try {
-    const parsed = JSON.parse(downloadHintsJson) as { filename?: unknown }[];
+    const parsed = JSON.parse(downloadHintsJson) as { filename?: unknown; fileSize?: unknown }[];
     if (!Array.isArray(parsed)) return [];
-    const names: string[] = [];
+    const hints: { filename: string; fileSize: string | null }[] = [];
     for (const h of parsed) {
       const name = typeof h?.filename === 'string' ? h.filename.trim() : '';
-      if (name) names.push(name);
+      if (!name) continue;
+      hints.push({
+        filename: name,
+        fileSize: typeof h?.fileSize === 'string' ? h.fileSize : null,
+      });
     }
-    return names;
+    return hints;
   } catch {
     return [];
   }
 }
 
-function computeFileRolesForSingleRelease(
-  releaseRow: {
-    id: number;
-    title: string;
-    system_name: string;
-    genres_json: string | null;
-    languages_json: string | null;
-    sources_json: string | null;
-    download_hints_json: string | null;
-  },
-  recordedFiles: { filename: string | null; file_role: string | null }[],
-): string[] {
+function computeReleaseRuleData(
+  releaseRow: ReleaseRuleCacheReleaseRow,
+  recordedFiles: ReleaseRuleCacheFileRow[],
+): CachedReleaseRuleData {
+  const hints = parseDownloadHints(releaseRow.download_hints_json);
+  const hintNames = hints.map((h) => h.filename);
   const recordedFilenameSet = new Set<string>();
   const recordedRawFilenames: string[] = [];
-  const rolesList: string[] = [];
 
   for (const f of recordedFiles) {
     const fname = String(f.filename || '').trim();
-    const role = String(f.file_role || '').trim();
     if (fname) {
       recordedFilenameSet.add(fname.toLowerCase());
       recordedRawFilenames.push(fname);
     }
-    if (role) {
-      rolesList.push(role);
+  }
+
+  const genres = parseJsonStringArray(releaseRow.genres_json);
+  const languages = parseJsonStringArray(releaseRow.languages_json);
+  const sources = parseJsonStringArray(releaseRow.sources_json);
+  const systemName = String(releaseRow.system_name || '');
+  const siblingFilenames = Array.from(new Set([...recordedRawFilenames, ...hintNames]));
+  const ctx = {
+    genres,
+    languages,
+    sources,
+    title: releaseRow.title,
+    systemName,
+    siblingFilenames,
+  };
+
+  const rolesList: string[] = [];
+  const allRolesForMetaTags: string[] = [];
+  const files: CachedReleaseFileCoverage[] = [];
+
+  for (const f of recordedFiles) {
+    const fname = String(f.filename || '').trim();
+    const displayLabel = String(f.display_label || '').trim();
+    const localPath = String(f.local_path || '').trim();
+    const storedRole = String(f.file_role || '').trim();
+    const classifiedRole = fname ? classifyFileRole(fname, displayLabel || fname, ctx) : storedRole;
+    const effectiveRole =
+      classifiedRole && classifiedRole !== 'ROM'
+        ? classifiedRole
+        : storedRole || classifiedRole;
+    const matchRole = storedRole || classifiedRole;
+    if (matchRole) {
+      rolesList.push(matchRole);
+    }
+    if (effectiveRole) {
+      allRolesForMetaTags.push(effectiveRole);
+    }
+    const status = String(f.status || 'available');
+    files.push({
+      filenameKey: fname ? normalizeFilenameKey(fname) : '',
+      basenameKey: localPath ? normalizeFilenameKey(path.basename(localPath)) : '',
+      role: effectiveRole || 'ROM',
+      isMirrored: (status === 'downloaded' || status === 'skipped') && localPath.length > 0,
+      fileSizeBytes: Math.max(0, Number(f.file_size_bytes || 0)),
+    });
+  }
+
+  const hintItems: CachedReleaseHintCoverage[] = [];
+  for (const hint of hints) {
+    const hintRole = classifyFileRole(hint.filename, hint.filename, ctx);
+    allRolesForMetaTags.push(hintRole);
+    if (!recordedFilenameSet.has(hint.filename.toLowerCase())) {
+      rolesList.push(hintRole);
+    }
+    hintItems.push({
+      filenameKey: normalizeFilenameKey(hint.filename),
+      role: hintRole,
+      estimatedBytes: parseHumanFileSizeToBytes(hint.fileSize),
+    });
+  }
+
+  const baseMetaTags = deriveReleaseTags(
+    {
+      genres,
+      languages,
+      sources,
+      systemName,
+    },
+    allRolesForMetaTags,
+  );
+
+  return {
+    systemName,
+    fileRoles: rolesList,
+    baseMetaTags,
+    files,
+    hints: hintItems,
+  };
+}
+
+/**
+ * Pure-DB mirror coverage check mirroring `isReleaseFullyMirroredForRules` without synchronous
+ * filesystem `stat` calls (preserving Node.js event-loop responsiveness on HTTP requests).
+ *
+ * Returns `fullyMirrored: false` when a release is not yet mirrored for the active Release Type
+ * policy — including `status = 'downloaded'` releases that still have unmirrored policy-eligible
+ * sibling files in `downloadHints` (or zero recorded child files).
+ */
+function evaluateReleaseRuleMirrorCoverage(
+  status: string,
+  ruleData: CachedReleaseRuleData | undefined,
+  allowedTypes: readonly string[],
+): {
+  fullyMirrored: boolean;
+  unmirroredEstimatedBytes: number;
+} {
+  if (status === 'skipped') {
+    return { fullyMirrored: true, unmirroredEstimatedBytes: 0 };
+  }
+  if (status === 'queued' || status === 'downloading') {
+    return { fullyMirrored: false, unmirroredEstimatedBytes: 0 };
+  }
+
+  const files = ruleData?.files || [];
+  if (files.length === 0) {
+    return { fullyMirrored: false, unmirroredEstimatedBytes: 0 };
+  }
+
+  const hasTypeFilter = allowedTypes.length > 0;
+  const mutableAllowedTypes = [...allowedTypes];
+  const baseMetaTags = ruleData?.baseMetaTags || [];
+  const systemName = ruleData?.systemName || '';
+  const hints = ruleData?.hints || [];
+
+  const mirroredDownloadKeys = new Set<string>();
+  let mirroredEligibleCount = 0;
+  let hasUnmirrored = false;
+  let unmirroredBytes = 0;
+
+  for (const file of files) {
+    if (file.isMirrored) {
+      if (file.filenameKey) mirroredDownloadKeys.add(file.filenameKey);
+      if (file.basenameKey) mirroredDownloadKeys.add(file.basenameKey);
+    }
+
+    let isEligible = true;
+    if (hasTypeFilter) {
+      const fileTypeKeys = classifyFileRoleToTypeKeys(file.role, baseMetaTags, systemName);
+      isEligible = evaluateReleaseTypeMatch(fileTypeKeys, mutableAllowedTypes).allowed;
+    }
+
+    if (!isEligible) {
+      continue;
+    }
+
+    if (!file.isMirrored) {
+      hasUnmirrored = true;
+      unmirroredBytes += file.fileSizeBytes;
+    } else {
+      mirroredEligibleCount += 1;
     }
   }
 
-  const hintNames = parseDownloadHintFilenames(releaseRow.download_hints_json);
-  if (hintNames.length > 0) {
-    const siblingFilenames = Array.from(new Set([...recordedRawFilenames, ...hintNames]));
-    const ctx = {
-      genres: parseJsonStringArray(releaseRow.genres_json),
-      languages: parseJsonStringArray(releaseRow.languages_json),
-      sources: parseJsonStringArray(releaseRow.sources_json),
-      title: releaseRow.title,
-      systemName: releaseRow.system_name,
-      siblingFilenames,
-    };
-    for (const hintName of hintNames) {
-      if (recordedFilenameSet.has(hintName.toLowerCase())) {
+  let eligibleHintsCount = 0;
+  for (const hint of hints) {
+    if (!hint.filenameKey) continue;
+
+    if (hasTypeFilter) {
+      const hintTypeKeys = classifyFileRoleToTypeKeys(hint.role, baseMetaTags, systemName);
+      if (!evaluateReleaseTypeMatch(hintTypeKeys, mutableAllowedTypes).allowed) {
         continue;
       }
-      rolesList.push(classifyFileRole(hintName, hintName, ctx));
+    }
+
+    eligibleHintsCount += 1;
+    if (!mirroredDownloadKeys.has(hint.filenameKey)) {
+      hasUnmirrored = true;
+      unmirroredBytes += hint.estimatedBytes;
     }
   }
 
-  return rolesList;
+  if (hasUnmirrored) {
+    return {
+      fullyMirrored: false,
+      unmirroredEstimatedBytes: unmirroredBytes,
+    };
+  }
+
+  if (mirroredEligibleCount === 0 && eligibleHintsCount === 0) {
+    return {
+      fullyMirrored: hasTypeFilter,
+      unmirroredEstimatedBytes: 0,
+    };
+  }
+
+  return {
+    fullyMirrored: mirroredEligibleCount > 0,
+    unmirroredEstimatedBytes: 0,
+  };
 }
 
 function refreshReleaseFileRolesCacheForRelease(releaseId: number): void {
   const conn = getDb();
-  if (!releaseFileRolesCache || releaseFileRolesCacheDb !== conn) {
+  if (!releaseRuleIndexCache || releaseRuleIndexCacheDb !== conn) {
     return;
   }
 
@@ -2030,126 +2260,70 @@ function refreshReleaseFileRolesCacheForRelease(releaseId: number): void {
        FROM catalog_releases
        WHERE id = ?`,
     )
-    .get(releaseId) as
-    | {
-        id: number;
-        title: string;
-        system_name: string;
-        genres_json: string | null;
-        languages_json: string | null;
-        sources_json: string | null;
-        download_hints_json: string | null;
-      }
-    | undefined;
+    .get(releaseId) as ReleaseRuleCacheReleaseRow | undefined;
 
   if (!releaseRow) {
-    releaseFileRolesCache.delete(releaseId);
+    releaseRuleIndexCache.delete(releaseId);
     return;
   }
 
   const recordedFiles = conn
-    .prepare('SELECT filename, file_role FROM catalog_release_files WHERE release_id = ?')
-    .all(releaseId) as { filename: string | null; file_role: string | null }[];
+    .prepare(
+      'SELECT filename, display_label, local_path, file_role, status, file_size_bytes FROM catalog_release_files WHERE release_id = ?',
+    )
+    .all(releaseId) as ReleaseRuleCacheFileRow[];
 
-  const roles = computeFileRolesForSingleRelease(releaseRow, recordedFiles);
-  if (roles.length > 0) {
-    releaseFileRolesCache.set(releaseId, roles);
-  } else {
-    releaseFileRolesCache.delete(releaseId);
-  }
+  releaseRuleIndexCache.set(releaseId, computeReleaseRuleData(releaseRow, recordedFiles));
 }
 
-function loadAllReleaseFileRolesMap(): Map<number, string[]> {
+function loadAllReleaseRuleIndexMap(): Map<number, CachedReleaseRuleData> {
   const conn = getDb();
-  if (releaseFileRolesCache && releaseFileRolesCacheDb === conn) {
-    return releaseFileRolesCache;
+  if (releaseRuleIndexCache && releaseRuleIndexCacheDb === conn) {
+    return releaseRuleIndexCache;
   }
 
   const fileRows = conn
-    .prepare('SELECT release_id, filename, file_role FROM catalog_release_files')
-    .all() as { release_id: number; filename: string | null; file_role: string | null }[];
+    .prepare(
+      'SELECT release_id, filename, display_label, local_path, file_role, status, file_size_bytes FROM catalog_release_files',
+    )
+    .all() as (ReleaseRuleCacheFileRow & { release_id: number })[];
 
-  const recordedByRelease = new Map<
-    number,
-    { filenames: Set<string>; roles: string[]; rawFilenames: string[] }
-  >();
+  const filesByRelease = new Map<number, ReleaseRuleCacheFileRow[]>();
   for (const row of fileRows) {
     const rid = Number(row.release_id);
-    const role = String(row.file_role || '').trim();
-    const fname = String(row.filename || '').trim();
-    let entry = recordedByRelease.get(rid);
-    if (!entry) {
-      entry = { filenames: new Set(), roles: [], rawFilenames: [] };
-      recordedByRelease.set(rid, entry);
+    let list = filesByRelease.get(rid);
+    if (!list) {
+      list = [];
+      filesByRelease.set(rid, list);
     }
-    if (fname) {
-      entry.filenames.add(fname.toLowerCase());
-      entry.rawFilenames.push(fname);
-    }
-    if (role) {
-      entry.roles.push(role);
-    }
-  }
-
-  const map = new Map<number, string[]>();
-  for (const [rid, entry] of recordedByRelease.entries()) {
-    if (entry.roles.length > 0) {
-      map.set(rid, [...entry.roles]);
-    }
+    list.push(row);
   }
 
   // Extract ONLY `$.downloadHints` inside SQLite so multi-KB HTML descriptions & screenshots are
   // never copied into V8 heap or JSON-parsed on the Node.js event loop.
-  const metaRows = conn
+  const releaseRows = conn
     .prepare(
       `SELECT id, title, system_name, genres_json, languages_json, sources_json,
-              json_extract(metadata_json, '$.downloadHints') AS download_hints_json
-       FROM catalog_releases
-       WHERE metadata_json IS NOT NULL
-         AND json_extract(metadata_json, '$.downloadHints') IS NOT NULL`,
+              CASE
+                WHEN metadata_json IS NOT NULL THEN json_extract(metadata_json, '$.downloadHints')
+                ELSE NULL
+              END AS download_hints_json
+       FROM catalog_releases`,
     )
-    .all() as {
-    id: number;
-    title: string;
-    system_name: string;
-    genres_json: string | null;
-    languages_json: string | null;
-    sources_json: string | null;
-    download_hints_json: string | null;
-  }[];
+    .all() as ReleaseRuleCacheReleaseRow[];
 
-  for (const row of metaRows) {
-    const hintNames = parseDownloadHintFilenames(row.download_hints_json);
-    if (hintNames.length === 0) continue;
-
+  const map = new Map<number, CachedReleaseRuleData>();
+  for (const row of releaseRows) {
     const rid = Number(row.id);
-    const recorded = recordedByRelease.get(rid);
-    const siblingFilenames = Array.from(
-      new Set([...(recorded?.rawFilenames || []), ...hintNames]),
-    );
-    const ctx = {
-      genres: parseJsonStringArray(row.genres_json),
-      languages: parseJsonStringArray(row.languages_json),
-      sources: parseJsonStringArray(row.sources_json),
-      title: row.title,
-      systemName: row.system_name,
-      siblingFilenames,
-    };
-
-    const rolesList = map.get(rid) ?? [];
-    for (const hintName of hintNames) {
-      if (recorded?.filenames.has(hintName.toLowerCase())) {
-        continue;
-      }
-      rolesList.push(classifyFileRole(hintName, hintName, ctx));
+    const recorded = filesByRelease.get(rid) || [];
+    if (recorded.length === 0 && !row.download_hints_json) {
+      continue;
     }
-    if (rolesList.length > 0) {
-      map.set(rid, rolesList);
-    }
+    map.set(rid, computeReleaseRuleData(row, recorded));
   }
 
-  releaseFileRolesCache = map;
-  releaseFileRolesCacheDb = conn;
+  releaseRuleIndexCache = map;
+  releaseRuleIndexCacheDb = conn;
   return map;
 }
 
@@ -2167,31 +2341,50 @@ interface RuleFilterRow {
 function filterCandidateRowsBySyncRules<T extends RuleFilterRow>(
   rows: T[],
   cfg: ScraperConfigPublic,
-  fileRolesMap?: Map<number, string[]>,
+  ruleIndexMap?: Map<number, CachedReleaseRuleData>,
 ): T[] {
   const allowedTypes = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes);
   const targetSystems = normalizeTargetConsoleSlugs(cfg.systemFilter);
   if (allowedTypes.length === 0 && targetSystems.length === 0) {
     return rows;
   }
-  const rolesLookup = allowedTypes.length > 0 ? (fileRolesMap ?? loadAllReleaseFileRolesMap()) : null;
+  const indexLookup = allowedTypes.length > 0 ? (ruleIndexMap ?? loadAllReleaseRuleIndexMap()) : null;
   return rows.filter((row) =>
     doesCatalogReleaseMatchSyncRules(
       {
         systemName: String(row.system_name || ''),
         releaseType: row.release_type ? String(row.release_type) : null,
         releaseTags: parseJsonStringArray(row.release_tags_json),
-        fileRoles: rolesLookup?.get(Number(row.id)) ?? undefined,
+        fileRoles: indexLookup?.get(Number(row.id))?.fileRoles,
       },
       cfg,
     ),
   );
 }
 
+function filterRuleMatchedRowsByDownloadedState<T extends RuleFilterRow>(
+  rows: T[],
+  downloadedFilter: string | undefined,
+  allowedTypes: readonly string[],
+  ruleIndexMap: Map<number, CachedReleaseRuleData>,
+): T[] {
+  if (downloadedFilter !== 'only' && downloadedFilter !== 'exclude') {
+    return rows;
+  }
+  return rows.filter((row) => {
+    const coverage = evaluateReleaseRuleMirrorCoverage(
+      String(row.status || 'available'),
+      ruleIndexMap.get(Number(row.id)),
+      allowedTypes,
+    );
+    return downloadedFilter === 'only' ? coverage.fullyMirrored : !coverage.fullyMirrored;
+  });
+}
+
 function listDownloadedFacetCounts(
   params: CatalogQueryFilterParams,
   cfg?: ScraperConfigPublic,
-  fileRolesMap?: Map<number, string[]>,
+  ruleIndexMap?: Map<number, CachedReleaseRuleData>,
 ): {
   downloaded: number;
   notDownloaded: number;
@@ -2204,15 +2397,22 @@ function listDownloadedFacetCounts(
   const resolvedCfg = cfg ?? (scopedParams.syncRules ? getPublicConfig() : undefined);
   const { where, args } = buildCatalogWhereAndOrder(scopedParams, resolvedCfg);
 
-  if (scopedParams.syncRules && resolvedCfg && normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes).length > 0) {
+  if (scopedParams.syncRules && resolvedCfg) {
+    const indexMap = ruleIndexMap ?? loadAllReleaseRuleIndexMap();
+    const allowedTypes = normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes);
     const candidateRows = getDb()
       .prepare(`SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes FROM catalog_releases ${where}`)
       .all(...args) as RuleFilterRow[];
-    const matched = filterCandidateRowsBySyncRules(candidateRows, resolvedCfg, fileRolesMap);
+    const matched = filterCandidateRowsBySyncRules(candidateRows, resolvedCfg, indexMap);
     let downloaded = 0;
     let notDownloaded = 0;
     for (const row of matched) {
-      if (row.status === 'downloaded' || row.status === 'skipped') downloaded += 1;
+      const coverage = evaluateReleaseRuleMirrorCoverage(
+        String(row.status || 'available'),
+        indexMap.get(Number(row.id)),
+        allowedTypes,
+      );
+      if (coverage.fullyMirrored) downloaded += 1;
       else notDownloaded += 1;
     }
     return { downloaded, notDownloaded };
@@ -2236,7 +2436,7 @@ function listDownloadedFacetCounts(
 function listInstalledFacetCounts(
   params: CatalogQueryFilterParams,
   cfg?: ScraperConfigPublic,
-  fileRolesMap?: Map<number, string[]>,
+  ruleIndexMap?: Map<number, CachedReleaseRuleData>,
 ): {
   installed: number;
   notInstalled: number;
@@ -2248,11 +2448,18 @@ function listInstalledFacetCounts(
   const resolvedCfg = cfg ?? (scopedParams.syncRules ? getPublicConfig() : undefined);
   const { where, args } = buildCatalogWhereAndOrder(scopedParams, resolvedCfg);
 
-  if (scopedParams.syncRules && resolvedCfg && normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes).length > 0) {
+  if (scopedParams.syncRules && resolvedCfg) {
+    const indexMap = ruleIndexMap ?? loadAllReleaseRuleIndexMap();
+    const allowedTypes = normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes);
     const candidateRows = getDb()
       .prepare(`SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, installed_at FROM catalog_releases ${where}`)
       .all(...args) as RuleFilterRow[];
-    const matched = filterCandidateRowsBySyncRules(candidateRows, resolvedCfg, fileRolesMap);
+    const matched = filterRuleMatchedRowsByDownloadedState(
+      filterCandidateRowsBySyncRules(candidateRows, resolvedCfg, indexMap),
+      scopedParams.downloaded,
+      allowedTypes,
+      indexMap,
+    );
     let installed = 0;
     let notInstalled = 0;
     for (const row of matched) {
@@ -2280,23 +2487,32 @@ function listInstalledFacetCounts(
 function listSyncRulesMatchedFacetCount(
   params: CatalogQueryFilterParams,
   cfg: ScraperConfigPublic,
-  fileRolesMap?: Map<number, string[]>,
+  ruleIndexMap?: Map<number, CachedReleaseRuleData>,
 ): number {
   const scopedParams: CatalogQueryFilterParams = {
     ...params,
     syncRules: true,
   };
   const { where, args } = buildCatalogWhereAndOrder(scopedParams, cfg);
-  if (normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes).length === 0) {
+  const allowedTypes = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes);
+  const needsCoverageFilter = params.downloaded === 'only' || params.downloaded === 'exclude';
+  if (allowedTypes.length === 0 && !needsCoverageFilter) {
     const row = getDb()
       .prepare(`SELECT COUNT(*) AS cnt FROM catalog_releases ${where}`)
       .get(...args) as { cnt: number };
     return Number(row.cnt || 0);
   }
+  const indexMap = ruleIndexMap ?? loadAllReleaseRuleIndexMap();
   const candidateRows = getDb()
     .prepare(`SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes FROM catalog_releases ${where}`)
     .all(...args) as RuleFilterRow[];
-  return filterCandidateRowsBySyncRules(candidateRows, cfg, fileRolesMap).length;
+  const matched = filterRuleMatchedRowsByDownloadedState(
+    filterCandidateRowsBySyncRules(candidateRows, cfg, indexMap),
+    params.downloaded,
+    allowedTypes,
+    indexMap,
+  );
+  return matched.length;
 }
 
 function normalizeFilterList(raw: string | string[] | undefined): string[] {
@@ -2460,10 +2676,12 @@ function buildCatalogWhereAndOrder(
   appendJsonFacetCondition(conditions, args, 'languages_json', params.language, params.languageMode);
   appendJsonFacetCondition(conditions, args, 'sources_json', params.source, params.sourceMode);
 
-  if (params.downloaded === 'only') {
-    conditions.push("status IN ('downloaded', 'skipped')");
-  } else if (params.downloaded === 'exclude') {
-    conditions.push("status NOT IN ('downloaded', 'skipped')");
+  if (!params.syncRules) {
+    if (params.downloaded === 'only') {
+      conditions.push("status IN ('downloaded', 'skipped')");
+    } else if (params.downloaded === 'exclude') {
+      conditions.push("status NOT IN ('downloaded', 'skipped')");
+    }
   }
 
   if (params.installed === 'only') {
@@ -2489,6 +2707,8 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   total: number;
 } {
   const cfg = params.syncRules ? getPublicConfig() : undefined;
+  const allowedTypes = cfg ? normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes) : [];
+  const ruleIndexMap = params.syncRules ? loadAllReleaseRuleIndexMap() : undefined;
   const { where, args, orderBy } = buildCatalogWhereAndOrder(params, cfg);
   let rows = getDb()
     .prepare(
@@ -2497,8 +2717,13 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
     )
     .all(...args) as RuleFilterRow[];
 
-  if (params.syncRules && cfg && normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes).length > 0) {
-    rows = filterCandidateRowsBySyncRules(rows, cfg);
+  if (params.syncRules && cfg && ruleIndexMap) {
+    rows = filterRuleMatchedRowsByDownloadedState(
+      filterCandidateRowsBySyncRules(rows, cfg, ruleIndexMap),
+      params.downloaded,
+      allowedTypes,
+      ruleIndexMap,
+    );
   }
 
   const ids: number[] = [];
@@ -2515,6 +2740,29 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
     if (isCatalogStatusInstallable(row.status)) {
       downloadableIds.push(numId);
     }
+
+    if (params.syncRules && ruleIndexMap) {
+      const coverage = evaluateReleaseRuleMirrorCoverage(
+        String(row.status || 'available'),
+        ruleIndexMap.get(numId),
+        allowedTypes,
+      );
+      if (coverage.fullyMirrored) {
+        alreadyDownloadedCount += 1;
+      } else if (isCatalogStatusAlreadyQueued(row.status)) {
+        alreadyQueuedIds.push(numId);
+        alreadyQueuedCount += 1;
+      } else if (isCatalogStatusQueueable(row.status) || row.status === 'downloaded') {
+        queueableIds.push(numId);
+        const estBytes =
+          row.status === 'downloaded' && coverage.unmirroredEstimatedBytes > 0
+            ? coverage.unmirroredEstimatedBytes
+            : Number(row.file_size_bytes || 0);
+        estimatedQueueBytes += estBytes;
+      }
+      continue;
+    }
+
     if (isCatalogStatusAlreadyDownloaded(row.status)) {
       alreadyDownloadedCount += 1;
     } else if (isCatalogStatusAlreadyQueued(row.status)) {
@@ -2545,8 +2793,12 @@ export function queryRepositoryItems(
   },
 ): { items: RepositoryItemRecord[]; total: number; facets: CatalogFacets } {
   const cfg = getPublicConfig();
-  const hasTypeRules = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes).length > 0;
-  const fileRolesMap = hasTypeRules ? loadAllReleaseFileRolesMap() : undefined;
+  const allowedTypes = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes);
+  const hasTypeRules = allowedTypes.length > 0;
+  const needsRuleIndex = Boolean(
+    params.syncRules || hasTypeRules || params.downloaded === 'only' || params.downloaded === 'exclude',
+  );
+  const ruleIndexMap = needsRuleIndex ? loadAllReleaseRuleIndexMap() : undefined;
 
   const { where, args, orderBy } = buildCatalogWhereAndOrder(params, cfg);
   const limit = Math.min(200, Math.max(1, params.limit ?? 50));
@@ -2556,19 +2808,30 @@ export function queryRepositoryItems(
   let queueableFiltered = 0;
   let rows: Record<string, unknown>[] = [];
 
-  if (params.syncRules && hasTypeRules) {
+  if (params.syncRules && ruleIndexMap) {
     const candidates = getDb()
       .prepare(
         `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes
          FROM catalog_releases ${where} ORDER BY ${orderBy}`,
       )
       .all(...args) as RuleFilterRow[];
-    const matched = filterCandidateRowsBySyncRules(candidates, cfg, fileRolesMap);
-    total = matched.length;
-    queueableFiltered = matched.reduce(
-      (acc, r) => acc + (isCatalogStatusQueueable(r.status) ? 1 : 0),
-      0,
+    const matched = filterRuleMatchedRowsByDownloadedState(
+      filterCandidateRowsBySyncRules(candidates, cfg, ruleIndexMap),
+      params.downloaded,
+      allowedTypes,
+      ruleIndexMap,
     );
+    total = matched.length;
+    queueableFiltered = matched.reduce((acc, r) => {
+      const coverage = evaluateReleaseRuleMirrorCoverage(
+        String(r.status || 'available'),
+        ruleIndexMap.get(Number(r.id)),
+        allowedTypes,
+      );
+      if (coverage.fullyMirrored) return acc;
+      if (isCatalogStatusQueueable(r.status) || r.status === 'downloaded') return acc + 1;
+      return acc;
+    }, 0);
     const pageIds = matched.slice(offset, offset + limit).map((r) => Number(r.id));
     if (pageIds.length > 0) {
       const placeholders = pageIds.map(() => '?').join(', ');
@@ -2609,9 +2872,9 @@ export function queryRepositoryItems(
   const languagesFacet = listDistinctJsonFacetWithCounts('languages_json');
   const sourcesFacet = listDistinctJsonFacetWithCounts('sources_json');
   const statusCounts = listStatusFacetCounts();
-  const downloadedCounts = listDownloadedFacetCounts(params, cfg, fileRolesMap);
-  const installedCounts = listInstalledFacetCounts(params, cfg, fileRolesMap);
-  const syncRulesMatched = listSyncRulesMatchedFacetCount(params, cfg, fileRolesMap);
+  const downloadedCounts = listDownloadedFacetCounts(params, cfg, ruleIndexMap);
+  const installedCounts = listInstalledFacetCounts(params, cfg, ruleIndexMap);
+  const syncRulesMatched = listSyncRulesMatchedFacetCount(params, cfg, ruleIndexMap);
 
   const counts: CatalogFacetCounts = {
     tags: tagsFacet.counts,
@@ -2653,7 +2916,7 @@ export function listCatalogReleasesForRuleSync(
   const allRows = getDb()
     .prepare('SELECT * FROM catalog_releases ORDER BY system_name COLLATE NOCASE ASC, title COLLATE NOCASE ASC, id ASC')
     .all() as Record<string, unknown>[];
-  const fileRolesMap = loadAllReleaseFileRolesMap();
+  const ruleIndexMap = loadAllReleaseRuleIndexMap();
   const matchedRows: Record<string, unknown>[] = [];
   let excludedByRulesCount = 0;
 
@@ -2664,7 +2927,7 @@ export function listCatalogReleasesForRuleSync(
         systemName: String(row.system_name || ''),
         releaseType: row.release_type ? String(row.release_type) : null,
         releaseTags: parseJsonStringArray(row.release_tags_json),
-        fileRoles: fileRolesMap.get(rid) ?? undefined,
+        fileRoles: ruleIndexMap.get(rid)?.fileRoles,
       },
       cfg,
     );
@@ -2699,7 +2962,7 @@ export function computeSyncPreflightSummary(): SyncPreflightSummary {
     )
     .all() as RuleFilterRow[];
 
-  const fileRolesMap = allowedTypes.length > 0 ? loadAllReleaseFileRolesMap() : undefined;
+  const ruleIndexMap = loadAllReleaseRuleIndexMap();
 
   let totalCataloged = 0;
   let totalRuleMatched = 0;
@@ -2717,12 +2980,13 @@ export function computeSyncPreflightSummary(): SyncPreflightSummary {
   for (const row of rows) {
     totalCataloged += 1;
     const rid = Number(row.id);
+    const ruleData = ruleIndexMap.get(rid);
     const matches = doesCatalogReleaseMatchSyncRules(
       {
         systemName: String(row.system_name || ''),
         releaseType: row.release_type ? String(row.release_type) : null,
         releaseTags: parseJsonStringArray(row.release_tags_json),
-        fileRoles: fileRolesMap?.get(rid) ?? undefined,
+        fileRoles: ruleData?.fileRoles,
       },
       cfg,
     );
@@ -2734,16 +2998,22 @@ export function computeSyncPreflightSummary(): SyncPreflightSummary {
 
     totalRuleMatched += 1;
     const status = String(row.status || 'available');
-    const sizeBytes = Math.max(0, Number(row.file_size_bytes || 0));
+    const rowSizeBytes = Math.max(0, Number(row.file_size_bytes || 0));
+    const coverage = evaluateReleaseRuleMirrorCoverage(status, ruleData, allowedTypes);
 
-    if (status === 'downloaded' || status === 'skipped') {
+    if (coverage.fullyMirrored) {
       alreadyDownloadedCount += 1;
       continue;
     }
 
+    const sizeBytes =
+      status === 'downloaded' && coverage.unmirroredEstimatedBytes > 0
+        ? coverage.unmirroredEstimatedBytes
+        : rowSizeBytes;
+
     pendingDownloadCount += 1;
     estimatedPendingBytes += sizeBytes;
-    if (status === 'available') {
+    if (status === 'available' || status === 'downloaded') {
       availablePendingCount += 1;
     } else if (status === 'partial' || status === 'failed') {
       retryablePendingCount += 1;
@@ -3455,9 +3725,9 @@ export function deleteRepositoryItemsByIds(ids: number[]): RepositoryItemRecord[
   const items = rows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || []));
 
   getDb().prepare(`DELETE FROM catalog_releases WHERE id IN (${placeholders})`).run(...validIds);
-  if (releaseFileRolesCache) {
+  if (releaseRuleIndexCache) {
     for (const id of validIds) {
-      releaseFileRolesCache.delete(id);
+      releaseRuleIndexCache.delete(id);
     }
   }
   return items;
