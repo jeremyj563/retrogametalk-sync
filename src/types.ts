@@ -110,6 +110,26 @@ export interface ConfigSaveResult {
   liveSyncReload?: import('./shared/syncRuleMatcher').LiveSyncReloadReceipt | null;
 }
 
+export type ConfigPatchPayload = Partial<ScraperConfigPublic> & {
+  password?: string;
+  clearPassword?: boolean;
+};
+
+export interface AppAuthStatus {
+  enabled: boolean;
+  authenticated: boolean;
+  usernameRequired: boolean;
+}
+
+export interface ConfigBackupImportResult {
+  ok: boolean;
+  config: ScraperConfigPublic;
+  liveSyncReload?: import('./shared/syncRuleMatcher').LiveSyncReloadReceipt | null;
+  appliedFields: string[];
+  skippedEnvLocked: string[];
+  changesCount: number;
+}
+
 export interface DryRunSampleRelease {
   id?: number;
   title: string;

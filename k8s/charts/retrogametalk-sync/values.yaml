@@ -61,7 +61,8 @@ persistence:
 # RetroGameTalk credentials and SQLite encryption key.
 # Leave username/password empty if you prefer configuring them interactively in the UI.
 credentials:
-  # Name of an existing Kubernetes Secret containing RGT_USERNAME, RGT_PASSWORD, ENCRYPTION_KEY.
+  # Name of an existing Kubernetes Secret containing RGT_USERNAME, RGT_PASSWORD, ENCRYPTION_KEY,
+  # and optionally APP_AUTH_USERNAME, APP_AUTH_PASSWORD, APP_AUTH_SESSION_SECRET.
   # When set, the chart will not create a Secret resource.
   existingSecret: ""
   # Optional RetroGameTalk account username (locks UI username field when non-empty)
@@ -71,6 +72,15 @@ credentials:
   # Optional 32+ character key used for AES-256-GCM credential encryption in SQLite.
   # If omitted, the container generates and persists a volume-local .keyfile automatically.
   encryptionKey: ""
+  # Optional self-hosted dashboard/API lock password (maps to APP_AUTH_PASSWORD).
+  # Leave empty to allow direct access without a login screen.
+  appAuthPassword: ""
+  # Optional username paired with appAuthPassword (maps to APP_AUTH_USERNAME).
+  # Leave empty for password-only unlock when appAuthPassword is set.
+  appAuthUsername: ""
+  # Optional stable secret used to sign app auth session cookies across pod restarts (maps to APP_AUTH_SESSION_SECRET).
+  # If omitted, an ephemeral per-process key is generated automatically.
+  appAuthSessionSecret: ""
 
 # Scraper engine, scheduler, and adaptive AIMD rate-limit configuration
 scraper:

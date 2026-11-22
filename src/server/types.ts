@@ -77,6 +77,7 @@ export interface ConfigUpdateInput {
   loginUrl?: string;
   username?: string;
   password?: string;
+  clearPassword?: boolean;
   downloadDir?: string;
   cronSchedule?: string;
   scheduleEnabled?: boolean;
@@ -98,6 +99,12 @@ export interface ConfigUpdateInput {
   romMaxFilenameLen?: number;
   storageFolderConfig?: import('../shared/storageFolderMappings.ts').StorageFolderMappingConfig;
   autoDownloadNewReleases?: boolean;
+}
+
+export interface AppAuthStatus {
+  enabled: boolean;
+  authenticated: boolean;
+  usernameRequired: boolean;
 }
 
 export interface DryRunSampleRelease {

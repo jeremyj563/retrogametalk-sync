@@ -8,17 +8,26 @@ import {
   useState,
 } from 'react';
 import {
+  AlertTriangle,
+  Archive,
   Check,
   CheckCircle2,
   ChevronDown,
+  Download,
   Eye,
   EyeOff,
   Gauge,
   KeyRound,
   ShieldCheck,
+  Trash2,
+  Upload,
   XCircle,
 } from 'lucide-react';
 import { useSectionSpotlight } from '../hooks/useSectionSpotlight';
+import {
+  parseAndValidateConfigBackup,
+  type ParsedConfigBackupPlan,
+} from '../shared/configBackup';
 import {
   PACING_PROFILES,
   describeCurrentPacing,
@@ -28,9 +37,11 @@ import {
 import { formatLiveReloadRunLabel } from '../shared/syncRuleMatcher';
 import type {
   AuthTestResult,
+  ConfigBackupImportResult,
   ConfigDirtyState,
   ConfigFocusRequest,
   ConfigPanelHandle,
+  ConfigPatchPayload,
   LiveSyncReloadReceipt,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
@@ -46,7 +57,7 @@ interface SystemSettingsPanelProps {
   focusRequest?: ConfigFocusRequest | null;
   onDirtyChange?: (state: ConfigDirtyState) => void;
   onSaveConfig: (
-    patch: Partial<ScraperConfigPublic> & { password?: string },
+    patch: ConfigPatchPayload,
   ) => Promise<{ liveSyncReload?: LiveSyncReloadReceipt | null } | void>;
   onRefreshConfig: () => Promise<void>;
 }
@@ -67,7 +78,8 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
     const [baseUrl, setBaseUrl] = useState(config.baseUrl);
     const [loginUrl, setLoginUrl] = useState(config.loginUrl);
     const [username, setUsername] = useState(config.username);
-    const [password, setPassword] = useState(config.password);
+    const [passwordInput, setPasswordInput] = useState('');
+    const [clearSavedPassword, setClearSavedPassword] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
     const [downloadDir, setDownloadDir] = useState(config.downloadDir);
 
@@ -87,6 +99,18 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
     const [requestTimeoutMs, setRequestTimeoutMs] = useState(config.requestTimeoutMs);
     const [userAgent, setUserAgent] = useState(config.userAgent);
     const [showAdvancedPacing, setShowAdvancedPacing] = useState(false);
+
+    // 3. Configuration Backup & Restore state
+    const backupFileInputRef = useRef<HTMLInputElement | null>(null);
+    const [exportingBackup, setExportingBackup] = useState(false);
+    const [applyingBackup, setApplyingBackup] = useState(false);
+    const [backupPreview, setBackupPreview] = useState<{
+      filename: string;
+      rawPayload: unknown;
+      plan: ParsedConfigBackupPlan;
+    } | null>(null);
+    const [backupNotice, setBackupNotice] = useState<string | null>(null);
+    const [backupError, setBackupError] = useState<string | null>(null);
 
     const authSectionRef = useRef<HTMLElement | null>(null);
     const pacingSectionRef = useRef<HTMLElement | null>(null);
@@ -157,7 +181,8 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
       setBaseUrl(target.baseUrl);
       setLoginUrl(target.loginUrl);
       setUsername(target.username);
-      setPassword(target.password);
+      setPasswordInput('');
+      setClearSavedPassword(false);
       setDownloadDir(target.downloadDir);
 
       setBaseDelayMs(target.baseDelayMs);
@@ -233,11 +258,15 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
     }, [minDelayMs, maxDelayMs, baseDelayMs]);
 
     const buildAccountPayload = useCallback(
-      () => ({
+      (): ConfigPatchPayload => ({
         ...(!baseUrlLockedByEnv ? { baseUrl } : {}),
         ...(!loginUrlLockedByEnv ? { loginUrl } : {}),
         ...(!usernameLockedByEnv ? { username } : {}),
-        ...(!passwordLockedByEnv ? { password } : {}),
+        ...(!passwordLockedByEnv && clearSavedPassword
+          ? { clearPassword: true }
+          : !passwordLockedByEnv && passwordInput.length > 0
+            ? { password: passwordInput }
+            : {}),
         ...(!downloadDirLockedByEnv ? { downloadDir } : {}),
       }),
       [
@@ -248,7 +277,8 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
         usernameLockedByEnv,
         username,
         passwordLockedByEnv,
-        password,
+        clearSavedPassword,
+        passwordInput,
         downloadDirLockedByEnv,
         downloadDir,
       ],
@@ -318,7 +348,8 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
         (!baseUrlLockedByEnv && baseUrl !== config.baseUrl) ||
         (!loginUrlLockedByEnv && loginUrl !== config.loginUrl) ||
         (!usernameLockedByEnv && username !== config.username) ||
-        (!passwordLockedByEnv && password !== config.password) ||
+        (!passwordLockedByEnv &&
+          (passwordInput.length > 0 || (clearSavedPassword && config.hasPassword))) ||
         (!downloadDirLockedByEnv && downloadDir !== config.downloadDir);
       if (accountChanged) changedSections.push('Account & Paths');
 
@@ -353,7 +384,8 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
       usernameLockedByEnv,
       username,
       passwordLockedByEnv,
-      password,
+      passwordInput,
+      clearSavedPassword,
       downloadDirLockedByEnv,
       downloadDir,
       baseDelayLockedByEnv,
@@ -410,6 +442,8 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
       try {
         const saveResult = await onSaveConfig(buildSavePayload());
         isDirtyRef.current = false;
+        setPasswordInput('');
+        setClearSavedPassword(false);
         const liveReceipt =
           saveResult && 'liveSyncReload' in saveResult ? saveResult.liveSyncReload : null;
         if (liveReceipt?.applied) {
@@ -461,7 +495,12 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
       try {
         await onSaveConfig(buildSavePayload());
         isDirtyRef.current = false;
-        const res = await fetch('/api/auth/test', { method: 'POST' });
+        setPasswordInput('');
+        setClearSavedPassword(false);
+        const res = await fetch('/api/auth/test', {
+          method: 'POST',
+          headers: { 'X-Requested-With': 'rgt-sync' },
+        });
         const parsed = await readJsonSafely<AuthTestResult>(res);
         if (parsed.data && typeof parsed.data.message === 'string') {
           setAuthResult(parsed.data);
@@ -491,6 +530,114 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
         });
       } finally {
         setTestingAuth(false);
+      }
+    };
+
+    const handleExportBackup = async () => {
+      setExportingBackup(true);
+      setBackupError(null);
+      setBackupNotice(null);
+      try {
+        const res = await fetch('/api/backup/export');
+        if (!res.ok) {
+          throw new Error(`Backup export failed (HTTP ${res.status})`);
+        }
+        const blob = await res.blob();
+        const disposition = res.headers.get('content-disposition') || '';
+        const match = disposition.match(/filename="?([^";]+)"?/i);
+        const fallbackDate = new Date().toISOString().slice(0, 10);
+        const filename = match?.[1] || `rgt-sync-backup-${fallbackDate}.json`;
+
+        const objectUrl = URL.createObjectURL(blob);
+        try {
+          const link = document.createElement('a');
+          link.href = objectUrl;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+        }
+        setBackupNotice(`Downloaded secret-free backup: ${filename}`);
+      } catch (err) {
+        setBackupError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setExportingBackup(false);
+      }
+    };
+
+    const handleSelectBackupFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = '';
+      if (!file) return;
+
+      setBackupError(null);
+      setBackupNotice(null);
+      setBackupPreview(null);
+
+      try {
+        const text = await file.text();
+        let parsedJson: unknown;
+        try {
+          parsedJson = JSON.parse(text);
+        } catch {
+          setBackupError(`"${file.name}" is not valid JSON.`);
+          return;
+        }
+
+        const validation = parseAndValidateConfigBackup(parsedJson, config);
+        if (!validation.valid) {
+          setBackupError(validation.error);
+          return;
+        }
+
+        setBackupPreview({
+          filename: file.name,
+          rawPayload: parsedJson,
+          plan: validation,
+        });
+      } catch (err) {
+        setBackupError(err instanceof Error ? err.message : 'Unable to read backup file.');
+      }
+    };
+
+    const handleApplyBackup = async () => {
+      if (!backupPreview || applyingBackup) return;
+      setApplyingBackup(true);
+      setBackupError(null);
+      setBackupNotice(null);
+      try {
+        const res = await fetch('/api/backup/import', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'rgt-sync',
+          },
+          body: JSON.stringify(backupPreview.rawPayload),
+        });
+        const parsed = await readJsonSafely<ConfigBackupImportResult & { error?: string }>(res);
+        if (!parsed.ok || !parsed.data?.ok) {
+          throw new Error(parsed.data?.error || parsed.errorMessage || `Import failed (HTTP ${res.status})`);
+        }
+        isDirtyRef.current = false;
+        resetFormToConfig(parsed.data.config);
+        await onRefreshConfig();
+
+        const appliedCount = parsed.data.appliedFields.length;
+        const skippedCount = parsed.data.skippedEnvLocked.length;
+        const skipSuffix =
+          skippedCount > 0 ? ` (${skippedCount} env-locked field${skippedCount === 1 ? '' : 's'} skipped)` : '';
+        setBackupNotice(
+          appliedCount > 0
+            ? `Applied ${appliedCount} setting${appliedCount === 1 ? '' : 's'} from ${backupPreview.filename}${skipSuffix}.`
+            : `No changes needed — active configuration already matches ${backupPreview.filename}${skipSuffix}.`,
+        );
+        setBackupPreview(null);
+      } catch (err) {
+        setBackupError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setApplyingBackup(false);
       }
     };
 
@@ -604,26 +751,68 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
               <div className="relative">
                 <input
                   type={showPassword ? 'text' : 'password'}
-                  value={password}
+                  autoComplete="new-password"
+                  value={passwordInput}
                   disabled={passwordLockedByEnv}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter repository password"
+                  onChange={(e) => {
+                    setPasswordInput(e.target.value);
+                    if (clearSavedPassword && e.target.value.length > 0) {
+                      setClearSavedPassword(false);
+                    }
+                  }}
+                  placeholder={
+                    passwordLockedByEnv
+                      ? 'Managed by RGT_PASSWORD environment variable'
+                      : clearSavedPassword
+                        ? 'Saved password will be cleared when you save'
+                        : config.hasPassword
+                          ? 'Saved on server — enter a new password to replace'
+                          : 'Enter repository password'
+                  }
                   className="w-full pl-3 pr-10 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor disabled:opacity-70"
                 />
                 <button
                   type="button"
+                  disabled={passwordLockedByEnv}
                   onClick={() => setShowPassword((v) => !v)}
                   aria-label={showPassword ? 'Hide password' : 'Show password'}
                   title={showPassword ? 'Hide password' : 'Show password'}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-crt-muted hover:text-crt-phosphor transition-colors cursor-pointer"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-crt-muted hover:text-crt-phosphor transition-colors cursor-pointer disabled:opacity-40"
                 >
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
               {!passwordLockedByEnv && (
-                <p className="text-[11px] font-mono text-crt-muted">
-                  {config.hasPassword ? 'Persisted encrypted in SQLite' : 'Not set yet'}
-                </p>
+                <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                  <span className={clearSavedPassword ? 'text-crt-amber' : 'text-crt-muted'}>
+                    {clearSavedPassword
+                      ? 'Marked for removal on Save'
+                      : passwordInput.length > 0
+                        ? 'New password staged — save to replace stored secret'
+                        : config.hasPassword
+                          ? 'Stored encrypted on server (never transmitted back to browser)'
+                          : 'Not set yet'}
+                  </span>
+                  {config.hasPassword && passwordInput.length === 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setClearSavedPassword((v) => !v)}
+                      title={
+                        clearSavedPassword
+                          ? 'Keep the currently saved repository password'
+                          : 'Remove the saved repository password on next save'
+                      }
+                      className={`inline-flex items-center gap-1 underline transition-colors cursor-pointer shrink-0 ${
+                        clearSavedPassword
+                          ? 'text-crt-phosphor hover:text-crt-text'
+                          : 'text-crt-muted hover:text-crt-crimson'
+                      }`}
+                    >
+                      {!clearSavedPassword && <Trash2 className="h-3 w-3" />}
+                      <span>{clearSavedPassword ? 'Keep saved' : 'Clear'}</span>
+                    </button>
+                  )}
+                </div>
               )}
             </div>
 
@@ -1098,6 +1287,167 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
               </div>
             </div>
           </div>
+        </section>
+
+        {/* 3. Configuration Backup & Restore */}
+        <section className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-6 space-y-5">
+          <div aria-hidden="true" className="crt-edge-beam">
+            <span />
+          </div>
+
+          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
+            <div className="flex items-start gap-3">
+              <Archive className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
+              <div className="space-y-1">
+                <h2 className="font-display text-lg font-semibold text-crt-text">
+                  Configuration Backup &amp; Restore
+                </h2>
+                <p className="text-xs text-crt-muted max-w-2xl leading-relaxed">
+                  Export a portable JSON snapshot of your Mirror URLs, Sync Rules, schedule, request pacing, ROM naming template, and console folder mappings. Passwords, usernames, session cookies, and local disk paths are always excluded.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                disabled={exportingBackup}
+                onClick={() => void handleExportBackup()}
+                title="Download a secret-free JSON backup of your Sync Rules, pacing, and folder mappings"
+                className="inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-medium border border-crt-phosphor text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap cursor-pointer disabled:opacity-50"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>{exportingBackup ? 'Exporting...' : 'Export Settings Backup (.json)'}</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={applyingBackup}
+                onClick={() => backupFileInputRef.current?.click()}
+                title="Load a RetroGameTalk Sync JSON backup file and preview changes before applying"
+                className="inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-medium border border-crt-border-strong bg-crt-bg text-crt-text hover:border-crt-phosphor hover:text-crt-phosphor rounded transition-colors whitespace-nowrap cursor-pointer disabled:opacity-50"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                <span>Import Settings Backup</span>
+              </button>
+
+              <input
+                ref={backupFileInputRef}
+                type="file"
+                accept=".json,application/json"
+                onChange={(e) => void handleSelectBackupFile(e)}
+                className="hidden"
+              />
+            </div>
+          </div>
+
+          {backupError && (
+            <div
+              role="alert"
+              className="border border-crt-crimson/40 bg-crt-crimson/10 rounded px-4 py-3 text-xs font-mono text-crt-text flex items-start justify-between gap-3"
+            >
+              <span className="inline-flex items-start gap-2">
+                <XCircle className="h-4 w-4 text-crt-crimson shrink-0 mt-0.5" />
+                <span>{backupError}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setBackupError(null)}
+                className="text-crt-muted hover:text-crt-text underline shrink-0 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {backupNotice && (
+            <div className="border border-crt-phosphor/40 bg-crt-phosphor/8 rounded px-4 py-3 text-xs font-mono text-crt-text flex items-start justify-between gap-3">
+              <span className="inline-flex items-start gap-2">
+                <CheckCircle2 className="h-4 w-4 text-crt-phosphor shrink-0 mt-0.5" />
+                <span>{backupNotice}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setBackupNotice(null)}
+                className="text-crt-muted hover:text-crt-text underline shrink-0 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {backupPreview && (
+            <div className="border border-crt-border-strong bg-crt-bg rounded-md p-4 space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-crt-border pb-3">
+                <div className="space-y-1 min-w-0">
+                  <div className="text-xs font-display font-semibold text-crt-text truncate">
+                    Preview Import: {backupPreview.filename}
+                  </div>
+                  <div className="text-[11px] font-mono text-crt-muted tabular-nums">
+                    v{backupPreview.plan.snapshot.appVersion} · Exported{' '}
+                    {backupPreview.plan.snapshot.exportedAt.slice(0, 10)} ·{' '}
+                    {backupPreview.plan.summaryTags.join(' · ')}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={applyingBackup}
+                    onClick={() => setBackupPreview(null)}
+                    className="px-3 py-1.5 text-xs font-mono text-crt-muted hover:text-crt-text border border-crt-border rounded transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={applyingBackup || backupPreview.plan.changes.length === 0}
+                    onClick={() => void handleApplyBackup()}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-display font-semibold border border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor hover:bg-crt-phosphor/25 rounded transition-colors cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    <span>
+                      {applyingBackup
+                        ? 'Applying...'
+                        : `Apply Backup (${backupPreview.plan.changes.length})`}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {backupPreview.plan.changes.length === 0 ? (
+                <p className="text-xs font-mono text-crt-muted">
+                  This backup matches your current active configuration — no changes need to be applied.
+                </p>
+              ) : (
+                <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                  {backupPreview.plan.changes.map((change) => (
+                    <div
+                      key={change.field}
+                      className="flex flex-wrap items-baseline justify-between gap-2 text-xs font-mono py-1 border-b border-crt-border/40 last:border-b-0"
+                    >
+                      <span className="text-crt-text">
+                        <span className="text-crt-muted">[{change.section}]</span> {change.label}
+                      </span>
+                      <span className="text-crt-muted tabular-nums">
+                        {change.from} <span className="text-crt-phosphor">→</span>{' '}
+                        <span className="text-crt-text">{change.to}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {backupPreview.plan.skippedEnvLocked.length > 0 && (
+                <div className="border border-crt-amber/40 bg-crt-amber/8 rounded px-3 py-2 text-[11px] font-mono text-crt-amber flex items-start gap-2">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    Skipped because locked by environment variables:{' '}
+                    {backupPreview.plan.skippedEnvLocked.map((item) => item.envVar).join(', ')}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         <ConfigSaveBar

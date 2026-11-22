@@ -510,7 +510,12 @@ export function getInternalConfig(): ScraperConfigInternal {
 }
 
 export function getPublicConfig(): ScraperConfigPublic {
-  return getInternalConfig();
+  const internal = getInternalConfig();
+  return {
+    ...internal,
+    password: '',
+    hasPassword: Boolean(internal.password),
+  };
 }
 
 export function getSystemIndexState(): Record<string, SystemIndexCursor> {
@@ -605,9 +610,14 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
   fs.mkdirSync(nextDownloadDir, { recursive: true });
 
   const nextUsername = (input.username ?? String(current.username)).trim();
-  const nextPasswordEnc = input.password !== undefined
-    ? (input.password === '' ? '' : encryptSecret(input.password))
-    : String(current.password_enc || '');
+  const clearPasswordRequested = input.clearPassword === true;
+  const replacementPassword =
+    typeof input.password === 'string' && input.password.length > 0 ? input.password : null;
+  const nextPasswordEnc = clearPasswordRequested
+    ? ''
+    : replacementPassword !== null
+      ? encryptSecret(replacementPassword)
+      : String(current.password_enc || '');
 
   const effectiveCurrentBaseUrl = process.env.RGT_BASE_URL || String(current.base_url || '');
   const effectiveCurrentLoginUrl = process.env.RGT_LOGIN_URL || String(current.login_url || '');
@@ -625,8 +635,8 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     nextUsername !== effectiveCurrentUsername.trim();
   const passwordChanged =
     !process.env.RGT_PASSWORD &&
-    input.password !== undefined &&
-    input.password !== currentPasswordPlain;
+    ((clearPasswordRequested && currentPasswordPlain !== '') ||
+      (replacementPassword !== null && replacementPassword !== currentPasswordPlain));
 
   const authCredentialsChanged = baseChanged || loginChanged || usernameChanged || passwordChanged;
 
