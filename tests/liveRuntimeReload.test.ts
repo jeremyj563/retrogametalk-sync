@@ -231,3 +231,70 @@ test('formatLiveReloadRunLabel formats all run types and dry-run modes cleanly',
   assert.equal(formatLiveReloadRunLabel({ runMode: 'retry', dryRun: true }), 'Retry Failed Dry Run');
   assert.equal(formatLiveReloadRunLabel({ triggerType: 'download', mode: 'incremental' }), 'Download Queue');
 });
+
+test('runWithConcurrency mid-batch Sync Rule reload breaks out right after in-flight item even when concurrency getter consumes revision first', async () => {
+  const items = [0, 1, 2, 3, 4];
+  const item0Gate = createDeferred<void>();
+  const listeners: (() => void)[] = [];
+
+  let syncRulesRevision = 0;
+  let observedRuleRevision = 0;
+  let appliedRuleVersion = 0;
+  let rulesChangedDuringMirror = false;
+  const processed: number[] = [];
+
+  const syncLiveRules = () => {
+    if (syncRulesRevision === observedRuleRevision) return false;
+    observedRuleRevision = syncRulesRevision;
+    appliedRuleVersion += 1;
+    return true;
+  };
+
+  const mirrorPassRuleVersion = appliedRuleVersion;
+  const controller = new AbortController();
+  const runPromise = runWithConcurrency(
+    items,
+    () => {
+      // Mirrors Full Sync Phase 2 concurrency getter calling syncLiveRules() when notified
+      syncLiveRules();
+      return 1;
+    },
+    controller.signal,
+    async (item) => {
+      if (rulesChangedDuringMirror) return;
+      syncLiveRules();
+      if (appliedRuleVersion !== mirrorPassRuleVersion) {
+        rulesChangedDuringMirror = true;
+        return;
+      }
+      processed.push(item);
+      if (item === 0) {
+        await item0Gate.promise;
+      }
+    },
+    (cb) => {
+      listeners.push(cb);
+      return () => {};
+    },
+  );
+
+  // Wait for item 0 to enter flight
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(processed, [0]);
+
+  // Simulate saving new consoles mid-run: revision bumps AND runtime listener invokes concurrency getter
+  syncRulesRevision += 1;
+  for (const cb of listeners) cb();
+
+  // Concurrency getter already bumped observedRuleRevision, yet appliedRuleVersion preserved the transition
+  assert.equal(observedRuleRevision, 1);
+  assert.equal(appliedRuleVersion, 1);
+
+  // Release item 0; worker must immediately break out without processing items 1..4
+  item0Gate.resolve();
+  await runPromise;
+
+  assert.equal(rulesChangedDuringMirror, true);
+  assert.deepEqual(processed, [0]);
+});
+
