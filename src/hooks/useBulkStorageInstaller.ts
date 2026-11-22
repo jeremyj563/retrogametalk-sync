@@ -80,6 +80,7 @@ export interface ExportQueueRow {
   outputNamesByTargetId: Record<string, string>;
   replaceOlderByTargetId: Record<string, boolean>;
   overwriteExisting: boolean;
+  previousInstalledFilename?: string | null;
   error: string | null;
   patchOnly: boolean;
   ignoredEntriesCount: number;
@@ -137,6 +138,11 @@ export interface BulkInstallJobState {
 export interface BulkInstallKnownItemMeta {
   title: string;
   systemName: string;
+  previousInstalledFilename?: string | null;
+}
+
+export interface ExpressInstallOptions {
+  overwriteExisting?: boolean;
 }
 
 export interface BulkInstallMetrics {
@@ -203,7 +209,14 @@ function buildRowsFromInspectedItem(
   entry: SdExportBatchItemResult,
   mode: 'express' | 'review',
   filterContext: SmartRomFilterContext,
+  options?: {
+    overwriteExisting?: boolean;
+    previousInstalledFilename?: string | null;
+  },
 ): ExportQueueRow[] {
+  const overwriteExisting = Boolean(options?.overwriteExisting);
+  const previousInstalledFilename = options?.previousInstalledFilename ?? null;
+
   if (entry.inspections.length === 0) {
     return [
       {
@@ -221,7 +234,8 @@ function buildRowsFromInspectedItem(
         isMultiChoiceItem: false,
         outputNamesByTargetId: {},
         replaceOlderByTargetId: {},
-        overwriteExisting: false,
+        overwriteExisting,
+        previousInstalledFilename,
         error: entry.error || 'No downloadable archive found',
         patchOnly: false,
         ignoredEntriesCount: 0,
@@ -304,7 +318,8 @@ function buildRowsFromInspectedItem(
       isMultiChoiceItem: hasCompetingVariants && insp.playableTargets.length > 0,
       outputNamesByTargetId: namesMap,
       replaceOlderByTargetId: replaceMap,
-      overwriteExisting: false,
+      overwriteExisting,
+      previousInstalledFilename,
       error:
         insp.playableTargets.length === 0
           ? insp.patchOnly
@@ -560,16 +575,24 @@ export function useBulkStorageInstaller({
   }, [applyMountedHandle, emitSdDebug]);
 
   const syncInstalledIdsToServer = useCallback(
-    async (ids: number[], deviceLabel: string) => {
+    async (
+      ids: number[],
+      deviceLabel: string,
+      itemMeta?: Record<number, { fileId?: number | null; filename?: string | null }>,
+    ) => {
       if (ids.length === 0) return;
       try {
         const res = await fetch('/api/items/installed', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'rgt-sync',
+          },
           body: JSON.stringify({
             ids,
             installed: true,
             deviceLabel,
+            ...(itemMeta && Object.keys(itemMeta).length > 0 ? { itemMeta } : {}),
           }),
         });
         const parsed = await readJsonSafely<{ items?: RepositoryItemRecord[] }>(res);
@@ -657,6 +680,8 @@ export function useBulkStorageInstaller({
       detail: string;
       bytesWritten: number;
       installedSuccess: boolean;
+      installedFileId: number | null;
+      installedFilename: string | null;
     }> => {
       if (signal.aborted) {
         throw new DOMException('Installation canceled by user.', 'AbortError');
@@ -686,6 +711,8 @@ export function useBulkStorageInstaller({
       let rowBytes = 0;
       let fileIndex = 0;
       let upgradedOldName: string | null = null;
+      let overwroteExisting = false;
+      let lastWrittenFilename: string | null = null;
       let allSkipped = true;
       let rowFailed: string | null = null;
       const touchedFolders = new Set<string>();
@@ -768,6 +795,8 @@ export function useBulkStorageInstaller({
             detail,
             bytesWritten: rowBytes,
             installedSuccess: false,
+            installedFileId: null,
+            installedFilename: null,
           };
         }
 
@@ -782,7 +811,11 @@ export function useBulkStorageInstaller({
 
         const cardStatus = findUpgradeCandidateOnCard(finalName, scan);
         if (cardStatus.exactMatch && !row.overwriteExisting) {
+          lastWrittenFilename = finalName;
           continue;
+        }
+        if (cardStatus.exactMatch && row.overwriteExisting) {
+          overwroteExisting = true;
         }
         allSkipped = false;
 
@@ -882,13 +915,40 @@ export function useBulkStorageInstaller({
             );
           }
 
-          if (cardStatus.olderEntryName && row.replaceOlderByTargetId[targetId] !== false) {
+          lastWrittenFilename = target.kind === 'disc_set' ? finalName.replace(/\.zip$/i, '') : finalName;
+
+          let olderEntryToRemove: string | null =
+            cardStatus.olderEntryName && row.replaceOlderByTargetId[targetId] !== false
+              ? cardStatus.olderEntryName
+              : null;
+
+          if (
+            !olderEntryToRemove &&
+            row.replaceOlderByTargetId[targetId] !== false &&
+            row.previousInstalledFilename
+          ) {
+            const prevNameLower = row.previousInstalledFilename.trim().toLowerCase();
+            if (prevNameLower && prevNameLower !== lastWrittenFilename.toLowerCase()) {
+              const matchedOnCard = scan.exactNamesLower.get(prevNameLower);
+              if (matchedOnCard) {
+                olderEntryToRemove = matchedOnCard;
+              }
+            }
+          }
+
+          if (olderEntryToRemove) {
             try {
-              await systemDirHandle.removeEntry(cardStatus.olderEntryName, { recursive: true });
-              upgradedOldName = cardStatus.olderEntryName;
+              await systemDirHandle.removeEntry(olderEntryToRemove, { recursive: true });
+              registerWrittenEntryInScan(
+                scan,
+                lastWrittenFilename,
+                target.kind === 'disc_set' ? 'directory' : 'file',
+                olderEntryToRemove,
+              );
+              upgradedOldName = olderEntryToRemove;
             } catch (removeErr) {
               emitSdDebug(
-                `Could not remove superseded file "${cardStatus.olderEntryName}" in /${targetFolderRel}`,
+                `Could not remove superseded file "${olderEntryToRemove}" in /${targetFolderRel}`,
                 removeErr instanceof Error ? removeErr.message : String(removeErr),
                 true,
               );
@@ -917,6 +977,8 @@ export function useBulkStorageInstaller({
         touchedFolders.size > 0
           ? Array.from(touchedFolders).join(', ')
           : `/${resolveRowTargetCategoryAndFolder(row, null, storageCfg, filterContext).folder}`;
+      const installedFileId = row.fileId > 0 ? row.fileId : null;
+      const installedFilename = lastWrittenFilename || (row.sourceFilename !== '—' ? row.sourceFilename : null);
 
       if (rowFailed) {
         return {
@@ -924,6 +986,8 @@ export function useBulkStorageInstaller({
           detail: rowFailed,
           bytesWritten: rowBytes,
           installedSuccess: false,
+          installedFileId: null,
+          installedFilename: null,
         };
       }
       if (allSkipped) {
@@ -932,6 +996,8 @@ export function useBulkStorageInstaller({
           detail: `Already on device in ${folderSummary}`,
           bytesWritten: 0,
           installedSuccess: true,
+          installedFileId,
+          installedFilename,
         };
       }
       if (upgradedOldName) {
@@ -941,6 +1007,19 @@ export function useBulkStorageInstaller({
           detail: `Updated in ${folderSummary} (replaced ${upgradedOldName}) · ${formatBytes(rowBytes)}`,
           bytesWritten: rowBytes,
           installedSuccess: true,
+          installedFileId,
+          installedFilename,
+        };
+      }
+      if (overwroteExisting) {
+        reportAchievementEvent('sd_version_upgrade');
+        return {
+          nextState: 'upgraded',
+          detail: `Updated in ${folderSummary} · ${formatBytes(rowBytes)}`,
+          bytesWritten: rowBytes,
+          installedSuccess: true,
+          installedFileId,
+          installedFilename,
         };
       }
       return {
@@ -948,6 +1027,8 @@ export function useBulkStorageInstaller({
         detail: `Saved to ${folderSummary} · ${formatBytes(rowBytes)}`,
         bytesWritten: rowBytes,
         installedSuccess: true,
+        installedFileId,
+        installedFilename,
       };
     },
     [emitSdDebug],
@@ -963,6 +1044,7 @@ export function useBulkStorageInstaller({
       rawItemIds: number[],
       filterContext: SmartRomFilterContext,
       knownMeta?: Map<number, BulkInstallKnownItemMeta>,
+      options?: ExpressInstallOptions,
     ): Promise<boolean> => {
       const cleanIds = Array.from(
         new Set(rawItemIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
@@ -983,6 +1065,7 @@ export function useBulkStorageInstaller({
       }
 
       const waitingForAutoConfig = Boolean(autoConfigPromiseRef.current);
+      const overwriteExisting = Boolean(options?.overwriteExisting);
 
       setMountError(null);
       const jobId = ++jobSeqRef.current;
@@ -1007,7 +1090,8 @@ export function useBulkStorageInstaller({
           isPlaceholder: true,
           outputNamesByTargetId: {},
           replaceOlderByTargetId: {},
-          overwriteExisting: false,
+          overwriteExisting,
+          previousInstalledFilename: meta?.previousInstalledFilename ?? null,
           error: null,
           patchOnly: false,
           ignoredEntriesCount: 0,
@@ -1053,12 +1137,17 @@ export function useBulkStorageInstaller({
         const scanCache: Record<string, SdScanFolderResult> = {};
         const dirCache = new Map<string, SdDirectoryHandle>();
         const unsyncedInstalledIds = new Set<number>();
+        const unsyncedItemMeta: Record<number, { fileId?: number | null; filename?: string | null }> = {};
 
         const flushInstalled = async () => {
           if (unsyncedInstalledIds.size === 0) return;
           const batch = Array.from(unsyncedInstalledIds);
+          const metaBatch = { ...unsyncedItemMeta };
           unsyncedInstalledIds.clear();
-          await syncInstalledIdsToServer(batch, activeHandle!.name);
+          for (const key of Object.keys(unsyncedItemMeta)) {
+            delete unsyncedItemMeta[Number(key)];
+          }
+          await syncInstalledIdsToServer(batch, activeHandle!.name, metaBatch);
         };
 
         try {
@@ -1120,7 +1209,10 @@ export function useBulkStorageInstaller({
 
             const expandedChunkRows: ExportQueueRow[] = [];
             for (const entry of parsed.data.results) {
-              const itemRows = buildRowsFromInspectedItem(entry, 'express', filterContext);
+              const itemRows = buildRowsFromInspectedItem(entry, 'express', filterContext, {
+                overwriteExisting,
+                previousInstalledFilename: knownMeta?.get(entry.itemId)?.previousInstalledFilename ?? null,
+              });
               expandedChunkRows.push(...itemRows);
             }
 
@@ -1227,6 +1319,10 @@ export function useBulkStorageInstaller({
 
               if (outcome.installedSuccess) {
                 unsyncedInstalledIds.add(row.itemId);
+                unsyncedItemMeta[row.itemId] = {
+                  fileId: outcome.installedFileId,
+                  filename: outcome.installedFilename,
+                };
               }
 
               setJob((prev) => {
@@ -1311,6 +1407,19 @@ export function useBulkStorageInstaller({
       return true;
     },
     [emitSdDebug, isBusy, promptMountSdCard, syncInstalledIdsToServer, writeSingleRowToDevice],
+  );
+
+  const upgradeOutdatedItems = useCallback(
+    (
+      rawItemIds: number[],
+      filterContext: SmartRomFilterContext,
+      knownMeta?: Map<number, BulkInstallKnownItemMeta>,
+    ): Promise<boolean> => {
+      return startExpressInstall(rawItemIds, filterContext, knownMeta, {
+        overwriteExisting: true,
+      });
+    },
+    [startExpressInstall],
   );
 
   /**
@@ -1536,14 +1645,19 @@ export function useBulkStorageInstaller({
       const scanCache: Record<string, SdScanFolderResult> = { ...folderScans };
       const dirCache = new Map<string, SdDirectoryHandle>();
       const unsyncedInstalledIds = new Set<number>();
+      const unsyncedItemMeta: Record<number, { fileId?: number | null; filename?: string | null }> = {};
       let sinceLastSync = 0;
 
       const flushInstalled = async () => {
         if (unsyncedInstalledIds.size === 0) return;
         const batch = Array.from(unsyncedInstalledIds);
+        const metaBatch = { ...unsyncedItemMeta };
         unsyncedInstalledIds.clear();
+        for (const key of Object.keys(unsyncedItemMeta)) {
+          delete unsyncedItemMeta[Number(key)];
+        }
         sinceLastSync = 0;
-        await syncInstalledIdsToServer(batch, activeHandle!.name);
+        await syncInstalledIdsToServer(batch, activeHandle!.name, metaBatch);
       };
 
       try {
@@ -1628,6 +1742,10 @@ export function useBulkStorageInstaller({
 
           if (outcome.installedSuccess) {
             unsyncedInstalledIds.add(row.itemId);
+            unsyncedItemMeta[row.itemId] = {
+              fileId: outcome.installedFileId,
+              filename: outcome.installedFilename,
+            };
             sinceLastSync += 1;
           }
 
@@ -2074,6 +2192,7 @@ export function useBulkStorageInstaller({
     scanningCard,
     rescanMountedSdFolders,
     startExpressInstall,
+    upgradeOutdatedItems,
     openReviewQueue,
     startReviewWrite,
     cancelInstall,

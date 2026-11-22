@@ -10,6 +10,7 @@ import {
   getSchemaMigrationReport,
   initDb,
   listActivityLogs,
+  listOutdatedInstalledItems,
   listSyncRuns,
   queryRepositoryItemIds,
   queryRepositoryItems,
@@ -265,6 +266,14 @@ async function bootstrap() {
       sort: typeof req.query.sort === 'string' ? req.query.sort : undefined,
     });
     res.json(result);
+  });
+
+  app.get('/api/items/outdated', (req, res) => {
+    const deviceLabel =
+      typeof req.query.deviceLabel === 'string' && req.query.deviceLabel.trim()
+        ? req.query.deviceLabel.trim()
+        : null;
+    res.json(listOutdatedInstalledItems({ deviceLabel }));
   });
 
   app.get('/api/catalog/stats', (_req, res) => {
@@ -861,10 +870,41 @@ async function bootstrap() {
       typeof req.body?.deviceLabel === 'string' && req.body.deviceLabel.trim()
         ? req.body.deviceLabel.trim()
         : null;
+    const rawFileId = Number(req.body?.installedFileId);
+    const installedFileId = Number.isInteger(rawFileId) && rawFileId > 0 ? rawFileId : null;
+    const installedFilename =
+      typeof req.body?.installedFilename === 'string' && req.body.installedFilename.trim()
+        ? req.body.installedFilename.trim().slice(0, 300)
+        : null;
+
+    let itemMeta: Record<number, { fileId?: number | null; filename?: string | null }> | undefined;
+    if (req.body?.itemMeta && typeof req.body.itemMeta === 'object' && !Array.isArray(req.body.itemMeta)) {
+      const sanitized: Record<number, { fileId?: number | null; filename?: string | null }> = {};
+      for (const [key, val] of Object.entries(req.body.itemMeta as Record<string, unknown>)) {
+        const idNum = Number(key);
+        if (!Number.isInteger(idNum) || idNum <= 0 || !val || typeof val !== 'object') continue;
+        const entry = val as Record<string, unknown>;
+        const fid = Number(entry.fileId);
+        sanitized[idNum] = {
+          fileId: Number.isInteger(fid) && fid > 0 ? fid : null,
+          filename:
+            typeof entry.filename === 'string' && entry.filename.trim()
+              ? entry.filename.trim().slice(0, 300)
+              : null,
+        };
+      }
+      if (Object.keys(sanitized).length > 0) {
+        itemMeta = sanitized;
+      }
+    }
+
     const result = setCatalogItemsInstalled({
       ids: rawIds,
       installed,
       deviceLabel,
+      installedFileId,
+      installedFilename,
+      itemMeta,
     });
     orchestrator.notifyInstalledStateChanged();
     res.json(result);

@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.34.0] - 2026-11-22
+
+- Added **Installed ROM Update Detection & One-Click Device Upgrades** so actively updated RetroGameTalk hacks and fan translations stay current on mounted handhelds and storage devices:
+  - **Version Drift Detection & SQLite Schema v24**: Added `installed_file_id` and `installed_filename` tracking on `catalog_releases` (`installed_rom_version_tracking` migration) plus a shared update classifier with a 60-second grace window that distinguishes **Update ready** (newer mirrored file already on disk) from **Update on RGT** (newer upstream release needing re-download first).
+  - **Outdated API & Filterable Catalog View**: Added `GET /api/items/outdated`, `installed=outdated` filtering across `/api/items` and `/api/items/ids`, live `outdated` facet counts, and global `outdatedInstalledItems` / `outdatedLocalReadyItems` status totals; allowed queueing remote-newer updates on already-downloaded releases.
+  - **One-Click Upgrade UX Across Catalog, Sidebar Drive Bay & Game Details**: Added a contextual **Updates (`N`)** toggle and batch **Update on `<Device>` (`N`)** / **Download Updates (`M`)** strip in the Catalog, amber **Update ready** / **Update on RGT** cues and promoted **Update** / **Download Update** buttons on cards, rows, and the Game Details drawer, and an inline **Update All** shortcut in the Sidebar Storage Drive Bay. Upgrade runs automatically overwrite exact matches and remove superseded older-version ROMs on the mounted device after each new file finishes streaming cleanly.
+
 ## [1.33.0] - 2026-11-22
 
 - Hardened credential handling, added optional environment-driven self-hosted UI/API authentication, and introduced secret-free JSON configuration **Backup & Restore**:

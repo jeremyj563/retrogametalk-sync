@@ -31,6 +31,7 @@ export interface GameDetailFooterPlanInput {
   canInstallToDevice: boolean;
   installedAt: string | null;
   installedDeviceLabel: string | null;
+  isUpdateReadyLocal?: boolean;
 }
 
 export interface GameDetailFooterPlan {
@@ -38,6 +39,7 @@ export interface GameDetailFooterPlan {
   secondaryAction: GameDetailSecondaryAction;
   installButtonLabel: string;
   isReinstallOnMountedDevice: boolean;
+  isUpdateOnMountedDevice: boolean;
   showReviewDeviceInstallInMore: boolean;
   showRetryInMore: boolean;
 }
@@ -293,11 +295,17 @@ export function resolveGameDetailFooterPlan(
     hasMountedDevice &&
     Boolean(input.installedAt) &&
     (!normalizedInstalledLabel || normalizedInstalledLabel === trimmedDevice.toLowerCase());
+  const isUpdateReady = Boolean(input.isUpdateReadyLocal);
+  const isUpdateOnMountedDevice = hasMountedDevice && isUpdateReady;
 
   const shortDeviceName = formatDeviceActionLabel(trimmedDevice);
-  const installButtonLabel = hasMountedDevice
-    ? `${isReinstallOnMountedDevice ? 'Reinstall' : 'Install'} to ${shortDeviceName}`
-    : 'Install to Device';
+  const installButtonLabel = isUpdateReady
+    ? hasMountedDevice
+      ? `Update on ${shortDeviceName}`
+      : 'Update on Device'
+    : hasMountedDevice
+      ? `${isReinstallOnMountedDevice ? 'Reinstall' : 'Install'} to ${shortDeviceName}`
+      : 'Install to Device';
 
   if (input.hasDownloadedFile) {
     if (hasMountedDevice) {
@@ -306,6 +314,7 @@ export function resolveGameDetailFooterPlan(
         secondaryAction: 'download_rom',
         installButtonLabel,
         isReinstallOnMountedDevice,
+        isUpdateOnMountedDevice,
         showReviewDeviceInstallInMore: true,
         showRetryInMore: input.hasFailedFiles,
       };
@@ -316,6 +325,7 @@ export function resolveGameDetailFooterPlan(
       secondaryAction: input.canInstallToDevice ? 'install_unmounted' : null,
       installButtonLabel,
       isReinstallOnMountedDevice: false,
+      isUpdateOnMountedDevice: false,
       showReviewDeviceInstallInMore: input.canInstallToDevice,
       showRetryInMore: input.hasFailedFiles,
     };
@@ -327,6 +337,7 @@ export function resolveGameDetailFooterPlan(
       secondaryAction: null,
       installButtonLabel,
       isReinstallOnMountedDevice: false,
+      isUpdateOnMountedDevice: false,
       showReviewDeviceInstallInMore: false,
       showRetryInMore: false,
     };
@@ -338,6 +349,7 @@ export function resolveGameDetailFooterPlan(
       secondaryAction: null,
       installButtonLabel,
       isReinstallOnMountedDevice: false,
+      isUpdateOnMountedDevice: false,
       showReviewDeviceInstallInMore: false,
       showRetryInMore: false,
     };
@@ -348,6 +360,7 @@ export function resolveGameDetailFooterPlan(
     secondaryAction: null,
     installButtonLabel,
     isReinstallOnMountedDevice: false,
+    isUpdateOnMountedDevice: false,
     showReviewDeviceInstallInMore: false,
     showRetryInMore: false,
   };

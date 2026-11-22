@@ -65,6 +65,7 @@ import type {
   ActiveTransferState,
   AppAuthStatus,
   CatalogDownloadedFilter,
+  CatalogInstalledFilter,
   ConfigDirtyState,
   ConfigFocusRequest,
   ConfigPanelHandle,
@@ -72,6 +73,7 @@ import type {
   ConfigSectionTarget,
   LogLevel,
   NavSection,
+  OutdatedInstalledSummary,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
   SyncPreflightSummary,
@@ -477,6 +479,7 @@ export default function App() {
   const [catalogPresetIntent, setCatalogPresetIntent] = useState<{
     syncRulesOnly?: boolean;
     downloadedFilter?: CatalogDownloadedFilter;
+    installedFilter?: CatalogInstalledFilter;
     nonce: number;
   } | null>(null);
   const [selectedScope, setSelectedScope] = useState<SyncScope>(() => loadInitialSyncScope());
@@ -1563,12 +1566,62 @@ export default function App() {
       setCatalogPresetIntent((prev) => ({
         syncRulesOnly: true,
         downloadedFilter: onlyNotDownloaded ? 'exclude' : 'all',
+        installedFilter: 'all',
         nonce: (prev?.nonce ?? 0) + 1,
       }));
       requestSectionChange('catalog');
     },
     [requestSectionChange],
   );
+
+  const handleViewOutdatedInCatalog = useCallback(() => {
+    setCatalogPresetIntent((prev) => ({
+      syncRulesOnly: false,
+      downloadedFilter: 'all',
+      installedFilter: 'outdated',
+      nonce: (prev?.nonce ?? 0) + 1,
+    }));
+    requestSectionChange('catalog');
+  }, [requestSectionChange]);
+
+  const handleUpdateOutdatedOnDevice = useCallback(async () => {
+    if (bulkInstaller.isBusy) {
+      bulkInstaller.openModal();
+      return;
+    }
+    try {
+      const res = await fetch('/api/items/outdated');
+      const parsed = await readJsonSafely<OutdatedInstalledSummary>(res);
+      if (!parsed.ok || !parsed.data) {
+        setErrorBanner(parsed.errorMessage || 'Failed to load outdated installed games.');
+        return;
+      }
+      if (parsed.data.localReadyIds.length === 0) {
+        handleViewOutdatedInCatalog();
+        return;
+      }
+      const metaMap = new Map<
+        number,
+        { title: string; systemName: string; previousInstalledFilename?: string | null }
+      >();
+      for (const entry of parsed.data.items) {
+        if (entry.updateState === 'update_ready_local') {
+          metaMap.set(entry.id, {
+            title: entry.title,
+            systemName: entry.systemName,
+            previousInstalledFilename: entry.installedFilename,
+          });
+        }
+      }
+      await bulkInstaller.upgradeOutdatedItems(
+        parsed.data.localReadyIds,
+        { syncIncludeTags: config?.allowedReleaseTypes },
+        metaMap,
+      );
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+    }
+  }, [bulkInstaller, config?.allowedReleaseTypes, handleViewOutdatedInCatalog]);
 
   const handlePreviewMountedDevicePaths = useCallback(() => {
     navigateToConfigTarget('storageMappings');
@@ -2079,7 +2132,11 @@ export default function App() {
             {/* Persistent Recessed Storage Device Drive Bay */}
             <StorageDeviceSidebarDock
               installer={bulkInstaller}
+              outdatedInstalledCount={status?.totals.outdatedInstalledItems ?? 0}
+              outdatedLocalReadyCount={status?.totals.outdatedLocalReadyItems ?? 0}
               onPreviewDevicePaths={handlePreviewMountedDevicePaths}
+              onUpdateOutdatedOnDevice={() => void handleUpdateOutdatedOnDevice()}
+              onViewOutdatedInCatalog={handleViewOutdatedInCatalog}
             />
 
             {/* Real Daemon & Storage Telemetry Readout */}

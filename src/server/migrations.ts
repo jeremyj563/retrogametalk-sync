@@ -1198,6 +1198,24 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 24,
+    name: 'installed_rom_version_tracking',
+    description:
+      'Add installed_file_id and installed_filename columns on catalog_releases plus an update-drift index for detecting outdated installed ROMs.',
+    up: (db) => {
+      if (!tableHasColumn(db, 'catalog_releases', 'installed_file_id')) {
+        db.exec(`ALTER TABLE catalog_releases ADD COLUMN installed_file_id INTEGER;`);
+      }
+      if (!tableHasColumn(db, 'catalog_releases', 'installed_filename')) {
+        db.exec(`ALTER TABLE catalog_releases ADD COLUMN installed_filename TEXT;`);
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_releases_installed_remote_updated
+        ON catalog_releases(installed_at, remote_updated_at);
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

@@ -51,6 +51,8 @@ function makeItem(overrides: Partial<RepositoryItemRecord> = {}): RepositoryItem
     downloadedAt: '2026-11-10T10:01:00Z',
     installedAt: null,
     installedDeviceLabel: null,
+    installedFileId: null,
+    installedFilename: null,
     publisher: 'Konami',
     developer: 'Konami',
     releaseYear: '1987',

@@ -1,8 +1,8 @@
 ---
 title: Installed ROM Update Detection & One-Click Device Upgrades
-status: planned
+status: implemented
 created_at: 2026-11-22T20:35:00Z
-implemented_at: null
+implemented_at: 2026-11-22T21:35:00Z
 ---
 
 # Installed ROM Update Detection & One-Click Device Upgrades

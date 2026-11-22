@@ -38,6 +38,7 @@ export function formatRescanDeviceTooltip(
 export function formatQuickInstallLabel(params: {
   mountedDeviceName: string | null;
   isReinstall?: boolean;
+  isUpdateAvailable?: boolean;
   count?: number;
   compact?: boolean;
   maxDeviceLen?: number;
@@ -45,6 +46,7 @@ export function formatQuickInstallLabel(params: {
   const {
     mountedDeviceName,
     isReinstall = false,
+    isUpdateAvailable = false,
     count,
     compact = false,
     maxDeviceLen = 18,
@@ -54,13 +56,23 @@ export function formatQuickInstallLabel(params: {
 
   if (typeof count === 'number') {
     const countSuffix = `(${count.toLocaleString()})`;
+    if (isUpdateAvailable) {
+      return trimmedDevice
+        ? `Update on ${shortDevice} ${countSuffix}`
+        : `Update on Device ${countSuffix}`;
+    }
     return trimmedDevice
       ? `Install to ${shortDevice} ${countSuffix}`
       : `Install to Device ${countSuffix}`;
   }
 
   if (compact) {
+    if (isUpdateAvailable) return 'Update';
     return isReinstall && trimmedDevice ? 'Reinstall' : 'Install';
+  }
+
+  if (isUpdateAvailable) {
+    return trimmedDevice ? `Update on ${shortDevice}` : 'Update on Device';
   }
 
   if (trimmedDevice) {
@@ -73,12 +85,14 @@ export function formatQuickInstallLabel(params: {
 export function formatQuickInstallTooltip(params: {
   mountedDeviceName: string | null;
   isReinstall?: boolean;
+  isUpdateAvailable?: boolean;
   isActive?: boolean;
   isOtherBusy?: boolean;
 }): string {
   const {
     mountedDeviceName,
     isReinstall = false,
+    isUpdateAvailable = false,
     isActive = false,
     isOtherBusy = false,
   } = params;
@@ -91,6 +105,11 @@ export function formatQuickInstallTooltip(params: {
   }
 
   const trimmedDevice = (mountedDeviceName || '').trim();
+  if (isUpdateAvailable) {
+    return trimmedDevice
+      ? `Upgrade to latest local ROM on ${trimmedDevice} (replaces older copy)`
+      : 'Mount a storage device and upgrade to the latest local ROM';
+  }
   if (trimmedDevice) {
     return `${isReinstall ? 'Reinstall' : 'Install'} latest primary ROM directly to ${trimmedDevice}`;
   }

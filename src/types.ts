@@ -242,7 +242,7 @@ export interface ReleaseMetadata {
 
 export type FilterMatchMode = 'any' | 'all';
 export type CatalogDownloadedFilter = 'all' | 'only' | 'exclude';
-export type CatalogInstalledFilter = 'all' | 'only' | 'exclude';
+export type CatalogInstalledFilter = 'all' | 'only' | 'exclude' | 'outdated';
 
 export interface CatalogFacetCounts {
   tags: Record<string, number>;
@@ -258,6 +258,7 @@ export interface CatalogFacetCounts {
   installed?: {
     installed: number;
     notInstalled: number;
+    outdated: number;
   };
   syncRulesMatched?: number;
   queueableFiltered?: number;
@@ -323,8 +324,32 @@ export interface RepositoryItemRecord {
   metadata: ReleaseMetadata | null;
   installedAt: string | null;
   installedDeviceLabel: string | null;
+  installedFileId: number | null;
+  installedFilename: string | null;
   filesCount: number;
   files: ReleaseFileRecord[];
+}
+
+export interface OutdatedInstalledItemSummary {
+  id: number;
+  title: string;
+  systemName: string;
+  updateState: 'update_ready_local' | 'update_available_remote';
+  installedAt: string;
+  installedDeviceLabel: string | null;
+  installedFileId: number | null;
+  installedFilename: string | null;
+  latestLocalDownloadedAt: string | null;
+  remoteUpdatedAt: string | null;
+}
+
+export interface OutdatedInstalledSummary {
+  total: number;
+  localReadyCount: number;
+  remoteOnlyCount: number;
+  localReadyIds: number[];
+  remoteOnlyIds: number[];
+  items: OutdatedInstalledItemSummary[];
 }
 
 export interface ActivityLogRecord {
@@ -475,6 +500,8 @@ export interface ServiceStatusSnapshot {
     failedItems: number;
     queuedItems: number;
     installedItems: number;
+    outdatedInstalledItems?: number;
+    outdatedLocalReadyItems?: number;
     totalBytesMirrored: number;
     totalRuns: number;
   };

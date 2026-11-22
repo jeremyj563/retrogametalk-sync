@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import {
+  ArrowUpCircle,
   Eye,
   FolderPlus,
   FolderSync,
@@ -86,12 +87,20 @@ export function resolveStorageDriveBayState(params: {
 
 interface StorageDeviceSidebarDockProps {
   installer: BulkStorageInstallerController;
+  outdatedInstalledCount?: number;
+  outdatedLocalReadyCount?: number;
   onPreviewDevicePaths: () => void;
+  onUpdateOutdatedOnDevice?: () => void;
+  onViewOutdatedInCatalog?: () => void;
 }
 
 export function StorageDeviceSidebarDock({
   installer,
+  outdatedInstalledCount = 0,
+  outdatedLocalReadyCount = 0,
   onPreviewDevicePaths,
+  onUpdateOutdatedOnDevice,
+  onViewOutdatedInCatalog,
 }: StorageDeviceSidebarDockProps) {
   const support = useMemo(() => isFileSystemAccessSupported(), []);
   const [showSupportDetails, setShowSupportDetails] = useState(false);
@@ -248,6 +257,39 @@ export function StorageDeviceSidebarDock({
             </span>
           </button>
 
+          {outdatedInstalledCount > 0 && (
+            <div className="flex items-center justify-between gap-2 px-1.5 py-1 -mx-1 rounded border border-crt-amber/35 bg-crt-amber/8 text-[11px] font-mono">
+              <button
+                type="button"
+                onClick={onViewOutdatedInCatalog}
+                title={
+                  outdatedLocalReadyCount > 0
+                    ? `${outdatedLocalReadyCount} local ROM update${outdatedLocalReadyCount === 1 ? '' : 's'} ready to stream (${outdatedInstalledCount} total outdated) — click to view in Catalog`
+                    : `${outdatedInstalledCount} installed game${outdatedInstalledCount === 1 ? '' : 's'} updated on RetroGameTalk — click to view in Catalog`
+                }
+                className="inline-flex items-center gap-1.5 min-w-0 text-crt-amber hover:underline text-left cursor-pointer"
+              >
+                <ArrowUpCircle className="h-3 w-3 shrink-0" />
+                <span className="truncate tabular-nums">
+                  {outdatedLocalReadyCount > 0
+                    ? `${outdatedLocalReadyCount} update${outdatedLocalReadyCount === 1 ? '' : 's'} ready`
+                    : `${outdatedInstalledCount} update${outdatedInstalledCount === 1 ? '' : 's'}`}
+                </span>
+              </button>
+              {outdatedLocalReadyCount > 0 && onUpdateOutdatedOnDevice && (
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={onUpdateOutdatedOnDevice}
+                  title={`Upgrade ${outdatedLocalReadyCount} outdated ROM${outdatedLocalReadyCount === 1 ? '' : 's'} on ${sdRootHandle.name}`}
+                  className="px-1.5 py-0.5 rounded bg-crt-amber/20 hover:bg-crt-amber/30 text-crt-amber font-semibold whitespace-nowrap shrink-0 transition-colors disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  Update All
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Quiet inline action strip — zero heavy nested buttons */}
           <div className="flex items-center justify-between gap-2 pt-1 text-[11px] font-mono">
             <button
@@ -315,6 +357,21 @@ export function StorageDeviceSidebarDock({
               {support.supported ? 'Auto' : 'Info'}
             </span>
           </button>
+
+          {outdatedInstalledCount > 0 && onViewOutdatedInCatalog && (
+            <button
+              type="button"
+              onClick={onViewOutdatedInCatalog}
+              title={`View ${outdatedInstalledCount} installed game${outdatedInstalledCount === 1 ? '' : 's'} with newer versions available`}
+              className="w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1 -mx-1 rounded border border-crt-amber/35 bg-crt-amber/8 text-[11px] font-mono text-crt-amber hover:bg-crt-amber/15 transition-colors cursor-pointer"
+            >
+              <span className="inline-flex items-center gap-1.5 min-w-0">
+                <ArrowUpCircle className="h-3 w-3 shrink-0" />
+                <span className="truncate">Updates Available</span>
+              </span>
+              <span className="tabular-nums shrink-0">{outdatedInstalledCount}</span>
+            </button>
+          )}
 
           {!support.supported && (
             <div className="flex items-center justify-between gap-2 px-0.5 text-[11px] font-mono text-crt-muted">
