@@ -32,8 +32,10 @@ import {
   classifySystemIndexFreshness,
   doesCatalogReleaseMatchSyncRules,
   formatSyncRuleScopeSummary,
+  normalizeSyncOverride,
   normalizeTargetConsoleSlugs,
   resolveTargetConsoleScope,
+  type SyncOverrideMode,
 } from '../shared/syncRuleMatcher.ts';
 import {
   classifyInstalledUpdateState,
@@ -75,6 +77,7 @@ import type {
   SystemBreakdown,
   SystemCoverageStat,
   SystemIndexCursor,
+  UserCollectionRecord,
 } from './types.ts';
 
 const DATA_DIR = path.resolve(process.env.DATA_DIR || '/run/repo/.rgt-data');
@@ -932,7 +935,11 @@ function mapFileRow(row: Record<string, unknown>): ReleaseFileRecord {
   };
 }
 
-function mapReleaseRow(row: Record<string, unknown>, files: ReleaseFileRecord[]): RepositoryItemRecord {
+function mapReleaseRow(
+  row: Record<string, unknown>,
+  files: ReleaseFileRecord[],
+  collectionIds: number[] = [],
+): RepositoryItemRecord {
   let parsedMeta: ReleaseMetadata | null = null;
   if (row.metadata_json) {
     try {
@@ -986,6 +993,9 @@ function mapReleaseRow(row: Record<string, unknown>, files: ReleaseFileRecord[])
         ? Number(row.installed_file_id)
         : null,
     installedFilename: row.installed_filename ? String(row.installed_filename) : null,
+    isFavorite: Boolean(row.is_favorite),
+    syncOverride: normalizeSyncOverride(row.sync_override),
+    collectionIds,
     filesCount: files.length,
     files,
   };
@@ -1003,6 +1013,28 @@ function loadFilesByReleaseIds(releaseIds: number[]): Map<number, ReleaseFileRec
     const list = map.get(file.releaseId) || [];
     list.push(file);
     map.set(file.releaseId, list);
+  }
+  return map;
+}
+
+function loadCollectionIdsByReleaseIds(releaseIds: number[]): Map<number, number[]> {
+  const map = new Map<number, number[]>();
+  if (releaseIds.length === 0) return map;
+  const placeholders = releaseIds.map(() => '?').join(',');
+  const rows = getDb()
+    .prepare(
+      `SELECT release_id, collection_id
+       FROM user_collection_items
+       WHERE release_id IN (${placeholders})
+       ORDER BY collection_id ASC`,
+    )
+    .all(...releaseIds) as { release_id: number; collection_id: number }[];
+  for (const row of rows) {
+    const rid = Number(row.release_id);
+    const cid = Number(row.collection_id);
+    const list = map.get(rid) || [];
+    list.push(cid);
+    map.set(rid, list);
   }
   return map;
 }
@@ -1925,8 +1957,10 @@ export function getCatalogReleaseById(id: number): RepositoryItemRecord | null {
     | Record<string, unknown>
     | undefined;
   if (!row) return null;
-  const filesMap = loadFilesByReleaseIds([Number(row.id)]);
-  return mapReleaseRow(row, filesMap.get(Number(row.id)) || []);
+  const rid = Number(row.id);
+  const filesMap = loadFilesByReleaseIds([rid]);
+  const collectionsMap = loadCollectionIdsByReleaseIds([rid]);
+  return mapReleaseRow(row, filesMap.get(rid) || [], collectionsMap.get(rid) || []);
 }
 
 export function getRepositoryItemById(id: number): RepositoryItemRecord | null {
@@ -1939,8 +1973,10 @@ export function getCatalogReleaseByRemoteUrl(remoteUrl: string): RepositoryItemR
     | Record<string, unknown>
     | undefined;
   if (!row) return null;
-  const filesMap = loadFilesByReleaseIds([Number(row.id)]);
-  return mapReleaseRow(row, filesMap.get(Number(row.id)) || []);
+  const rid = Number(row.id);
+  const filesMap = loadFilesByReleaseIds([rid]);
+  const collectionsMap = loadCollectionIdsByReleaseIds([rid]);
+  return mapReleaseRow(row, filesMap.get(rid) || [], collectionsMap.get(rid) || []);
 }
 
 export function getRepositoryItemByRemoteUrl(remoteUrl: string): RepositoryItemRecord | null {
@@ -2394,6 +2430,8 @@ interface RuleFilterRow {
   file_size_bytes: number;
   installed_at?: string | null;
   is_outdated?: number;
+  sync_override?: string | null;
+  is_favorite?: number;
 }
 
 function buildInstalledLocalUpdateReadySql(alias?: string): string {
@@ -2457,10 +2495,6 @@ function filterCandidateRowsBySyncRules<T extends RuleFilterRow>(
   ruleIndexMap?: Map<number, CachedReleaseRuleData>,
 ): T[] {
   const allowedTypes = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes);
-  const targetSystems = normalizeTargetConsoleSlugs(cfg.systemFilter);
-  if (allowedTypes.length === 0 && targetSystems.length === 0) {
-    return rows;
-  }
   const indexLookup = allowedTypes.length > 0 ? (ruleIndexMap ?? loadAllReleaseRuleIndexMap()) : null;
   return rows.filter((row) =>
     doesCatalogReleaseMatchSyncRules(
@@ -2469,6 +2503,7 @@ function filterCandidateRowsBySyncRules<T extends RuleFilterRow>(
         releaseType: row.release_type ? String(row.release_type) : null,
         releaseTags: parseJsonStringArray(row.release_tags_json),
         fileRoles: indexLookup?.get(Number(row.id))?.fileRoles,
+        syncOverride: row.sync_override,
       },
       cfg,
     ),
@@ -2485,10 +2520,11 @@ function filterRuleMatchedRowsByDownloadedState<T extends RuleFilterRow>(
     return rows;
   }
   return rows.filter((row) => {
+    const effectiveTypes = normalizeSyncOverride(row.sync_override) === 'pin' ? [] : allowedTypes;
     const coverage = evaluateReleaseRuleMirrorCoverage(
       String(row.status || 'available'),
       ruleIndexMap.get(Number(row.id)),
-      allowedTypes,
+      effectiveTypes,
     );
     return downloadedFilter === 'only' ? coverage.fullyMirrored : !coverage.fullyMirrored;
   });
@@ -2514,16 +2550,20 @@ function listDownloadedFacetCounts(
     const indexMap = ruleIndexMap ?? loadAllReleaseRuleIndexMap();
     const allowedTypes = normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes);
     const candidateRows = getDb()
-      .prepare(`SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes FROM catalog_releases ${where}`)
+      .prepare(
+        `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, sync_override
+         FROM catalog_releases ${where}`,
+      )
       .all(...args) as RuleFilterRow[];
     const matched = filterCandidateRowsBySyncRules(candidateRows, resolvedCfg, indexMap);
     let downloaded = 0;
     let notDownloaded = 0;
     for (const row of matched) {
+      const effectiveTypes = normalizeSyncOverride(row.sync_override) === 'pin' ? [] : allowedTypes;
       const coverage = evaluateReleaseRuleMirrorCoverage(
         String(row.status || 'available'),
         indexMap.get(Number(row.id)),
-        allowedTypes,
+        effectiveTypes,
       );
       if (coverage.fullyMirrored) downloaded += 1;
       else notDownloaded += 1;
@@ -2568,7 +2608,7 @@ function listInstalledFacetCounts(
     const allowedTypes = normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes);
     const candidateRows = getDb()
       .prepare(
-        `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, installed_at,
+        `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, installed_at, sync_override,
                 CASE WHEN ${outdatedExpr} THEN 1 ELSE 0 END AS is_outdated
          FROM catalog_releases ${where}`,
       )
@@ -2632,7 +2672,10 @@ function listSyncRulesMatchedFacetCount(
   }
   const indexMap = ruleIndexMap ?? loadAllReleaseRuleIndexMap();
   const candidateRows = getDb()
-    .prepare(`SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes FROM catalog_releases ${where}`)
+    .prepare(
+      `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, sync_override
+       FROM catalog_releases ${where}`,
+    )
     .all(...args) as RuleFilterRow[];
   const matched = filterRuleMatchedRowsByDownloadedState(
     filterCandidateRowsBySyncRules(candidateRows, cfg, indexMap),
@@ -2641,6 +2684,63 @@ function listSyncRulesMatchedFacetCount(
     indexMap,
   );
   return matched.length;
+}
+
+function listCurationFacetCounts(
+  params: CatalogQueryFilterParams,
+  cfg?: ScraperConfigPublic,
+  ruleIndexMap?: Map<number, CachedReleaseRuleData>,
+): {
+  favorites: number;
+  syncOverrides: { pinned: number; ignored: number };
+} {
+  const favScopedParams: CatalogQueryFilterParams = {
+    ...params,
+    favoriteOnly: undefined,
+  };
+  const resolvedCfg = cfg ?? (favScopedParams.syncRules ? getPublicConfig() : undefined);
+  const { where: favWhere, args: favArgs } = buildCatalogWhereAndOrder(favScopedParams, resolvedCfg);
+
+  let favorites = 0;
+  if (favScopedParams.syncRules && resolvedCfg) {
+    const indexMap = ruleIndexMap ?? loadAllReleaseRuleIndexMap();
+    const allowedTypes = normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes);
+    const favCandidates = getDb()
+      .prepare(
+        `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, sync_override, is_favorite
+         FROM catalog_releases ${favWhere}`,
+      )
+      .all(...favArgs) as RuleFilterRow[];
+    const matched = filterRuleMatchedRowsByDownloadedState(
+      filterCandidateRowsBySyncRules(favCandidates, resolvedCfg, indexMap),
+      favScopedParams.downloaded,
+      allowedTypes,
+      indexMap,
+    );
+    favorites = matched.reduce((acc, r) => acc + (r.is_favorite ? 1 : 0), 0);
+  } else {
+    const favRow = getDb()
+      .prepare(`SELECT SUM(CASE WHEN is_favorite = 1 THEN 1 ELSE 0 END) AS fav_cnt FROM catalog_releases ${favWhere}`)
+      .get(...favArgs) as { fav_cnt: number | null } | undefined;
+    favorites = Number(favRow?.fav_cnt || 0);
+  }
+
+  const overrideRow = getDb()
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN sync_override = 'pin' THEN 1 ELSE 0 END) AS pinned_cnt,
+         SUM(CASE WHEN sync_override = 'ignore' THEN 1 ELSE 0 END) AS ignored_cnt
+       FROM catalog_releases`,
+    )
+    .get() as { pinned_cnt: number | null; ignored_cnt: number | null } | undefined;
+
+  return {
+    favorites,
+    syncOverrides: {
+      pinned: Number(overrideRow?.pinned_cnt || 0),
+      ignored: Number(overrideRow?.ignored_cnt || 0),
+    },
+  };
 }
 
 function normalizeFilterList(raw: string | string[] | undefined): string[] {
@@ -2709,6 +2809,9 @@ export interface CatalogQueryFilterParams {
   downloaded?: string;
   installed?: string;
   syncRules?: boolean;
+  favoriteOnly?: boolean;
+  collectionId?: number;
+  syncOverride?: SyncOverrideMode;
   tag?: string | string[];
   tagMode?: string;
   genre?: string | string[];
@@ -2760,18 +2863,37 @@ function buildCatalogWhereAndOrder(
 
   if (params.syncRules) {
     const ruleCfg = cfgOverride ?? getPublicConfig();
+    conditions.push("COALESCE(sync_override, 'default') != 'ignore'");
     const ruleSystemSlugs = normalizeTargetConsoleSlugs(ruleCfg.systemFilter);
     if (ruleSystemSlugs.length > 0) {
       const ruleExpanded = expandSystemAliases(ruleSystemSlugs);
       if (ruleExpanded.length === 1) {
-        conditions.push('LOWER(system_name) = ?');
+        conditions.push("(COALESCE(sync_override, 'default') = 'pin' OR LOWER(system_name) = ?)");
         args.push(ruleExpanded[0].toLowerCase());
       } else if (ruleExpanded.length > 1) {
         const lowerExpanded = ruleExpanded.map((s) => s.toLowerCase());
-        conditions.push(`LOWER(system_name) IN (${lowerExpanded.map(() => '?').join(', ')})`);
+        conditions.push(
+          `(COALESCE(sync_override, 'default') = 'pin' OR LOWER(system_name) IN (${lowerExpanded.map(() => '?').join(', ')}))`,
+        );
         args.push(...lowerExpanded);
       }
     }
+  }
+
+  if (params.favoriteOnly) {
+    conditions.push('is_favorite = 1');
+  }
+
+  if (params.collectionId !== undefined && Number.isInteger(params.collectionId) && params.collectionId > 0) {
+    conditions.push(
+      'EXISTS (SELECT 1 FROM user_collection_items uci WHERE uci.release_id = catalog_releases.id AND uci.collection_id = ?)',
+    );
+    args.push(params.collectionId);
+  }
+
+  if (params.syncOverride === 'pin' || params.syncOverride === 'ignore' || params.syncOverride === 'default') {
+    conditions.push("COALESCE(sync_override, 'default') = ?");
+    args.push(params.syncOverride);
   }
 
   const rawStatuses = normalizeFilterList(params.status);
@@ -2842,7 +2964,7 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   const { where, args, orderBy } = buildCatalogWhereAndOrder(params, cfg);
   let rows = getDb()
     .prepare(
-      `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes
+      `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, sync_override
        FROM catalog_releases ${where} ORDER BY ${orderBy}`,
     )
     .all(...args) as RuleFilterRow[];
@@ -2872,10 +2994,11 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
     }
 
     if (params.syncRules && ruleIndexMap) {
+      const effectiveTypes = normalizeSyncOverride(row.sync_override) === 'pin' ? [] : allowedTypes;
       const coverage = evaluateReleaseRuleMirrorCoverage(
         String(row.status || 'available'),
         ruleIndexMap.get(numId),
-        allowedTypes,
+        effectiveTypes,
       );
       if (coverage.fullyMirrored) {
         alreadyDownloadedCount += 1;
@@ -2941,7 +3064,7 @@ export function queryRepositoryItems(
   if (params.syncRules && ruleIndexMap) {
     const candidates = getDb()
       .prepare(
-        `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes
+        `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, sync_override
          FROM catalog_releases ${where} ORDER BY ${orderBy}`,
       )
       .all(...args) as RuleFilterRow[];
@@ -2953,10 +3076,11 @@ export function queryRepositoryItems(
     );
     total = matched.length;
     queueableFiltered = matched.reduce((acc, r) => {
+      const effectiveTypes = normalizeSyncOverride(r.sync_override) === 'pin' ? [] : allowedTypes;
       const coverage = evaluateReleaseRuleMirrorCoverage(
         String(r.status || 'available'),
         ruleIndexMap.get(Number(r.id)),
-        allowedTypes,
+        effectiveTypes,
       );
       if (coverage.fullyMirrored) return acc;
       if (isCatalogStatusQueueable(r.status) || r.status === 'downloaded') return acc + 1;
@@ -2995,6 +3119,7 @@ export function queryRepositoryItems(
 
   const releaseIds = rows.map((r) => Number(r.id));
   const filesMap = loadFilesByReleaseIds(releaseIds);
+  const collectionsMap = loadCollectionIdsByReleaseIds(releaseIds);
 
   const tagsFacet = listDistinctJsonFacetWithCounts('release_tags_json');
   const genresFacet = listDistinctJsonFacetWithCounts('genres_json');
@@ -3005,6 +3130,7 @@ export function queryRepositoryItems(
   const downloadedCounts = listDownloadedFacetCounts(params, cfg, ruleIndexMap);
   const installedCounts = listInstalledFacetCounts(params, cfg, ruleIndexMap);
   const syncRulesMatched = listSyncRulesMatchedFacetCount(params, cfg, ruleIndexMap);
+  const curationCounts = listCurationFacetCounts(params, cfg, ruleIndexMap);
 
   const counts: CatalogFacetCounts = {
     tags: tagsFacet.counts,
@@ -3017,6 +3143,8 @@ export function queryRepositoryItems(
     installed: installedCounts,
     syncRulesMatched,
     queueableFiltered,
+    favorites: curationCounts.favorites,
+    syncOverrides: curationCounts.syncOverrides,
   };
 
   const facets: CatalogFacets = {
@@ -3029,7 +3157,9 @@ export function queryRepositoryItems(
   };
 
   return {
-    items: rows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || [])),
+    items: rows.map((r) =>
+      mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+    ),
     total,
     facets,
   };
@@ -3058,6 +3188,7 @@ export function listCatalogReleasesForRuleSync(
         releaseType: row.release_type ? String(row.release_type) : null,
         releaseTags: parseJsonStringArray(row.release_tags_json),
         fileRoles: ruleIndexMap.get(rid)?.fileRoles,
+        syncOverride: row.sync_override ? String(row.sync_override) : 'default',
       },
       cfg,
     );
@@ -3068,13 +3199,33 @@ export function listCatalogReleasesForRuleSync(
     }
   }
 
-  const filesMap = loadFilesByReleaseIds(matchedRows.map((r) => Number(r.id)));
-  const matched = matchedRows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || []));
+  const matchedIds = matchedRows.map((r) => Number(r.id));
+  const filesMap = loadFilesByReleaseIds(matchedIds);
+  const collectionsMap = loadCollectionIdsByReleaseIds(matchedIds);
+  const matched = matchedRows.map((r) =>
+    mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+  );
   return {
     matched,
     excludedByRulesCount,
     totalCataloged: allRows.length,
   };
+}
+
+export function listPinnedCatalogReleases(): RepositoryItemRecord[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM catalog_releases
+       WHERE sync_override = 'pin'
+       ORDER BY system_name COLLATE NOCASE ASC, title COLLATE NOCASE ASC, id ASC`,
+    )
+    .all() as Record<string, unknown>[];
+  const releaseIds = rows.map((r) => Number(r.id));
+  const filesMap = loadFilesByReleaseIds(releaseIds);
+  const collectionsMap = loadCollectionIdsByReleaseIds(releaseIds);
+  return rows.map((r) =>
+    mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+  );
 }
 
 export function computeSyncPreflightSummary(): SyncPreflightSummary {
@@ -3086,7 +3237,7 @@ export function computeSyncPreflightSummary(): SyncPreflightSummary {
 
   const rows = getDb()
     .prepare(
-      `SELECT id, title, system_name, release_type, release_tags_json, status, file_size_bytes
+      `SELECT id, title, system_name, release_type, release_tags_json, status, file_size_bytes, sync_override
        FROM catalog_releases
        ORDER BY COALESCE(published_at, remote_updated_at, discovered_at) DESC, id DESC`,
     )
@@ -3111,12 +3262,14 @@ export function computeSyncPreflightSummary(): SyncPreflightSummary {
     totalCataloged += 1;
     const rid = Number(row.id);
     const ruleData = ruleIndexMap.get(rid);
+    const override = normalizeSyncOverride(row.sync_override);
     const matches = doesCatalogReleaseMatchSyncRules(
       {
         systemName: String(row.system_name || ''),
         releaseType: row.release_type ? String(row.release_type) : null,
         releaseTags: parseJsonStringArray(row.release_tags_json),
         fileRoles: ruleData?.fileRoles,
+        syncOverride: override,
       },
       cfg,
     );
@@ -3129,7 +3282,8 @@ export function computeSyncPreflightSummary(): SyncPreflightSummary {
     totalRuleMatched += 1;
     const status = String(row.status || 'available');
     const rowSizeBytes = Math.max(0, Number(row.file_size_bytes || 0));
-    const coverage = evaluateReleaseRuleMirrorCoverage(status, ruleData, allowedTypes);
+    const effectiveTypes = override === 'pin' ? [] : allowedTypes;
+    const coverage = evaluateReleaseRuleMirrorCoverage(status, ruleData, effectiveTypes);
 
     if (coverage.fullyMirrored) {
       alreadyDownloadedCount += 1;
@@ -3305,10 +3459,281 @@ export function setCatalogItemsInstalled(options: {
     .prepare(`SELECT * FROM catalog_releases WHERE id IN (${placeholders})`)
     .all(...cleanIds) as Record<string, unknown>[];
   const filesMap = loadFilesByReleaseIds(cleanIds);
+  const collectionsMap = loadCollectionIdsByReleaseIds(cleanIds);
 
   return {
     updated,
-    items: rows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || [])),
+    items: rows.map((r) =>
+      mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+    ),
+  };
+}
+
+export function setCatalogItemsFavorite(options: {
+  ids: number[];
+  favorite: boolean;
+}): { updated: number; items: RepositoryItemRecord[] } {
+  const cleanIds = Array.from(
+    new Set(options.ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
+  );
+  if (cleanIds.length === 0) {
+    return { updated: 0, items: [] };
+  }
+
+  const placeholders = cleanIds.map(() => '?').join(', ');
+  const info = getDb()
+    .prepare(`UPDATE catalog_releases SET is_favorite = ? WHERE id IN (${placeholders})`)
+    .run(options.favorite ? 1 : 0, ...cleanIds);
+
+  const rows = getDb()
+    .prepare(`SELECT * FROM catalog_releases WHERE id IN (${placeholders})`)
+    .all(...cleanIds) as Record<string, unknown>[];
+  const filesMap = loadFilesByReleaseIds(cleanIds);
+  const collectionsMap = loadCollectionIdsByReleaseIds(cleanIds);
+
+  return {
+    updated: info.changes,
+    items: rows.map((r) =>
+      mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+    ),
+  };
+}
+
+export function setCatalogItemsSyncOverride(options: {
+  ids: number[];
+  syncOverride: SyncOverrideMode;
+}): { updated: number; items: RepositoryItemRecord[] } {
+  const cleanIds = Array.from(
+    new Set(options.ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
+  );
+  if (cleanIds.length === 0) {
+    return { updated: 0, items: [] };
+  }
+
+  const normalized = normalizeSyncOverride(options.syncOverride);
+  const placeholders = cleanIds.map(() => '?').join(', ');
+  const info = getDb()
+    .prepare(`UPDATE catalog_releases SET sync_override = ? WHERE id IN (${placeholders})`)
+    .run(normalized, ...cleanIds);
+
+  const rows = getDb()
+    .prepare(`SELECT * FROM catalog_releases WHERE id IN (${placeholders})`)
+    .all(...cleanIds) as Record<string, unknown>[];
+  const filesMap = loadFilesByReleaseIds(cleanIds);
+  const collectionsMap = loadCollectionIdsByReleaseIds(cleanIds);
+
+  return {
+    updated: info.changes,
+    items: rows.map((r) =>
+      mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+    ),
+  };
+}
+
+function mapUserCollectionRow(row: Record<string, unknown>): UserCollectionRecord {
+  return {
+    id: Number(row.id),
+    name: String(row.name || ''),
+    description: row.description ? String(row.description) : null,
+    sortOrder: Number(row.sort_order || 0),
+    itemCount: Number(row.item_count || 0),
+    downloadedCount: Number(row.downloaded_count || 0),
+    installedCount: Number(row.installed_count || 0),
+    queueableCount: Number(row.queueable_count || 0),
+    estimatedBytes: Number(row.estimated_bytes || 0),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+const USER_COLLECTION_SELECT_SQL = `
+  SELECT
+    c.id,
+    c.name,
+    c.description,
+    c.sort_order,
+    c.created_at,
+    c.updated_at,
+    COUNT(r.id) AS item_count,
+    SUM(CASE WHEN r.status IN ('downloaded', 'skipped') THEN 1 ELSE 0 END) AS downloaded_count,
+    SUM(CASE WHEN r.installed_at IS NOT NULL THEN 1 ELSE 0 END) AS installed_count,
+    SUM(CASE WHEN r.status IN ('available', 'failed', 'partial') THEN 1 ELSE 0 END) AS queueable_count,
+    COALESCE(SUM(COALESCE(r.file_size_bytes, 0)), 0) AS estimated_bytes
+  FROM user_collections c
+  LEFT JOIN user_collection_items uci ON uci.collection_id = c.id
+  LEFT JOIN catalog_releases r ON r.id = uci.release_id
+`;
+
+export function listUserCollections(): UserCollectionRecord[] {
+  const rows = getDb()
+    .prepare(
+      `${USER_COLLECTION_SELECT_SQL}
+       GROUP BY c.id
+       ORDER BY c.sort_order ASC, c.name COLLATE NOCASE ASC, c.id ASC`,
+    )
+    .all() as Record<string, unknown>[];
+  return rows.map(mapUserCollectionRow);
+}
+
+export function getUserCollectionById(id: number): UserCollectionRecord | null {
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const row = getDb()
+    .prepare(
+      `${USER_COLLECTION_SELECT_SQL}
+       WHERE c.id = ?
+       GROUP BY c.id`,
+    )
+    .get(id) as Record<string, unknown> | undefined;
+  return row ? mapUserCollectionRow(row) : null;
+}
+
+export function createUserCollection(input: {
+  name: string;
+  description?: string | null;
+}): UserCollectionRecord {
+  const cleanName = input.name.trim().slice(0, 80);
+  if (!cleanName) {
+    throw new Error('Collection name is required');
+  }
+  const cleanDesc =
+    typeof input.description === 'string' && input.description.trim()
+      ? input.description.trim().slice(0, 300)
+      : null;
+  const now = new Date().toISOString();
+  const maxOrderRow = getDb()
+    .prepare('SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM user_collections')
+    .get() as { max_order: number };
+  const nextOrder = Number(maxOrderRow?.max_order ?? -1) + 1;
+
+  const info = getDb()
+    .prepare(
+      `INSERT INTO user_collections (name, description, sort_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(cleanName, cleanDesc, nextOrder, now, now);
+
+  const created = getUserCollectionById(Number(info.lastInsertRowid));
+  if (!created) {
+    throw new Error('Failed to load newly created collection');
+  }
+  return created;
+}
+
+export function updateUserCollection(
+  id: number,
+  input: { name?: string; description?: string | null },
+): UserCollectionRecord | null {
+  const existing = getUserCollectionById(id);
+  if (!existing) return null;
+
+  const nextName = input.name !== undefined ? input.name.trim().slice(0, 80) : existing.name;
+  if (!nextName) {
+    throw new Error('Collection name cannot be empty');
+  }
+  const nextDesc =
+    input.description !== undefined
+      ? typeof input.description === 'string' && input.description.trim()
+        ? input.description.trim().slice(0, 300)
+        : null
+      : existing.description;
+  const now = new Date().toISOString();
+
+  getDb()
+    .prepare(
+      `UPDATE user_collections
+       SET name = ?, description = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(nextName, nextDesc, now, id);
+
+  return getUserCollectionById(id);
+}
+
+export function deleteUserCollection(id: number): boolean {
+  if (!Number.isInteger(id) || id <= 0) return false;
+  const info = getDb().prepare('DELETE FROM user_collections WHERE id = ?').run(id);
+  return info.changes > 0;
+}
+
+export function addItemsToUserCollection(
+  collectionId: number,
+  releaseIds: number[],
+): { collection: UserCollectionRecord | null; added: number } {
+  const existing = getUserCollectionById(collectionId);
+  if (!existing) {
+    return { collection: null, added: 0 };
+  }
+  const cleanIds = Array.from(
+    new Set(releaseIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
+  );
+  if (cleanIds.length === 0) {
+    return { collection: existing, added: 0 };
+  }
+
+  const now = new Date().toISOString();
+  const placeholders = cleanIds.map(() => '?').join(', ');
+  const existingReleaseRows = getDb()
+    .prepare(`SELECT id FROM catalog_releases WHERE id IN (${placeholders})`)
+    .all(...cleanIds) as { id: number }[];
+  const validReleaseIds = existingReleaseRows.map((r) => Number(r.id));
+
+  const insertStmt = getDb().prepare(
+    `INSERT OR IGNORE INTO user_collection_items (collection_id, release_id, added_at)
+     VALUES (?, ?, ?)`,
+  );
+  const touchCollectionStmt = getDb().prepare(
+    `UPDATE user_collections SET updated_at = ? WHERE id = ?`,
+  );
+
+  const tx = getDb().transaction(() => {
+    let added = 0;
+    for (const rid of validReleaseIds) {
+      added += insertStmt.run(collectionId, rid, now).changes;
+    }
+    if (added > 0) {
+      touchCollectionStmt.run(now, collectionId);
+    }
+    return added;
+  });
+
+  const added = tx();
+  return {
+    collection: getUserCollectionById(collectionId),
+    added,
+  };
+}
+
+export function removeItemsFromUserCollection(
+  collectionId: number,
+  releaseIds: number[],
+): { collection: UserCollectionRecord | null; removed: number } {
+  const existing = getUserCollectionById(collectionId);
+  if (!existing) {
+    return { collection: null, removed: 0 };
+  }
+  const cleanIds = Array.from(
+    new Set(releaseIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
+  );
+  if (cleanIds.length === 0) {
+    return { collection: existing, removed: 0 };
+  }
+
+  const now = new Date().toISOString();
+  const placeholders = cleanIds.map(() => '?').join(', ');
+  const info = getDb()
+    .prepare(
+      `DELETE FROM user_collection_items
+       WHERE collection_id = ? AND release_id IN (${placeholders})`,
+    )
+    .run(collectionId, ...cleanIds);
+
+  if (info.changes > 0) {
+    getDb().prepare('UPDATE user_collections SET updated_at = ? WHERE id = ?').run(now, collectionId);
+  }
+
+  return {
+    collection: getUserCollectionById(collectionId),
+    removed: info.changes,
   };
 }
 
@@ -3424,6 +3849,7 @@ export function getCatalogTotalsAndSystems(): {
     installedItems: number;
     outdatedInstalledItems: number;
     outdatedLocalReadyItems: number;
+    favoriteItems: number;
     totalBytesMirrored: number;
     totalRuns: number;
   };
@@ -3443,6 +3869,7 @@ export function getCatalogTotalsAndSystems(): {
       SUM(CASE WHEN installed_at IS NOT NULL THEN 1 ELSE 0 END) as installed_items,
       SUM(CASE WHEN ${outdatedExpr} THEN 1 ELSE 0 END) as outdated_installed_items,
       SUM(CASE WHEN ${localReadyExpr} THEN 1 ELSE 0 END) as outdated_local_ready_items,
+      SUM(CASE WHEN is_favorite = 1 THEN 1 ELSE 0 END) as favorite_items,
       COALESCE(SUM(CASE WHEN status IN ('downloaded', 'skipped', 'partial') THEN file_size_bytes ELSE 0 END), 0) as total_bytes
     FROM catalog_releases
   `).get() as Record<string, unknown>;
@@ -3515,6 +3942,7 @@ export function getCatalogTotalsAndSystems(): {
       installedItems: Number(totalsRow.installed_items || 0),
       outdatedInstalledItems: Number(totalsRow.outdated_installed_items || 0),
       outdatedLocalReadyItems: Number(totalsRow.outdated_local_ready_items || 0),
+      favoriteItems: Number(totalsRow.favorite_items || 0),
       totalBytesMirrored: Number(totalsRow.total_bytes || 0),
       totalRuns: Number(runsRow.count || 0),
     },

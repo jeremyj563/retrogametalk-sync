@@ -5,7 +5,7 @@ export type {
   SystemTypeFolderOverride,
   SystemTypeSubfolderMode,
 } from './shared/storageFolderMappings';
-export type { LiveSyncReloadReceipt } from './shared/syncRuleMatcher';
+export type { LiveSyncReloadReceipt, SyncOverrideMode } from './shared/syncRuleMatcher';
 export type NavSection =
   | 'monitor'
   | 'catalog'
@@ -262,6 +262,11 @@ export interface CatalogFacetCounts {
   };
   syncRulesMatched?: number;
   queueableFiltered?: number;
+  favorites?: number;
+  syncOverrides?: {
+    pinned: number;
+    ignored: number;
+  };
 }
 
 export interface CatalogFacets {
@@ -326,8 +331,25 @@ export interface RepositoryItemRecord {
   installedDeviceLabel: string | null;
   installedFileId: number | null;
   installedFilename: string | null;
+  isFavorite: boolean;
+  syncOverride: import('./shared/syncRuleMatcher').SyncOverrideMode;
+  collectionIds: number[];
   filesCount: number;
   files: ReleaseFileRecord[];
+}
+
+export interface UserCollectionRecord {
+  id: number;
+  name: string;
+  description: string | null;
+  sortOrder: number;
+  itemCount: number;
+  downloadedCount: number;
+  installedCount: number;
+  queueableCount: number;
+  estimatedBytes: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface OutdatedInstalledItemSummary {
@@ -502,6 +524,7 @@ export interface ServiceStatusSnapshot {
     installedItems: number;
     outdatedInstalledItems?: number;
     outdatedLocalReadyItems?: number;
+    favoriteItems?: number;
     totalBytesMirrored: number;
     totalRuns: number;
   };
