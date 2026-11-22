@@ -1,3 +1,5 @@
+FROM ghcr.io/linuxserver/unrar:latest AS unrar
+
 FROM node:22-alpine AS builder
 WORKDIR /app
 
@@ -33,7 +35,10 @@ ENV PORT=3000
 ENV DATA_DIR=/run/repo/.rgt-data
 ENV DOWNLOAD_DIR=/run/repo
 
-RUN apk add --no-cache curl 7zip \
+COPY --from=unrar /usr/bin/unrar-alpine /usr/bin/unrar
+RUN apk add --no-cache curl 7zip libstdc++ libgcc libarchive-tools \
+  && chmod +x /usr/bin/unrar \
+  && /usr/bin/unrar >/dev/null \
   && addgroup -S rgt && adduser -S rgt -G rgt \
   && mkdir -p $DOWNLOAD_DIR $DATA_DIR /app/data \
   && chown -R rgt:rgt $DOWNLOAD_DIR /app/data

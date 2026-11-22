@@ -13,6 +13,11 @@ import {
 import {
   browseArchiveAtPath,
   classifyArchiveEntry,
+  classifyArchiveMagicBytes,
+  detect7zRarSupportFromInfoOutput,
+  listArchiveEntries,
+  parseBsdtarVerboseOutput,
+  parseUnrarLtOutput,
   readArchiveTextPreview,
 } from '../src/server/archiveService.ts';
 
@@ -131,4 +136,95 @@ test('browseArchiveAtPath and readArchiveTextPreview inspect real ZIP archives w
     () => readArchiveTextPreview(sampleZipPath, 'Chrono Trigger.sfc'),
     /not supported/i,
   );
+});
+
+test('RAR parsers, 7-Zip RAR codec detection, and archive magic-byte sniffing handle RAR4/RAR5 and corrupt files', async () => {
+  const unrarSample = `
+UNRAR 7.10 freeware      Copyright (c) 1993-2025 Alexander Roshal
+
+Archive: /run/repo/sega_cd_isos/sonic-megamix-hack/Sonic Megamix 5.0a BIN.rar
+Details: RAR 5
+
+        Name: Sonic Megamix 5.0a (Track 01).bin
+        Type: File
+        Size: 451234567
+ Packed size: 210123456
+       Ratio: 46%
+       mtime: 2024-03-10 12:34:56,000000000
+  Attributes: ..A....
+     Host OS: Windows
+ Compression: RAR 5.0(v50) -m3 -md=32m
+
+        Name: Docs
+        Type: Directory
+        Size: 0
+  Attributes: ..D....
+
+        Name: Docs\\Sonic Megamix 5.0a.cue
+        Type: File
+        Size: 1420
+  Attributes: ..A....
+
+        Name: ../escape.bin
+        Type: File
+        Size: 128
+
+        Name: __MACOSX/._Sonic Megamix 5.0a.cue
+        Type: File
+        Size: 212
+`;
+
+  const unrarEntries = parseUnrarLtOutput(unrarSample);
+  assert.deepEqual(unrarEntries, [
+    { entryPath: 'Sonic Megamix 5.0a (Track 01).bin', sizeBytes: 451234567, isDir: false },
+    { entryPath: 'Docs/Sonic Megamix 5.0a.cue', sizeBytes: 1420, isDir: false },
+  ]);
+
+  const bsdtarSample = [
+    'drwxr-xr-x  0 0      0           0 Mar 10  2024 Docs/',
+    '-rw-r--r--  0 0      0   451234567 Mar 10  2024 Sonic Megamix 5.0a (Track 01).bin',
+    '-rw-rw-rw-  0 0      0        1420 Sep 30 19:41 Docs/Sonic Megamix 5.0a.cue',
+    '-rw-r--r--  0 0      0          64 Sep 30 19:41 ../bad.bin',
+  ].join('\n');
+
+  const bsdtarEntries = parseBsdtarVerboseOutput(bsdtarSample);
+  assert.deepEqual(bsdtarEntries, [
+    { entryPath: 'Sonic Megamix 5.0a (Track 01).bin', sizeBytes: 451234567, isDir: false },
+    { entryPath: 'Docs/Sonic Megamix 5.0a.cue', sizeBytes: 1420, isDir: false },
+  ]);
+
+  assert.equal(
+    detect7zRarSupportFromInfoOutput(
+      'Formats:\n 0  7z                   7z\n 0  Rar5                 rar r00\n 0  zip                  zip\n\nCodecs:\n',
+    ),
+    true,
+  );
+  assert.equal(
+    detect7zRarSupportFromInfoOutput(
+      'Formats:\n 0  7z                   7z\n 0  zip                  zip\n\nCodecs:\n',
+    ),
+    false,
+  );
+
+  assert.equal(
+    classifyArchiveMagicBytes(Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00, 0x00])).kind,
+    'rar5',
+  );
+  assert.equal(
+    classifyArchiveMagicBytes(Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00, 0xcf])).kind,
+    'rar4',
+  );
+  assert.equal(
+    classifyArchiveMagicBytes(Buffer.from('<!DOCTYPE html><html><body>Login</body></html>', 'utf8')).kind,
+    'html',
+  );
+  assert.equal(classifyArchiveMagicBytes(Buffer.alloc(0)).kind, 'empty');
+
+  const htmlRarPath = path.join(tempRoot, 'bad-download.rar');
+  fs.writeFileSync(htmlRarPath, '<!DOCTYPE html><html><body>Cloudflare challenge</body></html>', 'utf8');
+  await assert.rejects(() => listArchiveEntries(htmlRarPath), /HTML page/i);
+
+  const emptyRarPath = path.join(tempRoot, 'empty.rar');
+  fs.writeFileSync(emptyRarPath, Buffer.alloc(0));
+  await assert.rejects(() => listArchiveEntries(emptyRarPath), /empty \(0 bytes\)/i);
 });
