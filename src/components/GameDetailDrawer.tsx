@@ -14,6 +14,7 @@ import {
   Gamepad2,
   HardDrive,
   Image as ImageIcon,
+  Loader2,
   Maximize2,
   Minimize2,
   MoreHorizontal,
@@ -21,6 +22,7 @@ import {
   RotateCcw,
   SkipForward,
   SlidersHorizontal,
+  Square,
   Trash2,
   X,
   XCircle,
@@ -55,6 +57,7 @@ import {
   type RomDownloadOutcome,
 } from '../utils/gameDetailActions';
 import { reportAchievementEvent } from '../utils/achievementsClient';
+import type { ResolvedItemDeviceInstallState } from '../utils/deviceInstallView';
 import { readJsonSafely } from '../utils/http';
 import { resolveFileTransferProgress, resolveItemTransferProgress } from '../utils/transferProgress';
 
@@ -79,6 +82,8 @@ interface GameDetailDrawerProps {
   retryingItem?: boolean;
   mountedDeviceName?: string | null;
   isInstallingToDevice?: boolean;
+  isAnotherDeviceInstallBusy?: boolean;
+  deviceInstallState?: ResolvedItemDeviceInstallState | null;
   navigation?: GameDetailNavigation | null;
   onClose: () => void;
   onItemUpdated: (updated: RepositoryItemRecord) => void;
@@ -87,6 +92,9 @@ interface GameDetailDrawerProps {
   onDeleteItem: (id: number) => Promise<void>;
   onExpressInstallToDevice?: (id: number) => void;
   onExportToSdCard?: (id: number) => void;
+  onCancelDeviceInstall?: () => void;
+  onDismissDeviceInstall?: () => void;
+  onViewDeviceInstallQueue?: () => void;
 }
 
 interface LightboxSlide {
@@ -262,6 +270,8 @@ export function GameDetailDrawer({
   retryingItem = false,
   mountedDeviceName = null,
   isInstallingToDevice = false,
+  isAnotherDeviceInstallBusy = false,
+  deviceInstallState = null,
   navigation: activeNavigation = null,
   onClose,
   onItemUpdated,
@@ -270,12 +280,16 @@ export function GameDetailDrawer({
   onDeleteItem,
   onExpressInstallToDevice,
   onExportToSdCard,
+  onCancelDeviceInstall,
+  onDismissDeviceInstall,
+  onViewDeviceInstallQueue,
 }: GameDetailDrawerProps) {
   const [renderedItem, setRenderedItem] = useState<RepositoryItemRecord | null>(activeItem);
   const [renderedNavigation, setRenderedNavigation] = useState<GameDetailNavigation | null>(activeNavigation);
   const [phase, setPhase] = useState<DrawerPhase>(activeItem ? 'entering' : 'closed');
   const [swapDir, setSwapDir] = useState<DrawerSwapDirection>('none');
   const [swapSeq, setSwapSeq] = useState(0);
+  const [dismissedInstallJobId, setDismissedInstallJobId] = useState<number | null>(null);
 
   const [fetchingMeta, setFetchingMeta] = useState(false);
   const [upgradingAssets, setUpgradingAssets] = useState(false);
@@ -2182,6 +2196,156 @@ export function GameDetailDrawer({
           </div>
         )}
 
+        {/* Live Device Install Progress & Outcome Strip (anchored right above the sticky footer) */}
+        {deviceInstallState &&
+          (deviceInstallState.isActive ||
+            (deviceInstallState.isFinished &&
+              deviceInstallState.jobId !== dismissedInstallJobId)) && (
+            <div
+              role="region"
+              aria-label="Storage device installation progress"
+              className={`px-6 py-3 border-t bg-crt-surface/95 space-y-2 shrink-0 ${
+                deviceInstallState.status === 'error'
+                  ? 'border-crt-crimson/50'
+                  : deviceInstallState.status === 'canceled'
+                    ? 'border-crt-amber/50'
+                    : 'border-crt-phosphor/40'
+              }`}
+            >
+              {deviceInstallState.isActive ? (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <Loader2 className="h-3.5 w-3.5 text-crt-phosphor animate-spin shrink-0" />
+                      <HardDrive className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
+                      <span className="font-medium text-crt-text whitespace-nowrap shrink-0">
+                        {deviceInstallState.stageLabel}
+                      </span>
+                      {deviceInstallState.destinationPath && (
+                        <span
+                          title={deviceInstallState.destinationPath}
+                          className="text-crt-muted truncate min-w-0"
+                        >
+                          · {deviceInstallState.destinationPath}
+                        </span>
+                      )}
+                      {deviceInstallState.fileSequenceLabel && (
+                        <span className="text-crt-muted whitespace-nowrap shrink-0 tabular-nums">
+                          · {deviceInstallState.fileSequenceLabel}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2.5 shrink-0 tabular-nums">
+                      {deviceInstallState.bytesLabel && (
+                        <span className="text-crt-muted whitespace-nowrap">
+                          {deviceInstallState.bytesLabel}
+                        </span>
+                      )}
+                      {deviceInstallState.speedLabel && (
+                        <span className="text-crt-muted whitespace-nowrap">
+                          {deviceInstallState.speedLabel}
+                        </span>
+                      )}
+                      {deviceInstallState.percent !== null && (
+                        <span className="text-crt-phosphor font-semibold whitespace-nowrap">
+                          {deviceInstallState.percent}%
+                        </span>
+                      )}
+                      {deviceInstallState.isBatchJob && onViewDeviceInstallQueue && (
+                        <button
+                          type="button"
+                          onClick={onViewDeviceInstallQueue}
+                          className="px-2 py-0.5 text-[11px] font-medium border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap cursor-pointer"
+                        >
+                          Queue
+                        </button>
+                      )}
+                      {onCancelDeviceInstall && (
+                        <button
+                          type="button"
+                          disabled={deviceInstallState.stage === 'canceling'}
+                          onClick={onCancelDeviceInstall}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium border border-crt-crimson/60 bg-crt-crimson/10 text-crt-crimson hover:bg-crt-crimson/20 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+                        >
+                          <Square className="h-2.5 w-2.5 fill-current shrink-0" />
+                          {deviceInstallState.stage === 'canceling' ? 'Stopping…' : 'Cancel'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div
+                    role="progressbar"
+                    aria-label={`Device install progress for ${item.title}`}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={deviceInstallState.percent ?? undefined}
+                    className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+                  >
+                    {deviceInstallState.mode === 'determinate' &&
+                    deviceInstallState.percent !== null ? (
+                      <div
+                        className="h-full bg-crt-phosphor crt-progress-beam transition-all duration-150"
+                        style={{ width: `${deviceInstallState.percent}%` }}
+                      />
+                    ) : (
+                      <div
+                        className={`h-full crt-progress-indeterminate ${
+                          deviceInstallState.mode === 'preparing'
+                            ? 'bg-crt-amber'
+                            : 'bg-crt-phosphor'
+                        }`}
+                      />
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="flex items-center justify-between gap-3 text-xs font-mono">
+                  <div className="flex items-center gap-2 min-w-0">
+                    {deviceInstallState.status === 'completed' ? (
+                      <CheckCircle2 className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
+                    ) : deviceInstallState.status === 'canceled' ? (
+                      <AlertCircle className="h-3.5 w-3.5 text-crt-amber shrink-0" />
+                    ) : (
+                      <AlertCircle className="h-3.5 w-3.5 text-crt-crimson shrink-0" />
+                    )}
+                    <span
+                      className={`font-medium whitespace-nowrap shrink-0 ${
+                        deviceInstallState.status === 'completed'
+                          ? 'text-crt-phosphor'
+                          : deviceInstallState.status === 'canceled'
+                            ? 'text-crt-amber'
+                            : 'text-crt-crimson'
+                      }`}
+                    >
+                      {deviceInstallState.stageLabel}
+                    </span>
+                    {deviceInstallState.outcomeSummary && (
+                      <span
+                        title={deviceInstallState.outcomeSummary}
+                        className="text-crt-muted truncate min-w-0"
+                      >
+                        · {deviceInstallState.outcomeSummary}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDismissedInstallJobId(deviceInstallState.jobId);
+                      onDismissDeviceInstall?.();
+                    }}
+                    aria-label="Dismiss install status"
+                    className="p-1 text-crt-muted hover:text-crt-text rounded shrink-0 cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
         {/* Unified Sticky Footer */}
         {(() => {
           const canInstallToDevice = Boolean(onExpressInstallToDevice || onExportToSdCard);
@@ -2202,8 +2366,20 @@ export function GameDetailDrawer({
           const canBrowsePrimaryArchive = Boolean(
             primaryDownloadFile && isBrowsableArchiveName(primaryDownloadFile.filename),
           );
+          const isThisItemInstalling = Boolean(isInstallingToDevice || deviceInstallState?.isActive);
+          const installingButtonLabel =
+            deviceInstallState?.stage === 'queued'
+              ? 'Queued…'
+              : deviceInstallState?.stage === 'finalizing'
+                ? 'Finalizing…'
+                : deviceInstallState?.stage === 'canceling'
+                  ? 'Stopping…'
+                  : deviceInstallState?.percent !== null && deviceInstallState?.percent !== undefined
+                    ? `Installing… ${deviceInstallState.percent}%`
+                    : 'Installing…';
           const handlePrimaryMountedInstall = () => {
             setMoreMenuOpen(false);
+            setDismissedInstallJobId(null);
             if (onExpressInstallToDevice) {
               onExpressInstallToDevice(item.id);
             } else if (onExportToSdCard) {
@@ -2218,21 +2394,23 @@ export function GameDetailDrawer({
                   <>
                     <button
                       type="button"
-                      disabled={isInstallingToDevice}
+                      disabled={isThisItemInstalling || isAnotherDeviceInstallBusy}
                       onClick={handlePrimaryMountedInstall}
                       title={
-                        mountedDeviceName
-                          ? `One-click express install directly to ${mountedDeviceName}`
-                          : 'Install directly to mounted storage device'
+                        isAnotherDeviceInstallBusy
+                          ? 'Another storage device install is currently in progress'
+                          : mountedDeviceName
+                            ? `One-click express install directly to ${mountedDeviceName}`
+                            : 'Install directly to mounted storage device'
                       }
-                      className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-60 cursor-pointer"
+                      className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer tabular-nums"
                     >
-                      {isInstallingToDevice ? (
+                      {isThisItemInstalling ? (
                         <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
                       ) : (
                         <HardDrive className="h-3.5 w-3.5 shrink-0" />
                       )}
-                      {isInstallingToDevice ? 'Installing...' : footerPlan.installButtonLabel}
+                      {isThisItemInstalling ? installingButtonLabel : footerPlan.installButtonLabel}
                     </button>
                     <button
                       type="button"

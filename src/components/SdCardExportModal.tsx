@@ -593,47 +593,100 @@ export function SdCardExportModal({
           )}
 
           {/* Live Transfer Progress */}
-          {(isRunning || isFinished) && (
-            <div className="pt-2 border-t border-crt-border space-y-1.5">
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono tabular-nums">
-                <span className="text-crt-text truncate">
-                  {isCanceling
-                    ? 'Stopping active transfer...'
-                    : isRunning
-                      ? `Installing ${metrics.completedItems} / ${metrics.totalItems} game${metrics.totalItems === 1 ? '' : 's'}${job.currentTitle ? ` · ${job.currentTitle}` : ''}`
-                      : job.phase === 'canceled'
-                        ? `Stopped at ${metrics.completedItems} / ${metrics.totalItems} games`
-                        : job.phase === 'error'
-                          ? `Error after ${metrics.completedItems} / ${metrics.totalItems} games`
-                          : `Completed ${metrics.completedItems} / ${metrics.totalItems} game${metrics.totalItems === 1 ? '' : 's'}`}
-                </span>
-                <span className="text-crt-muted whitespace-nowrap shrink-0">
-                  {[
-                    metrics.writtenItems > 0 ? `${metrics.writtenItems} installed` : null,
-                    metrics.upgradedItems > 0 ? `${metrics.upgradedItems} updated` : null,
-                    metrics.skippedItems > 0 ? `${metrics.skippedItems} already on device` : null,
-                    metrics.failedItems > 0 ? `${metrics.failedItems} failed` : null,
-                    metrics.canceledItems > 0 ? `${metrics.canceledItems} canceled` : null,
-                    metrics.totalBytesWritten > 0 ? formatBytes(metrics.totalBytesWritten) : null,
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
-                </span>
+          {(isRunning || isFinished) && (() => {
+            const active = isRunning ? job.activeTransfer : null;
+            const liveActiveLabel = active
+              ? active.stage === 'scanning_device'
+                ? `Scanning ${shortDeviceName}…`
+                : active.stage === 'inspecting'
+                  ? 'Inspecting archive…'
+                  : active.stage === 'extracting'
+                    ? active.totalBytes
+                      ? `Extracting (${formatBytes(active.totalBytes)})…`
+                      : 'Extracting…'
+                    : active.stage === 'finalizing'
+                      ? 'Finalizing on device…'
+                      : active.totalBytes && active.totalBytes > 0
+                        ? `${formatBytes(active.bytesWritten)} / ${formatBytes(active.totalBytes)}${
+                            active.bytesPerSec && active.bytesPerSec > 0
+                              ? ` · ${formatBytes(active.bytesPerSec)}/s`
+                              : ''
+                          }${active.percent !== null ? ` · ${active.percent}%` : ''}`
+                        : active.bytesWritten > 0
+                          ? `${formatBytes(active.bytesWritten)}${
+                              active.bytesPerSec && active.bytesPerSec > 0
+                                ? ` · ${formatBytes(active.bytesPerSec)}/s`
+                                : ''
+                            }`
+                          : null
+              : null;
+            const showIndeterminate =
+              isRunning &&
+              metrics.completedItems === 0 &&
+              (!active ||
+                active.stage === 'scanning_device' ||
+                active.stage === 'inspecting' ||
+                active.stage === 'extracting' ||
+                (active.stage === 'writing' && active.percent === null));
+
+            return (
+              <div className="pt-2 border-t border-crt-border space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono tabular-nums">
+                  <span className="text-crt-text truncate">
+                    {isCanceling
+                      ? 'Stopping active transfer...'
+                      : isRunning
+                        ? `Installing ${metrics.completedItems} / ${metrics.totalItems} game${metrics.totalItems === 1 ? '' : 's'}${job.currentTitle ? ` · ${job.currentTitle}` : ''}`
+                        : job.phase === 'canceled'
+                          ? `Stopped at ${metrics.completedItems} / ${metrics.totalItems} games`
+                          : job.phase === 'error'
+                            ? `Error after ${metrics.completedItems} / ${metrics.totalItems} games`
+                            : `Completed ${metrics.completedItems} / ${metrics.totalItems} game${metrics.totalItems === 1 ? '' : 's'}`}
+                  </span>
+                  <span className="text-crt-muted whitespace-nowrap shrink-0">
+                    {liveActiveLabel ||
+                      [
+                        metrics.writtenItems > 0 ? `${metrics.writtenItems} installed` : null,
+                        metrics.upgradedItems > 0 ? `${metrics.upgradedItems} updated` : null,
+                        metrics.skippedItems > 0 ? `${metrics.skippedItems} already on device` : null,
+                        metrics.failedItems > 0 ? `${metrics.failedItems} failed` : null,
+                        metrics.canceledItems > 0 ? `${metrics.canceledItems} canceled` : null,
+                        metrics.totalBytesWritten > 0 ? formatBytes(metrics.totalBytesWritten) : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                  </span>
+                </div>
+                <div
+                  role="progressbar"
+                  aria-label="Storage installation progress"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={showIndeterminate ? undefined : metrics.progressPercent}
+                  className="h-1.5 w-full overflow-hidden rounded-sm bg-crt-bg border border-crt-border/70"
+                >
+                  {showIndeterminate ? (
+                    <div
+                      className={`h-full crt-progress-indeterminate ${
+                        active?.stage === 'writing' ? 'bg-crt-phosphor' : 'bg-crt-amber'
+                      }`}
+                    />
+                  ) : (
+                    <div
+                      className={`h-full transition-all duration-150 ${
+                        job.phase === 'error'
+                          ? 'bg-crt-crimson'
+                          : job.phase === 'canceled'
+                            ? 'bg-crt-amber'
+                            : 'bg-crt-phosphor crt-progress-beam'
+                      }`}
+                      style={{ width: `${metrics.progressPercent}%` }}
+                    />
+                  )}
+                </div>
               </div>
-              <progress
-                max={100}
-                value={isRunning && metrics.progressPercent === 0 ? 3 : metrics.progressPercent}
-                aria-label="Storage installation progress"
-                className={`block h-1.5 w-full overflow-hidden rounded-xs bg-crt-bg [&::-webkit-progress-bar]:bg-crt-bg [&::-webkit-progress-value]:transition-all [&::-webkit-progress-value]:duration-200 ${
-                  job.phase === 'error'
-                    ? '[&::-webkit-progress-value]:bg-crt-crimson [&::-moz-progress-bar]:bg-crt-crimson'
-                    : job.phase === 'canceled'
-                      ? '[&::-webkit-progress-value]:bg-crt-amber [&::-moz-progress-bar]:bg-crt-amber'
-                      : '[&::-webkit-progress-value]:bg-crt-phosphor [&::-moz-progress-bar]:bg-crt-phosphor'
-                }`}
-              />
-            </div>
-          )}
+            );
+          })()}
         </div>
 
         {/* Modal Body */}

@@ -52,6 +52,7 @@ import {
   formatDownloadFilteredTooltip,
   formatInstallSelectedTooltip,
   formatQueueSelectedTooltip,
+  isCatalogStatusInstallable,
   isCatalogStatusQueueable,
   summarizeCatalogSelection,
 } from '../shared/catalogSelection';
@@ -71,6 +72,7 @@ import type {
   ServiceStatusSnapshot,
 } from '../types';
 import { ArchiveExplorer } from './ArchiveExplorer';
+import { resolveItemDeviceInstallState } from '../utils/deviceInstallView';
 import { formatBytes, formatDateTime } from '../utils/format';
 import { reportAchievementEvent } from '../utils/achievementsClient';
 import {
@@ -78,6 +80,7 @@ import {
   normalizeSecretQuery,
   type SecretSearchEffect,
 } from '../utils/easterEggs';
+import { isFileSystemAccessSupported } from '../utils/sdCardFs';
 import { resolveItemTransferProgress } from '../utils/transferProgress';
 import { CatalogStatsPanel } from './CatalogStatsPanel';
 import { GameDetailDrawer, type GameDetailNavigation } from './GameDetailDrawer';
@@ -1313,6 +1316,40 @@ export function CatalogPanel({
     [selectedCatalogIds, effectiveStatusById],
   );
 
+  const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
+
+  const handleQuickInstallItem = useCallback(
+    (item: RepositoryItemRecord) => {
+      if (installer.isBusy) {
+        if (installer.job?.itemIds.includes(item.id)) {
+          installer.openModal();
+        }
+        return;
+      }
+      const metaMap = new Map(knownItemMetaMap);
+      metaMap.set(item.id, { title: item.title, systemName: item.systemName });
+      if (sdRootHandle || fsSupport.supported) {
+        void installer.startExpressInstall([item.id], currentSmartFilterContext, metaMap);
+      } else {
+        void installer.openReviewQueue([item.id], currentSmartFilterContext, metaMap);
+      }
+    },
+    [installer, knownItemMetaMap, sdRootHandle, fsSupport.supported, currentSmartFilterContext],
+  );
+
+  const activeDetailInstallState = useMemo(
+    () =>
+      activeDetailItem
+        ? resolveItemDeviceInstallState(
+            activeDetailItem.id,
+            installer.job,
+            installer.metrics,
+            sdRootHandle?.name || null,
+          )
+        : null,
+    [activeDetailItem, installer.job, installer.metrics, sdRootHandle],
+  );
+
   const queueableFilteredCount = useMemo(() => {
     if (typeof facets.counts?.queueableFiltered === 'number') {
       return facets.counts.queueableFiltered;
@@ -2201,6 +2238,7 @@ export function CatalogPanel({
                 type="button"
                 disabled={refreshing}
                 onClick={() => void loadCatalog(false, { softRefresh: true })}
+                title="Reload this view and filter counts from your local database (does not fetch new games from RetroGameTalk)"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60"
               >
                 <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${refreshing ? 'animate-spin' : ''}`} />
@@ -2243,6 +2281,11 @@ export function CatalogPanel({
                     void loadFsTree(fsPath);
                   }
                 }}
+                title={
+                  fsArchivePath
+                    ? 'Re-read this archive from local disk'
+                    : 'Re-scan this folder on local disk for file changes'
+                }
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-sans border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap cursor-pointer"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
@@ -2803,6 +2846,7 @@ export function CatalogPanel({
                                 setIndexerBusy(false);
                               }
                             }}
+                            title="Pause background catalog indexing (already indexed games stay saved)"
                             className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                           >
                             <Pause className="h-3 w-3" />
@@ -2823,6 +2867,7 @@ export function CatalogPanel({
                                   setIndexerBusy(false);
                                 }
                               }}
+                              title="Fetch game metadata from RetroGameTalk for all remaining unindexed consoles (does not download ROMs)"
                               className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                             >
                               <RefreshCw className={`h-3 w-3 ${indexerBusy ? 'animate-spin' : ''}`} />
@@ -3216,6 +3261,21 @@ export function CatalogPanel({
                       status.activeTransfer,
                       item.files,
                     );
+                    const itemInstall = resolveItemDeviceInstallState(
+                      item.id,
+                      installer.job,
+                      installer.metrics,
+                      sdRootHandle?.name || null,
+                    );
+                    const canQuickInstall = isCatalogStatusInstallable(item.status);
+                    const isReinstallOnMounted = Boolean(
+                      sdRootHandle &&
+                        item.installedAt &&
+                        (!item.installedDeviceLabel ||
+                          item.installedDeviceLabel.trim().toLowerCase() ===
+                            sdRootHandle.name.trim().toLowerCase()),
+                    );
+                    const isOtherInstallBusy = installer.isBusy && !itemInstall.isActive;
 
                     return (
                       <tr
@@ -3368,6 +3428,67 @@ export function CatalogPanel({
                                 </div>
                               )}
                             </div>
+                          ) : itemInstall.isActive ? (
+                            <div className="min-w-[180px] max-w-[230px] space-y-1">
+                              <div className="flex items-center justify-between gap-2 text-[11px] tabular-nums">
+                                <span
+                                  className={`inline-flex items-center gap-1 font-medium truncate ${
+                                    itemInstall.mode === 'preparing'
+                                      ? 'text-crt-amber'
+                                      : 'text-crt-phosphor'
+                                  }`}
+                                  title={itemInstall.destinationPath || itemInstall.stageLabel}
+                                >
+                                  <HardDrive className="h-3 w-3 shrink-0" />
+                                  <span className="truncate">
+                                    {itemInstall.stage === 'queued'
+                                      ? 'Queued'
+                                      : itemInstall.stage === 'finalizing'
+                                        ? 'Finalizing…'
+                                        : itemInstall.stage === 'extracting'
+                                          ? 'Extracting…'
+                                          : itemInstall.stage === 'inspecting' ||
+                                              itemInstall.stage === 'scanning_device'
+                                            ? 'Preparing…'
+                                            : itemInstall.percent !== null
+                                              ? `Installing · ${itemInstall.percent}%`
+                                              : 'Installing…'}
+                                  </span>
+                                </span>
+                                {itemInstall.speedLabel && (
+                                  <span className="text-crt-muted shrink-0">
+                                    {itemInstall.speedLabel}
+                                  </span>
+                                )}
+                              </div>
+                              <div
+                                role="progressbar"
+                                aria-label={`Device install progress for ${item.title}`}
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-valuenow={itemInstall.percent ?? undefined}
+                                className="h-1.5 w-full bg-crt-bg border border-crt-border rounded-sm overflow-hidden"
+                              >
+                                {itemInstall.mode === 'determinate' &&
+                                itemInstall.percent !== null ? (
+                                  <div
+                                    className="h-full bg-crt-phosphor crt-progress-beam transition-all duration-150"
+                                    style={{ width: `${itemInstall.percent}%` }}
+                                  />
+                                ) : (
+                                  <div
+                                    className={`h-full crt-progress-indeterminate ${
+                                      itemInstall.mode === 'preparing'
+                                        ? 'bg-crt-amber'
+                                        : 'bg-crt-phosphor'
+                                    }`}
+                                  />
+                                )}
+                              </div>
+                              <div className="text-[10px] text-crt-muted tabular-nums truncate">
+                                {itemInstall.bytesLabel}
+                              </div>
+                            </div>
                           ) : (
                             <div className="space-y-0.5">
                               <span
@@ -3424,40 +3545,112 @@ export function CatalogPanel({
                                 <Download className="h-3 w-3" />
                                 {queueingIds.has(item.id) ? 'Queueing...' : 'Download'}
                               </button>
-                            ) : item.status === 'failed' || item.status === 'partial' ? (
-                              <button
-                                type="button"
-                                disabled={effectiveRetryingId === item.id || Boolean(status.activeRun) || !status.auth.hasCompletedLogin}
-                                title={!status.auth.hasCompletedLogin ? 'Verify login in System Settings before retrying' : undefined}
-                                onClick={() => void handleRetry(item.id)}
-                                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-border hover:border-crt-phosphor text-crt-text rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                <RotateCcw className={`h-3 w-3 ${effectiveRetryingId === item.id ? 'animate-spin' : ''}`} />
-                                {effectiveRetryingId === item.id ? 'Retrying...' : 'Retry'}
-                              </button>
                             ) : (
-                              <span
-                                className="font-mono text-[11px] text-crt-muted tabular-nums"
-                                title={
-                                  sort === 'downloaded_desc'
-                                    ? 'Downloaded to disk'
-                                    : sort === 'discovered_desc'
-                                      ? 'Indexed into catalog'
-                                      : item.publishedAt
-                                        ? 'Site submission date'
-                                        : item.remoteUpdatedAt
-                                          ? 'Site updated date'
-                                          : 'Indexed into catalog'
-                                }
-                              >
-                                {formatDateTime(
-                                  sort === 'downloaded_desc'
-                                    ? item.downloadedAt || item.discoveredAt
-                                    : sort === 'discovered_desc'
-                                      ? item.discoveredAt
-                                      : item.publishedAt || item.remoteUpdatedAt || item.downloadedAt || item.discoveredAt,
+                              <>
+                                {!canQuickInstall &&
+                                  item.status !== 'failed' &&
+                                  item.status !== 'partial' && (
+                                    <span
+                                      className="font-mono text-[11px] text-crt-muted tabular-nums"
+                                      title={
+                                        sort === 'downloaded_desc'
+                                          ? 'Downloaded to disk'
+                                          : sort === 'discovered_desc'
+                                            ? 'Indexed into catalog'
+                                            : item.publishedAt
+                                              ? 'Site submission date'
+                                              : item.remoteUpdatedAt
+                                                ? 'Site updated date'
+                                                : 'Indexed into catalog'
+                                      }
+                                    >
+                                      {formatDateTime(
+                                        sort === 'downloaded_desc'
+                                          ? item.downloadedAt || item.discoveredAt
+                                          : sort === 'discovered_desc'
+                                            ? item.discoveredAt
+                                            : item.publishedAt || item.remoteUpdatedAt || item.downloadedAt || item.discoveredAt,
+                                      )}
+                                    </span>
+                                  )}
+
+                                {canQuickInstall && item.status !== 'partial' && (
+                                  <span
+                                    className="hidden xl:inline font-mono text-[11px] text-crt-muted tabular-nums"
+                                    title={
+                                      sort === 'downloaded_desc'
+                                        ? 'Downloaded to disk'
+                                        : sort === 'discovered_desc'
+                                          ? 'Indexed into catalog'
+                                          : item.publishedAt
+                                            ? 'Site submission date'
+                                            : item.remoteUpdatedAt
+                                              ? 'Site updated date'
+                                              : 'Indexed into catalog'
+                                    }
+                                  >
+                                    {formatDateTime(
+                                      sort === 'downloaded_desc'
+                                        ? item.downloadedAt || item.discoveredAt
+                                        : sort === 'discovered_desc'
+                                          ? item.discoveredAt
+                                          : item.publishedAt || item.remoteUpdatedAt || item.downloadedAt || item.discoveredAt,
+                                    )}
+                                  </span>
                                 )}
-                              </span>
+
+                                {canQuickInstall && (
+                                  <button
+                                    type="button"
+                                    disabled={isOtherInstallBusy}
+                                    title={
+                                      itemInstall.isActive
+                                        ? 'View or cancel active device installation'
+                                        : isOtherInstallBusy
+                                          ? 'Wait for the active device install to finish'
+                                          : sdRootHandle
+                                            ? `${isReinstallOnMounted ? 'Reinstall' : 'Install'} directly to ${sdRootHandle.name}`
+                                            : 'Mount a storage device and install this game'
+                                    }
+                                    onClick={() => handleQuickInstallItem(item)}
+                                    className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border rounded transition-colors disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer tabular-nums ${
+                                      itemInstall.isActive
+                                        ? 'border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor'
+                                        : isReinstallOnMounted
+                                          ? 'border-crt-border text-crt-muted hover:border-crt-phosphor hover:text-crt-phosphor'
+                                          : 'border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10'
+                                    }`}
+                                  >
+                                    {itemInstall.isActive ? (
+                                      <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                                    ) : (
+                                      <HardDrive className="h-3 w-3 shrink-0" />
+                                    )}
+                                    {itemInstall.isActive
+                                      ? itemInstall.percent !== null
+                                        ? `${itemInstall.percent}%`
+                                        : itemInstall.stage === 'queued'
+                                          ? 'Queued'
+                                          : 'Installing'
+                                      : isReinstallOnMounted
+                                        ? 'Reinstall'
+                                        : 'Install'}
+                                  </button>
+                                )}
+
+                                {(item.status === 'failed' || item.status === 'partial') && (
+                                  <button
+                                    type="button"
+                                    disabled={effectiveRetryingId === item.id || Boolean(status.activeRun) || !status.auth.hasCompletedLogin}
+                                    title={!status.auth.hasCompletedLogin ? 'Verify login in System Settings before retrying' : undefined}
+                                    onClick={() => void handleRetry(item.id)}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-border hover:border-crt-phosphor text-crt-text rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                                  >
+                                    <RotateCcw className={`h-3 w-3 ${effectiveRetryingId === item.id ? 'animate-spin' : ''}`} />
+                                    {effectiveRetryingId === item.id ? 'Retrying...' : 'Retry'}
+                                  </button>
+                                )}
+                              </>
                             )}
                             <button
                               type="button"
@@ -3465,7 +3658,7 @@ export function CatalogPanel({
                               onClick={() => void handleDeleteCatalogItems([item.id])}
                               aria-label={`Delete ${item.title}`}
                               title="Delete release and local mirrored files"
-                              className="p-1.5 border border-crt-border hover:border-crt-crimson text-crt-muted hover:text-crt-crimson rounded transition-colors disabled:opacity-50"
+                              className="p-1.5 border border-crt-border hover:border-crt-crimson text-crt-muted hover:text-crt-crimson rounded transition-colors disabled:opacity-50 cursor-pointer"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </button>
@@ -3531,6 +3724,21 @@ export function CatalogPanel({
                     status.activeTransfer,
                     item.files,
                   );
+                  const itemInstall = resolveItemDeviceInstallState(
+                    item.id,
+                    installer.job,
+                    installer.metrics,
+                    sdRootHandle?.name || null,
+                  );
+                  const canQuickInstall = isCatalogStatusInstallable(item.status);
+                  const isReinstallOnMounted = Boolean(
+                    sdRootHandle &&
+                      item.installedAt &&
+                      (!item.installedDeviceLabel ||
+                        item.installedDeviceLabel.trim().toLowerCase() ===
+                          sdRootHandle.name.trim().toLowerCase()),
+                  );
+                  const isOtherInstallBusy = installer.isBusy && !itemInstall.isActive;
 
                   return (
                     <div
@@ -3561,7 +3769,7 @@ export function CatalogPanel({
                           hasRemoteCover={Boolean(item.metadata?.coverUrl)}
                           assetVersion={assetVersion}
                           failed={failedCovers.has(item.id)}
-                          padBottom={transfer.active}
+                          padBottom={transfer.active || itemInstall.isActive}
                           onError={() =>
                             setFailedCovers((prev) => {
                               const next = new Set(prev);
@@ -3623,6 +3831,65 @@ export function CatalogPanel({
                                 )}
                                 {transfer.percent !== null && (
                                   <span className="text-crt-phosphor font-semibold">{transfer.percent}%</span>
+                                )}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        {!transfer.active && itemInstall.isActive && (
+                          <div className="absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-crt-bg via-crt-bg/92 to-transparent pt-10 px-3 pb-2.5 space-y-1.5">
+                            <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                              <span
+                                className={`inline-flex items-center gap-1.5 font-medium truncate ${
+                                  itemInstall.mode === 'preparing' ? 'text-crt-amber' : 'text-crt-phosphor'
+                                }`}
+                              >
+                                <HardDrive className="h-3 w-3 shrink-0" />
+                                <span className="truncate">
+                                  {itemInstall.filename || itemInstall.stageLabel}
+                                </span>
+                              </span>
+                              {itemInstall.fileSequenceLabel && (
+                                <span className="text-[10px] text-crt-muted whitespace-nowrap shrink-0 tabular-nums">
+                                  {itemInstall.fileSequenceLabel}
+                                </span>
+                              )}
+                            </div>
+
+                            <div
+                              role="progressbar"
+                              aria-label={`Device install progress for ${item.title}`}
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={itemInstall.percent ?? undefined}
+                              className="h-1.5 w-full bg-crt-surface/90 border border-crt-border rounded-sm overflow-hidden"
+                            >
+                              {itemInstall.mode === 'determinate' && itemInstall.percent !== null ? (
+                                <div
+                                  className="h-full bg-crt-phosphor crt-progress-beam transition-all duration-150"
+                                  style={{ width: `${itemInstall.percent}%` }}
+                                />
+                              ) : (
+                                <div
+                                  className={`h-full crt-progress-indeterminate ${
+                                    itemInstall.mode === 'preparing' ? 'bg-crt-amber' : 'bg-crt-phosphor'
+                                  }`}
+                                />
+                              )}
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2 text-[10px] font-mono tabular-nums text-crt-muted">
+                              <span className="truncate text-crt-text/90">{itemInstall.bytesLabel}</span>
+                              <span className="whitespace-nowrap shrink-0">
+                                {itemInstall.speedLabel && <span>{itemInstall.speedLabel}</span>}
+                                {itemInstall.speedLabel && itemInstall.percent !== null && (
+                                  <span aria-hidden="true"> · </span>
+                                )}
+                                {itemInstall.percent !== null && (
+                                  <span className="text-crt-phosphor font-semibold">
+                                    {itemInstall.percent}%
+                                  </span>
                                 )}
                               </span>
                             </div>
@@ -3716,6 +3983,33 @@ export function CatalogPanel({
                               </span>
                             </div>
                           )
+                        ) : itemInstall.isActive ? (
+                          <div className="pt-2 border-t border-crt-border flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
+                            <span className="text-crt-text truncate">
+                              {item.sizeIsEstimated && item.fileSizeBytes > 0 ? '~' : ''}
+                              {formatBytes(item.fileSizeBytes)} · {item.filesCount}f
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                installer.openModal();
+                              }}
+                              title="View or cancel active device installation"
+                              className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium border border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor rounded transition-colors shrink-0 cursor-pointer"
+                            >
+                              <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                              <span>
+                                {itemInstall.percent !== null
+                                  ? `${itemInstall.percent}%`
+                                  : itemInstall.stage === 'queued'
+                                    ? 'Queued'
+                                    : itemInstall.stage === 'finalizing'
+                                      ? 'Finalizing'
+                                      : 'Installing'}
+                              </span>
+                            </button>
+                          </div>
                         ) : (
                           <div className="pt-2 border-t border-crt-border flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
                             <span className="text-crt-text truncate">
@@ -3739,6 +4033,30 @@ export function CatalogPanel({
                               >
                                 <Download className="h-3 w-3" />
                                 {queueingIds.has(item.id) ? 'Queueing' : 'Download'}
+                              </button>
+                            ) : canQuickInstall ? (
+                              <button
+                                type="button"
+                                disabled={isOtherInstallBusy}
+                                title={
+                                  isOtherInstallBusy
+                                    ? 'Wait for the active device install to finish'
+                                    : sdRootHandle
+                                      ? `${isReinstallOnMounted ? 'Reinstall' : 'Install'} directly to ${sdRootHandle.name}`
+                                      : 'Mount a storage device and install this game'
+                                }
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleQuickInstallItem(item);
+                                }}
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium border rounded transition-colors shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer ${
+                                  isReinstallOnMounted
+                                    ? 'border-crt-border text-crt-muted hover:border-crt-phosphor hover:text-crt-phosphor'
+                                    : 'border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10'
+                                }`}
+                              >
+                                <HardDrive className="h-3 w-3 shrink-0" />
+                                {isReinstallOnMounted ? 'Reinstall' : 'Install'}
                               </button>
                             ) : (
                               <span
@@ -4067,11 +4385,11 @@ export function CatalogPanel({
         canSync={Boolean(status.auth.hasCompletedLogin)}
         retryingItem={effectiveRetryingId === activeDetailItem?.id}
         mountedDeviceName={sdRootHandle?.name || null}
-        isInstallingToDevice={Boolean(
-          installer.isBusy &&
-            activeDetailItem &&
-            installer.job?.itemIds.includes(activeDetailItem.id),
+        isInstallingToDevice={Boolean(activeDetailInstallState?.isActive)}
+        isAnotherDeviceInstallBusy={Boolean(
+          installer.isBusy && !activeDetailInstallState?.isActive,
         )}
+        deviceInstallState={activeDetailInstallState}
         navigation={detailNavigation}
         onClose={closeDetailDrawer}
         onItemUpdated={handleItemUpdated}
@@ -4083,6 +4401,9 @@ export function CatalogPanel({
         onExportToSdCard={(id) =>
           void installer.openReviewQueue([id], currentSmartFilterContext, knownItemMetaMap)
         }
+        onCancelDeviceInstall={installer.cancelInstall}
+        onDismissDeviceInstall={installer.dismissJob}
+        onViewDeviceInstallQueue={installer.openModal}
         onDeleteItem={async (id) => {
           await handleDeleteCatalogItems([id]);
         }}

@@ -31,6 +31,36 @@ export function BulkInstallDock({ installer }: BulkInstallDockProps) {
   const isCompleted = job.phase === 'completed';
 
   const deviceName = sdRootHandle?.name || 'Storage Device';
+  const active = isRunning ? job.activeTransfer : null;
+  const activeBytesSummary = active
+    ? active.stage === 'scanning_device'
+      ? `Scanning ${deviceName}…`
+      : active.stage === 'inspecting'
+        ? 'Inspecting archive…'
+        : active.stage === 'extracting'
+          ? active.totalBytes
+            ? `Extracting (${formatBytes(active.totalBytes)})…`
+            : 'Extracting…'
+          : active.stage === 'finalizing'
+            ? 'Finalizing on device…'
+            : active.totalBytes && active.totalBytes > 0
+              ? `${formatBytes(active.bytesWritten)} / ${formatBytes(active.totalBytes)}`
+              : active.bytesWritten > 0
+                ? formatBytes(active.bytesWritten)
+                : null
+    : null;
+  const activeSpeedLabel =
+    active && active.stage === 'writing' && active.bytesPerSec && active.bytesPerSec > 0
+      ? `${formatBytes(active.bytesPerSec)}/s`
+      : null;
+  const showIndeterminateBar =
+    isRunning &&
+    metrics.completedItems === 0 &&
+    (!active ||
+      active.stage === 'scanning_device' ||
+      active.stage === 'inspecting' ||
+      active.stage === 'extracting' ||
+      (active.stage === 'writing' && active.percent === null));
 
   const breakdownParts: string[] = [];
   if (metrics.writtenItems > 0) breakdownParts.push(`${metrics.writtenItems} written`);
@@ -82,18 +112,34 @@ export function BulkInstallDock({ installer }: BulkInstallDockProps) {
           </span>
 
           <span className="font-mono tabular-nums text-crt-phosphor whitespace-nowrap shrink-0">
-            {metrics.completedItems} / {metrics.totalItems} games ({metrics.progressPercent}%)
+            {metrics.totalItems === 1 && isRunning
+              ? showIndeterminateBar
+                ? '1 game'
+                : `${metrics.progressPercent}%`
+              : `${metrics.completedItems} / ${metrics.totalItems} games (${metrics.progressPercent}%)`}
           </span>
 
-          {metrics.totalBytesWritten > 0 && (
+          {activeBytesSummary ? (
             <>
               <span aria-hidden="true" className="font-mono text-crt-muted">
                 ·
               </span>
               <span className="font-mono tabular-nums text-crt-muted whitespace-nowrap shrink-0">
-                {formatBytes(metrics.totalBytesWritten)}
+                {activeBytesSummary}
+                {activeSpeedLabel ? ` · ${activeSpeedLabel}` : ''}
               </span>
             </>
+          ) : (
+            metrics.totalBytesWritten > 0 && (
+              <>
+                <span aria-hidden="true" className="font-mono text-crt-muted">
+                  ·
+                </span>
+                <span className="font-mono tabular-nums text-crt-muted whitespace-nowrap shrink-0">
+                  {formatBytes(metrics.totalBytesWritten)}
+                </span>
+              </>
+            )
           )}
 
           {isRunning && job.currentTitle && (
@@ -159,18 +205,33 @@ export function BulkInstallDock({ installer }: BulkInstallDockProps) {
       </div>
 
       {/* Progress bar */}
-      <progress
-        max={100}
-        value={isRunning && metrics.progressPercent === 0 ? 3 : metrics.progressPercent}
+      <div
+        role="progressbar"
         aria-label="Bulk storage installation progress"
-        className={`mt-2 block h-1 w-full overflow-hidden rounded-xs bg-crt-bg [&::-webkit-progress-bar]:bg-crt-bg [&::-webkit-progress-value]:transition-all [&::-webkit-progress-value]:duration-200 ${
-          isError
-            ? '[&::-webkit-progress-value]:bg-crt-crimson [&::-moz-progress-bar]:bg-crt-crimson'
-            : isCanceled
-              ? '[&::-webkit-progress-value]:bg-crt-amber [&::-moz-progress-bar]:bg-crt-amber'
-              : '[&::-webkit-progress-value]:bg-crt-phosphor [&::-moz-progress-bar]:bg-crt-phosphor'
-        }`}
-      />
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={showIndeterminateBar ? undefined : metrics.progressPercent}
+        className="mt-2 h-1.5 w-full overflow-hidden rounded-sm bg-crt-bg border border-crt-border/70"
+      >
+        {showIndeterminateBar ? (
+          <div
+            className={`h-full crt-progress-indeterminate ${
+              active?.stage === 'writing' ? 'bg-crt-phosphor' : 'bg-crt-amber'
+            }`}
+          />
+        ) : (
+          <div
+            className={`h-full transition-all duration-150 ${
+              isError
+                ? 'bg-crt-crimson'
+                : isCanceled
+                  ? 'bg-crt-amber'
+                  : 'bg-crt-phosphor crt-progress-beam'
+            }`}
+            style={{ width: `${metrics.progressPercent}%` }}
+          />
+        )}
+      </div>
     </div>
   );
 }

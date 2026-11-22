@@ -98,6 +98,28 @@ export type BulkInstallPhase =
   | 'canceled'
   | 'error';
 
+export type DeviceInstallStage =
+  | 'scanning_device'
+  | 'inspecting'
+  | 'extracting'
+  | 'writing'
+  | 'finalizing';
+
+export interface ActiveDeviceInstallTransfer {
+  itemId: number;
+  rowKey: string;
+  title: string;
+  stage: DeviceInstallStage;
+  filename: string | null;
+  destinationFolder: string | null;
+  bytesWritten: number;
+  totalBytes: number | null;
+  percent: number | null;
+  bytesPerSec: number | null;
+  fileIndex: number;
+  totalFiles: number;
+}
+
 export interface BulkInstallJobState {
   jobId: number;
   mode: 'express' | 'review';
@@ -106,6 +128,7 @@ export interface BulkInstallJobState {
   filterContext: SmartRomFilterContext;
   rows: ExportQueueRow[];
   currentTitle: string | null;
+  activeTransfer: ActiveDeviceInstallTransfer | null;
   errorMessage: string | null;
   startedAt: string;
   finishedAt: string | null;
@@ -628,6 +651,7 @@ export function useBulkStorageInstaller({
       scanCache: Record<string, SdScanFolderResult>,
       dirCache: Map<string, SdDirectoryHandle>,
       signal: AbortSignal,
+      onProgress?: (transfer: ActiveDeviceInstallTransfer) => void,
     ): Promise<{
       nextState: ExportRowWriteState;
       detail: string;
@@ -643,11 +667,64 @@ export function useBulkStorageInstaller({
       const maxFilenameLen = cfg?.romMaxFilenameLen ?? 0;
       const storageCfg = effectiveStorageFolderConfigRef.current;
 
+      const selectedTargets = row.selectedTargetIds
+        .map((id) => row.targets.find((t) => t.id === id))
+        .filter((t): t is PlayableExportTarget => Boolean(t));
+      const allHaveExpectedSizes =
+        selectedTargets.length > 0 && selectedTargets.every((t) => (t.sizeBytes || 0) > 0);
+      const rowTotalExpectedBytes = allHaveExpectedSizes
+        ? selectedTargets.reduce((sum, t) => sum + (t.sizeBytes || 0), 0)
+        : null;
+      const totalFiles = Math.max(
+        1,
+        selectedTargets.reduce(
+          (sum, t) => sum + (t.kind === 'disc_set' ? Math.max(1, t.entryPaths.length) : 1),
+          0,
+        ),
+      );
+
       let rowBytes = 0;
+      let fileIndex = 0;
       let upgradedOldName: string | null = null;
       let allSkipped = true;
       let rowFailed: string | null = null;
       const touchedFolders = new Set<string>();
+
+      const emitTransferUpdate = (params: {
+        stage: DeviceInstallStage;
+        filename: string | null;
+        destinationFolder: string | null;
+        currentFileBytes: number;
+        currentFileTotalBytes: number | null;
+        bytesPerSec: number | null;
+      }) => {
+        if (!onProgress) return;
+        const cumulativeBytes = rowBytes + params.currentFileBytes;
+        const effectiveTotal =
+          rowTotalExpectedBytes && rowTotalExpectedBytes > 0
+            ? rowTotalExpectedBytes
+            : totalFiles === 1 && params.currentFileTotalBytes && params.currentFileTotalBytes > 0
+              ? params.currentFileTotalBytes
+              : null;
+        const percent =
+          effectiveTotal !== null && effectiveTotal > 0
+            ? Math.min(100, Math.round((cumulativeBytes / effectiveTotal) * 100))
+            : null;
+        onProgress({
+          itemId: row.itemId,
+          rowKey: row.rowKey,
+          title: row.title,
+          stage: params.stage,
+          filename: params.filename,
+          destinationFolder: params.destinationFolder,
+          bytesWritten: cumulativeBytes,
+          totalBytes: effectiveTotal,
+          percent,
+          bytesPerSec: params.bytesPerSec,
+          fileIndex: Math.max(1, Math.min(totalFiles, fileIndex || 1)),
+          totalFiles,
+        });
+      };
 
       for (const targetId of row.selectedTargetIds) {
         if (signal.aborted) {
@@ -713,16 +790,43 @@ export function useBulkStorageInstaller({
           if (target.kind === 'disc_set') {
             const discFolderName = finalName.replace(/\.zip$/i, '');
             const discDir = await systemDirHandle.getDirectoryHandle(discFolderName, { create: true });
+            const discRelFolder = `${targetFolderRel}/${discFolderName}`;
             for (const entryPath of target.entryPaths) {
               if (signal.aborted) {
                 throw new DOMException('Installation canceled by user.', 'AbortError');
               }
+              fileIndex += 1;
               const leaf = entryPath.split('/').pop() || entryPath;
               const cleanLeaf = sanitizeFat32 ? sanitizeFat32Filename(leaf, maxFilenameLen) : leaf;
               const url = `/api/items/${row.itemId}/extract-entry?fileId=${row.fileId}&entry=${encodeURIComponent(entryPath)}&name=${encodeURIComponent(cleanLeaf)}`;
+              let latestFileBytes = 0;
+              let latestFileTotal: number | null = null;
+              let latestSpeed: number | null = null;
               rowBytes += await streamHttpPayloadToSdFile(url, discDir, cleanLeaf, {
                 signal,
                 hadExistingFile: cardStatus.exactMatch,
+                onStage: (stage) =>
+                  emitTransferUpdate({
+                    stage,
+                    filename: cleanLeaf,
+                    destinationFolder: discRelFolder,
+                    currentFileBytes: latestFileBytes,
+                    currentFileTotalBytes: latestFileTotal,
+                    bytesPerSec: stage === 'writing' ? latestSpeed : null,
+                  }),
+                onProgress: (prog) => {
+                  latestFileBytes = prog.bytesWritten;
+                  latestFileTotal = prog.totalBytes;
+                  latestSpeed = prog.bytesPerSec;
+                  emitTransferUpdate({
+                    stage: 'writing',
+                    filename: cleanLeaf,
+                    destinationFolder: discRelFolder,
+                    currentFileBytes: prog.bytesWritten,
+                    currentFileTotalBytes: prog.totalBytes,
+                    bytesPerSec: prog.bytesPerSec,
+                  });
+                },
                 onDebug: (msg, detail) => emitSdDebug(msg, detail),
               });
             }
@@ -735,10 +839,37 @@ export function useBulkStorageInstaller({
                 : null,
             );
           } else {
+            fileIndex += 1;
             const url = `/api/items/${row.itemId}/extract-entry?fileId=${row.fileId}&entry=${encodeURIComponent(target.primaryEntry)}&name=${encodeURIComponent(finalName)}`;
+            let latestFileBytes = 0;
+            let latestFileTotal: number | null = target.sizeBytes > 0 ? target.sizeBytes : null;
+            let latestSpeed: number | null = null;
             rowBytes += await streamHttpPayloadToSdFile(url, systemDirHandle, finalName, {
               signal,
               hadExistingFile: cardStatus.exactMatch,
+              expectedBytes: target.sizeBytes > 0 ? target.sizeBytes : null,
+              onStage: (stage) =>
+                emitTransferUpdate({
+                  stage,
+                  filename: finalName,
+                  destinationFolder: targetFolderRel,
+                  currentFileBytes: latestFileBytes,
+                  currentFileTotalBytes: latestFileTotal,
+                  bytesPerSec: stage === 'writing' ? latestSpeed : null,
+                }),
+              onProgress: (prog) => {
+                latestFileBytes = prog.bytesWritten;
+                latestFileTotal = prog.totalBytes;
+                latestSpeed = prog.bytesPerSec;
+                emitTransferUpdate({
+                  stage: 'writing',
+                  filename: finalName,
+                  destinationFolder: targetFolderRel,
+                  currentFileBytes: prog.bytesWritten,
+                  currentFileTotalBytes: prog.totalBytes,
+                  bytesPerSec: prog.bytesPerSec,
+                });
+              },
               onDebug: (msg, detail) => emitSdDebug(msg, detail),
             });
             registerWrittenEntryInScan(
@@ -851,9 +982,7 @@ export function useBulkStorageInstaller({
         }
       }
 
-      if (autoConfigPromiseRef.current) {
-        await autoConfigPromiseRef.current;
-      }
+      const waitingForAutoConfig = Boolean(autoConfigPromiseRef.current);
 
       setMountError(null);
       const jobId = ++jobSeqRef.current;
@@ -883,11 +1012,12 @@ export function useBulkStorageInstaller({
           patchOnly: false,
           ignoredEntriesCount: 0,
           writeState: 'pending',
-          writeDetail: 'Queued',
+          writeDetail: waitingForAutoConfig ? 'Scanning device folders...' : 'Queued',
           bytesWritten: 0,
         };
       });
 
+      const firstPlaceholder = placeholderRows[0];
       const initialJob: BulkInstallJobState = {
         jobId,
         mode: 'express',
@@ -895,7 +1025,23 @@ export function useBulkStorageInstaller({
         itemIds: cleanIds,
         filterContext,
         rows: placeholderRows,
-        currentTitle: placeholderRows[0]?.title || null,
+        currentTitle: firstPlaceholder?.title || null,
+        activeTransfer: firstPlaceholder
+          ? {
+              itemId: firstPlaceholder.itemId,
+              rowKey: firstPlaceholder.rowKey,
+              title: firstPlaceholder.title,
+              stage: waitingForAutoConfig ? 'scanning_device' : 'inspecting',
+              filename: null,
+              destinationFolder: null,
+              bytesWritten: 0,
+              totalBytes: null,
+              percent: null,
+              bytesPerSec: null,
+              fileIndex: 1,
+              totalFiles: 1,
+            }
+          : null,
         errorMessage: null,
         startedAt: new Date().toISOString(),
         finishedAt: null,
@@ -916,6 +1062,10 @@ export function useBulkStorageInstaller({
         };
 
         try {
+          if (autoConfigPromiseRef.current) {
+            await autoConfigPromiseRef.current;
+          }
+
           for (let offset = 0; offset < cleanIds.length; offset += EXPRESS_INSPECT_CHUNK_SIZE) {
             if (controller.signal.aborted) {
               throw new DOMException('Installation canceled by user.', 'AbortError');
@@ -923,11 +1073,28 @@ export function useBulkStorageInstaller({
 
             const chunkIds = cleanIds.slice(offset, offset + EXPRESS_INSPECT_CHUNK_SIZE);
             const chunkIdSet = new Set(chunkIds);
+            const chunkLeadId = chunkIds[0];
+            const chunkLeadMeta = knownMeta?.get(chunkLeadId);
 
             setJob((prev) => {
               if (!prev || prev.jobId !== jobId) return prev;
               return {
                 ...prev,
+                currentTitle: chunkLeadMeta?.title || prev.currentTitle,
+                activeTransfer: {
+                  itemId: chunkLeadId,
+                  rowKey: `${chunkLeadId}-placeholder`,
+                  title: chunkLeadMeta?.title || `Catalog Release #${chunkLeadId}`,
+                  stage: 'inspecting',
+                  filename: null,
+                  destinationFolder: null,
+                  bytesWritten: 0,
+                  totalBytes: null,
+                  percent: null,
+                  bytesPerSec: null,
+                  fileIndex: 1,
+                  totalFiles: 1,
+                },
                 rows: prev.rows.map((r) =>
                   r.isPlaceholder && chunkIdSet.has(r.itemId)
                     ? { ...r, writeState: 'inspecting', writeDetail: 'Inspecting archive...' }
@@ -986,14 +1153,40 @@ export function useBulkStorageInstaller({
                 continue;
               }
 
+              const firstSelectedTarget = row.targets.find((t) =>
+                row.selectedTargetIds.includes(t.id),
+              );
+              const expectedRowBytes = row.selectedTargetIds.reduce((sum, tid) => {
+                const t = row.targets.find((cand) => cand.id === tid);
+                return sum + (t?.sizeBytes || 0);
+              }, 0);
+
               setJob((prev) => {
                 if (!prev || prev.jobId !== jobId) return prev;
                 return {
                   ...prev,
                   currentTitle: row.title,
+                  activeTransfer: {
+                    itemId: row.itemId,
+                    rowKey: row.rowKey,
+                    title: row.title,
+                    stage: 'extracting',
+                    filename:
+                      (firstSelectedTarget &&
+                        (row.outputNamesByTargetId[firstSelectedTarget.id] ||
+                          firstSelectedTarget.suggestedFilename)) ||
+                      null,
+                    destinationFolder: null,
+                    bytesWritten: 0,
+                    totalBytes: expectedRowBytes > 0 ? expectedRowBytes : null,
+                    percent: null,
+                    bytesPerSec: null,
+                    fileIndex: 1,
+                    totalFiles: Math.max(1, row.selectedTargetIds.length),
+                  },
                   rows: prev.rows.map((r) =>
                     r.rowKey === row.rowKey
-                      ? { ...r, writeState: 'writing', writeDetail: 'Extracting & writing ROM...' }
+                      ? { ...r, writeState: 'writing', writeDetail: 'Extracting ROM...' }
                       : r,
                   ),
                 };
@@ -1006,6 +1199,30 @@ export function useBulkStorageInstaller({
                 scanCache,
                 dirCache,
                 controller.signal,
+                (transfer) => {
+                  const detailText =
+                    transfer.stage === 'extracting'
+                      ? 'Extracting ROM...'
+                      : transfer.stage === 'finalizing'
+                        ? 'Finalizing on device...'
+                        : transfer.totalBytes && transfer.percent !== null
+                          ? `Writing ${formatBytes(transfer.bytesWritten)} / ${formatBytes(transfer.totalBytes)} (${transfer.percent}%)`
+                          : transfer.bytesWritten > 0
+                            ? `Writing ${formatBytes(transfer.bytesWritten)}...`
+                            : 'Writing ROM...';
+                  setJob((prev) => {
+                    if (!prev || prev.jobId !== jobId) return prev;
+                    return {
+                      ...prev,
+                      activeTransfer: transfer,
+                      rows: prev.rows.map((r) =>
+                        r.rowKey === row.rowKey
+                          ? { ...r, writeDetail: detailText, bytesWritten: transfer.bytesWritten }
+                          : r,
+                      ),
+                    };
+                  });
+                },
               );
 
               if (outcome.installedSuccess) {
@@ -1016,6 +1233,8 @@ export function useBulkStorageInstaller({
                 if (!prev || prev.jobId !== jobId) return prev;
                 return {
                   ...prev,
+                  activeTransfer:
+                    prev.activeTransfer?.rowKey === row.rowKey ? null : prev.activeTransfer,
                   rows: prev.rows.map((r) =>
                     r.rowKey === row.rowKey
                       ? {
@@ -1041,6 +1260,7 @@ export function useBulkStorageInstaller({
                   ...prev,
                   phase: 'completed',
                   currentTitle: null,
+                  activeTransfer: null,
                   finishedAt: new Date().toISOString(),
                 }
               : prev,
@@ -1054,6 +1274,7 @@ export function useBulkStorageInstaller({
                 ...prev,
                 phase: 'canceled',
                 currentTitle: null,
+                activeTransfer: null,
                 finishedAt: new Date().toISOString(),
                 rows: prev.rows.map((r) =>
                   r.writeState === 'pending' ||
@@ -1073,6 +1294,7 @@ export function useBulkStorageInstaller({
                     ...prev,
                     phase: 'error',
                     currentTitle: null,
+                    activeTransfer: null,
                     errorMessage: errMsg,
                     finishedAt: new Date().toISOString(),
                   }
@@ -1154,6 +1376,7 @@ export function useBulkStorageInstaller({
         filterContext,
         rows: placeholderRows,
         currentTitle: null,
+        activeTransfer: null,
         errorMessage: null,
         startedAt: new Date().toISOString(),
         finishedAt: null,
@@ -1297,6 +1520,7 @@ export function useBulkStorageInstaller({
         ? {
             ...prev,
             phase: 'running',
+            activeTransfer: null,
             errorMessage: null,
             finishedAt: null,
             rows: prev.rows.map((r) =>
@@ -1330,14 +1554,40 @@ export function useBulkStorageInstaller({
           }
           if (row.selectedTargetIds.length === 0) continue;
 
+          const firstSelectedTarget = row.targets.find((t) =>
+            row.selectedTargetIds.includes(t.id),
+          );
+          const expectedRowBytes = row.selectedTargetIds.reduce((sum, tid) => {
+            const t = row.targets.find((cand) => cand.id === tid);
+            return sum + (t?.sizeBytes || 0);
+          }, 0);
+
           setJob((prev) => {
             if (!prev || prev.jobId !== jobId) return prev;
             return {
               ...prev,
               currentTitle: row.title,
+              activeTransfer: {
+                itemId: row.itemId,
+                rowKey: row.rowKey,
+                title: row.title,
+                stage: 'extracting',
+                filename:
+                  (firstSelectedTarget &&
+                    (row.outputNamesByTargetId[firstSelectedTarget.id] ||
+                      firstSelectedTarget.suggestedFilename)) ||
+                  null,
+                destinationFolder: null,
+                bytesWritten: 0,
+                totalBytes: expectedRowBytes > 0 ? expectedRowBytes : null,
+                percent: null,
+                bytesPerSec: null,
+                fileIndex: 1,
+                totalFiles: Math.max(1, row.selectedTargetIds.length),
+              },
               rows: prev.rows.map((r) =>
                 r.rowKey === row.rowKey
-                  ? { ...r, writeState: 'writing', writeDetail: 'Extracting & writing ROM...' }
+                  ? { ...r, writeState: 'writing', writeDetail: 'Extracting ROM...' }
                   : r,
               ),
             };
@@ -1350,6 +1600,30 @@ export function useBulkStorageInstaller({
             scanCache,
             dirCache,
             controller.signal,
+            (transfer) => {
+              const detailText =
+                transfer.stage === 'extracting'
+                  ? 'Extracting ROM...'
+                  : transfer.stage === 'finalizing'
+                    ? 'Finalizing on device...'
+                    : transfer.totalBytes && transfer.percent !== null
+                      ? `Writing ${formatBytes(transfer.bytesWritten)} / ${formatBytes(transfer.totalBytes)} (${transfer.percent}%)`
+                      : transfer.bytesWritten > 0
+                        ? `Writing ${formatBytes(transfer.bytesWritten)}...`
+                        : 'Writing ROM...';
+              setJob((prev) => {
+                if (!prev || prev.jobId !== jobId) return prev;
+                return {
+                  ...prev,
+                  activeTransfer: transfer,
+                  rows: prev.rows.map((r) =>
+                    r.rowKey === row.rowKey
+                      ? { ...r, writeDetail: detailText, bytesWritten: transfer.bytesWritten }
+                      : r,
+                  ),
+                };
+              });
+            },
           );
 
           if (outcome.installedSuccess) {
@@ -1361,6 +1635,8 @@ export function useBulkStorageInstaller({
             if (!prev || prev.jobId !== jobId) return prev;
             return {
               ...prev,
+              activeTransfer:
+                prev.activeTransfer?.rowKey === row.rowKey ? null : prev.activeTransfer,
               rows: prev.rows.map((r) =>
                 r.rowKey === row.rowKey
                   ? {
@@ -1387,6 +1663,7 @@ export function useBulkStorageInstaller({
                 ...prev,
                 phase: 'completed',
                 currentTitle: null,
+                activeTransfer: null,
                 finishedAt: new Date().toISOString(),
               }
             : prev,
@@ -1400,6 +1677,7 @@ export function useBulkStorageInstaller({
               ...prev,
               phase: 'canceled',
               currentTitle: null,
+              activeTransfer: null,
               finishedAt: new Date().toISOString(),
               rows: prev.rows.map((r) =>
                 r.writeState === 'pending' || r.writeState === 'writing'
@@ -1417,6 +1695,7 @@ export function useBulkStorageInstaller({
                   ...prev,
                   phase: 'error',
                   currentTitle: null,
+                  activeTransfer: null,
                   errorMessage: msg,
                   finishedAt: new Date().toISOString(),
                 }
@@ -1725,8 +2004,21 @@ export function useBulkStorageInstaller({
     }
 
     const totalItems = job.itemIds.length;
+    const active = job.activeTransfer;
+    const activeFraction =
+      active &&
+      (job.phase === 'running' || job.phase === 'canceling') &&
+      completedItems < totalItems
+        ? active.stage === 'finalizing'
+          ? 0.99
+          : active.percent !== null
+            ? Math.min(0.99, Math.max(0, active.percent / 100))
+            : 0
+        : 0;
     const progressPercent =
-      totalItems > 0 ? Math.min(100, Math.round((completedItems / totalItems) * 100)) : 0;
+      totalItems > 0
+        ? Math.min(100, Math.round(((completedItems + activeFraction) / totalItems) * 100))
+        : 0;
 
     return {
       totalItems,
