@@ -6,7 +6,8 @@ import {
   ChevronDown,
   ChevronUp,
   Folder,
-  FolderInput,
+  FolderPlus,
+  FolderSync,
   FolderTree,
   HardDrive,
   Loader2,
@@ -29,6 +30,16 @@ import {
 import { formatBytes } from '../utils/format';
 import { formatDeviceActionLabel } from '../utils/gameDetailActions';
 import { isFileSystemAccessSupported } from '../utils/sdCardFs';
+import {
+  formatInstallModalCtaLabel,
+  formatInstallModalCtaTooltip,
+  formatMountDeviceTooltip,
+  formatRescanDeviceTooltip,
+  formatSwitchDeviceTooltip,
+  MOUNT_DEVICE_LABEL,
+  RESCAN_DEVICE_LABEL,
+  SWITCH_DEVICE_LABEL,
+} from '../utils/storageActionCopy';
 
 interface SdCardExportModalProps {
   installer: BulkStorageInstallerController;
@@ -174,8 +185,8 @@ export function SdCardExportModal({
           ? 'Installation was stopped before finishing.'
           : 'Installation encountered an error.'
       : isSingleGame
-        ? 'Extracts the playable ROM directly into the matching console folder on your device.'
-        : 'Latest playable version is pre-selected for each game. Review folders or adjust any game below.';
+        ? 'Latest primary ROM is pre-selected. Review destination path, version, or filename before installing.'
+        : 'Latest primary ROM is pre-selected for each game. Review folders, versions, or filenames below.';
 
   const singleGame = isSingleGame ? games[0] || null : null;
 
@@ -434,16 +445,18 @@ export function SdCardExportModal({
     );
   };
 
-  const renderPrimaryCtaLabel = () => {
-    if (!sdRootHandle) {
-      return isSingleGame
-        ? 'Choose Device & Install'
-        : `Choose Device & Install ${selectedGames.length.toLocaleString()} Game${selectedGames.length === 1 ? '' : 's'}`;
-    }
-    return isSingleGame
-      ? `Install to ${shortDeviceName}`
-      : `Install ${selectedGames.length.toLocaleString()} Game${selectedGames.length === 1 ? '' : 's'} to ${shortDeviceName}`;
-  };
+  const primaryCtaLabel = formatInstallModalCtaLabel({
+    mountedDeviceName: deviceName,
+    isSingleGame,
+    selectedCount: selectedGames.length,
+    maxDeviceLen: 20,
+  });
+
+  const primaryCtaTooltip = formatInstallModalCtaTooltip({
+    mountedDeviceName: deviceName,
+    isSingleGame,
+    selectedCount: selectedGames.length,
+  });
 
   return (
     <div
@@ -500,9 +513,11 @@ export function SdCardExportModal({
                       <button
                         type="button"
                         onClick={() => void promptMountSdCard()}
-                        className="text-crt-muted hover:text-crt-text hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                        title={formatSwitchDeviceTooltip(isRunning)}
+                        className="inline-flex items-center gap-1 text-crt-muted hover:text-crt-text hover:underline whitespace-nowrap shrink-0 cursor-pointer"
                       >
-                        Switch
+                        <FolderSync className="h-3 w-3 shrink-0" />
+                        <span>{SWITCH_DEVICE_LABEL}</span>
                       </button>
                     </>
                   )}
@@ -515,27 +530,29 @@ export function SdCardExportModal({
                         type="button"
                         disabled={scanningCard}
                         onClick={() => void rescanMountedSdFolders()}
+                        title={formatRescanDeviceTooltip('folders', isRunning)}
                         className="inline-flex items-center gap-1 text-crt-muted hover:text-crt-text hover:underline whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
                       >
                         <RefreshCw
                           className={`h-3 w-3 shrink-0 ${scanningCard ? 'animate-spin' : ''}`}
                         />
-                        <span>{scanningCard ? 'Scanning...' : 'Rescan'}</span>
+                        <span>{scanningCard ? 'Scanning...' : RESCAN_DEVICE_LABEL}</span>
                       </button>
                     </>
                   )}
                 </>
               ) : fsSupport.supported ? (
                 <div className="flex flex-wrap items-center gap-2.5">
-                  <span className="text-crt-muted">No storage device selected</span>
+                  <span className="text-crt-muted">No storage device mounted</span>
                   <button
                     type="button"
                     disabled={isRunning}
                     onClick={() => void promptMountSdCard()}
+                    title={formatMountDeviceTooltip(fsSupport)}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded border border-crt-phosphor/70 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                   >
-                    <HardDrive className="h-3.5 w-3.5 shrink-0" />
-                    <span>Choose Device Folder</span>
+                    <FolderPlus className="h-3.5 w-3.5 shrink-0" />
+                    <span>{MOUNT_DEVICE_LABEL}</span>
                   </button>
                 </div>
               ) : (
@@ -1084,16 +1101,12 @@ export function SdCardExportModal({
                   <button
                     type="button"
                     disabled={selectedFilesCount === 0 || isInspecting}
-                    title={
-                      !sdRootHandle
-                        ? 'Choose your storage device folder and start installing'
-                        : undefined
-                    }
+                    title={primaryCtaTooltip}
                     onClick={() => void startReviewWrite()}
                     className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 rounded transition-colors disabled:opacity-45 disabled:cursor-not-allowed whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <FolderInput className="h-3.5 w-3.5 shrink-0" />
-                    <span>{renderPrimaryCtaLabel()}</span>
+                    <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                    <span>{primaryCtaLabel}</span>
                   </button>
                 )}
               </>

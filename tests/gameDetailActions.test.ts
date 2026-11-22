@@ -174,7 +174,7 @@ test('resolveGameDetailFooterPlan prioritizes Download ROM when no device is mou
   assert.equal(plan.primaryAction, 'download_rom');
   assert.equal(plan.secondaryAction, 'install_unmounted');
   assert.equal(plan.installButtonLabel, 'Install to Device');
-  assert.equal(plan.showReviewDeviceInstallInMore, false);
+  assert.equal(plan.showReviewDeviceInstallInMore, true);
 });
 
 test('resolveGameDetailFooterPlan handles catalog-only, failed, partial, and queued states cleanly', () => {

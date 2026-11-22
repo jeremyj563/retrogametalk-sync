@@ -17,6 +17,15 @@ import {
   summarizeDestinationFolders,
 } from '../src/utils/deviceInstallView.ts';
 import { registerWrittenEntryInScan, type SdScanFolderResult } from '../src/utils/sdCardFs.ts';
+import {
+  formatInstallModalCtaLabel,
+  formatInstallModalCtaTooltip,
+  formatMountDeviceTooltip,
+  formatQuickInstallLabel,
+  formatQuickInstallTooltip,
+  formatRescanDeviceTooltip,
+  formatSwitchDeviceTooltip,
+} from '../src/utils/storageActionCopy.ts';
 
 const baseStorageConfig: StorageFolderMappingConfig = {
   typeSubfoldersEnabled: true,
@@ -462,4 +471,80 @@ test('resolveItemDeviceInstallState handles idle review queues, queued batch ite
   assert.equal(errored.status, 'error');
   assert.equal(errored.outcomeKind, 'error');
   assert.equal(errored.outcomeSummary, 'Disk full');
+});
+
+test('storageActionCopy produces unified labels and tooltips across install, mount, switch, and rescan controls', () => {
+  assert.equal(
+    formatQuickInstallLabel({ mountedDeviceName: 'Roms', compact: true }),
+    'Install',
+  );
+  assert.equal(
+    formatQuickInstallLabel({ mountedDeviceName: 'Roms', isReinstall: true, compact: true }),
+    'Reinstall',
+  );
+  assert.equal(
+    formatQuickInstallLabel({ mountedDeviceName: 'Roms', count: 5 }),
+    'Install to Roms (5)',
+  );
+  assert.equal(
+    formatQuickInstallLabel({ mountedDeviceName: null, count: 5 }),
+    'Install to Device (5)',
+  );
+  assert.equal(
+    formatQuickInstallTooltip({ mountedDeviceName: 'Roms' }),
+    'Install latest primary ROM directly to Roms',
+  );
+  assert.equal(
+    formatQuickInstallTooltip({ mountedDeviceName: 'Roms', isReinstall: true }),
+    'Reinstall latest primary ROM directly to Roms',
+  );
+  assert.equal(
+    formatQuickInstallTooltip({ mountedDeviceName: null }),
+    'Mount a storage device and install the latest primary ROM',
+  );
+  assert.equal(
+    formatQuickInstallTooltip({ mountedDeviceName: 'Roms', isOtherBusy: true }),
+    'Another storage device install is currently in progress',
+  );
+
+  assert.equal(
+    formatInstallModalCtaLabel({ mountedDeviceName: null, isSingleGame: true, selectedCount: 1 }),
+    'Mount Device & Install',
+  );
+  assert.equal(
+    formatInstallModalCtaLabel({ mountedDeviceName: null, isSingleGame: false, selectedCount: 4 }),
+    'Mount Device & Install 4 Games',
+  );
+  assert.equal(
+    formatInstallModalCtaLabel({ mountedDeviceName: 'Roms', isSingleGame: false, selectedCount: 4 }),
+    'Install 4 Games to Roms',
+  );
+  assert.equal(
+    formatInstallModalCtaTooltip({ mountedDeviceName: null, isSingleGame: true, selectedCount: 1 }),
+    'Mount a storage device and install the selected ROM',
+  );
+  assert.equal(
+    formatMountDeviceTooltip({ supported: true, reason: '' }),
+    'Mount a storage device folder (auto-configures console paths immediately)',
+  );
+  assert.equal(
+    formatMountDeviceTooltip({ supported: false, reason: 'HTTPS required' }),
+    'HTTPS required',
+  );
+  assert.equal(
+    formatSwitchDeviceTooltip(false),
+    'Switch to a different storage device folder (auto-configures console paths immediately)',
+  );
+  assert.equal(
+    formatSwitchDeviceTooltip(true),
+    'Finish or cancel the active transfer before switching devices',
+  );
+  assert.equal(
+    formatRescanDeviceTooltip('layout', false),
+    'Rescan mounted device folders to refresh auto-configured console paths',
+  );
+  assert.equal(
+    formatRescanDeviceTooltip('folders', false),
+    'Rescan mounted device folders to check for existing or older ROM files',
+  );
 });

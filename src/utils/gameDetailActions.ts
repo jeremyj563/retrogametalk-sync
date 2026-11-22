@@ -316,7 +316,7 @@ export function resolveGameDetailFooterPlan(
       secondaryAction: input.canInstallToDevice ? 'install_unmounted' : null,
       installButtonLabel,
       isReinstallOnMountedDevice: false,
-      showReviewDeviceInstallInMore: false,
+      showReviewDeviceInstallInMore: input.canInstallToDevice,
       showRetryInMore: input.hasFailedFiles,
     };
   }

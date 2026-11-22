@@ -11,7 +11,6 @@ import {
   Download,
   FileArchive,
   Folder,
-  FolderInput,
   FolderOpen,
   Gamepad2,
   HardDrive,
@@ -81,6 +80,10 @@ import {
   type SecretSearchEffect,
 } from '../utils/easterEggs';
 import { isFileSystemAccessSupported } from '../utils/sdCardFs';
+import {
+  formatQuickInstallLabel,
+  formatQuickInstallTooltip,
+} from '../utils/storageActionCopy';
 import { resolveItemTransferProgress } from '../utils/transferProgress';
 import { CatalogStatsPanel } from './CatalogStatsPanel';
 import { GameDetailDrawer, type GameDetailNavigation } from './GameDetailDrawer';
@@ -1318,23 +1321,33 @@ export function CatalogPanel({
 
   const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
 
-  const handleQuickInstallItem = useCallback(
-    (item: RepositoryItemRecord) => {
+  const handleQuickInstallIds = useCallback(
+    (ids: number[], itemHint?: Pick<RepositoryItemRecord, 'id' | 'title' | 'systemName'>) => {
+      if (ids.length === 0) return;
       if (installer.isBusy) {
-        if (installer.job?.itemIds.includes(item.id)) {
+        if (ids.some((id) => installer.job?.itemIds.includes(id))) {
           installer.openModal();
         }
         return;
       }
       const metaMap = new Map(knownItemMetaMap);
-      metaMap.set(item.id, { title: item.title, systemName: item.systemName });
+      if (itemHint) {
+        metaMap.set(itemHint.id, { title: itemHint.title, systemName: itemHint.systemName });
+      }
       if (sdRootHandle || fsSupport.supported) {
-        void installer.startExpressInstall([item.id], currentSmartFilterContext, metaMap);
+        void installer.startExpressInstall(ids, currentSmartFilterContext, metaMap);
       } else {
-        void installer.openReviewQueue([item.id], currentSmartFilterContext, metaMap);
+        void installer.openReviewQueue(ids, currentSmartFilterContext, metaMap);
       }
     },
     [installer, knownItemMetaMap, sdRootHandle, fsSupport.supported, currentSmartFilterContext],
+  );
+
+  const handleQuickInstallItem = useCallback(
+    (item: RepositoryItemRecord) => {
+      handleQuickInstallIds([item.id], item);
+    },
+    [handleQuickInstallIds],
   );
 
   const activeDetailInstallState = useMemo(
@@ -2946,18 +2959,16 @@ export function CatalogPanel({
                           'express',
                           selectionSummary,
                           installer.isBusy,
+                          sdRootHandle?.name || null,
                         )}
-                        onClick={() =>
-                          void installer.startExpressInstall(
-                            selectionSummary.installableIds,
-                            currentSmartFilterContext,
-                            knownItemMetaMap,
-                          )
-                        }
-                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                        onClick={() => handleQuickInstallIds(selectionSummary.installableIds)}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold border border-crt-phosphor/70 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                       >
-                        <FolderInput className="h-3.5 w-3.5 shrink-0" />
-                        Express Install ({selectionSummary.installableIds.length.toLocaleString()})
+                        <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                        {formatQuickInstallLabel({
+                          mountedDeviceName: sdRootHandle?.name || null,
+                          count: selectionSummary.installableIds.length,
+                        })}
                       </button>
                       <button
                         type="button"
@@ -2966,6 +2977,7 @@ export function CatalogPanel({
                           'review',
                           selectionSummary,
                           installer.isBusy,
+                          sdRootHandle?.name || null,
                         )}
                         onClick={() =>
                           void installer.openReviewQueue(
@@ -2974,9 +2986,9 @@ export function CatalogPanel({
                             knownItemMetaMap,
                           )
                         }
-                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold border border-crt-phosphor/70 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium border border-crt-border text-crt-text hover:border-crt-phosphor hover:text-crt-phosphor rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                       >
-                        <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                        <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" />
                         Install Options ({selectionSummary.installableIds.length.toLocaleString()})
                       </button>
                     </>
@@ -3603,15 +3615,12 @@ export function CatalogPanel({
                                   <button
                                     type="button"
                                     disabled={isOtherInstallBusy}
-                                    title={
-                                      itemInstall.isActive
-                                        ? 'View or cancel active device installation'
-                                        : isOtherInstallBusy
-                                          ? 'Wait for the active device install to finish'
-                                          : sdRootHandle
-                                            ? `${isReinstallOnMounted ? 'Reinstall' : 'Install'} directly to ${sdRootHandle.name}`
-                                            : 'Mount a storage device and install this game'
-                                    }
+                                    title={formatQuickInstallTooltip({
+                                      mountedDeviceName: sdRootHandle?.name || null,
+                                      isReinstall: isReinstallOnMounted,
+                                      isActive: itemInstall.isActive,
+                                      isOtherBusy: isOtherInstallBusy,
+                                    })}
                                     onClick={() => handleQuickInstallItem(item)}
                                     className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border rounded transition-colors disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer tabular-nums ${
                                       itemInstall.isActive
@@ -3632,9 +3641,11 @@ export function CatalogPanel({
                                         : itemInstall.stage === 'queued'
                                           ? 'Queued'
                                           : 'Installing'
-                                      : isReinstallOnMounted
-                                        ? 'Reinstall'
-                                        : 'Install'}
+                                      : formatQuickInstallLabel({
+                                          mountedDeviceName: sdRootHandle?.name || null,
+                                          isReinstall: isReinstallOnMounted,
+                                          compact: true,
+                                        })}
                                   </button>
                                 )}
 
@@ -4038,13 +4049,12 @@ export function CatalogPanel({
                               <button
                                 type="button"
                                 disabled={isOtherInstallBusy}
-                                title={
-                                  isOtherInstallBusy
-                                    ? 'Wait for the active device install to finish'
-                                    : sdRootHandle
-                                      ? `${isReinstallOnMounted ? 'Reinstall' : 'Install'} directly to ${sdRootHandle.name}`
-                                      : 'Mount a storage device and install this game'
-                                }
+                                title={formatQuickInstallTooltip({
+                                  mountedDeviceName: sdRootHandle?.name || null,
+                                  isReinstall: isReinstallOnMounted,
+                                  isActive: false,
+                                  isOtherBusy: isOtherInstallBusy,
+                                })}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   handleQuickInstallItem(item);
@@ -4056,7 +4066,11 @@ export function CatalogPanel({
                                 }`}
                               >
                                 <HardDrive className="h-3 w-3 shrink-0" />
-                                {isReinstallOnMounted ? 'Reinstall' : 'Install'}
+                                {formatQuickInstallLabel({
+                                  mountedDeviceName: sdRootHandle?.name || null,
+                                  isReinstall: isReinstallOnMounted,
+                                  compact: true,
+                                })}
                               </button>
                             ) : (
                               <span
@@ -4396,7 +4410,10 @@ export function CatalogPanel({
         onRetryItem={handleRetry}
         onQueueDownload={onQueueDownload ? (ids) => handleQueueIds(ids) : undefined}
         onExpressInstallToDevice={(id) =>
-          void installer.startExpressInstall([id], currentSmartFilterContext, knownItemMetaMap)
+          handleQuickInstallIds(
+            [id],
+            activeDetailItem && activeDetailItem.id === id ? activeDetailItem : undefined,
+          )
         }
         onExportToSdCard={(id) =>
           void installer.openReviewQueue([id], currentSmartFilterContext, knownItemMetaMap)
