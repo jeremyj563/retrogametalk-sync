@@ -1,4 +1,5 @@
 export type { CatalogSortOption } from '../shared/catalogSort.ts';
+export type { SyncOverrideMode } from '../shared/syncRuleMatcher.ts';
 export type {
   StorageFolderMappingConfig,
   StorageRomCategoryKey,
@@ -241,6 +242,11 @@ export interface CatalogFacetCounts {
   };
   syncRulesMatched?: number;
   queueableFiltered?: number;
+  favorites?: number;
+  syncOverrides?: {
+    pinned: number;
+    ignored: number;
+  };
 }
 
 export interface CatalogFacets {
@@ -305,8 +311,25 @@ export interface RepositoryItemRecord {
   installedDeviceLabel: string | null;
   installedFileId: number | null;
   installedFilename: string | null;
+  isFavorite: boolean;
+  syncOverride: import('../shared/syncRuleMatcher.ts').SyncOverrideMode;
+  collectionIds: number[];
   filesCount: number;
   files: ReleaseFileRecord[];
+}
+
+export interface UserCollectionRecord {
+  id: number;
+  name: string;
+  description: string | null;
+  sortOrder: number;
+  itemCount: number;
+  downloadedCount: number;
+  installedCount: number;
+  queueableCount: number;
+  estimatedBytes: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface OutdatedInstalledItemSummary {
@@ -485,6 +508,7 @@ export interface ServiceStatusSnapshot {
     installedItems: number;
     outdatedInstalledItems?: number;
     outdatedLocalReadyItems?: number;
+    favoriteItems?: number;
     totalBytesMirrored: number;
     totalRuns: number;
   };

@@ -24,6 +24,7 @@ import {
   getSchemaMigrationReport,
   getSystemIndexState,
   listCatalogReleasesForRuleSync,
+  listPinnedCatalogReleases,
   listReleasesNeedingRetry,
   listSyncRuns,
   markCatalogItemsQueuedDetailed,
@@ -4225,9 +4226,21 @@ export class ScraperOrchestrator extends EventEmitter {
           );
         }
 
-        // Re-check live Sync Rules before per-file filtering or catalog writes
+        // Re-check live Sync Rules & per-game Sync Override before per-file filtering or catalog writes
         syncLiveRules();
-        if (!isConsoleAllowedBySyncRules(systemName, liveCfg)) {
+        const existingGroupItem = getRepositoryItemByRemoteUrl(canonicalPageUrl);
+        const groupSyncOverride = existingGroupItem?.syncOverride ?? 'default';
+        if (groupSyncOverride === 'ignore') {
+          skippedCount += uniqueReleases.length;
+          runLogger(
+            'info',
+            `[Sync Override] Skipped ignored release ${effectiveMeta?.title || canonicalPageUrl}`,
+            'Excluded by per-game Ignore override',
+          );
+          persistCounters();
+          return;
+        }
+        if (groupSyncOverride !== 'pin' && !isConsoleAllowedBySyncRules(systemName, liveCfg)) {
           skippedCount += uniqueReleases.length;
           runLogger(
             'info',
@@ -4240,7 +4253,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
         // Evaluate per-file release type allowlist before creating catalog rows or downloading archives
         const eligibleReleases: DiscoveredRelease[] = [];
-        if (liveHasReleaseTypeFilter) {
+        if (liveHasReleaseTypeFilter && groupSyncOverride !== 'pin') {
           const baseMetaTags = effectiveMeta?.releaseTags || [];
           for (const rel of uniqueReleases) {
             const role = classifyFileRole(rel.filename, rel.displayLabel || rel.filename, {
@@ -4422,7 +4435,7 @@ export class ScraperOrchestrator extends EventEmitter {
           // Gracefully enforce live Sync Rule updates right before starting each next file
           // (in-flight transfers finish cleanly; newly excluded remaining files are skipped immediately)
           syncLiveRules();
-          if (!isConsoleAllowedBySyncRules(systemName, liveCfg)) {
+          if (groupSyncOverride !== 'pin' && !isConsoleAllowedBySyncRules(systemName, liveCfg)) {
             skippedCount += 1;
             runLogger(
               'info',
@@ -4432,7 +4445,7 @@ export class ScraperOrchestrator extends EventEmitter {
             persistCounters();
             return;
           }
-          if (liveHasReleaseTypeFilter) {
+          if (liveHasReleaseTypeFilter && groupSyncOverride !== 'pin') {
             const role = classifyFileRole(rel.filename, rel.displayLabel || rel.filename, {
               genres: effectiveMeta?.genres,
               languages: effectiveMeta?.languages,
@@ -4499,8 +4512,21 @@ export class ScraperOrchestrator extends EventEmitter {
         if (visitedReleasePages.has(canonicalRelUrl)) {
           return { newerThanCutoff: false };
         }
+        const existingPageItem = getRepositoryItemByRemoteUrl(canonicalRelUrl);
+        const pageSyncOverride = existingPageItem?.syncOverride ?? 'default';
+        if (pageSyncOverride === 'ignore') {
+          visitedReleasePages.add(canonicalRelUrl);
+          skippedCount += 1;
+          runLogger(
+            'info',
+            `[Sync Override] Skipped ignored release ${existingPageItem?.title || canonicalRelUrl}`,
+            'Excluded by per-game Ignore override',
+          );
+          persistCounters();
+          return { newerThanCutoff: false };
+        }
         const preFetchSys = inferSystemFromUrl(canonicalRelUrl);
-        if (preFetchSys && !isConsoleAllowedBySyncRules(preFetchSys, liveCfg)) {
+        if (pageSyncOverride !== 'pin' && preFetchSys && !isConsoleAllowedBySyncRules(preFetchSys, liveCfg)) {
           runLogger(
             'info',
             `[Live Rules] Skipped ${canonicalRelUrl}`,
@@ -4538,7 +4564,7 @@ export class ScraperOrchestrator extends EventEmitter {
           // In delta fallback mode, verify RGT creation/modification timestamp BEFORE resolving download nonces
           const inferredSys = inferSystemFromUrl(relPage.finalUrl);
           syncLiveRules();
-          if (inferredSys && !isConsoleAllowedBySyncRules(inferredSys, liveCfg)) {
+          if (pageSyncOverride !== 'pin' && inferredSys && !isConsoleAllowedBySyncRules(inferredSys, liveCfg)) {
             runLogger(
               'info',
               `[Live Rules] Skipped ${wpData?.title || canonicalRelUrl}`,
@@ -4583,7 +4609,7 @@ export class ScraperOrchestrator extends EventEmitter {
           }
 
           // Pre-nonce Release Type Allowlist gate: skip disallowed releases before resolving download links
-          if (liveHasReleaseTypeFilter) {
+          if (liveHasReleaseTypeFilter && pageSyncOverride !== 'pin') {
             const prelimSystem = prelimMeta.consoleName || inferredSys;
             const prelimTags = prelimMeta.releaseTags || [];
             const prelimTypeKeys =
@@ -5175,7 +5201,7 @@ export class ScraperOrchestrator extends EventEmitter {
             const files = item.files || [];
             const mirroredCheck = isReleaseFullyMirroredForRules(
               item,
-              liveAllowedReleaseTypes,
+              item.syncOverride === 'pin' ? [] : liveAllowedReleaseTypes,
               defaultFileExistsWithBytes,
             );
 
@@ -5349,6 +5375,7 @@ export class ScraperOrchestrator extends EventEmitter {
                       releaseType: item.releaseType,
                       releaseTags: item.releaseTags,
                       fileRoles: workerFileRoles,
+                      syncOverride: item.syncOverride,
                     },
                     liveCfg,
                   )
@@ -5510,7 +5537,7 @@ export class ScraperOrchestrator extends EventEmitter {
             return false;
           };
 
-          const tryFastSkipWpPost = (post: WpPostMetadata): boolean => {
+          const tryFastSkipWpPost = (post: WpPostMetadata, isPinned: boolean): boolean => {
             if (!post.link) return false;
             const canonicalLink = post.link.split('#')[0];
             const existing = preUpsertExistingByUrl.get(canonicalLink) ?? null;
@@ -5518,7 +5545,7 @@ export class ScraperOrchestrator extends EventEmitter {
               existing,
               post,
               systemSlug,
-              allowedReleaseTypes: liveAllowedReleaseTypes,
+              allowedReleaseTypes: isPinned ? [] : liveAllowedReleaseTypes,
             });
             if (!check.skip) {
               if (existing && existing.status === 'downloaded') {
@@ -5559,7 +5586,26 @@ export class ScraperOrchestrator extends EventEmitter {
               if (lastWidenedRuleVersion !== deltaPassWidenedVersion) {
                 rulesWidened = true;
               }
-              if (!isConsoleAllowedBySyncRules(systemSlug, liveCfg)) {
+              if (!post.link) return;
+              const canonicalLink = post.link.split('#')[0];
+              const existingForOverride =
+                preUpsertExistingByUrl.get(canonicalLink) ?? getRepositoryItemByRemoteUrl(canonicalLink);
+              const postSyncOverride = existingForOverride?.syncOverride ?? 'default';
+
+              if (postSyncOverride === 'ignore') {
+                visitedReleasePages.add(canonicalLink);
+                skippedCount += 1;
+                skippedByTypeCount += 1;
+                runLogger(
+                  'info',
+                  `${isDryRun ? `[Dry Run · ${dryRunScopeTag}] ` : ''}[Sync Override] Skipped ignored release ${post.title || canonicalLink}`,
+                  'Excluded by per-game Ignore override',
+                );
+                persistCounters();
+                return;
+              }
+
+              if (postSyncOverride !== 'pin' && !isConsoleAllowedBySyncRules(systemSlug, liveCfg)) {
                 if (!consoleRemovedMidPass) {
                   consoleRemovedMidPass = true;
                   runLogger(
@@ -5571,20 +5617,18 @@ export class ScraperOrchestrator extends EventEmitter {
                 return;
               }
 
-              if (!post.link) return;
-              const canonicalLink = post.link.split('#')[0];
               if (isReplayPass && visitedReleasePages.has(canonicalLink)) {
                 return;
               }
 
               recordObservedTimestamp(post.dateGmt);
               recordObservedTimestamp(post.modifiedGmt);
-              if (shouldSkipWpPostBeforeHtml(post)) {
+              if (postSyncOverride !== 'pin' && shouldSkipWpPostBeforeHtml(post)) {
                 persistCounters();
                 return;
               }
               deltaMatchedCount += 1;
-              if (tryFastSkipWpPost(post)) {
+              if (tryFastSkipWpPost(post, postSyncOverride === 'pin')) {
                 return;
               }
               if (isDeltaMode && isDryRun) {
@@ -5876,6 +5920,64 @@ export class ScraperOrchestrator extends EventEmitter {
           }
           if (!hasUnscannedTarget && !pendingReplayForWidenedTypes && this.syncRulesRevision === observedRuleRevision) {
             break;
+          }
+        }
+
+        // Also keep Pinned releases synced even when their console is outside Target Consoles
+        const isScheduledIndexOnlyDelta =
+          isDeltaMode && run.triggerType === 'scheduled' && !liveCfg.autoDownloadNewReleases;
+        if (!signal.aborted && !isScheduledIndexOnlyDelta) {
+          const pinnedItems = listPinnedCatalogReleases();
+          for (const pinnedItem of pinnedItems) {
+            if (signal.aborted) break;
+            if (!pinnedItem.remoteUrl || !pinnedItem.remoteUrl.startsWith('http')) continue;
+            const canonicalUrl = pinnedItem.remoteUrl.split('#')[0];
+            if (visitedReleasePages.has(canonicalUrl)) continue;
+            const mirroredCheck = isReleaseFullyMirroredForRules(
+              pinnedItem,
+              [],
+              defaultFileExistsWithBytes,
+            );
+            if (mirroredCheck.satisfied) {
+              continue;
+            }
+            deltaMatchedCount += 1;
+            if (isDryRun) {
+              const estBytes =
+                pinnedItem.fileSizeBytes > 0
+                  ? pinnedItem.fileSizeBytes
+                  : estimateDownloadHintsBytes(pinnedItem.metadata?.downloadHints);
+              deltaWouldDownloadCount += 1;
+              deltaEstimatedBytes += estBytes;
+              const pinnedSys = (canonicalizeSystemSlug(pinnedItem.systemName) || pinnedItem.systemName).toLowerCase();
+              const cEntry = deltaConsoleMap.get(pinnedSys);
+              if (cEntry) {
+                cEntry.pendingCount += 1;
+                cEntry.estimatedBytes += estBytes;
+              } else {
+                deltaConsoleMap.set(pinnedSys, {
+                  systemName: pinnedSys,
+                  pendingCount: 1,
+                  estimatedBytes: estBytes,
+                });
+              }
+              if (deltaSamples.length < 12) {
+                deltaSamples.push({
+                  id: pinnedItem.id,
+                  title: pinnedItem.title,
+                  systemName: pinnedSys,
+                  releaseType: pinnedItem.releaseType || 'Pinned Release',
+                  fileSizeBytes: estBytes,
+                  status: pinnedItem.status,
+                });
+              }
+              newFound += 1;
+              continue;
+            }
+            this.setActiveSyncItemFromRecord(pinnedItem);
+            this.currentPhase = `Pinned Sync · ${pinnedItem.systemName}: ${pinnedItem.title}`;
+            this.emitStatus();
+            await inspectAndProcessReleasePage(pinnedItem.remoteUrl, buildWpMetaHintFromItem(pinnedItem), null);
           }
         }
 

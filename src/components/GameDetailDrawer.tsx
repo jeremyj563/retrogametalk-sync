@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import {
   AlertCircle,
   ArrowUpCircle,
+  Ban,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -15,15 +16,18 @@ import {
   Gamepad2,
   HardDrive,
   Image as ImageIcon,
+  Layers,
   Loader2,
   Maximize2,
   Minimize2,
   MoreHorizontal,
+  Pin,
   RefreshCw,
   RotateCcw,
   SkipForward,
   SlidersHorizontal,
   Square,
+  Star,
   Trash2,
   X,
   XCircle,
@@ -40,8 +44,11 @@ import type {
   ArchiveInspectResult,
   PlayableExportTarget,
   RepositoryItemRecord,
+  SyncOverrideMode,
+  UserCollectionRecord,
 } from '../types';
 import { ArchiveExplorer } from './ArchiveExplorer';
+import { CollectionPickerPopover } from './CollectionPickerPopover';
 import { formatBytes, formatDateTime } from '../utils/format';
 import {
   getDrawerCloseDurationMs,
@@ -105,6 +112,12 @@ interface GameDetailDrawerProps {
   onCancelDeviceInstall?: () => void;
   onDismissDeviceInstall?: () => void;
   onViewDeviceInstallQueue?: () => void;
+  collections?: UserCollectionRecord[];
+  onToggleFavorite?: (item: RepositoryItemRecord) => Promise<void> | void;
+  onSetSyncOverride?: (item: RepositoryItemRecord, mode: SyncOverrideMode) => Promise<void> | void;
+  onAddItemToCollection?: (collectionId: number, itemId: number) => Promise<void> | void;
+  onRemoveItemFromCollection?: (collectionId: number, itemId: number) => Promise<void> | void;
+  onCreateCollection?: (name: string) => Promise<UserCollectionRecord | null>;
 }
 
 interface LightboxSlide {
@@ -294,6 +307,12 @@ export function GameDetailDrawer({
   onCancelDeviceInstall,
   onDismissDeviceInstall,
   onViewDeviceInstallQueue,
+  collections = [],
+  onToggleFavorite,
+  onSetSyncOverride,
+  onAddItemToCollection,
+  onRemoveItemFromCollection,
+  onCreateCollection,
 }: GameDetailDrawerProps) {
   const [renderedItem, setRenderedItem] = useState<RepositoryItemRecord | null>(activeItem);
   const [renderedNavigation, setRenderedNavigation] = useState<GameDetailNavigation | null>(activeNavigation);
@@ -345,6 +364,8 @@ export function GameDetailDrawer({
   const [archiveBrowseSubpath, setArchiveBrowseSubpath] = useState('');
   const [archiveBrowseError, setArchiveBrowseError] = useState<string | null>(null);
   const [togglingInstalled, setTogglingInstalled] = useState(false);
+  const [togglingFavorite, setTogglingFavorite] = useState(false);
+  const [updatingSyncOverride, setUpdatingSyncOverride] = useState(false);
 
   const autoUpgradedIdsRef = useRef<Set<number>>(new Set());
   const autoHydratedIdsRef = useRef<Set<number>>(new Set());
@@ -1115,7 +1136,10 @@ export function GameDetailDrawer({
     try {
       const res = await fetch('/api/items/installed', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'rgt-sync',
+        },
         body: JSON.stringify({ ids: [item.id], installed }),
       });
       const parsed = await readJsonSafely<{ items?: RepositoryItemRecord[] }>(res);
@@ -1124,6 +1148,57 @@ export function GameDetailDrawer({
       }
     } finally {
       setTogglingInstalled(false);
+    }
+  };
+
+  const handleToggleFavoriteClick = async () => {
+    if (!activeItem || togglingFavorite) return;
+    setTogglingFavorite(true);
+    try {
+      if (onToggleFavorite) {
+        await onToggleFavorite(item);
+      } else {
+        const res = await fetch('/api/items/favorite', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'rgt-sync',
+          },
+          body: JSON.stringify({ ids: [item.id], favorite: !item.isFavorite }),
+        });
+        const parsed = await readJsonSafely<{ items?: RepositoryItemRecord[] }>(res);
+        if (parsed.ok && parsed.data?.items?.[0]) {
+          onItemUpdated(parsed.data.items[0]);
+        }
+      }
+    } finally {
+      setTogglingFavorite(false);
+    }
+  };
+
+  const handleChangeSyncOverride = async (nextMode: SyncOverrideMode) => {
+    if (!activeItem || updatingSyncOverride || item.syncOverride === nextMode) return;
+    setUpdatingSyncOverride(true);
+    setMoreMenuOpen(false);
+    try {
+      if (onSetSyncOverride) {
+        await onSetSyncOverride(item, nextMode);
+      } else {
+        const res = await fetch('/api/items/sync-override', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'rgt-sync',
+          },
+          body: JSON.stringify({ ids: [item.id], syncOverride: nextMode }),
+        });
+        const parsed = await readJsonSafely<{ items?: RepositoryItemRecord[] }>(res);
+        if (parsed.ok && parsed.data?.items?.[0]) {
+          onItemUpdated(parsed.data.items[0]);
+        }
+      }
+    } finally {
+      setUpdatingSyncOverride(false);
     }
   };
 
@@ -1300,10 +1375,43 @@ export function GameDetailDrawer({
             data-swap-dir={swapDir}
             className="crt-detail-swap min-w-0 flex-1 space-y-1"
           >
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                disabled={togglingFavorite}
+                onClick={() => void handleToggleFavoriteClick()}
+                aria-pressed={Boolean(item.isFavorite)}
+                aria-label={item.isFavorite ? `Remove ${item.title} from Favorites` : `Add ${item.title} to Favorites`}
+                title={item.isFavorite ? 'Remove from Favorites' : 'Add to Favorites'}
+                className={`p-1 rounded border transition-colors shrink-0 cursor-pointer disabled:opacity-50 ${
+                  item.isFavorite
+                    ? 'border-crt-amber/60 bg-crt-amber/12 text-crt-amber hover:bg-crt-amber/20'
+                    : 'border-crt-border bg-crt-surface text-crt-muted hover:text-crt-amber hover:border-crt-amber/50'
+                }`}
+              >
+                <Star className={`h-4 w-4 ${item.isFavorite ? 'fill-crt-amber' : ''}`} />
+              </button>
               <h2 className="font-display text-xl font-bold text-crt-text tracking-tight break-words">
                 {item.title}
               </h2>
+              {item.syncOverride === 'pin' && (
+                <span
+                  title="Pinned: always synced by Full & Incremental Sync regardless of global Sync Rules"
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wider border border-crt-phosphor/50 bg-crt-phosphor/10 text-crt-phosphor rounded"
+                >
+                  <Pin className="h-3 w-3 shrink-0" />
+                  Pinned
+                </span>
+              )}
+              {item.syncOverride === 'ignore' && (
+                <span
+                  title="Ignored: excluded from automatic Full & Incremental Sync"
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wider border border-crt-crimson/45 bg-crt-crimson/10 text-crt-crimson rounded"
+                >
+                  <Ban className="h-3 w-3 shrink-0" />
+                  Ignored
+                </span>
+              )}
               <span
                 className={`inline-flex items-center gap-1.5 font-mono text-xs tabular-nums ${
                   item.status === 'downloaded' || (itemTransfer.active && itemTransfer.mode !== 'preparing')
@@ -1707,6 +1815,52 @@ export function GameDetailDrawer({
               </dl>
             </div>
           </div>
+
+          {/* Collections Membership Strip */}
+          {onAddItemToCollection && onRemoveItemFromCollection && onCreateCollection && (
+            <div className="border border-crt-border bg-crt-bg/70 rounded-md px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-crt-muted mr-1 shrink-0">
+                  <Layers className="h-3.5 w-3.5 text-crt-phosphor/80" />
+                  Collections
+                </span>
+                {collections
+                  .filter((c) => (item.collectionIds || []).includes(c.id))
+                  .map((col) => (
+                    <span
+                      key={col.id}
+                      className="inline-flex items-center gap-1.5 px-2 py-0.5 text-[11px] font-mono border border-crt-phosphor/45 bg-crt-phosphor/10 text-crt-phosphor rounded"
+                    >
+                      <span className="max-w-[160px] truncate">{col.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => void onRemoveItemFromCollection(col.id, item.id)}
+                        aria-label={`Remove from ${col.name}`}
+                        title={`Remove from ${col.name}`}
+                        className="text-crt-phosphor/80 hover:text-crt-crimson transition-colors cursor-pointer"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                {collections.filter((c) => (item.collectionIds || []).includes(c.id)).length === 0 && (
+                  <span className="text-[11px] font-mono text-crt-muted/75">None assigned</span>
+                )}
+              </div>
+              <CollectionPickerPopover
+                mode="single"
+                collections={collections}
+                assignedCollectionIds={item.collectionIds || []}
+                align="right"
+                direction="down"
+                triggerLabel="Add to Collection"
+                triggerClassName="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-border bg-crt-surface hover:border-crt-phosphor hover:text-crt-phosphor text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                onAddToCollection={(cid) => onAddItemToCollection(cid, item.id)}
+                onRemoveFromCollection={(cid) => onRemoveItemFromCollection(cid, item.id)}
+                onCreateCollection={onCreateCollection}
+              />
+            </div>
+          )}
 
           {/* Included Downloads List */}
           {(() => {
@@ -2784,6 +2938,58 @@ export function GameDetailDrawer({
                               </span>
                             </button>
                           )}
+                        </div>
+
+                        <div className="my-1 border-t border-crt-border" />
+
+                        <div className="py-1">
+                          <div className="px-3 py-1 text-[10px] font-mono uppercase tracking-wider text-crt-muted">
+                            Sync Rule Override
+                          </div>
+                          {(
+                            [
+                              {
+                                id: 'default' as const,
+                                label: 'Default (Follow Sync Rules)',
+                                icon: SlidersHorizontal,
+                                tone: 'text-crt-text',
+                              },
+                              {
+                                id: 'pin' as const,
+                                label: 'Pin (Always Sync)',
+                                icon: Pin,
+                                tone: 'text-crt-phosphor',
+                              },
+                              {
+                                id: 'ignore' as const,
+                                label: 'Ignore (Skip in Auto-Sync)',
+                                icon: Ban,
+                                tone: 'text-crt-crimson',
+                              },
+                            ] as const
+                          ).map((opt) => {
+                            const Icon = opt.icon;
+                            const active = (item.syncOverride || 'default') === opt.id;
+                            return (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                role="menuitemradio"
+                                aria-checked={active}
+                                disabled={updatingSyncOverride}
+                                onClick={() => void handleChangeSyncOverride(opt.id)}
+                                className={`w-full px-3 py-1.5 text-left flex items-center justify-between gap-2 hover:bg-crt-elevated transition-colors disabled:opacity-50 cursor-pointer ${
+                                  active ? `${opt.tone} font-medium` : 'text-crt-text'
+                                }`}
+                              >
+                                <span className="flex items-center gap-2 min-w-0">
+                                  <Icon className={`h-3.5 w-3.5 shrink-0 ${active ? opt.tone : 'text-crt-muted'}`} />
+                                  <span className="truncate">{opt.label}</span>
+                                </span>
+                                {active && <Check className="h-3.5 w-3.5 shrink-0" />}
+                              </button>
+                            );
+                          })}
                         </div>
 
                         <div className="my-1 border-t border-crt-border" />

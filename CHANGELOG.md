@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.35.0] - 2026-11-22
+
+- Added **Favorites, Custom Collections & Per-Game Sync Rule Overrides** for personal library curation and handheld loadouts:
+  - **SQLite Schema v25 & Curation API**: Added `user_collections` (case-insensitive unique names), `user_collection_items` (many-to-many with `ON DELETE CASCADE`), and `is_favorite` / `sync_override` columns on `catalog_releases`, backed by validated REST endpoints (`/api/collections`, `/api/collections/:id`, `/api/collections/:id/items`, `/api/items/favorite`, `/api/items/sync-override`) plus `favoriteOnly`, `collectionId`, and `syncOverride` filtering across `/api/items`, `/api/items/ids`, and `/api/items/download`.
+  - **One-Click Favorites & Custom Collections / Handheld Loadouts**: Added instant Star toggles on Catalog grid cards, list rows, and the Game Details header; a **Favorites (`N`)** toolbar toggle and compact **Collection** dropdown (`All Collections`, `Favorites`, custom collections with live counts, `+ New Collection…`); a contextual **Collection Active Banner** with 1-click **Queue Missing (`N`)**, **Install to `<Device>` (`N`)**, inline **Rename**, and **Delete**; a unified `+ Collection` bulk curation popover; and removable collection chips + picker inside the Game Details drawer.
+  - **Per-Game Sync Rule Overrides (`Pin` / `Ignore`)**: Added `pin` (always mirror regardless of global console or release-type filters) and `ignore` (skip during automatic Full/Incremental Sync without blocking manual downloads) overrides editable in the Game Details `More` menu and Catalog bulk popover, with consistent parity across `doesCatalogReleaseMatchSyncRules`, Full Sync, Incremental Sync, Sync Preflight, and Catalog `Matches Sync Rules`.
+
 ## [1.34.0] - 2026-11-22
 
 - Added **Installed ROM Update Detection & One-Click Device Upgrades** so actively updated RetroGameTalk hacks and fan translations stay current on mounted handhelds and storage devices:

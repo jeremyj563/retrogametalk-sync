@@ -3,18 +3,27 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import {
+  addItemsToUserCollection,
   computeSyncPreflightSummary,
+  createUserCollection,
+  deleteUserCollection,
   getCatalogStatsSnapshot,
   getPublicConfig,
   getRepositoryItemById,
   getSchemaMigrationReport,
+  getUserCollectionById,
   initDb,
   listActivityLogs,
   listOutdatedInstalledItems,
   listSyncRuns,
+  listUserCollections,
   queryRepositoryItemIds,
   queryRepositoryItems,
+  removeItemsFromUserCollection,
+  setCatalogItemsFavorite,
   setCatalogItemsInstalled,
+  setCatalogItemsSyncOverride,
+  updateUserCollection,
 } from './src/server/db.ts';
 import {
   buildContentDispositionAttachment,
@@ -219,6 +228,17 @@ async function bootstrap() {
     return undefined;
   };
 
+  const parseOptionalPositiveInt = (raw: unknown): number | undefined => {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    const n = Number(raw);
+    return Number.isInteger(n) && n > 0 ? n : undefined;
+  };
+
+  const parseOptionalSyncOverride = (raw: unknown): 'default' | 'pin' | 'ignore' | undefined => {
+    if (raw === 'default' || raw === 'pin' || raw === 'ignore') return raw;
+    return undefined;
+  };
+
   // Repository catalog, metadata, local assets, download & retry
   app.get('/api/items', (req, res) => {
     const result = queryRepositoryItems({
@@ -228,6 +248,9 @@ async function bootstrap() {
       downloaded: typeof req.query.downloaded === 'string' ? req.query.downloaded : undefined,
       installed: typeof req.query.installed === 'string' ? req.query.installed : undefined,
       syncRules: req.query.syncRules === 'true' || req.query.syncRules === '1',
+      favoriteOnly: req.query.favoriteOnly === 'true' || req.query.favoriteOnly === '1',
+      collectionId: parseOptionalPositiveInt(req.query.collectionId),
+      syncOverride: parseOptionalSyncOverride(req.query.syncOverride),
       tag: parseQueryFilterParam(req.query.tag),
       tagMode: typeof req.query.tagMode === 'string' ? req.query.tagMode : undefined,
       genre: parseQueryFilterParam(req.query.genre),
@@ -253,6 +276,9 @@ async function bootstrap() {
       downloaded: typeof req.query.downloaded === 'string' ? req.query.downloaded : undefined,
       installed: typeof req.query.installed === 'string' ? req.query.installed : undefined,
       syncRules: req.query.syncRules === 'true' || req.query.syncRules === '1',
+      favoriteOnly: req.query.favoriteOnly === 'true' || req.query.favoriteOnly === '1',
+      collectionId: parseOptionalPositiveInt(req.query.collectionId),
+      syncOverride: parseOptionalSyncOverride(req.query.syncOverride),
       tag: parseQueryFilterParam(req.query.tag),
       tagMode: typeof req.query.tagMode === 'string' ? req.query.tagMode : undefined,
       genre: parseQueryFilterParam(req.query.genre),
@@ -324,6 +350,9 @@ async function bootstrap() {
           downloaded: typeof rawFilters.downloaded === 'string' ? rawFilters.downloaded : undefined,
           installed: typeof rawFilters.installed === 'string' ? rawFilters.installed : undefined,
           syncRules: Boolean(rawFilters.syncRules),
+          favoriteOnly: Boolean(rawFilters.favoriteOnly),
+          collectionId: parseOptionalPositiveInt(rawFilters.collectionId),
+          syncOverride: parseOptionalSyncOverride(rawFilters.syncOverride),
           tag: parseQueryFilterParam(rawFilters.tag),
           tagMode: typeof rawFilters.tagMode === 'string' ? rawFilters.tagMode : undefined,
           genre: parseQueryFilterParam(rawFilters.genre),
@@ -907,6 +936,180 @@ async function bootstrap() {
       itemMeta,
     });
     orchestrator.notifyInstalledStateChanged();
+    res.json(result);
+  });
+
+  app.post('/api/items/favorite', (req, res) => {
+    const rawIds: number[] = Array.isArray(req.body?.ids)
+      ? Array.from(
+          new Set<number>(
+            req.body.ids
+              .map(Number)
+              .filter((id: number) => Number.isInteger(id) && id > 0),
+          ),
+        ).slice(0, 5000)
+      : [];
+    if (rawIds.length === 0) {
+      res.status(400).json({ error: 'Provide one or more valid catalog item IDs' });
+      return;
+    }
+    const favorite = req.body?.favorite !== false;
+    const result = setCatalogItemsFavorite({ ids: rawIds, favorite });
+    orchestrator.notifyInstalledStateChanged();
+    res.json(result);
+  });
+
+  app.post('/api/items/sync-override', (req, res) => {
+    const rawIds: number[] = Array.isArray(req.body?.ids)
+      ? Array.from(
+          new Set<number>(
+            req.body.ids
+              .map(Number)
+              .filter((id: number) => Number.isInteger(id) && id > 0),
+          ),
+        ).slice(0, 5000)
+      : [];
+    if (rawIds.length === 0) {
+      res.status(400).json({ error: 'Provide one or more valid catalog item IDs' });
+      return;
+    }
+    const syncOverride = req.body?.syncOverride;
+    if (syncOverride !== 'default' && syncOverride !== 'pin' && syncOverride !== 'ignore') {
+      res.status(400).json({ error: "syncOverride must be 'default', 'pin', or 'ignore'" });
+      return;
+    }
+    const result = setCatalogItemsSyncOverride({ ids: rawIds, syncOverride });
+    orchestrator.notifyInstalledStateChanged();
+    res.json(result);
+  });
+
+  // User Collections CRUD & membership
+  app.get('/api/collections', (_req, res) => {
+    res.json({ collections: listUserCollections() });
+  });
+
+  app.post('/api/collections', (req, res) => {
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    if (!name || name.length > 80) {
+      res.status(400).json({ error: 'Collection name must be between 1 and 80 characters' });
+      return;
+    }
+    const description =
+      typeof req.body?.description === 'string' ? req.body.description.trim().slice(0, 300) : null;
+    try {
+      const collection = createUserCollection({ name, description });
+      res.status(201).json({ collection });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isConflict = /UNIQUE constraint/i.test(msg);
+      res.status(isConflict ? 409 : 400).json({
+        error: isConflict ? `A collection named "${name}" already exists` : msg,
+      });
+    }
+  });
+
+  app.patch('/api/collections/:id', (req, res) => {
+    const collectionId = Number(req.params.id);
+    if (!Number.isInteger(collectionId) || collectionId <= 0) {
+      res.status(400).json({ error: 'Invalid collection ID' });
+      return;
+    }
+    const existing = getUserCollectionById(collectionId);
+    if (!existing) {
+      res.status(404).json({ error: 'Collection not found' });
+      return;
+    }
+    const hasName = req.body?.name !== undefined;
+    const hasDesc = req.body?.description !== undefined;
+    const name = hasName ? (typeof req.body.name === 'string' ? req.body.name.trim() : '') : undefined;
+    if (hasName && (!name || name.length > 80)) {
+      res.status(400).json({ error: 'Collection name must be between 1 and 80 characters' });
+      return;
+    }
+    const description = hasDesc
+      ? typeof req.body.description === 'string'
+        ? req.body.description.trim().slice(0, 300)
+        : null
+      : undefined;
+    try {
+      const collection = updateUserCollection(collectionId, { name, description });
+      res.json({ collection });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isConflict = /UNIQUE constraint/i.test(msg);
+      res.status(isConflict ? 409 : 400).json({
+        error: isConflict ? `A collection named "${name}" already exists` : msg,
+      });
+    }
+  });
+
+  app.delete('/api/collections/:id', (req, res) => {
+    const collectionId = Number(req.params.id);
+    if (!Number.isInteger(collectionId) || collectionId <= 0) {
+      res.status(400).json({ error: 'Invalid collection ID' });
+      return;
+    }
+    const deleted = deleteUserCollection(collectionId);
+    if (!deleted) {
+      res.status(404).json({ error: 'Collection not found' });
+      return;
+    }
+    res.json({ ok: true, id: collectionId });
+  });
+
+  app.post('/api/collections/:id/items', (req, res) => {
+    const collectionId = Number(req.params.id);
+    if (!Number.isInteger(collectionId) || collectionId <= 0) {
+      res.status(400).json({ error: 'Invalid collection ID' });
+      return;
+    }
+    const rawList = Array.isArray(req.body?.releaseIds)
+      ? req.body.releaseIds
+      : Array.isArray(req.body?.ids)
+        ? req.body.ids
+        : [];
+    const releaseIds: number[] = Array.from(
+      new Set<number>(
+        rawList.map(Number).filter((id: number) => Number.isInteger(id) && id > 0),
+      ),
+    ).slice(0, 5000);
+    if (releaseIds.length === 0) {
+      res.status(400).json({ error: 'Provide one or more valid releaseIds to add' });
+      return;
+    }
+    const result = addItemsToUserCollection(collectionId, releaseIds);
+    if (!result.collection) {
+      res.status(404).json({ error: 'Collection not found' });
+      return;
+    }
+    res.json(result);
+  });
+
+  app.delete('/api/collections/:id/items', (req, res) => {
+    const collectionId = Number(req.params.id);
+    if (!Number.isInteger(collectionId) || collectionId <= 0) {
+      res.status(400).json({ error: 'Invalid collection ID' });
+      return;
+    }
+    const rawList = Array.isArray(req.body?.releaseIds)
+      ? req.body.releaseIds
+      : Array.isArray(req.body?.ids)
+        ? req.body.ids
+        : [];
+    const releaseIds: number[] = Array.from(
+      new Set<number>(
+        rawList.map(Number).filter((id: number) => Number.isInteger(id) && id > 0),
+      ),
+    ).slice(0, 5000);
+    if (releaseIds.length === 0) {
+      res.status(400).json({ error: 'Provide one or more valid releaseIds to remove' });
+      return;
+    }
+    const result = removeItemsFromUserCollection(collectionId, releaseIds);
+    if (!result.collection) {
+      res.status(404).json({ error: 'Collection not found' });
+      return;
+    }
     res.json(result);
   });
 

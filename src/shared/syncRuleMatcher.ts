@@ -25,11 +25,21 @@ export interface SystemIndexFreshnessSummary {
   oldestIndexedAt: string | null;
 }
 
+export type SyncOverrideMode = 'default' | 'pin' | 'ignore';
+
+export function normalizeSyncOverride(raw: unknown): SyncOverrideMode {
+  if (typeof raw !== 'string') return 'default';
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'pin' || normalized === 'ignore') return normalized;
+  return 'default';
+}
+
 export interface SyncRuleReleaseCandidate {
   systemName: string;
   releaseType?: string | null;
   releaseTags?: readonly string[] | null;
   fileRoles?: readonly string[] | null;
+  syncOverride?: SyncOverrideMode | string | null;
 }
 
 export interface SyncRuleConfigLike {
@@ -120,6 +130,14 @@ export function doesCatalogReleaseMatchSyncRules(
   release: SyncRuleReleaseCandidate,
   config: SyncRuleConfigLike,
 ): boolean {
+  const override = normalizeSyncOverride(release.syncOverride);
+  if (override === 'pin') {
+    return true;
+  }
+  if (override === 'ignore') {
+    return false;
+  }
+
   const targetSystems = normalizeTargetConsoleSlugs(config.systemFilter);
   if (targetSystems.length > 0) {
     const releaseSystemCanonical = canonicalizeSystemSlug(release.systemName).toLowerCase();

@@ -1216,6 +1216,51 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `);
     },
   },
+  {
+    version: 25,
+    name: 'favorites_collections_and_sync_overrides',
+    description:
+      'Add user_collections and user_collection_items tables plus is_favorite and sync_override columns on catalog_releases with supporting indexes.',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS user_collections (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+          description TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS user_collection_items (
+          collection_id INTEGER NOT NULL,
+          release_id INTEGER NOT NULL,
+          added_at TEXT NOT NULL,
+          PRIMARY KEY (collection_id, release_id),
+          FOREIGN KEY (collection_id) REFERENCES user_collections(id) ON DELETE CASCADE,
+          FOREIGN KEY (release_id) REFERENCES catalog_releases(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_collection_items_release
+        ON user_collection_items(release_id);
+      `);
+
+      if (!tableHasColumn(db, 'catalog_releases', 'is_favorite')) {
+        db.exec(`ALTER TABLE catalog_releases ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;`);
+      }
+      if (!tableHasColumn(db, 'catalog_releases', 'sync_override')) {
+        db.exec(`ALTER TABLE catalog_releases ADD COLUMN sync_override TEXT NOT NULL DEFAULT 'default';`);
+      }
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_releases_is_favorite
+        ON catalog_releases(is_favorite);
+
+        CREATE INDEX IF NOT EXISTS idx_releases_sync_override
+        ON catalog_releases(sync_override);
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

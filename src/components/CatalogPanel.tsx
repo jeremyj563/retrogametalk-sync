@@ -5,7 +5,9 @@ import {
   ArrowUp,
   ArrowUpCircle,
   ArrowUpDown,
+  Ban,
   BarChart3,
+  Check,
   CheckCircle2,
   ChevronRight,
   Cloud,
@@ -15,15 +17,20 @@ import {
   FolderOpen,
   Gamepad2,
   HardDrive,
+  Layers,
   LayoutGrid,
   List,
   Loader2,
   Pause,
+  Pencil,
+  Pin,
+  Plus,
   RefreshCw,
   RotateCcw,
   Search,
   SkipForward,
   SlidersHorizontal,
+  Star,
   Trash2,
   X,
   XCircle,
@@ -76,8 +83,11 @@ import type {
   RepositoryItemRecord,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
+  SyncOverrideMode,
+  UserCollectionRecord,
 } from '../types';
 import { ArchiveExplorer } from './ArchiveExplorer';
+import { CollectionPickerPopover } from './CollectionPickerPopover';
 import { resolveItemDeviceInstallState } from '../utils/deviceInstallView';
 import { formatBytes, formatDateTime } from '../utils/format';
 import { reportAchievementEvent } from '../utils/achievementsClient';
@@ -291,6 +301,9 @@ interface CatalogViewPrefs {
   downloadedFilter: CatalogDownloadedFilter;
   installedFilter: CatalogInstalledFilter;
   syncRulesOnly: boolean;
+  favoriteOnly: boolean;
+  collectionId: number | null;
+  syncOverrideFilter: SyncOverrideMode | null;
   tags: string[];
   tagsMode: FilterMatchMode;
   genres: string[];
@@ -324,6 +337,9 @@ const DEFAULT_CATALOG_VIEW_PREFS: CatalogViewPrefs = {
   downloadedFilter: 'all',
   installedFilter: 'all',
   syncRulesOnly: false,
+  favoriteOnly: false,
+  collectionId: null,
+  syncOverrideFilter: null,
   tags: [],
   tagsMode: 'any',
   genres: [],
@@ -409,6 +425,17 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
       downloadedFilter,
       installedFilter: sanitizeStoredInstalledFilter(parsed.installedFilter),
       syncRulesOnly: Boolean(parsed.syncRulesOnly),
+      favoriteOnly: Boolean(parsed.favoriteOnly),
+      collectionId:
+        typeof parsed.collectionId === 'number' &&
+        Number.isInteger(parsed.collectionId) &&
+        parsed.collectionId > 0
+          ? parsed.collectionId
+          : null,
+      syncOverrideFilter:
+        parsed.syncOverrideFilter === 'pin' || parsed.syncOverrideFilter === 'ignore'
+          ? parsed.syncOverrideFilter
+          : null,
       tags: sanitizeStoredList(parsed.tags, parsed.tagFilter),
       tagsMode: sanitizeStoredMatchMode(parsed.tagsMode),
       genres: sanitizeStoredList(parsed.genres, parsed.genreFilter),
@@ -438,6 +465,9 @@ function buildCatalogQueryKey(
     | 'downloadedFilter'
     | 'installedFilter'
     | 'syncRulesOnly'
+    | 'favoriteOnly'
+    | 'collectionId'
+    | 'syncOverrideFilter'
     | 'tags'
     | 'tagsMode'
     | 'genres'
@@ -459,6 +489,9 @@ function buildCatalogQueryKey(
     prefs.downloadedFilter,
     prefs.installedFilter,
     prefs.syncRulesOnly,
+    prefs.favoriteOnly,
+    prefs.collectionId,
+    prefs.syncOverrideFilter,
     prefs.tags,
     prefs.tags.length > 1 ? prefs.tagsMode : 'any',
     prefs.genres,
@@ -575,6 +608,24 @@ export function CatalogPanel({
   const [syncRulesOnly, setSyncRulesOnly] = useState<boolean>(
     () => memoryCatalogViewPrefs.syncRulesOnly,
   );
+  const [favoriteOnly, setFavoriteOnly] = useState<boolean>(
+    () => memoryCatalogViewPrefs.favoriteOnly,
+  );
+  const [collectionId, setCollectionId] = useState<number | null>(
+    () => memoryCatalogViewPrefs.collectionId,
+  );
+  const [syncOverrideFilter, setSyncOverrideFilter] = useState<SyncOverrideMode | null>(
+    () => memoryCatalogViewPrefs.syncOverrideFilter,
+  );
+  const [collections, setCollections] = useState<UserCollectionRecord[]>([]);
+  const [creatingCollectionQuick, setCreatingCollectionQuick] = useState(false);
+  const [newCollectionQuickName, setNewCollectionQuickName] = useState('');
+  const [collectionQuickBusy, setCollectionQuickBusy] = useState(false);
+  const [collectionQuickError, setCollectionQuickError] = useState<string | null>(null);
+  const [renamingCollection, setRenamingCollection] = useState(false);
+  const [renameCollectionValue, setRenameCollectionValue] = useState('');
+  const [confirmDeleteCollection, setConfirmDeleteCollection] = useState(false);
+  const [collectionActionBusy, setCollectionActionBusy] = useState(false);
   const [tags, setTags] = useState<string[]>(() => memoryCatalogViewPrefs.tags);
   const [tagsMode, setTagsMode] = useState<FilterMatchMode>(() => memoryCatalogViewPrefs.tagsMode);
   const [genres, setGenres] = useState<string[]>(() => memoryCatalogViewPrefs.genres);
@@ -688,6 +739,9 @@ export function CatalogPanel({
         downloadedFilter,
         installedFilter,
         syncRulesOnly,
+        favoriteOnly,
+        collectionId,
+        syncOverrideFilter,
         tags,
         tags.length > 1 ? tagsMode : 'any',
         genres,
@@ -706,6 +760,9 @@ export function CatalogPanel({
       downloadedFilter,
       installedFilter,
       syncRulesOnly,
+      favoriteOnly,
+      collectionId,
+      syncOverrideFilter,
       tags,
       tagsMode,
       genres,
@@ -745,6 +802,9 @@ export function CatalogPanel({
       downloadedFilter,
       installedFilter,
       syncRulesOnly,
+      favoriteOnly,
+      collectionId,
+      syncOverrideFilter,
       tags,
       tagsMode,
       genres,
@@ -774,6 +834,9 @@ export function CatalogPanel({
     downloadedFilter,
     installedFilter,
     syncRulesOnly,
+    favoriteOnly,
+    collectionId,
+    syncOverrideFilter,
     tags,
     tagsMode,
     genres,
@@ -817,6 +880,9 @@ export function CatalogPanel({
       if (downloadedFilter !== 'all') qs.set('downloaded', downloadedFilter);
       if (installedFilter !== 'all') qs.set('installed', installedFilter);
       if (syncRulesOnly) qs.set('syncRules', 'true');
+      if (favoriteOnly) qs.set('favoriteOnly', 'true');
+      if (collectionId !== null) qs.set('collectionId', String(collectionId));
+      if (syncOverrideFilter) qs.set('syncOverride', syncOverrideFilter);
       for (const t of tags) qs.append('tag', t);
       if (tags.length > 1) qs.set('tagMode', tagsMode);
       for (const g of genres) qs.append('genre', g);
@@ -837,6 +903,9 @@ export function CatalogPanel({
       downloadedFilter,
       installedFilter,
       syncRulesOnly,
+      favoriteOnly,
+      collectionId,
+      syncOverrideFilter,
       tags,
       tagsMode,
       genres,
@@ -849,6 +918,27 @@ export function CatalogPanel({
       sourcesMode,
     ],
   );
+
+  const loadCollections = useCallback(async () => {
+    try {
+      const res = await fetch('/api/collections');
+      if (!res.ok) return;
+      const data = (await res.json()) as { collections?: UserCollectionRecord[] };
+      if (Array.isArray(data.collections)) {
+        setCollections(data.collections);
+        setCollectionId((current) => {
+          if (current === null) return null;
+          return data.collections!.some((c) => c.id === current) ? current : null;
+        });
+      }
+    } catch {
+      // Non-fatal
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadCollections();
+  }, [loadCollections]);
 
   const loadCatalog = useCallback(
     async (silent = false, options?: { softRefresh?: boolean }) => {
@@ -881,6 +971,9 @@ export function CatalogPanel({
             downloadedFilter,
             installedFilter,
             syncRulesOnly,
+            favoriteOnly,
+            collectionId,
+            syncOverrideFilter,
             tags,
             tagsMode,
             genres,
@@ -983,6 +1076,9 @@ export function CatalogPanel({
       downloadedFilter,
       installedFilter,
       syncRulesOnly,
+      favoriteOnly,
+      collectionId,
+      syncOverrideFilter,
       tags,
       tagsMode,
       genres,
@@ -1086,6 +1182,9 @@ export function CatalogPanel({
           downloadedFilter,
           installedFilter,
           syncRulesOnly,
+          favoriteOnly,
+          collectionId,
+          syncOverrideFilter,
           tags,
           tagsMode,
           genres,
@@ -1114,6 +1213,9 @@ export function CatalogPanel({
     downloadedFilter,
     installedFilter,
     syncRulesOnly,
+    favoriteOnly,
+    collectionId,
+    syncOverrideFilter,
     tags,
     tagsMode,
     genres,
@@ -1130,12 +1232,13 @@ export function CatalogPanel({
   useEffect(() => {
     if (catalogRevision === lastHandledRevisionRef.current) return;
     lastHandledRevisionRef.current = catalogRevision;
+    void loadCollections();
     if (viewMode === 'catalog') {
       void loadCatalog(true);
     } else {
       void loadFsTree(fsPath, true);
     }
-  }, [catalogRevision, viewMode, fsPath, loadCatalog, loadFsTree]);
+  }, [catalogRevision, viewMode, fsPath, loadCatalog, loadFsTree, loadCollections]);
 
   const filteredFsNodes = useMemo(() => {
     const q = fsSearch.trim().toLowerCase();
@@ -1537,7 +1640,10 @@ export function CatalogPanel({
     try {
       const res = await fetch('/api/items/installed', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'rgt-sync',
+        },
         body: JSON.stringify({
           ids,
           installed,
@@ -1555,6 +1661,243 @@ export function CatalogPanel({
       }
     } finally {
       setMarkingInstalled(false);
+    }
+  };
+
+  const handleBulkSetFavorite = async (ids: number[], favorite: boolean) => {
+    if (ids.length === 0) return;
+    const res = await fetch('/api/items/favorite', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'rgt-sync',
+      },
+      body: JSON.stringify({ ids, favorite }),
+    });
+    const parsed = await readJsonSafely<{ items?: RepositoryItemRecord[]; error?: string }>(res);
+    if (!parsed.ok) {
+      throw new Error(parsed.errorMessage || 'Failed to update favorite status');
+    }
+    if (Array.isArray(parsed.data?.items) && parsed.data.items.length > 0) {
+      const byId = new Map(parsed.data.items.map((row) => [row.id, row]));
+      setItems((prev) => prev.map((row) => byId.get(row.id) ?? row));
+      setActiveDetailItem((current) => (current ? (byId.get(current.id) ?? current) : current));
+    }
+    await Promise.all([loadCatalog(true), onRefreshStatus()]);
+  };
+
+  const handleToggleFavoriteItem = async (item: RepositoryItemRecord) => {
+    const nextFav = !item.isFavorite;
+    // Optimistic update for snappy 1-click feedback
+    setItems((prev) =>
+      prev.map((row) => (row.id === item.id ? { ...row, isFavorite: nextFav } : row)),
+    );
+    setActiveDetailItem((current) =>
+      current && current.id === item.id ? { ...current, isFavorite: nextFav } : current,
+    );
+    try {
+      await handleBulkSetFavorite([item.id], nextFav);
+    } catch (err) {
+      setQueueNotice(err instanceof Error ? err.message : String(err));
+      await loadCatalog(true);
+    }
+  };
+
+  const handleBulkSetSyncOverride = async (ids: number[], syncOverride: SyncOverrideMode) => {
+    if (ids.length === 0) return;
+    const res = await fetch('/api/items/sync-override', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'rgt-sync',
+      },
+      body: JSON.stringify({ ids, syncOverride }),
+    });
+    const parsed = await readJsonSafely<{ items?: RepositoryItemRecord[]; error?: string }>(res);
+    if (!parsed.ok) {
+      throw new Error(parsed.errorMessage || 'Failed to update sync rule override');
+    }
+    if (Array.isArray(parsed.data?.items) && parsed.data.items.length > 0) {
+      const byId = new Map(parsed.data.items.map((row) => [row.id, row]));
+      setItems((prev) => prev.map((row) => byId.get(row.id) ?? row));
+      setActiveDetailItem((current) => (current ? (byId.get(current.id) ?? current) : current));
+    }
+    await loadCatalog(true);
+  };
+
+  const handleCreateCollection = async (name: string): Promise<UserCollectionRecord | null> => {
+    const res = await fetch('/api/collections', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'rgt-sync',
+      },
+      body: JSON.stringify({ name }),
+    });
+    const parsed = await readJsonSafely<{ collection?: UserCollectionRecord; error?: string }>(res);
+    if (!parsed.ok || !parsed.data?.collection) {
+      throw new Error(parsed.errorMessage || 'Failed to create collection');
+    }
+    await loadCollections();
+    return parsed.data.collection;
+  };
+
+  const handleRenameCollection = async (id: number, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setCollectionActionBusy(true);
+    try {
+      const res = await fetch(`/api/collections/${id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'rgt-sync',
+        },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      const parsed = await readJsonSafely<{ collection?: UserCollectionRecord; error?: string }>(res);
+      if (!parsed.ok) {
+        setQueueNotice(parsed.errorMessage || 'Failed to rename collection');
+        return;
+      }
+      setRenamingCollection(false);
+      await loadCollections();
+    } finally {
+      setCollectionActionBusy(false);
+    }
+  };
+
+  const handleDeleteCollection = async (id: number) => {
+    setCollectionActionBusy(true);
+    try {
+      const res = await fetch(`/api/collections/${id}`, {
+        method: 'DELETE',
+        headers: { 'X-Requested-With': 'rgt-sync' },
+      });
+      if (res.ok) {
+        setConfirmDeleteCollection(false);
+        setRenamingCollection(false);
+        if (collectionId === id) {
+          setCollectionId(null);
+        }
+        setItems((prev) =>
+          prev.map((row) =>
+            row.collectionIds.includes(id)
+              ? { ...row, collectionIds: row.collectionIds.filter((cid) => cid !== id) }
+              : row,
+          ),
+        );
+        setActiveDetailItem((current) =>
+          current && current.collectionIds.includes(id)
+            ? { ...current, collectionIds: current.collectionIds.filter((cid) => cid !== id) }
+            : current,
+        );
+        await Promise.all([loadCollections(), loadCatalog(true)]);
+      }
+    } finally {
+      setCollectionActionBusy(false);
+    }
+  };
+
+  const handleAddItemsToCollection = async (colId: number, releaseIds: number[]) => {
+    if (releaseIds.length === 0) return;
+    const res = await fetch(`/api/collections/${colId}/items`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'rgt-sync',
+      },
+      body: JSON.stringify({ releaseIds }),
+    });
+    const parsed = await readJsonSafely<{ error?: string }>(res);
+    if (!parsed.ok) {
+      throw new Error(parsed.errorMessage || 'Failed to add items to collection');
+    }
+    const idSet = new Set(releaseIds);
+    setItems((prev) =>
+      prev.map((row) =>
+        idSet.has(row.id) && !row.collectionIds.includes(colId)
+          ? { ...row, collectionIds: [...row.collectionIds, colId] }
+          : row,
+      ),
+    );
+    setActiveDetailItem((current) =>
+      current && idSet.has(current.id) && !current.collectionIds.includes(colId)
+        ? { ...current, collectionIds: [...current.collectionIds, colId] }
+        : current,
+    );
+    await loadCollections();
+    if (collectionId === colId) {
+      await loadCatalog(true);
+    }
+  };
+
+  const handleRemoveItemsFromCollection = async (colId: number, releaseIds: number[]) => {
+    if (releaseIds.length === 0) return;
+    const res = await fetch(`/api/collections/${colId}/items`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'rgt-sync',
+      },
+      body: JSON.stringify({ releaseIds }),
+    });
+    const parsed = await readJsonSafely<{ error?: string }>(res);
+    if (!parsed.ok) {
+      throw new Error(parsed.errorMessage || 'Failed to remove items from collection');
+    }
+    const idSet = new Set(releaseIds);
+    setItems((prev) =>
+      prev.map((row) =>
+        idSet.has(row.id)
+          ? { ...row, collectionIds: row.collectionIds.filter((cid) => cid !== colId) }
+          : row,
+      ),
+    );
+    setActiveDetailItem((current) =>
+      current && idSet.has(current.id)
+        ? { ...current, collectionIds: current.collectionIds.filter((cid) => cid !== colId) }
+        : current,
+    );
+    await loadCollections();
+    if (collectionId === colId) {
+      await loadCatalog(true);
+    }
+  };
+
+  const handleCollectionBatchAction = async (
+    col: UserCollectionRecord,
+    action: 'queue_missing' | 'install_ready',
+  ) => {
+    setCollectionActionBusy(true);
+    try {
+      const res = await fetch(`/api/items/ids?collectionId=${encodeURIComponent(String(col.id))}`);
+      const parsed = await readJsonSafely<{
+        queueableIds?: number[];
+        downloadableIds?: number[];
+        error?: string;
+      }>(res);
+      if (!parsed.ok || !parsed.data) {
+        setQueueNotice(parsed.errorMessage || `Failed to inspect "${col.name}".`);
+        return;
+      }
+      if (action === 'queue_missing') {
+        const queueable = parsed.data.queueableIds || [];
+        if (queueable.length === 0) {
+          setQueueNotice(`All games in "${col.name}" are already downloaded or queued.`);
+          return;
+        }
+        await handleQueueIds(queueable);
+      } else {
+        const downloadable = parsed.data.downloadableIds || [];
+        if (downloadable.length === 0) {
+          setQueueNotice(`No downloaded games in "${col.name}" are ready to install yet.`);
+          return;
+        }
+        handleQuickInstallIds(downloadable);
+      }
+    } finally {
+      setCollectionActionBusy(false);
     }
   };
 
@@ -1588,6 +1931,9 @@ export function CatalogPanel({
       downloaded: downloadedFilter !== 'all' ? downloadedFilter : undefined,
       installed: installedFilter !== 'all' ? installedFilter : undefined,
       syncRules: syncRulesOnly || undefined,
+      favoriteOnly: favoriteOnly || undefined,
+      collectionId: collectionId ?? undefined,
+      syncOverride: syncOverrideFilter ?? undefined,
       tag: tags,
       tagMode: tags.length > 1 ? tagsMode : undefined,
       genre: genres,
@@ -1607,6 +1953,9 @@ export function CatalogPanel({
     downloadedFilter,
     installedFilter,
     syncRulesOnly,
+    favoriteOnly,
+    collectionId,
+    syncOverrideFilter,
     tags,
     tagsMode,
     genres,
@@ -1851,7 +2200,10 @@ export function CatalogPanel({
     try {
       const res = await fetch('/api/items', {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'rgt-sync',
+        },
         body: JSON.stringify({ ids }),
       });
       if (res.ok) {
@@ -1860,7 +2212,7 @@ export function CatalogPanel({
         if (activeDetailItem && ids.includes(activeDetailItem.id)) {
           closeDetailDrawer();
         }
-        await Promise.all([loadCatalog(false, { softRefresh: true }), onRefreshStatus()]);
+        await Promise.all([loadCatalog(false, { softRefresh: true }), loadCollections(), onRefreshStatus()]);
       }
     } finally {
       setDeletingKey(null);
@@ -1873,7 +2225,10 @@ export function CatalogPanel({
     try {
       const res = await fetch('/api/fs/entry', {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'rgt-sync',
+        },
         body: JSON.stringify({ paths }),
       });
       if (res.ok) {
@@ -2168,6 +2523,41 @@ export function CatalogPanel({
       });
     }
 
+    if (favoriteOnly) {
+      tokens.push({
+        key: 'favoriteOnly',
+        groupLabel: 'Curated',
+        valueLabel: 'Favorites',
+        matchAll: false,
+        onRemove: () => setFavoriteOnly(false),
+      });
+    }
+
+    if (collectionId !== null) {
+      const col = collections.find((c) => c.id === collectionId);
+      tokens.push({
+        key: `collection:${collectionId}`,
+        groupLabel: 'Collection',
+        valueLabel: col ? col.name : `#${collectionId}`,
+        matchAll: false,
+        onRemove: () => {
+          setCollectionId(null);
+          setRenamingCollection(false);
+          setConfirmDeleteCollection(false);
+        },
+      });
+    }
+
+    if (syncOverrideFilter === 'pin' || syncOverrideFilter === 'ignore') {
+      tokens.push({
+        key: `syncOverride:${syncOverrideFilter}`,
+        groupLabel: 'Sync Override',
+        valueLabel: syncOverrideFilter === 'pin' ? 'Pinned' : 'Ignored',
+        matchAll: false,
+        onRemove: () => setSyncOverrideFilter(null),
+      });
+    }
+
     return tokens;
   }, [
     search,
@@ -2186,9 +2576,23 @@ export function CatalogPanel({
     statuses,
     installedFilter,
     syncRulesOnly,
+    favoriteOnly,
+    collectionId,
+    collections,
+    syncOverrideFilter,
     config.systemFilter,
     config.allowedReleaseTypes,
   ]);
+
+  const activeCollection = useMemo(
+    () => (collectionId !== null ? collections.find((c) => c.id === collectionId) ?? null : null),
+    [collectionId, collections],
+  );
+
+  useEffect(() => {
+    setRenamingCollection(false);
+    setConfirmDeleteCollection(false);
+  }, [collectionId]);
 
   const activeFilterCount = activeFilterTokens.length;
   const hasActiveFilters = activeFilterCount > 0;
@@ -2211,6 +2615,9 @@ export function CatalogPanel({
     setDownloadedFilter('all');
     setInstalledFilter('all');
     setSyncRulesOnly(false);
+    setFavoriteOnly(false);
+    setCollectionId(null);
+    setSyncOverrideFilter(null);
     setTags([]);
     setTagsMode('any');
     setGenres([]);
@@ -2222,6 +2629,8 @@ export function CatalogPanel({
     setSources([]);
     setSourcesMode('any');
     setOpenFilterId(null);
+    setRenamingCollection(false);
+    setConfirmDeleteCollection(false);
   };
 
   const breadcrumbs = fsPath ? fsPath.split('/').filter(Boolean) : [];
@@ -2779,6 +3188,138 @@ export function CatalogPanel({
                     </span>
                   )}
                 </button>
+
+                <span
+                  aria-hidden="true"
+                  className="hidden sm:inline-block h-4 w-px bg-crt-border mx-0.5 shrink-0"
+                />
+
+                <button
+                  type="button"
+                  aria-pressed={favoriteOnly}
+                  onClick={() => setFavoriteOnly((prev) => !prev)}
+                  title={
+                    favoriteOnly
+                      ? 'Click to clear Favorites filter and show all matching games'
+                      : 'Show only favorited games'
+                  }
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    favoriteOnly
+                      ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
+                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                  }`}
+                >
+                  <Star
+                    className={`h-3.5 w-3.5 shrink-0 ${
+                      favoriteOnly ? 'text-crt-amber fill-crt-amber' : 'text-crt-muted'
+                    }`}
+                  />
+                  <span>Favorites</span>
+                  <span
+                    className={`font-mono text-[11px] tabular-nums ${
+                      favoriteOnly ? 'text-crt-amber/90' : 'text-crt-muted'
+                    }`}
+                  >
+                    ({(facets.counts?.favorites ?? status.totals.favoriteItems ?? 0).toLocaleString()})
+                  </span>
+                </button>
+
+                <select
+                  aria-label="Filter by collection"
+                  value={
+                    collectionId !== null
+                      ? `col:${collectionId}`
+                      : favoriteOnly
+                        ? '__favorites__'
+                        : '__all__'
+                  }
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '__new__') {
+                      setCreatingCollectionQuick(true);
+                      setCollectionQuickError(null);
+                      return;
+                    }
+                    if (val === '__all__') {
+                      setCollectionId(null);
+                      setFavoriteOnly(false);
+                      return;
+                    }
+                    if (val === '__favorites__') {
+                      setCollectionId(null);
+                      setFavoriteOnly(true);
+                      return;
+                    }
+                    if (val.startsWith('col:')) {
+                      const nextId = Number.parseInt(val.slice(4), 10);
+                      if (Number.isInteger(nextId) && nextId > 0) {
+                        setCollectionId(nextId);
+                      }
+                    }
+                  }}
+                  className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor shrink-0 max-w-[14rem] ${
+                    collectionId !== null
+                      ? 'border-crt-phosphor/60 text-crt-phosphor font-medium'
+                      : 'border-crt-border text-crt-text'
+                  }`}
+                >
+                  <option value="__all__">All Collections</option>
+                  <option value="__favorites__">
+                    ★ Favorites ({(facets.counts?.favorites ?? status.totals.favoriteItems ?? 0).toLocaleString()})
+                  </option>
+                  {collections.map((col) => (
+                    <option key={col.id} value={`col:${col.id}`}>
+                      {col.name} ({col.itemCount.toLocaleString()})
+                    </option>
+                  ))}
+                  <option value="__new__">+ New Collection…</option>
+                </select>
+
+                {((facets.counts?.syncOverrides?.pinned ?? 0) > 0 ||
+                  syncOverrideFilter === 'pin') && (
+                  <button
+                    type="button"
+                    aria-pressed={syncOverrideFilter === 'pin'}
+                    onClick={() =>
+                      setSyncOverrideFilter((prev) => (prev === 'pin' ? null : 'pin'))
+                    }
+                    title="Filter games pinned to always sync"
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      syncOverrideFilter === 'pin'
+                        ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
+                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                    }`}
+                  >
+                    <Pin className="h-3.5 w-3.5 shrink-0 text-crt-phosphor" />
+                    <span>Pinned</span>
+                    <span className="font-mono text-[11px] tabular-nums text-crt-muted">
+                      ({(facets.counts?.syncOverrides?.pinned ?? 0).toLocaleString()})
+                    </span>
+                  </button>
+                )}
+
+                {((facets.counts?.syncOverrides?.ignored ?? 0) > 0 ||
+                  syncOverrideFilter === 'ignore') && (
+                  <button
+                    type="button"
+                    aria-pressed={syncOverrideFilter === 'ignore'}
+                    onClick={() =>
+                      setSyncOverrideFilter((prev) => (prev === 'ignore' ? null : 'ignore'))
+                    }
+                    title="Filter games ignored by automatic sync"
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      syncOverrideFilter === 'ignore'
+                        ? 'bg-crt-crimson/15 text-crt-crimson border-crt-crimson/70 font-medium'
+                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                    }`}
+                  >
+                    <Ban className="h-3.5 w-3.5 shrink-0 text-crt-crimson" />
+                    <span>Ignored</span>
+                    <span className="font-mono text-[11px] tabular-nums text-crt-muted">
+                      ({(facets.counts?.syncOverrides?.ignored ?? 0).toLocaleString()})
+                    </span>
+                  </button>
+                )}
               </div>
 
               <select
@@ -2798,6 +3339,70 @@ export function CatalogPanel({
                 ))}
               </select>
             </div>
+
+            {creatingCollectionQuick && (
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  const trimmed = newCollectionQuickName.trim();
+                  if (!trimmed || collectionQuickBusy) return;
+                  setCollectionQuickBusy(true);
+                  setCollectionQuickError(null);
+                  try {
+                    const created = await handleCreateCollection(trimmed);
+                    if (created) {
+                      setNewCollectionQuickName('');
+                      setCreatingCollectionQuick(false);
+                      setCollectionId(created.id);
+                    }
+                  } catch (err) {
+                    setCollectionQuickError(err instanceof Error ? err.message : String(err));
+                  } finally {
+                    setCollectionQuickBusy(false);
+                  }
+                }}
+                className="border border-crt-phosphor/45 bg-crt-bg rounded-md px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs"
+              >
+                <div className="flex items-center gap-2 flex-1 min-w-[200px]">
+                  <Layers className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
+                  <input
+                    type="text"
+                    autoFocus
+                    maxLength={80}
+                    value={newCollectionQuickName}
+                    onChange={(e) => setNewCollectionQuickName(e.target.value)}
+                    placeholder="New collection name (e.g. Miyoo Mini Travel, Top SNES RPGs)…"
+                    className="flex-1 min-w-0 px-2.5 py-1 text-xs bg-crt-surface border border-crt-border-strong focus:border-crt-phosphor rounded text-crt-text placeholder:text-crt-muted focus:outline-none"
+                  />
+                </div>
+                {collectionQuickError && (
+                  <span className="font-mono text-[11px] text-crt-crimson">
+                    {collectionQuickError}
+                  </span>
+                )}
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="submit"
+                    disabled={!newCollectionQuickName.trim() || collectionQuickBusy}
+                    className="inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded cursor-pointer disabled:opacity-45"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    {collectionQuickBusy ? 'Creating…' : 'Create Collection'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCreatingCollectionQuick(false);
+                      setNewCollectionQuickName('');
+                      setCollectionQuickError(null);
+                    }}
+                    className="px-2.5 py-1 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            )}
 
             {/* Removable Active Filter Summary Bar */}
             {hasActiveFilters && (
@@ -3106,6 +3711,158 @@ export function CatalogPanel({
               </div>
             )}
 
+            {activeCollection && (() => {
+              const missingCount = activeCollection.queueableCount;
+              return (
+                <div className="border border-crt-phosphor/40 bg-crt-phosphor/8 rounded px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+                  <div className="flex flex-wrap items-center gap-2 min-w-0 flex-1">
+                    <Layers className="h-4 w-4 text-crt-phosphor shrink-0" />
+                    {renamingCollection ? (
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void handleRenameCollection(activeCollection.id, renameCollectionValue);
+                        }}
+                        className="flex items-center gap-1.5 flex-wrap"
+                      >
+                        <input
+                          type="text"
+                          autoFocus
+                          maxLength={80}
+                          value={renameCollectionValue}
+                          onChange={(e) => setRenameCollectionValue(e.target.value)}
+                          aria-label="Rename collection"
+                          className="px-2 py-0.5 text-xs bg-crt-bg border border-crt-phosphor rounded text-crt-text focus:outline-none"
+                        />
+                        <button
+                          type="submit"
+                          disabled={!renameCollectionValue.trim() || collectionActionBusy}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold bg-crt-phosphor text-crt-bg rounded cursor-pointer disabled:opacity-45"
+                        >
+                          <Check className="h-3 w-3" />
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRenamingCollection(false)}
+                          className="px-2 py-0.5 text-[11px] border border-crt-border text-crt-muted hover:text-crt-text rounded cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </form>
+                    ) : (
+                      <span className="truncate">
+                        <span className="font-semibold text-crt-phosphor">
+                          {activeCollection.name}
+                        </span>
+                        <span className="text-crt-text/85">
+                          {' · '}
+                          {activeCollection.itemCount.toLocaleString()}{' '}
+                          {activeCollection.itemCount === 1 ? 'game' : 'games'}
+                          {' · '}
+                          {activeCollection.downloadedCount.toLocaleString()} downloaded
+                          {' · '}
+                          {activeCollection.installedCount.toLocaleString()} installed
+                          {activeCollection.estimatedBytes > 0
+                            ? ` · ${formatBytes(activeCollection.estimatedBytes)}`
+                            : ''}
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {!confirmDeleteCollection && missingCount > 0 && onQueueDownload && (
+                      <button
+                        type="button"
+                        disabled={
+                          collectionActionBusy ||
+                          queueingBulk ||
+                          !status.auth.hasCompletedLogin
+                        }
+                        onClick={() =>
+                          void handleCollectionBatchAction(activeCollection, 'queue_missing')
+                        }
+                        title={
+                          !status.auth.hasCompletedLogin
+                            ? 'Verify login in System Settings before downloading'
+                            : `Queue ${missingCount} un-downloaded game(s) from ${activeCollection.name}`
+                        }
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/15 rounded transition-colors whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        <Download className="h-3.5 w-3.5 shrink-0" />
+                        Queue Missing ({missingCount.toLocaleString()})
+                      </button>
+                    )}
+                    {!confirmDeleteCollection && activeCollection.downloadedCount > 0 && (
+                      <button
+                        type="button"
+                        disabled={collectionActionBusy || installer.isBusy}
+                        onClick={() =>
+                          void handleCollectionBatchAction(activeCollection, 'install_ready')
+                        }
+                        title={
+                          sdRootHandle
+                            ? `Install ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}" directly to ${sdRootHandle.name}`
+                            : `Mount a storage device and install ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}"`
+                        }
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                        {formatQuickInstallLabel({
+                          mountedDeviceName: sdRootHandle?.name || null,
+                          count: activeCollection.downloadedCount,
+                        })}
+                      </button>
+                    )}
+                    {!confirmDeleteCollection && !renamingCollection && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRenameCollectionValue(activeCollection.name);
+                          setRenamingCollection(true);
+                        }}
+                        title="Rename this collection"
+                        className="inline-flex items-center gap-1 px-2 py-1 text-[11px] border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors cursor-pointer"
+                      >
+                        <Pencil className="h-3 w-3" />
+                        Rename
+                      </button>
+                    )}
+                    {confirmDeleteCollection ? (
+                      <>
+                        <button
+                          type="button"
+                          disabled={collectionActionBusy}
+                          onClick={() => void handleDeleteCollection(activeCollection.id)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-crt-crimson text-crt-bg hover:brightness-110 rounded cursor-pointer disabled:opacity-45"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          Confirm Delete
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteCollection(false)}
+                          className="px-2 py-1 text-[11px] border border-crt-border text-crt-muted hover:text-crt-text rounded cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteCollection(true)}
+                        title="Delete this collection (keeps all game files on disk)"
+                        className="inline-flex items-center gap-1 px-2 py-1 text-[11px] border border-crt-crimson/50 text-crt-crimson hover:bg-crt-crimson/10 rounded transition-colors cursor-pointer"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
             {installedFilter === 'outdated' && (() => {
               const globalOutdatedTotal = status.totals.outdatedInstalledItems ?? 0;
               const globalLocalReady = status.totals.outdatedLocalReadyItems ?? 0;
@@ -3256,6 +4013,25 @@ export function CatalogPanel({
                       </button>
                     </>
                   )}
+                  <CollectionPickerPopover
+                    mode="bulk"
+                    align="right"
+                    collections={collections}
+                    selectedCount={selectedCatalogIds.size}
+                    onAddToCollection={(colId) =>
+                      handleAddItemsToCollection(colId, Array.from(selectedCatalogIds))
+                    }
+                    onRemoveFromCollection={(colId) =>
+                      handleRemoveItemsFromCollection(colId, Array.from(selectedCatalogIds))
+                    }
+                    onCreateCollection={handleCreateCollection}
+                    onBulkSetFavorite={(fav) =>
+                      handleBulkSetFavorite(Array.from(selectedCatalogIds), fav)
+                    }
+                    onBulkSetSyncOverride={(mode) =>
+                      handleBulkSetSyncOverride(Array.from(selectedCatalogIds), mode)
+                    }
+                  />
                   {(selectedCatalogIds.size > items.length ||
                     items.some((i) => selectedCatalogIds.has(i.id) && !i.installedAt)) && (
                     <button
@@ -3562,13 +4338,35 @@ export function CatalogPanel({
                         }`}
                       >
                         <td className="pl-4 pr-2 py-2" onClick={(e) => e.stopPropagation()}>
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleCatalogItem(item.id)}
-                            aria-label={`Select ${item.title}`}
-                            className="accent-crt-phosphor cursor-pointer"
-                          />
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleCatalogItem(item.id)}
+                              aria-label={`Select ${item.title}`}
+                              className="accent-crt-phosphor cursor-pointer"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => void handleToggleFavoriteItem(item)}
+                              aria-label={
+                                item.isFavorite
+                                  ? `Remove ${item.title} from Favorites`
+                                  : `Add ${item.title} to Favorites`
+                              }
+                              aria-pressed={item.isFavorite}
+                              title={item.isFavorite ? 'Remove from Favorites' : 'Add to Favorites'}
+                              className={`p-0.5 rounded transition-colors cursor-pointer ${
+                                item.isFavorite
+                                  ? 'text-crt-amber hover:text-crt-amber/80'
+                                  : 'text-crt-border-strong hover:text-crt-amber'
+                              }`}
+                            >
+                              <Star
+                                className={`h-3.5 w-3.5 ${item.isFavorite ? 'fill-crt-amber' : ''}`}
+                              />
+                            </button>
+                          </div>
                         </td>
                         <td className="px-3 py-2 font-mono text-crt-text whitespace-nowrap">
                           {item.systemName}
@@ -3593,7 +4391,29 @@ export function CatalogPanel({
                               }
                             />
                             <div className="min-w-0">
-                              <div className="font-medium text-crt-text truncate">{item.title}</div>
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <span className="font-medium text-crt-text truncate">
+                                  {item.title}
+                                </span>
+                                {item.syncOverride === 'pin' && (
+                                  <span
+                                    title="Pinned: always included in automatic sync"
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.25 text-[10px] font-mono border border-crt-phosphor/50 bg-crt-phosphor/10 text-crt-phosphor rounded shrink-0"
+                                  >
+                                    <Pin className="h-2.5 w-2.5" />
+                                    Pin
+                                  </span>
+                                )}
+                                {item.syncOverride === 'ignore' && (
+                                  <span
+                                    title="Ignored: skipped during automatic sync"
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.25 text-[10px] font-mono border border-crt-crimson/45 bg-crt-crimson/10 text-crt-crimson rounded shrink-0"
+                                  >
+                                    <Ban className="h-2.5 w-2.5" />
+                                    Ignored
+                                  </span>
+                                )}
+                              </div>
                               {subMeta && (
                                 <div className="text-[11px] text-crt-muted truncate">{subMeta}</div>
                               )}
@@ -4234,6 +5054,30 @@ export function CatalogPanel({
                             className="accent-crt-phosphor cursor-pointer block"
                           />
                         </div>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleToggleFavoriteItem(item);
+                          }}
+                          aria-label={
+                            item.isFavorite
+                              ? `Remove ${item.title} from Favorites`
+                              : `Add ${item.title} to Favorites`
+                          }
+                          aria-pressed={item.isFavorite}
+                          title={item.isFavorite ? 'Remove from Favorites' : 'Add to Favorites'}
+                          className={`absolute top-2 right-2 z-10 p-1.5 rounded border transition-all cursor-pointer ${
+                            item.isFavorite
+                              ? 'bg-crt-bg/90 border-crt-amber/70 text-crt-amber opacity-100'
+                              : 'bg-crt-bg/80 border-crt-border text-crt-muted hover:text-crt-amber hover:border-crt-amber/60 opacity-0 group-hover:opacity-100 focus:opacity-100'
+                          }`}
+                        >
+                          <Star
+                            className={`h-3.5 w-3.5 ${item.isFavorite ? 'fill-crt-amber' : ''}`}
+                          />
+                        </button>
                       </div>
 
                       {/* Card Body */}
@@ -4243,7 +5087,29 @@ export function CatalogPanel({
                             {item.title}
                           </h3>
                           <p className="font-mono text-[11px] text-crt-muted truncate">{subline}</p>
-                          <p className="font-mono text-[11px] text-crt-phosphor/90 truncate">{tagsDisplay}</p>
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <p className="font-mono text-[11px] text-crt-phosphor/90 truncate">
+                              {tagsDisplay}
+                            </p>
+                            {item.syncOverride === 'pin' && (
+                              <span
+                                title="Pinned: always included in automatic sync"
+                                className="inline-flex items-center gap-0.5 px-1 py-0.25 text-[10px] font-mono border border-crt-phosphor/50 bg-crt-phosphor/10 text-crt-phosphor rounded shrink-0"
+                              >
+                                <Pin className="h-2.5 w-2.5" />
+                                Pin
+                              </span>
+                            )}
+                            {item.syncOverride === 'ignore' && (
+                              <span
+                                title="Ignored: skipped during automatic sync"
+                                className="inline-flex items-center gap-0.5 px-1 py-0.25 text-[10px] font-mono border border-crt-crimson/45 bg-crt-crimson/10 text-crt-crimson rounded shrink-0"
+                              >
+                                <Ban className="h-2.5 w-2.5" />
+                                Ignored
+                              </span>
+                            )}
+                          </div>
                           {item.installedAt && (
                             <div
                               title={
@@ -4793,6 +5659,14 @@ export function CatalogPanel({
         onCancelDeviceInstall={installer.cancelInstall}
         onDismissDeviceInstall={installer.dismissJob}
         onViewDeviceInstallQueue={installer.openModal}
+        collections={collections}
+        onToggleFavorite={handleToggleFavoriteItem}
+        onSetSyncOverride={(targetItem, mode) => handleBulkSetSyncOverride([targetItem.id], mode)}
+        onAddItemToCollection={(colId, itemId) => handleAddItemsToCollection(colId, [itemId])}
+        onRemoveItemFromCollection={(colId, itemId) =>
+          handleRemoveItemsFromCollection(colId, [itemId])
+        }
+        onCreateCollection={handleCreateCollection}
         onDeleteItem={async (id) => {
           await handleDeleteCatalogItems([id]);
         }}
