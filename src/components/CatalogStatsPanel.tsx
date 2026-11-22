@@ -33,7 +33,10 @@ interface CatalogStatsPanelProps {
   status: ServiceStatusSnapshot;
   catalogRevision: number;
   onInspectSystem: (systemSlug: string) => void;
-  onStartCatalogIndex?: (scope: 'filtered' | 'full') => Promise<void>;
+  onStartCatalogIndex?: (
+    scope: 'filtered' | 'full',
+    options?: { forceFull?: boolean },
+  ) => Promise<void>;
 }
 
 type GrowthRange = '14d' | '30d' | '90d' | 'all';

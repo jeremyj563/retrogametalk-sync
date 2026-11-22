@@ -110,7 +110,10 @@ interface CatalogPanelProps {
     alreadyQueuedCount?: number;
     alreadyDownloadedCount?: number;
   } | void>;
-  onStartCatalogIndex?: (scope: 'filtered' | 'full') => Promise<void>;
+  onStartCatalogIndex?: (
+    scope: 'filtered' | 'full',
+    options?: { forceFull?: boolean },
+  ) => Promise<void>;
   onStopCatalogIndex?: () => Promise<void>;
   onRefreshStatus: () => Promise<void>;
   onEasterEggEffect?: (effect: SecretSearchEffect | 'clear_askew') => void;
@@ -2792,7 +2795,10 @@ export function CatalogPanel({
                           {indexer.active ? (
                             <>
                               <span className="text-crt-phosphor font-medium">
-                                Indexing Catalog {indexer.systemsCompleted + (indexer.currentSystem ? 1 : 0)}/
+                                {indexer.mode === 'delta'
+                                  ? 'Checking Catalog Updates'
+                                  : 'Indexing Catalog'}{' '}
+                                {indexer.systemsCompleted + (indexer.currentSystem ? 1 : 0)}/
                                 {Math.max(1, indexer.systemsTotal)}
                               </span>
                               {indexer.currentSystem && (
@@ -2801,7 +2807,7 @@ export function CatalogPanel({
                                   <span className="text-crt-text">{indexer.currentSystem}</span>
                                 </>
                               )}
-                              {indexer.totalPages > 0 && (
+                              {indexer.totalPages > (indexer.mode === 'delta' ? 1 : 0) && (
                                 <>
                                   <span aria-hidden="true" className="text-crt-muted">·</span>
                                   <span className="text-crt-muted">
@@ -2811,7 +2817,8 @@ export function CatalogPanel({
                               )}
                               <span aria-hidden="true" className="text-crt-muted">·</span>
                               <span className="text-crt-muted">
-                                {indexer.indexedCount.toLocaleString()} indexed
+                                {indexer.indexedCount.toLocaleString()}{' '}
+                                {indexer.mode === 'delta' ? 'updated' : 'indexed'}
                               </span>
                             </>
                           ) : (

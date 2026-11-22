@@ -1,0 +1,268 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import {
+  buildUpdatedSystemIndexCursor,
+  CATALOG_DELTA_OVERLAP_MS,
+  computeCatalogDeltaCutoffIso,
+  findSystemIndexCursor,
+  planCatalogIndexTargets,
+  type CatalogIndexCursorRecord,
+} from '../src/shared/catalogIndexerPlan.ts';
+import { DEFAULT_INDEX_STALE_MS } from '../src/shared/syncRuleMatcher.ts';
+
+const NOW_ISO = '2026-11-22T12:00:00.000Z';
+const NOW_MS = Date.parse(NOW_ISO);
+const FRESH_ISO = new Date(NOW_MS - 30 * 60 * 1000).toISOString(); // 30m ago
+const STALE_ISO = new Date(NOW_MS - DEFAULT_INDEX_STALE_MS - 60 * 60 * 1000).toISOString(); // > stale threshold
+
+test('computeCatalogDeltaCutoffIso subtracts safety overlap and handles invalid input', () => {
+  assert.equal(computeCatalogDeltaCutoffIso(null), null);
+  assert.equal(computeCatalogDeltaCutoffIso(undefined), null);
+  assert.equal(computeCatalogDeltaCutoffIso('not-a-date'), null);
+
+  const expectedDefault = new Date(Date.parse(NOW_ISO) - CATALOG_DELTA_OVERLAP_MS).toISOString();
+  assert.equal(computeCatalogDeltaCutoffIso(NOW_ISO), expectedDefault);
+
+  const expectedCustom = new Date(Date.parse(NOW_ISO) - 5 * 60 * 1000).toISOString();
+  assert.equal(computeCatalogDeltaCutoffIso(NOW_ISO, 5 * 60 * 1000), expectedCustom);
+});
+
+test('findSystemIndexCursor resolves canonical and alias system slugs', () => {
+  const indexState: Record<string, CatalogIndexCursorRecord> = {
+    gb_roms: {
+      lastIndexedAt: FRESH_ISO,
+      fullyIndexed: true,
+      totalWpPosts: 420,
+    },
+    gamecube: {
+      lastIndexedAt: STALE_ISO,
+      fullyIndexed: true,
+      totalWpPosts: 310,
+    },
+  };
+
+  assert.equal(findSystemIndexCursor(indexState, 'gameboy-roms')?.totalWpPosts, 420);
+  assert.equal(findSystemIndexCursor(indexState, 'gb-roms')?.totalWpPosts, 420);
+  assert.equal(findSystemIndexCursor(indexState, 'gcn-iso')?.totalWpPosts, 310);
+  assert.equal(findSystemIndexCursor(indexState, 'snes'), null);
+});
+
+test('planCatalogIndexTargets runs delta checks on all targets when all target consoles are already indexed', () => {
+  const indexState: Record<string, CatalogIndexCursorRecord> = {
+    snes: { lastIndexedAt: FRESH_ISO, fullyIndexed: true, totalWpPosts: 800, totalPages: 8, pagesIndexed: 8 },
+    gba: { lastIndexedAt: STALE_ISO, fullyIndexed: true, totalWpPosts: 1200, totalPages: 12, pagesIndexed: 12 },
+    gb_roms: { lastIndexedAt: FRESH_ISO, fullyIndexed: true, totalWpPosts: 500, totalPages: 5, pagesIndexed: 5 },
+  };
+
+  const plan = planCatalogIndexTargets({
+    candidateTargets: ['snes', 'gba', 'gameboy-roms', 'gb-roms'],
+    indexState,
+    scope: 'filtered',
+    nowMs: NOW_MS,
+  });
+
+  assert.equal(plan.mode, 'delta');
+  // Stale console prioritized first, then fresh consoles (deduped via canonical slug)
+  assert.deepEqual(
+    plan.targets.map((t) => t.slug),
+    ['gba', 'snes', 'gameboy-roms'],
+  );
+  assert.ok(plan.targets.every((t) => t.strategy === 'delta'));
+  assert.equal(plan.targets[0]?.modifiedAfterIso, computeCatalogDeltaCutoffIso(STALE_ISO));
+  assert.equal(plan.targets[1]?.modifiedAfterIso, computeCatalogDeltaCutoffIso(FRESH_ISO));
+  assert.equal(plan.targets[2]?.modifiedAfterIso, computeCatalogDeltaCutoffIso(FRESH_ISO));
+});
+
+test('planCatalogIndexTargets runs mixed mode when unindexed, stale, and fresh target consoles coexist', () => {
+  const indexState: Record<string, CatalogIndexCursorRecord> = {
+    snes: { lastIndexedAt: FRESH_ISO, fullyIndexed: true, totalWpPosts: 800 },
+    gba: { lastIndexedAt: STALE_ISO, fullyIndexed: true, totalWpPosts: 1200 },
+    n64: { lastIndexedAt: FRESH_ISO, fullyIndexed: false, totalWpPosts: 50 },
+  };
+
+  const plan = planCatalogIndexTargets({
+    candidateTargets: ['snes', 'gba', 'n64', 'psx'],
+    indexState,
+    scope: 'filtered',
+    nowMs: NOW_MS,
+  });
+
+  assert.equal(plan.mode, 'mixed');
+  // Unindexed consoles run full, stale consoles run delta, already-fresh consoles are skipped
+  assert.deepEqual(
+    plan.targets.map((t) => ({ slug: t.slug, strategy: t.strategy })),
+    [
+      { slug: 'n64', strategy: 'full' },
+      { slug: 'psx', strategy: 'full' },
+      { slug: 'gba', strategy: 'delta' },
+    ],
+  );
+  assert.equal(plan.targets[0]?.modifiedAfterIso, null);
+  assert.equal(plan.targets[1]?.modifiedAfterIso, null);
+  assert.equal(plan.targets[2]?.modifiedAfterIso, computeCatalogDeltaCutoffIso(STALE_ISO));
+});
+
+test('planCatalogIndexTargets with auto=true only indexes unindexed consoles and returns empty when all indexed', () => {
+  const partialState: Record<string, CatalogIndexCursorRecord> = {
+    snes: { lastIndexedAt: STALE_ISO, fullyIndexed: true, totalWpPosts: 800 },
+  };
+
+  const partialPlan = planCatalogIndexTargets({
+    candidateTargets: ['snes', 'gba'],
+    indexState: partialState,
+    scope: 'filtered',
+    auto: true,
+    nowMs: NOW_MS,
+  });
+  assert.equal(partialPlan.mode, 'full');
+  assert.deepEqual(
+    partialPlan.targets.map((t) => ({ slug: t.slug, strategy: t.strategy })),
+    [{ slug: 'gba', strategy: 'full' }],
+  );
+
+  const completeState: Record<string, CatalogIndexCursorRecord> = {
+    snes: { lastIndexedAt: STALE_ISO, fullyIndexed: true, totalWpPosts: 800 },
+    gba: { lastIndexedAt: FRESH_ISO, fullyIndexed: true, totalWpPosts: 1200 },
+  };
+  const completePlan = planCatalogIndexTargets({
+    candidateTargets: ['snes', 'gba'],
+    indexState: completeState,
+    scope: 'filtered',
+    auto: true,
+    nowMs: NOW_MS,
+  });
+  assert.equal(completePlan.mode, null);
+  assert.deepEqual(completePlan.targets, []);
+});
+
+test('planCatalogIndexTargets with scope=full indexes only unindexed consoles first, then delta-checks once all indexed', () => {
+  const indexState: Record<string, CatalogIndexCursorRecord> = {
+    snes: { lastIndexedAt: STALE_ISO, fullyIndexed: true, totalWpPosts: 800 },
+  };
+
+  const remainingPlan = planCatalogIndexTargets({
+    candidateTargets: ['snes', 'gba', 'psx'],
+    indexState,
+    scope: 'full',
+    nowMs: NOW_MS,
+  });
+  assert.equal(remainingPlan.mode, 'full');
+  assert.deepEqual(
+    remainingPlan.targets.map((t) => t.slug),
+    ['gba', 'psx'],
+  );
+
+  const allIndexedState: Record<string, CatalogIndexCursorRecord> = {
+    snes: { lastIndexedAt: FRESH_ISO, fullyIndexed: true, totalWpPosts: 800 },
+    gba: { lastIndexedAt: STALE_ISO, fullyIndexed: true, totalWpPosts: 1200 },
+  };
+  const deltaFullPlan = planCatalogIndexTargets({
+    candidateTargets: ['snes', 'gba'],
+    indexState: allIndexedState,
+    scope: 'full',
+    nowMs: NOW_MS,
+  });
+  assert.equal(deltaFullPlan.mode, 'delta');
+  assert.deepEqual(
+    deltaFullPlan.targets.map((t) => ({ slug: t.slug, strategy: t.strategy })),
+    [
+      { slug: 'gba', strategy: 'delta' },
+      { slug: 'snes', strategy: 'delta' },
+    ],
+  );
+});
+
+test('planCatalogIndexTargets with forceFull=true forces full re-index across all candidate targets', () => {
+  const indexState: Record<string, CatalogIndexCursorRecord> = {
+    snes: { lastIndexedAt: FRESH_ISO, fullyIndexed: true, totalWpPosts: 800 },
+    gba: { lastIndexedAt: FRESH_ISO, fullyIndexed: true, totalWpPosts: 1200 },
+  };
+
+  const plan = planCatalogIndexTargets({
+    candidateTargets: ['snes', 'gba'],
+    indexState,
+    scope: 'filtered',
+    forceFull: true,
+    nowMs: NOW_MS,
+  });
+
+  assert.equal(plan.mode, 'full');
+  assert.deepEqual(
+    plan.targets.map((t) => ({ slug: t.slug, strategy: t.strategy, modifiedAfterIso: t.modifiedAfterIso })),
+    [
+      { slug: 'snes', strategy: 'full', modifiedAfterIso: null },
+      { slug: 'gba', strategy: 'full', modifiedAfterIso: null },
+    ],
+  );
+});
+
+test('buildUpdatedSystemIndexCursor preserves totals in delta mode and replaces totals in full mode', () => {
+  const existing: CatalogIndexCursorRecord = {
+    lastIndexedAt: STALE_ISO,
+    totalWpPosts: 950,
+    totalPages: 10,
+    pagesIndexed: 10,
+    fullyIndexed: true,
+    scope: 'filtered',
+  };
+
+  // Delta with 0 changes advances lastIndexedAt without clobbering counts
+  const deltaZero = buildUpdatedSystemIndexCursor({
+    existingCursor: existing,
+    strategy: 'delta',
+    scope: 'filtered',
+    scanStartedAtIso: NOW_ISO,
+    totalPostsFetched: 0,
+    newPostsDiscovered: 0,
+    totalPagesFetched: 1,
+    pagesIndexed: 0,
+  });
+  assert.deepEqual(deltaZero, {
+    lastIndexedAt: NOW_ISO,
+    totalWpPosts: 950,
+    totalPages: 10,
+    pagesIndexed: 10,
+    fullyIndexed: true,
+    scope: 'filtered',
+  });
+
+  // Delta with 5 updated posts where 2 are brand new increments totalWpPosts by 2 only
+  const deltaUpdates = buildUpdatedSystemIndexCursor({
+    existingCursor: existing,
+    strategy: 'delta',
+    scope: 'full',
+    scanStartedAtIso: NOW_ISO,
+    totalPostsFetched: 5,
+    newPostsDiscovered: 2,
+    totalPagesFetched: 1,
+    pagesIndexed: 1,
+  });
+  assert.deepEqual(deltaUpdates, {
+    lastIndexedAt: NOW_ISO,
+    totalWpPosts: 952,
+    totalPages: 10,
+    pagesIndexed: 10,
+    fullyIndexed: true,
+    scope: 'filtered',
+  });
+
+  // Full re-index replaces totalWpPosts and page totals cleanly
+  const fullRebuild = buildUpdatedSystemIndexCursor({
+    existingCursor: existing,
+    strategy: 'full',
+    scope: 'filtered',
+    scanStartedAtIso: NOW_ISO,
+    totalPostsFetched: 963,
+    newPostsDiscovered: 13,
+    totalPagesFetched: 10,
+    pagesIndexed: 10,
+  });
+  assert.deepEqual(fullRebuild, {
+    lastIndexedAt: NOW_ISO,
+    totalWpPosts: 963,
+    totalPages: 10,
+    pagesIndexed: 10,
+    fullyIndexed: true,
+    scope: 'filtered',
+  });
+});

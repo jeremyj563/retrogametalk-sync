@@ -1345,16 +1345,20 @@ export default function App() {
     };
   };
 
-  const handleStartCatalogIndex = async (scope: 'filtered' | 'full' = 'filtered') => {
+  const handleStartCatalogIndex = async (
+    scope: 'filtered' | 'full' = 'filtered',
+    options?: { forceFull?: boolean },
+  ) => {
     setErrorBanner(null);
     const res = await fetch('/api/catalog/index', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scope }),
+      body: JSON.stringify({ scope, forceFull: Boolean(options?.forceFull) }),
     });
     const parsed = await readJsonSafely<{
       started?: boolean;
       targets?: string[];
+      mode?: 'delta' | 'full' | 'mixed' | null;
       status?: ServiceStatusSnapshot;
       error?: string;
     }>(res);

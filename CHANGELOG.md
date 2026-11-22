@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.32.0] - 2026-11-22
+
+- Made **Index / Update Target Consoles** perform fast **delta updates** by default for consoles that have already been indexed instead of re-fetching every WordPress REST page from page 1 to N:
+  - **Incremental `modified_after` Cursor Scanning**: For already-indexed consoles, the background indexer now queries RetroGameTalk using each console's `lastIndexedAt` cursor (with a 2-minute safety overlap window for clock skew) so only newly published or recently edited releases are fetched and upserted, while preserving existing catalog totals (`totalWpPosts`, `totalPages`, `pagesIndexed`) and advancing the cursor to the scan start timestamp.
+  - **Smart Mixed Runs**: When a mix of unindexed and already-indexed target consoles is selected, unindexed consoles run a full initial index, stale consoles run a fast delta check, and already-fresh consoles are skipped; when all target consoles are already indexed, clicking **Update Target Consoles** runs a fast delta check across all of them (stale first, then fresh).
+  - **Explicit Full Re-index Escape Hatch**: Added a subtle **Full Re-index** button on the **Sync Rules** page (and `forceFull: true` support on `POST /api/catalog/index`) for forcing a complete page-1-to-N metadata rebuild when needed.
+  - **Delta-Aware Progress & Copy**: Updated the **Sync Rules** and **Catalog** indexer status displays to distinguish delta checks (**Update Target Consoles**, `Checking updates X/Y · console · N updated`) from initial/full indexing (**Index Target Consoles**, `Indexing X/Y · console · Page P/T · N cataloged`) with descriptive tooltips.
+
 ## [1.31.1] - 2026-11-22
 
 - Unified all one-click storage device install actions across **Catalog** items (Grid cards and List rows), **Catalog** multi-select bulk bar, **Game Details** drawer, and the **Install to Device** window so they share identical behavior (auto-installing the latest primary playable ROM), consistent `HardDrive` iconography, unified naming (`Install` / `Reinstall`, `Install to <Device>` / `Install to Device`, `Install to <Device> (N)`), and matching tooltips:
