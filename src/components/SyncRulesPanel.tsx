@@ -1326,7 +1326,7 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
                         <button
                           type="button"
                           disabled={indexerBusy || !onStartCatalogIndex}
-                          title="Fetch game metadata from RetroGameTalk for all remaining unindexed consoles (does not download ROMs)"
+                          title="Fetch game metadata from RetroGameTalk for remaining unindexed consoles (does not download ROMs)"
                           onClick={async () => {
                             if (!onStartCatalogIndex) return;
                             setIndexerBusy(true);
@@ -1338,7 +1338,7 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
                           }}
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                         >
-                          Index All Remaining Consoles ({indexer.remainingUnindexedSystems})
+                          Index Remaining Consoles ({indexer.remainingUnindexedSystems})
                         </button>
                       )}
                     </>
