@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.32.1] - 2026-11-22
+
+- Renamed **Index All Remaining Consoles** to **Index Remaining Consoles** across both the **Catalog** and **Sync Rules** pages for concise, consistent labeling.
+- Added the **Update Target Consoles** (or **Index Target Consoles** when unindexed targets remain) fast-delta button alongside **Index Remaining Consoles** in the **Catalog** page's indexer strip so target console metadata can be refreshed directly from the Catalog.
+
 ## [1.32.0] - 2026-11-22
 
 - Made **Index / Update Target Consoles** perform fast **delta updates** by default for consoles that have already been indexed instead of re-fetching every WordPress REST page from page 1 to N:

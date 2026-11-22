@@ -56,7 +56,11 @@ import {
   summarizeCatalogSelection,
 } from '../shared/catalogSelection';
 import type { SmartRomFilterContext } from '../shared/smartRomPicker';
-import { formatSyncRuleScopeSummary } from '../shared/syncRuleMatcher';
+import {
+  classifySystemIndexFreshness,
+  formatSyncRuleScopeSummary,
+  resolveTargetConsoleScope,
+} from '../shared/syncRuleMatcher';
 import type {
   ArchiveBrowseListing,
   CatalogDownloadedFilter,
@@ -2778,7 +2782,21 @@ export function CatalogPanel({
             {/* Mellow Smooth Accordion: Background Catalog Indexer Banner */}
             {status.auth.hasCompletedLogin && status.indexer && (() => {
               const indexer = status.indexer;
-              const isOpen = indexer.active || indexer.remainingUnindexedSystems > 0;
+              const targetSystems = resolveTargetConsoleScope(
+                config.systemFilter,
+                config.discoveredSystems,
+              );
+              const targetFreshness = classifySystemIndexFreshness(
+                targetSystems,
+                config.systemIndexState,
+              );
+              const allTargetsIndexed =
+                targetSystems.length > 0 && targetFreshness.unindexed.length === 0;
+              const canUpdateTargets = Boolean(onStartCatalogIndex) && targetSystems.length > 0;
+              const isOpen =
+                indexer.active ||
+                indexer.remainingUnindexedSystems > 0 ||
+                canUpdateTargets;
               return (
                 <div
                   aria-hidden={!isOpen}
@@ -2821,10 +2839,19 @@ export function CatalogPanel({
                                 {indexer.mode === 'delta' ? 'updated' : 'indexed'}
                               </span>
                             </>
-                          ) : (
+                          ) : indexer.remainingUnindexedSystems > 0 ? (
                             <span className="text-crt-muted">
                               {indexer.remainingUnindexedSystems} console
                               {indexer.remainingUnindexedSystems === 1 ? '' : 's'} remaining outside your current filter
+                            </span>
+                          ) : targetFreshness.stale.length > 0 ? (
+                            <span className="text-crt-amber">
+                              {targetFreshness.stale.length} target console
+                              {targetFreshness.stale.length === 1 ? '' : 's'} stale (&gt;12h)
+                            </span>
+                          ) : (
+                            <span className="text-crt-muted">
+                              All consoles indexed &amp; up to date
                             </span>
                           )}
                         </div>
@@ -2873,6 +2900,29 @@ export function CatalogPanel({
                             Pause Indexing
                           </button>
                         )}
+                        {!indexer.active && canUpdateTargets && onStartCatalogIndex && (
+                          <button
+                            type="button"
+                            disabled={indexerBusy}
+                            onClick={async () => {
+                              setIndexerBusy(true);
+                              try {
+                                await onStartCatalogIndex('filtered');
+                              } finally {
+                                setIndexerBusy(false);
+                              }
+                            }}
+                            title={
+                              allTargetsIndexed
+                                ? 'Check RetroGameTalk for new or modified games across your target consoles since each was last indexed (fast delta update; does not download ROMs)'
+                                : 'Index unindexed target consoles and delta-check any stale ones from RetroGameTalk (does not download ROMs)'
+                            }
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-border bg-crt-surface hover:border-crt-phosphor text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                          >
+                            <RefreshCw className={`h-3 w-3 ${indexerBusy ? 'animate-spin' : ''}`} />
+                            {allTargetsIndexed ? 'Update Target Consoles' : 'Index Target Consoles'}
+                          </button>
+                        )}
                         {(!indexer.active || indexer.scope === 'filtered') &&
                           indexer.remainingUnindexedSystems > 0 &&
                           onStartCatalogIndex && (
@@ -2887,11 +2937,10 @@ export function CatalogPanel({
                                   setIndexerBusy(false);
                                 }
                               }}
-                              title="Fetch game metadata from RetroGameTalk for all remaining unindexed consoles (does not download ROMs)"
+                              title="Fetch game metadata from RetroGameTalk for remaining unindexed consoles (does not download ROMs)"
                               className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                             >
-                              <RefreshCw className={`h-3 w-3 ${indexerBusy ? 'animate-spin' : ''}`} />
-                              Index All Remaining Consoles ({indexer.remainingUnindexedSystems})
+                              Index Remaining Consoles ({indexer.remainingUnindexedSystems})
                             </button>
                           )}
                       </div>
