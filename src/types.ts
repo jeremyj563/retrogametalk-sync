@@ -311,6 +311,7 @@ export interface RepositoryItemRecord {
   sizeIsEstimated?: boolean;
   publishedAt: string | null;
   remoteUpdatedAt: string | null;
+  remoteCheckedAt?: string | null;
   status: ItemStatus;
   errorMessage: string | null;
   lastRunId: number | null;

@@ -39,7 +39,9 @@ import {
 } from '../shared/syncRuleMatcher.ts';
 import {
   classifyInstalledUpdateState,
-  INSTALL_UPDATE_GRACE_MS,
+  hasActionableRemoteUpdate,
+  type InstalledUpdateDownloadHintLike,
+  type InstalledUpdateFileLike,
 } from '../shared/deviceInstallUpdates.ts';
 import type {
   ActivityLogRecord,
@@ -970,6 +972,7 @@ function mapReleaseRow(
     sizeIsEstimated: Boolean(row.size_is_estimated),
     publishedAt: row.published_at ? String(row.published_at) : (parsedMeta?.publishedAt ?? null),
     remoteUpdatedAt: row.remote_updated_at ? String(row.remote_updated_at) : (parsedMeta?.remoteUpdatedAt ?? null),
+    remoteCheckedAt: row.remote_checked_at ? String(row.remote_checked_at) : null,
     status: String(row.status) as ItemStatus,
     errorMessage: row.error_message ? String(row.error_message) : null,
     lastRunId: row.last_run_id !== null ? Number(row.last_run_id) : null,
@@ -1457,13 +1460,20 @@ export function markCatalogItemsQueuedDetailed(
 
     for (const releaseId of cleanIds) {
       const row = getDb()
-        .prepare('SELECT id, status, downloaded_at, remote_updated_at FROM catalog_releases WHERE id = ?')
+        .prepare(
+          `SELECT id, status, downloaded_at, remote_updated_at, remote_checked_at,
+                  json_extract(metadata_json, '$.downloadHints') AS download_hints_json
+           FROM catalog_releases
+           WHERE id = ?`,
+        )
         .get(releaseId) as
         | {
             id: number;
             status: string;
             downloaded_at: string | null;
             remote_updated_at: string | null;
+            remote_checked_at: string | null;
+            download_hints_json: string | null;
           }
         | undefined;
       if (!row) continue;
@@ -1499,21 +1509,34 @@ export function markCatalogItemsQueuedDetailed(
             continue;
           }
         }
-        const remoteMs = row.remote_updated_at ? Date.parse(row.remote_updated_at) : NaN;
-        const latestLocalRow = getDb()
+        const releaseFileRows = getDb()
           .prepare(
-            `SELECT MAX(downloaded_at) AS latest_file_downloaded_at
+            `SELECT id, filename, local_path, status, downloaded_at
              FROM catalog_release_files
-             WHERE release_id = ? AND status = 'downloaded' AND downloaded_at IS NOT NULL`,
+             WHERE release_id = ?`,
           )
-          .get(releaseId) as { latest_file_downloaded_at: string | null } | undefined;
-        const localCandidates = [row.downloaded_at, latestLocalRow?.latest_file_downloaded_at]
-          .map((v) => (v ? Date.parse(v) : NaN))
-          .filter((ms) => Number.isFinite(ms));
-        const latestLocalMs = localCandidates.length > 0 ? Math.max(...localCandidates) : null;
-        const hasRemoteUpdate =
-          Number.isFinite(remoteMs) &&
-          (latestLocalMs === null || remoteMs - latestLocalMs > INSTALL_UPDATE_GRACE_MS);
+          .all(releaseId) as {
+          id: number;
+          filename: string;
+          local_path: string | null;
+          status: string;
+          downloaded_at: string | null;
+        }[];
+        const releaseFiles: InstalledUpdateFileLike[] = releaseFileRows.map((f) => ({
+          id: Number(f.id),
+          filename: String(f.filename),
+          localPath: f.local_path ? String(f.local_path) : null,
+          status: String(f.status),
+          downloadedAt: f.downloaded_at ? String(f.downloaded_at) : null,
+        }));
+        const hasRemoteUpdate = hasActionableRemoteUpdate({
+          status: row.status,
+          downloadedAt: row.downloaded_at,
+          remoteUpdatedAt: row.remote_updated_at,
+          remoteCheckedAt: row.remote_checked_at,
+          downloadHints: parseDownloadHintsJson(row.download_hints_json),
+          files: releaseFiles,
+        });
 
         if (hasRemoteUpdate) {
           getDb()
@@ -1882,6 +1905,7 @@ export function mergeCatalogReleaseDetailMetadata(
 export function persistDiscoveredReleaseDownloadHints(
   remoteUrl: string,
   hints: { filename: string; fileSize?: string | null }[],
+  options?: { replace?: boolean },
 ): boolean {
   const canonical = remoteUrl.split('#')[0];
   const cleanHints = hints
@@ -1926,21 +1950,25 @@ export function persistDiscoveredReleaseDownloadHints(
   const existingHints = Array.isArray(metaObj.downloadHints)
     ? (metaObj.downloadHints as { filename?: string; fileSize?: string | null }[])
     : [];
+  const existingFileSizeByKey = new Map<string, string | null>();
   const mergedByKey = new Map<string, { filename: string; fileSize: string | null }>();
   for (const h of existingHints) {
     const name = (h?.filename || '').trim();
     if (!name) continue;
-    mergedByKey.set(name.toLowerCase(), {
-      filename: name,
-      fileSize: h.fileSize ?? null,
-    });
+    const key = name.toLowerCase();
+    existingFileSizeByKey.set(key, h.fileSize ?? null);
+    if (!options?.replace) {
+      mergedByKey.set(key, {
+        filename: name,
+        fileSize: h.fileSize ?? null,
+      });
+    }
   }
   for (const h of cleanHints) {
     const key = h.filename.toLowerCase();
-    const prev = mergedByKey.get(key);
     mergedByKey.set(key, {
       filename: h.filename,
-      fileSize: h.fileSize ?? prev?.fileSize ?? null,
+      fileSize: h.fileSize ?? existingFileSizeByKey.get(key) ?? null,
     });
   }
 
@@ -1950,6 +1978,49 @@ export function persistDiscoveredReleaseDownloadHints(
     .run(JSON.stringify(metaObj), row.id);
   refreshReleaseFileRolesCacheForRelease(Number(row.id));
   return true;
+}
+
+/**
+ * Records that a release's live RetroGameTalk download links were verified against
+ * local mirrored files with zero failures. Clamps `remote_checked_at` to at least
+ * `remote_updated_at` so minor clock skew cannot leave stale metadata-only WordPress
+ * `modified_gmt` bumps re-triggering remote-update alerts, while intentionally leaving
+ * `downloaded_at` untouched so unchanged files never falsely appear as `update_ready_local`.
+ */
+export function markCatalogReleaseRemoteChecked(
+  releaseId: number,
+  checkedAtIso?: string,
+): void {
+  const row = getDb()
+    .prepare('SELECT remote_updated_at, remote_checked_at FROM catalog_releases WHERE id = ?')
+    .get(releaseId) as
+    | { remote_updated_at: string | null; remote_checked_at: string | null }
+    | undefined;
+  if (!row) return;
+
+  const candidateIsos = [
+    checkedAtIso || new Date().toISOString(),
+    row.remote_updated_at,
+    row.remote_checked_at,
+  ];
+  let bestIso = checkedAtIso || new Date().toISOString();
+  let bestMs = Date.parse(bestIso);
+  if (!Number.isFinite(bestMs)) {
+    bestIso = new Date().toISOString();
+    bestMs = Date.parse(bestIso);
+  }
+  for (const candidate of candidateIsos) {
+    if (!candidate) continue;
+    const ms = Date.parse(candidate);
+    if (Number.isFinite(ms) && ms > bestMs) {
+      bestMs = ms;
+      bestIso = candidate;
+    }
+  }
+
+  getDb()
+    .prepare('UPDATE catalog_releases SET remote_checked_at = ? WHERE id = ?')
+    .run(bestIso, releaseId);
 }
 
 export function getCatalogReleaseById(id: number): RepositoryItemRecord | null {
@@ -2434,59 +2505,140 @@ interface RuleFilterRow {
   is_favorite?: number;
 }
 
-function buildInstalledLocalUpdateReadySql(alias?: string): string {
-  const col = (name: string) => (alias ? `${alias}.${name}` : `catalog_releases.${name}`);
-  const graceSeconds = (INSTALL_UPDATE_GRACE_MS / 1000).toFixed(1);
-  return `(
-    ${col('installed_at')} IS NOT NULL
-    AND (
-      (
-        ${col('status')} IN ('downloaded', 'partial')
-        AND ${col('downloaded_at')} IS NOT NULL
-        AND (julianday(${col('downloaded_at')}) - julianday(${col('installed_at')})) * 86400.0 > ${graceSeconds}
-      )
-      OR EXISTS (
-        SELECT 1 FROM catalog_release_files f_upd
-        WHERE f_upd.release_id = ${col('id')}
-          AND f_upd.status = 'downloaded'
-          AND f_upd.downloaded_at IS NOT NULL
-          AND (
-            (julianday(f_upd.downloaded_at) - julianday(${col('installed_at')})) * 86400.0 > ${graceSeconds}
-            OR (
-              ${col('installed_file_id')} IS NOT NULL
-              AND f_upd.id != ${col('installed_file_id')}
-              AND julianday(f_upd.downloaded_at) > julianday(${col('installed_at')})
-            )
-          )
-      )
-    )
-  )`;
+function parseDownloadHintsJson(raw: unknown): InstalledUpdateDownloadHintLike[] | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as InstalledUpdateDownloadHintLike[]) : null;
+  } catch {
+    return null;
+  }
 }
 
-function buildInstalledRemoteUpdateAvailableSql(alias?: string): string {
-  const col = (name: string) => (alias ? `${alias}.${name}` : `catalog_releases.${name}`);
-  const graceSeconds = (INSTALL_UPDATE_GRACE_MS / 1000).toFixed(1);
-  return `(
-    ${col('installed_at')} IS NOT NULL
-    AND ${col('remote_updated_at')} IS NOT NULL
-    AND (julianday(${col('remote_updated_at')}) - julianday(${col('installed_at')})) * 86400.0 > ${graceSeconds}
-    AND (
-      ${col('status')} NOT IN ('downloaded', 'partial')
-      OR ${col('downloaded_at')} IS NULL
-      OR (julianday(${col('remote_updated_at')}) - julianday(${col('downloaded_at')})) * 86400.0 > ${graceSeconds}
-    )
-    AND NOT EXISTS (
-      SELECT 1 FROM catalog_release_files f_upd
-      WHERE f_upd.release_id = ${col('id')}
-        AND f_upd.status = 'downloaded'
-        AND f_upd.downloaded_at IS NOT NULL
-        AND (julianday(${col('remote_updated_at')}) - julianday(f_upd.downloaded_at)) * 86400.0 <= ${graceSeconds}
-    )
-  )`;
+interface InstalledOutdatedPartition {
+  outdatedIds: number[];
+  localReadyIds: number[];
+  remoteOnlyIds: number[];
+  outdatedIdSet: Set<number>;
+  localReadyIdSet: Set<number>;
+  remoteOnlyIdSet: Set<number>;
 }
 
-function buildInstalledOutdatedSql(alias?: string): string {
-  return `(${buildInstalledLocalUpdateReadySql(alias)} OR ${buildInstalledRemoteUpdateAvailableSql(alias)})`;
+/**
+ * Single authoritative partition of installed releases with pending local or remote
+ * updates, computed using the shared `classifyInstalledUpdateState()` classifier so
+ * Sidebar totals, Catalog `Updates (N)` facet, Catalog `installed=outdated` filter,
+ * and `GET /api/items/outdated` stay 100% consistent.
+ */
+function computeInstalledOutdatedPartition(): InstalledOutdatedPartition {
+  const rows = getDb()
+    .prepare(
+      `SELECT id, status, installed_at, installed_device_label, installed_file_id,
+              installed_filename, downloaded_at, remote_updated_at, remote_checked_at,
+              json_extract(metadata_json, '$.downloadHints') AS download_hints_json
+       FROM catalog_releases
+       WHERE installed_at IS NOT NULL`,
+    )
+    .all() as {
+    id: number;
+    status: string;
+    installed_at: string | null;
+    installed_device_label: string | null;
+    installed_file_id: number | null;
+    installed_filename: string | null;
+    downloaded_at: string | null;
+    remote_updated_at: string | null;
+    remote_checked_at: string | null;
+    download_hints_json: string | null;
+  }[];
+
+  const outdatedIds: number[] = [];
+  const localReadyIds: number[] = [];
+  const remoteOnlyIds: number[] = [];
+  const outdatedIdSet = new Set<number>();
+  const localReadyIdSet = new Set<number>();
+  const remoteOnlyIdSet = new Set<number>();
+
+  if (rows.length === 0) {
+    return {
+      outdatedIds,
+      localReadyIds,
+      remoteOnlyIds,
+      outdatedIdSet,
+      localReadyIdSet,
+      remoteOnlyIdSet,
+    };
+  }
+
+  const installedIds = rows.map((r) => Number(r.id));
+  const filesByReleaseId = new Map<number, InstalledUpdateFileLike[]>();
+  const fileRows = getDb()
+    .prepare(
+      `SELECT id, release_id, filename, local_path, status, downloaded_at
+       FROM catalog_release_files
+       WHERE release_id IN (SELECT value FROM json_each(?))
+       ORDER BY id ASC`,
+    )
+    .all(JSON.stringify(installedIds)) as {
+    id: number;
+    release_id: number;
+    filename: string;
+    local_path: string | null;
+    status: string;
+    downloaded_at: string | null;
+  }[];
+
+  for (const f of fileRows) {
+    const rid = Number(f.release_id);
+    const list = filesByReleaseId.get(rid) || [];
+    list.push({
+      id: Number(f.id),
+      filename: String(f.filename),
+      localPath: f.local_path ? String(f.local_path) : null,
+      status: String(f.status),
+      downloadedAt: f.downloaded_at ? String(f.downloaded_at) : null,
+    });
+    filesByReleaseId.set(rid, list);
+  }
+
+  for (const row of rows) {
+    const id = Number(row.id);
+    const info = classifyInstalledUpdateState({
+      status: String(row.status),
+      installedAt: row.installed_at ? String(row.installed_at) : null,
+      installedDeviceLabel: row.installed_device_label ? String(row.installed_device_label) : null,
+      installedFileId:
+        row.installed_file_id !== null && row.installed_file_id !== undefined
+          ? Number(row.installed_file_id)
+          : null,
+      installedFilename: row.installed_filename ? String(row.installed_filename) : null,
+      downloadedAt: row.downloaded_at ? String(row.downloaded_at) : null,
+      remoteUpdatedAt: row.remote_updated_at ? String(row.remote_updated_at) : null,
+      remoteCheckedAt: row.remote_checked_at ? String(row.remote_checked_at) : null,
+      downloadHints: parseDownloadHintsJson(row.download_hints_json),
+      files: filesByReleaseId.get(id) || [],
+    });
+
+    if (!info.hasUpdate) continue;
+    outdatedIds.push(id);
+    outdatedIdSet.add(id);
+    if (info.readyToUpgradeLocal) {
+      localReadyIds.push(id);
+      localReadyIdSet.add(id);
+    } else if (info.needsLocalDownload) {
+      remoteOnlyIds.push(id);
+      remoteOnlyIdSet.add(id);
+    }
+  }
+
+  return {
+    outdatedIds,
+    localReadyIds,
+    remoteOnlyIds,
+    outdatedIdSet,
+    localReadyIdSet,
+    remoteOnlyIdSet,
+  };
 }
 
 function filterCandidateRowsBySyncRules<T extends RuleFilterRow>(
@@ -2601,15 +2753,14 @@ function listInstalledFacetCounts(
   };
   const resolvedCfg = cfg ?? (scopedParams.syncRules ? getPublicConfig() : undefined);
   const { where, args } = buildCatalogWhereAndOrder(scopedParams, resolvedCfg);
-  const outdatedExpr = buildInstalledOutdatedSql();
+  const outdatedPartition = computeInstalledOutdatedPartition();
 
   if (scopedParams.syncRules && resolvedCfg) {
     const indexMap = ruleIndexMap ?? loadAllReleaseRuleIndexMap();
     const allowedTypes = normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes);
     const candidateRows = getDb()
       .prepare(
-        `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, installed_at, sync_override,
-                CASE WHEN ${outdatedExpr} THEN 1 ELSE 0 END AS is_outdated
+        `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, installed_at, sync_override
          FROM catalog_releases ${where}`,
       )
       .all(...args) as RuleFilterRow[];
@@ -2625,7 +2776,7 @@ function listInstalledFacetCounts(
     for (const row of matched) {
       if (row.installed_at) {
         installed += 1;
-        if (row.is_outdated) outdated += 1;
+        if (outdatedPartition.outdatedIdSet.has(Number(row.id))) outdated += 1;
       } else {
         notInstalled += 1;
       }
@@ -2633,15 +2784,23 @@ function listInstalledFacetCounts(
     return { installed, notInstalled, outdated };
   }
 
+  const hasOutdatedCandidates = outdatedPartition.outdatedIds.length > 0;
+  const queryArgs = hasOutdatedCandidates
+    ? [JSON.stringify(outdatedPartition.outdatedIds), ...args]
+    : args;
+  const outdatedSelectExpr = hasOutdatedCandidates
+    ? 'SUM(CASE WHEN id IN (SELECT value FROM json_each(?)) THEN 1 ELSE 0 END)'
+    : '0';
+
   const row = getDb()
     .prepare(
       `SELECT
         SUM(CASE WHEN installed_at IS NOT NULL THEN 1 ELSE 0 END) AS installed_cnt,
         SUM(CASE WHEN installed_at IS NULL THEN 1 ELSE 0 END) AS not_installed_cnt,
-        SUM(CASE WHEN ${outdatedExpr} THEN 1 ELSE 0 END) AS outdated_cnt
+        ${outdatedSelectExpr} AS outdated_cnt
       FROM catalog_releases ${where}`,
     )
-    .get(...args) as
+    .get(...queryArgs) as
     | { installed_cnt: number | null; not_installed_cnt: number | null; outdated_cnt: number | null }
     | undefined;
 
@@ -2939,7 +3098,13 @@ function buildCatalogWhereAndOrder(
   } else if (params.installed === 'exclude') {
     conditions.push('installed_at IS NULL');
   } else if (params.installed === 'outdated') {
-    conditions.push(buildInstalledOutdatedSql());
+    const outdatedPartition = computeInstalledOutdatedPartition();
+    if (outdatedPartition.outdatedIds.length === 0) {
+      conditions.push('1 = 0');
+    } else {
+      conditions.push('catalog_releases.id IN (SELECT value FROM json_each(?))');
+      args.push(JSON.stringify(outdatedPartition.outdatedIds));
+    }
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -3740,8 +3905,20 @@ export function removeItemsFromUserCollection(
 export function listOutdatedInstalledItems(options?: {
   deviceLabel?: string | null;
 }): OutdatedInstalledSummary {
-  const conditions: string[] = [buildInstalledOutdatedSql()];
-  const args: unknown[] = [];
+  const partition = computeInstalledOutdatedPartition();
+  if (partition.outdatedIds.length === 0) {
+    return {
+      total: 0,
+      localReadyCount: 0,
+      remoteOnlyCount: 0,
+      localReadyIds: [],
+      remoteOnlyIds: [],
+      items: [],
+    };
+  }
+
+  const conditions: string[] = ['id IN (SELECT value FROM json_each(?))'];
+  const args: unknown[] = [JSON.stringify(partition.outdatedIds)];
 
   if (options?.deviceLabel && options.deviceLabel.trim()) {
     conditions.push('LOWER(TRIM(installed_device_label)) = LOWER(TRIM(?))');
@@ -3856,8 +4033,7 @@ export function getCatalogTotalsAndSystems(): {
   systems: SystemBreakdown[];
   releaseTypes: ReleaseTypeBreakdown[];
 } {
-  const outdatedExpr = buildInstalledOutdatedSql();
-  const localReadyExpr = buildInstalledLocalUpdateReadySql();
+  const outdatedPartition = computeInstalledOutdatedPartition();
   const totalsRow = getDb().prepare(`
     SELECT
       COUNT(*) as total_items,
@@ -3867,8 +4043,6 @@ export function getCatalogTotalsAndSystems(): {
       SUM(CASE WHEN status IN ('failed', 'partial') THEN 1 ELSE 0 END) as failed_items,
       SUM(CASE WHEN status IN ('queued', 'downloading') THEN 1 ELSE 0 END) as queued_items,
       SUM(CASE WHEN installed_at IS NOT NULL THEN 1 ELSE 0 END) as installed_items,
-      SUM(CASE WHEN ${outdatedExpr} THEN 1 ELSE 0 END) as outdated_installed_items,
-      SUM(CASE WHEN ${localReadyExpr} THEN 1 ELSE 0 END) as outdated_local_ready_items,
       SUM(CASE WHEN is_favorite = 1 THEN 1 ELSE 0 END) as favorite_items,
       COALESCE(SUM(CASE WHEN status IN ('downloaded', 'skipped', 'partial') THEN file_size_bytes ELSE 0 END), 0) as total_bytes
     FROM catalog_releases
@@ -3940,8 +4114,8 @@ export function getCatalogTotalsAndSystems(): {
       failedItems: Number(totalsRow.failed_items || 0),
       queuedItems: Number(totalsRow.queued_items || 0),
       installedItems: Number(totalsRow.installed_items || 0),
-      outdatedInstalledItems: Number(totalsRow.outdated_installed_items || 0),
-      outdatedLocalReadyItems: Number(totalsRow.outdated_local_ready_items || 0),
+      outdatedInstalledItems: outdatedPartition.outdatedIds.length,
+      outdatedLocalReadyItems: outdatedPartition.localReadyIds.length,
       favoriteItems: Number(totalsRow.favorite_items || 0),
       totalBytesMirrored: Number(totalsRow.total_bytes || 0),
       totalRuns: Number(runsRow.count || 0),

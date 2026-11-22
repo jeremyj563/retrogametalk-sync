@@ -29,6 +29,7 @@ import {
   listSyncRuns,
   markCatalogItemsQueuedDetailed,
   markCatalogReleaseFailed,
+  markCatalogReleaseRemoteChecked,
   mergeCatalogReleaseDetailMetadata,
   persistDiscoveredReleaseDownloadHints,
   queryRepositoryItemIds,
@@ -3081,10 +3082,11 @@ export class ScraperOrchestrator extends EventEmitter {
         bytesDownloaded: bytes,
         avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
       });
-      runLogger(
-        'info',
-        `Download queue #${run.id} ${finalStatus}: ${downloaded} downloaded, ${skipped} already on disk, ${failed} failed`,
-      );
+      const queueSummaryMsg =
+        finalStatus === 'completed' && downloaded === 0 && skipped > 0 && failed === 0
+          ? `Download queue #${run.id} completed: all ${skipped} file${skipped === 1 ? '' : 's'} verified up to date on disk (0 new downloads needed)`
+          : `Download queue #${run.id} ${finalStatus}: ${downloaded} downloaded, ${skipped} already on disk, ${failed} failed`;
+      runLogger('info', queueSummaryMsg);
       if (finalStatus === 'completed') {
         recordAchievementCounter('runs_completed', 1, 'increment');
         this.evaluateAndEmitAchievements();
@@ -3351,11 +3353,20 @@ export class ScraperOrchestrator extends EventEmitter {
             return true;
           });
           if (targetDownloads.length === 0) {
-            persistDiscoveredReleaseDownloadHints(
-              pageUrl,
-              freshDownloads.map((d) => ({ filename: d.filename, fileSize: null })),
-            );
-            recomputeReleaseRollup(item.id);
+            if (!isDryRun) {
+              persistDiscoveredReleaseDownloadHints(
+                pageUrl,
+                freshDownloads.map((d) => ({ filename: d.filename, fileSize: null })),
+                { replace: true },
+              );
+              if (!signal.aborted) {
+                markCatalogReleaseRemoteChecked(item.id);
+              }
+              recomputeReleaseRollup(item.id);
+              if (!signal.aborted) {
+                this.emitCatalogUpdated('release_verified', item.id);
+              }
+            }
             return { downloaded, skipped, failed, bytes, wouldRecover };
           }
         }
@@ -3399,7 +3410,20 @@ export class ScraperOrchestrator extends EventEmitter {
         bytes += outcome.bytes;
       }, this.subscribeRuntimeConfig);
       if (!isDryRun) {
+        if (freshDownloads.length > 0) {
+          persistDiscoveredReleaseDownloadHints(
+            pageUrl,
+            freshDownloads.map((d) => ({ filename: d.filename, fileSize: null })),
+            { replace: true },
+          );
+        }
+        if (!signal.aborted && failed === 0) {
+          markCatalogReleaseRemoteChecked(item.id);
+        }
         recomputeReleaseRollup(item.id);
+        if (!signal.aborted && failed === 0 && downloaded === 0) {
+          this.emitCatalogUpdated('release_verified', item.id);
+        }
       }
       return { downloaded, skipped, failed, bytes, wouldRecover };
     }
@@ -3534,6 +3558,17 @@ export class ScraperOrchestrator extends EventEmitter {
       if (outcome.failed) failed += 1;
       bytes += outcome.bytes;
     }, this.subscribeRuntimeConfig);
+
+    if (!isDryRun && !signal.aborted && failed === 0) {
+      if (freshDownloads.length > 0) {
+        persistDiscoveredReleaseDownloadHints(
+          pageUrl,
+          freshDownloads.map((d) => ({ filename: d.filename, fileSize: null })),
+          { replace: true },
+        );
+      }
+      markCatalogReleaseRemoteChecked(item.id);
+    }
 
     return { downloaded, skipped, failed, bytes, wouldRecover };
   }
@@ -4348,25 +4383,40 @@ export class ScraperOrchestrator extends EventEmitter {
 
         if (toDownload.length === 0) {
           // Every eligible file is already downloaded & verified on disk — avoid flipping status to 'downloading'
-          if (preExistingParent && effectiveMeta && !preExistingParent.metadata?.detailHydrated) {
-            try {
-              const mirroredAssets = await this.client.mirrorReleaseAssets(
-                effectiveMeta,
-                releaseLocalDir,
-                liveCfg,
-                signal,
-                runLogger,
+          if (preExistingParent && !signal.aborted) {
+            if (uniqueReleases.length > 0) {
+              persistDiscoveredReleaseDownloadHints(
+                canonicalPageUrl,
+                uniqueReleases.map((r) => ({ filename: r.filename, fileSize: null })),
+                { replace: true },
               );
-              updateCatalogReleaseMetadata(
-                preExistingParent.id,
-                mirroredAssets.metadata,
-                mirroredAssets.coverAbsPath,
-                mirroredAssets.screenshotAbsPaths,
-              );
-              this.emitCatalogUpdated('metadata_mirrored', preExistingParent.id);
-            } catch (err) {
-              if (signal.aborted) throw err;
-              runLogger('warn', `Metadata/artwork sync incomplete for ${preExistingParent.title}`, String(err));
+            }
+            markCatalogReleaseRemoteChecked(preExistingParent.id);
+            let emittedUpdate = false;
+            if (effectiveMeta && !preExistingParent.metadata?.detailHydrated) {
+              try {
+                const mirroredAssets = await this.client.mirrorReleaseAssets(
+                  effectiveMeta,
+                  releaseLocalDir,
+                  liveCfg,
+                  signal,
+                  runLogger,
+                );
+                updateCatalogReleaseMetadata(
+                  preExistingParent.id,
+                  mirroredAssets.metadata,
+                  mirroredAssets.coverAbsPath,
+                  mirroredAssets.screenshotAbsPaths,
+                );
+                this.emitCatalogUpdated('metadata_mirrored', preExistingParent.id);
+                emittedUpdate = true;
+              } catch (err) {
+                if (signal.aborted) throw err;
+                runLogger('warn', `Metadata/artwork sync incomplete for ${preExistingParent.title}`, String(err));
+              }
+            }
+            if (!emittedUpdate) {
+              this.emitCatalogUpdated('release_verified', preExistingParent.id);
             }
           }
           persistCounters();
@@ -4422,6 +4472,7 @@ export class ScraperOrchestrator extends EventEmitter {
           ...eligibleReleases.map((r) => r.remoteUrl),
         ]).size;
 
+        let pageFailedCount = 0;
         await runWithConcurrency(
           toDownload,
           () => {
@@ -4496,10 +4547,24 @@ export class ScraperOrchestrator extends EventEmitter {
           );
           if (outcome.downloaded) downloadedCount += 1;
           if (outcome.skipped) skippedCount += 1;
-          if (outcome.failed) failedCount += 1;
+          if (outcome.failed) {
+            failedCount += 1;
+            pageFailedCount += 1;
+          }
           bytesDownloaded += outcome.bytes;
           persistCounters();
         }, this.subscribeRuntimeConfig);
+
+        if (!signal.aborted && pageFailedCount === 0) {
+          if (uniqueReleases.length > 0) {
+            persistDiscoveredReleaseDownloadHints(
+              canonicalPageUrl,
+              uniqueReleases.map((r) => ({ filename: r.filename, fileSize: null })),
+              { replace: true },
+            );
+          }
+          markCatalogReleaseRemoteChecked(parent.id);
+        }
       };
 
       const inspectAndProcessReleasePage = async (
