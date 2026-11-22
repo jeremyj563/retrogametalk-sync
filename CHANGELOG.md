@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.30.2] - 2026-11-21
+
+- Aligned **Sync Rule Readiness** pending counts, **View in Catalog** (`Sync Rules` + `Not Downloaded`), and **Queue Pending (N)** with Full Sync's per-file mirror coverage check:
+  - **Zero-Disk-I/O Sibling Coverage Evaluation**: Extended the cached SQLite rule index to evaluate recorded child files and `downloadHints` against active `allowedReleaseTypes` without synchronous filesystem `stat` calls, so releases marked `downloaded` that still have unmirrored policy-eligible sibling files (e.g., after widening Release Type rules) are counted as pending alongside `available`/`failed`/`partial` releases.
+  - **Accurate Pending Byte Estimates & Rule-Scoped Queueing**: Estimated pending bytes for partially-mirrored releases from their unmirrored eligible sibling hints rather than double-counting already-mirrored archives, and updated **Queue Pending (N)** to queue and download only the missing policy-eligible sibling files while skipping excluded types.
+
 ## [1.30.1] - 2026-11-21
 
 - Fixed the sync progress counter (e.g., `5/47`) intermittently disappearing from the main **Monitor** status bar during active runs:

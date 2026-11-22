@@ -417,3 +417,147 @@ test('live mid-run sync rule helpers diff console additions/removals, release ty
   assert.equal(widenToAll.releaseTypesWidened, true);
 });
 
+test('Sync Rule Readiness, Catalog syncRules queries, and rule queueing detect unmirrored policy-eligible sibling hints on downloaded releases', () => {
+  const nowIso = new Date().toISOString();
+  dbMod.saveDiscoveredSystems(['snes', 'gba', 'psx', 'nds-roms']);
+
+  // Seed a multi-archive release with 1 downloaded English Translation file + 2 unmirrored sibling hints
+  const multiRel = dbMod.upsertIndexedWpRelease({
+    remoteUrl: 'https://retrogametalk.com/repository/nds-roms/traverse-starlight-prairie/',
+    remotePath: '/repository/nds-roms/traverse-starlight-prairie/',
+    localPath: path.join(tempDownloadDir, 'nds-roms', 'traverse-starlight-prairie'),
+    systemName: 'nds-roms',
+    title: 'Traverse - Starlight & Prairie',
+    estimatedBytes: 100 * 1024 * 1024,
+    metadata: makeMetadata(
+      'Traverse - Starlight & Prairie',
+      'nds-roms',
+      ['English Translation', 'Portuguese Translation'],
+      {
+        wpPostId: 5001,
+        languages: ['English Patched', 'Japanese', 'Portuguese Patched'],
+        sources: ['Romhacking.net'],
+        downloadHints: [
+          { filename: 'Traverse Starlight and Praire (English v1.0.0).zip', fileSize: '50 MB' },
+          { filename: 'Traverse Starlight and Praire (Brazilian Portuguese v1.0.0).zip', fileSize: '12 MB' },
+          { filename: 'Traverse - Starlight & Prairie (Japan).zip', fileSize: '40 MB' },
+        ],
+      },
+    ),
+  });
+  dbMod.upsertReleaseFile({
+    releaseId: multiRel.id,
+    remoteUrl: 'https://retrogametalk.com/repository/nds-roms/traverse-starlight-prairie/#en',
+    downloadUrl: 'https://cdn.example.com/traverse-en.zip',
+    remotePath: '/repository/nds-roms/traverse-starlight-prairie/Traverse Starlight and Praire (English v1.0.0).zip',
+    localPath: path.join(
+      tempDownloadDir,
+      'nds-roms',
+      'traverse-starlight-prairie',
+      'Traverse Starlight and Praire (English v1.0.0).zip',
+    ),
+    filename: 'Traverse Starlight and Praire (English v1.0.0).zip',
+    fileSizeBytes: 50 * 1024 * 1024,
+    status: 'downloaded',
+    downloadedAt: nowIso,
+  });
+
+  assert.equal(dbMod.getCatalogReleaseById(multiRel.id)?.status, 'downloaded');
+
+  // 1) Under English Translation only: English file is mirrored, PT & Japan hints are excluded -> 0 pending, 1 on disk
+  dbMod.updateConfig({
+    systemFilter: 'nds-roms',
+    allowedReleaseTypes: ['translation:english'],
+  });
+
+  const narrowPreflight = dbMod.computeSyncPreflightSummary();
+  assert.equal(narrowPreflight.totalRuleMatched, 1);
+  assert.equal(narrowPreflight.pendingDownloadCount, 0);
+  assert.equal(narrowPreflight.alreadyDownloadedCount, 1);
+
+  const narrowPendingView = dbMod.queryRepositoryItems({
+    syncRules: true,
+    downloaded: 'exclude',
+    limit: 50,
+    offset: 0,
+  });
+  assert.equal(narrowPendingView.total, 0);
+  assert.equal(narrowPendingView.facets.counts?.downloaded?.downloaded, 1);
+  assert.equal(narrowPendingView.facets.counts?.downloaded?.notDownloaded, 0);
+
+  const narrowQueueIds = dbMod.queryRepositoryItemIds({ syncRules: true, downloaded: 'exclude' });
+  assert.equal(narrowQueueIds.total, 0);
+  assert.deepEqual(narrowQueueIds.queueableIds, []);
+
+  // 2) Widen Sync Rules to include Portuguese Translation -> unmirrored PT hint makes release pending (~12 MB)
+  dbMod.updateConfig({
+    systemFilter: 'nds-roms',
+    allowedReleaseTypes: ['translation:english', 'translation:portuguese'],
+  });
+
+  const widenedPreflight = dbMod.computeSyncPreflightSummary();
+  assert.equal(widenedPreflight.totalRuleMatched, 1);
+  assert.equal(widenedPreflight.pendingDownloadCount, 1);
+  assert.equal(widenedPreflight.availablePendingCount, 1);
+  assert.equal(widenedPreflight.alreadyDownloadedCount, 0);
+  assert.equal(widenedPreflight.estimatedPendingBytes, 12 * 1024 * 1024);
+
+  const widenedPendingView = dbMod.queryRepositoryItems({
+    syncRules: true,
+    downloaded: 'exclude',
+    limit: 50,
+    offset: 0,
+  });
+  assert.equal(widenedPendingView.total, 1);
+  assert.equal(widenedPendingView.items[0].id, multiRel.id);
+  assert.equal(widenedPendingView.facets.counts?.downloaded?.downloaded, 0);
+  assert.equal(widenedPendingView.facets.counts?.downloaded?.notDownloaded, 1);
+  assert.equal(widenedPendingView.facets.counts?.queueableFiltered, 1);
+
+  const widenedQueueIds = dbMod.queryRepositoryItemIds({ syncRules: true, downloaded: 'exclude' });
+  assert.equal(widenedQueueIds.total, 1);
+  assert.deepEqual(widenedQueueIds.queueableIds, [multiRel.id]);
+  assert.equal(widenedQueueIds.estimatedQueueBytes, 12 * 1024 * 1024);
+
+  // Without allowIncompleteRuleDownloads, standard queue call still treats downloaded status as already downloaded
+  const standardMark = dbMod.markCatalogItemsQueuedDetailed([multiRel.id], null);
+  assert.deepEqual(standardMark.queuedIds, []);
+  assert.deepEqual(standardMark.alreadyDownloadedIds, [multiRel.id]);
+
+  // With allowIncompleteRuleDownloads (used by Queue Pending / syncRules queue), it transitions cleanly to queued
+  const ruleMark = dbMod.markCatalogItemsQueuedDetailed([multiRel.id], null, {
+    allowIncompleteRuleDownloads: true,
+  });
+  assert.deepEqual(ruleMark.queuedIds, [multiRel.id]);
+  assert.deepEqual(ruleMark.alreadyDownloadedIds, []);
+  assert.equal(dbMod.getCatalogReleaseById(multiRel.id)?.status, 'queued');
+
+  // 3) Once the Portuguese file is downloaded, release returns to fully mirrored under widened rules
+  dbMod.upsertReleaseFile({
+    releaseId: multiRel.id,
+    remoteUrl: 'https://retrogametalk.com/repository/nds-roms/traverse-starlight-prairie/#pt',
+    downloadUrl: 'https://cdn.example.com/traverse-pt.zip',
+    remotePath:
+      '/repository/nds-roms/traverse-starlight-prairie/Traverse Starlight and Praire (Brazilian Portuguese v1.0.0).zip',
+    localPath: path.join(
+      tempDownloadDir,
+      'nds-roms',
+      'traverse-starlight-prairie',
+      'Traverse Starlight and Praire (Brazilian Portuguese v1.0.0).zip',
+    ),
+    filename: 'Traverse Starlight and Praire (Brazilian Portuguese v1.0.0).zip',
+    fileSizeBytes: 12 * 1024 * 1024,
+    status: 'downloaded',
+    downloadedAt: nowIso,
+  });
+
+  const completePreflight = dbMod.computeSyncPreflightSummary();
+  assert.equal(completePreflight.pendingDownloadCount, 0);
+  assert.equal(completePreflight.alreadyDownloadedCount, 1);
+  assert.equal(
+    dbMod.queryRepositoryItems({ syncRules: true, downloaded: 'exclude', limit: 50, offset: 0 }).total,
+    0,
+  );
+});
+
+
