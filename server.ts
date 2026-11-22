@@ -22,9 +22,14 @@ import {
   streamExtractedEntryToResponse,
 } from './src/server/archiveService.ts';
 import { formatErrorDetails, isDebugLoggingEnabled, logServer } from './src/server/logger.ts';
+import { AppAuthManager } from './src/server/appAuth.ts';
 import { ScraperOrchestrator } from './src/server/orchestrator.ts';
 import { getAchievementsSnapshot, markAchievementsSeen } from './src/server/achievements.ts';
 import type { ClientAchievementEventPayload } from './src/shared/achievements.ts';
+import {
+  buildConfigBackupSnapshot,
+  parseAndValidateConfigBackup,
+} from './src/shared/configBackup.ts';
 import { sanitizeFat32Filename } from './src/shared/romNaming.ts';
 import type { ConfigUpdateInput, RunMode } from './src/server/types.ts';
 
@@ -34,8 +39,10 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 async function bootstrap() {
   initDb();
   const orchestrator = new ScraperOrchestrator();
+  const appAuth = new AppAuthManager();
   const app = express();
 
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '1mb' }));
 
   // Kubernetes liveness probe
@@ -66,6 +73,14 @@ async function bootstrap() {
     res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
     res.send(orchestrator.getPrometheusMetrics());
   });
+
+  // Optional environment-driven App Authentication routes (always reachable)
+  app.get('/api/app-auth/status', appAuth.handleStatus);
+  app.post('/api/app-auth/login', appAuth.handleLogin);
+  app.post('/api/app-auth/logout', appAuth.handleLogout);
+
+  // Enforce App Authentication + CSRF protection on all remaining /api/* routes when APP_AUTH_PASSWORD is set
+  app.use('/api', appAuth.requireAuthMiddleware);
 
   // Service snapshot
   app.get('/api/status', (_req, res) => {
@@ -988,6 +1003,7 @@ async function bootstrap() {
 
   // Configuration & credential verification
   app.get('/api/config', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     res.json({ config: getPublicConfig() });
   });
 
@@ -995,7 +1011,58 @@ async function bootstrap() {
     try {
       const body = (req.body || {}) as ConfigUpdateInput;
       const result = orchestrator.updateConfigurationWithMeta(body);
+      res.setHeader('Cache-Control', 'no-store');
       res.json({ config: result.config, liveSyncReload: result.liveSyncReload });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // Secret-free Configuration Backup & Restore
+  app.get('/api/backup/export', (_req, res) => {
+    const config = getPublicConfig();
+    const version = orchestrator.getStatusSnapshot().build.version || '1.0.0';
+    const snapshot = buildConfigBackupSnapshot(config, version);
+    const dateStamp = snapshot.exportedAt.slice(0, 10);
+    const filename = `rgt-sync-backup-${dateStamp}.json`;
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', buildContentDispositionAttachment(filename).headerValue);
+    res.status(200).send(`${JSON.stringify(snapshot, null, 2)}\n`);
+  });
+
+  app.post('/api/backup/import', (req, res) => {
+    try {
+      const current = getPublicConfig();
+      const validation = parseAndValidateConfigBackup(req.body, current);
+      if (!validation.valid) {
+        res.status(400).json({ error: validation.error });
+        return;
+      }
+
+      if (validation.appliedFields.length === 0) {
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(200).json({
+          ok: true,
+          config: current,
+          liveSyncReload: null,
+          appliedFields: [],
+          skippedEnvLocked: validation.skippedEnvLocked.map((item) => item.envVar),
+          changesCount: 0,
+        });
+        return;
+      }
+
+      const result = orchestrator.updateConfigurationWithMeta(validation.patch);
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({
+        ok: true,
+        config: result.config,
+        liveSyncReload: result.liveSyncReload,
+        appliedFields: validation.appliedFields,
+        skippedEnvLocked: validation.skippedEnvLocked.map((item) => item.envVar),
+        changesCount: validation.changes.length,
+      });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }

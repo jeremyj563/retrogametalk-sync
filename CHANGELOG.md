@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.33.0] - 2026-11-22
+
+- Hardened credential handling, added optional environment-driven self-hosted UI/API authentication, and introduced secret-free JSON configuration **Backup & Restore**:
+  - **Zero Plaintext Secrets in `/api/config`**: Masked the stored RetroGameTalk password out of `GET /api/config` and `PUT /api/config` responses (`password: ""` with `hasPassword: true`), preserved existing server-side passwords when `password` is omitted or blank, added an explicit `clearPassword: true` action, and updated **System Settings** with a blank replacement input and inline **Clear** toggle.
+  - **Optional Self-Hosted App Lock (`APP_AUTH_PASSWORD`)**: Added zero-dependency `scrypt` + constant-time credential verification, HMAC-SHA256 signed `HttpOnly` session cookies, same-origin CSRF checks on state-changing requests, IP sliding-window brute-force rate limiting on `/api/app-auth/login`, a CRT-themed unlock screen (`AppAuthGate`), and a sidebar **Sign Out** button when enabled (with zero friction when `APP_AUTH_PASSWORD` is unset). Documented across `.env.example`, `docker-compose.yml`, and the Helm chart (`values.yaml` & `secret.yaml`).
+  - **Configuration Backup & Restore (Secret-Free JSON)**: Added `GET /api/backup/export`, `POST /api/backup/import`, and a **Configuration Backup & Restore** card in **System Settings** to download and restore Mirror URLs, Sync Rules, schedule, pacing, ROM naming, and console folder mappings with strict schema validation, inline diff previews, automatic skipping of env-locked fields, and guaranteed exclusion of all credentials and host-specific disk paths.
+
 ## [1.32.2] - 2026-11-22
 
 - Fixed `.rar` archive inspection and extraction failing in Alpine Docker containers with `Cannot open the file as archive` (Alpine's `7zip` package strips proprietary RAR codecs):

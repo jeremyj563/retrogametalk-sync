@@ -3,8 +3,10 @@ import {
   AlertTriangle,
   Check,
   FlaskConical,
+  LogOut,
   Trophy,
 } from 'lucide-react';
+import { AppAuthGate } from './components/AppAuthGate';
 import { BrandMark } from './components/BrandMark';
 import { BulkInstallDock } from './components/BulkInstallDock';
 import { CrtArcadeModal } from './components/CrtArcadeModal';
@@ -61,10 +63,12 @@ import {
 import type {
   ActivityLogRecord,
   ActiveTransferState,
+  AppAuthStatus,
   CatalogDownloadedFilter,
   ConfigDirtyState,
   ConfigFocusRequest,
   ConfigPanelHandle,
+  ConfigPatchPayload,
   ConfigSectionTarget,
   LogLevel,
   NavSection,
@@ -888,6 +892,8 @@ export default function App() {
       }
     };
   }, []);
+  const [appAuth, setAppAuth] = useState<AppAuthStatus | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
   const [actionPending, setActionPending] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
@@ -896,6 +902,49 @@ export default function App() {
   const [activeRetryItemId, setActiveRetryItemId] = useState<number | null>(null);
   const activeRetryRunRef = useRef<{ runId: number; itemId: number } | null>(null);
   const prevActiveRunRef = useRef<SyncRunRecord | null>(null);
+
+  const checkAppAuthStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/app-auth/status', { cache: 'no-store' });
+      const parsed = await readJsonSafely<AppAuthStatus>(res);
+      if (parsed.ok && parsed.data && typeof parsed.data.enabled === 'boolean') {
+        setAppAuth(parsed.data);
+        return;
+      }
+      setAppAuth({ enabled: false, authenticated: true, usernameRequired: false });
+    } catch {
+      setAppAuth({ enabled: false, authenticated: true, usernameRequired: false });
+    }
+  }, []);
+
+  useEffect(() => {
+    void checkAppAuthStatus();
+  }, [checkAppAuthStatus]);
+
+  const handleSignOut = useCallback(async () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    try {
+      await fetch('/api/app-auth/logout', {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'rgt-sync' },
+      });
+    } catch {
+      // Proceed with local lock state reset
+    } finally {
+      setStatus(null);
+      setConfig(null);
+      setRuns([]);
+      setLogs([]);
+      setPreflight(null);
+      setSseConnected(false);
+      setErrorBanner(null);
+      setAppAuth((prev) =>
+        prev ? { ...prev, authenticated: !prev.enabled } : { enabled: true, authenticated: false, usernameRequired: false },
+      );
+      setSigningOut(false);
+    }
+  }, [signingOut]);
 
   const bulkInstaller = useBulkStorageInstaller({
     config,
@@ -926,6 +975,15 @@ export default function App() {
         fetch('/api/logs?limit=300'),
         fetch('/api/sync/preflight'),
       ]);
+
+      if (statusRes.status === 401 || configRes.status === 401) {
+        setAppAuth((prev) =>
+          prev
+            ? { ...prev, enabled: true, authenticated: false }
+            : { enabled: true, authenticated: false, usernameRequired: false },
+        );
+        return;
+      }
 
       let loadedStatus: ServiceStatusSnapshot | null = null;
       if (statusRes.ok) {
@@ -967,7 +1025,14 @@ export default function App() {
     }
   }, []);
 
+  const appAuthReadyAndUnlocked = Boolean(appAuth && (!appAuth.enabled || appAuth.authenticated));
+
   useEffect(() => {
+    if (!appAuthReadyAndUnlocked) {
+      setSseConnected(false);
+      return;
+    }
+
     void loadInitialData();
 
     const source = new EventSource('/api/events');
@@ -1143,11 +1208,12 @@ export default function App() {
       if (catalogBumpTimer) clearTimeout(catalogBumpTimer);
       source.close();
     };
-  }, [loadInitialData, enqueueUnlockedTrophies, refreshAchievements]);
+  }, [appAuthReadyAndUnlocked, loadInitialData, enqueueUnlockedTrophies, refreshAchievements]);
 
   // Quietly load trophy progress on initial mount (never triggers toasts on startup)
   // and listen for client-reported achievement unlocks
   useEffect(() => {
+    if (!appAuthReadyAndUnlocked) return;
     void refreshAchievements();
     return subscribeAchievementClientUpdates((result) => {
       if (result.snapshot) {
@@ -1157,7 +1223,7 @@ export default function App() {
         enqueueUnlockedTrophies(result.newlyUnlocked);
       }
     });
-  }, [refreshAchievements, enqueueUnlockedTrophies]);
+  }, [appAuthReadyAndUnlocked, refreshAchievements, enqueueUnlockedTrophies]);
 
   const handleStartRun = async (scope: SyncScope, dryRun = dryRunEnabled) => {
     setActionPending(true);
@@ -1276,14 +1342,17 @@ export default function App() {
   };
 
   const handleSaveConfig = async (
-    patch: Partial<ScraperConfigPublic> & { password?: string },
+    patch: ConfigPatchPayload,
   ): Promise<{
     config: ScraperConfigPublic;
     liveSyncReload: import('./types').LiveSyncReloadReceipt | null;
   }> => {
     const res = await fetch('/api/config', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'rgt-sync',
+      },
       body: JSON.stringify(patch),
     });
     const parsed = await readJsonSafely<{
@@ -1303,7 +1372,7 @@ export default function App() {
   };
 
   const handleSaveConfigVoid = async (
-    patch: Partial<ScraperConfigPublic> & { password?: string },
+    patch: ConfigPatchPayload,
   ): Promise<void> => {
     await handleSaveConfig(patch);
   };
@@ -1727,6 +1796,22 @@ export default function App() {
       )}
       {showVignette && <div aria-hidden="true" className="crt-layer-vignette" />}
       {showDegauss && <div aria-hidden="true" className="crt-layer-degauss" />}
+      {appAuth === null ? (
+        <main className="flex-1 flex items-center justify-center p-6">
+          <div className="text-xs font-mono text-crt-muted animate-pulse">
+            Checking console session...
+          </div>
+        </main>
+      ) : appAuth.enabled && !appAuth.authenticated ? (
+        <AppAuthGate
+          usernameRequired={appAuth.usernameRequired}
+          onUnlocked={() =>
+            setAppAuth((prev) =>
+              prev ? { ...prev, authenticated: true } : { enabled: true, authenticated: true, usernameRequired: false },
+            )
+          }
+        />
+      ) : (
       <div
         className={`crt-easter-shell flex-1 flex flex-col ${
           askewActive ? 'crt-easter-askew' : ''
@@ -2024,15 +2109,32 @@ export default function App() {
             />
           </div>
 
-          {/* Inconspicuous Build Footer */}
-          {status?.build && (
-            <div className="hidden lg:block border-t border-crt-border pt-3">
-              <BuildFooterMeta
-                build={status.build}
-                className="flex items-center justify-between gap-2 px-1 text-[11px] font-mono text-crt-muted/60 hover:text-crt-muted transition-colors"
-              />
-            </div>
-          )}
+          {/* Optional App Auth Sign Out & Inconspicuous Build Footer */}
+          <div className="space-y-2.5">
+            {appAuth?.enabled && appAuth.authenticated && (
+              <div className="border-t border-crt-border pt-3">
+                <button
+                  type="button"
+                  disabled={signingOut}
+                  onClick={() => void handleSignOut()}
+                  title="Lock console and clear active session cookie"
+                  className="w-full inline-flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-mono border border-crt-border hover:border-crt-crimson/60 text-crt-muted hover:text-crt-text hover:bg-crt-crimson/10 rounded transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  <span>{signingOut ? 'Locking...' : 'Sign Out'}</span>
+                </button>
+              </div>
+            )}
+
+            {status?.build && (
+              <div className="hidden lg:block border-t border-crt-border pt-3">
+                <BuildFooterMeta
+                  build={status.build}
+                  className="flex items-center justify-between gap-2 px-1 text-[11px] font-mono text-crt-muted/60 hover:text-crt-muted transition-colors"
+                />
+              </div>
+            )}
+          </div>
         </aside>
 
         {/* Main Content Viewport */}
@@ -2155,6 +2257,7 @@ export default function App() {
         </main>
       </div>
       </div>
+      )}
 
       {/* Hidden Playable 4-in-1 CRT Multi-Cart Arcade Cabinet */}
       <CrtArcadeModal

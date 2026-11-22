@@ -1,8 +1,8 @@
 ---
 title: Security Hardening, Optional App Auth & Configuration Backup/Restore
-status: planned
+status: implemented
 created_at: 2026-11-22T20:35:00Z
-implemented_at: null
+implemented_at: 2026-11-22T21:05:00Z
 ---
 
 # Security Hardening, Optional App Auth & Configuration Backup/Restore
