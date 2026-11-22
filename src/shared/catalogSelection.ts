@@ -156,15 +156,20 @@ export function formatInstallSelectedTooltip(
   mode: 'express' | 'review',
   summary: CatalogSelectionSummary,
   isBusy: boolean,
+  mountedDeviceName?: string | null,
 ): string {
   if (isBusy) {
-    return 'A storage installation is currently running in the background';
+    return 'Another storage device install is currently in progress';
   }
   const count = summary.installableIds.length;
+  const gameWord = count === 1 ? 'game' : 'games';
+  const trimmedDevice = (mountedDeviceName || '').trim();
   const base =
     mode === 'express'
-      ? `Mount device if needed and express-install ${count.toLocaleString()} downloaded release${count === 1 ? '' : 's'} in background`
-      : `Open interactive installer queue for ${count.toLocaleString()} downloaded release${count === 1 ? '' : 's'}`;
+      ? trimmedDevice
+        ? `Install the latest primary ROM for ${count.toLocaleString()} downloaded ${gameWord} directly to ${trimmedDevice}`
+        : `Mount a storage device and install the latest primary ROM for ${count.toLocaleString()} downloaded ${gameWord}`
+      : `Choose versions, rename ROMs, or preview destination folders for ${count.toLocaleString()} downloaded ${gameWord} before installing`;
   if (summary.notYetDownloadedCount <= 0) {
     return base;
   }

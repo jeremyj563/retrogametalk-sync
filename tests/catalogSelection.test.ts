@@ -90,15 +90,19 @@ test('mixed selection partitions queueable, installable, partial, and queued ite
   );
   assert.equal(
     formatInstallSelectedTooltip('express', summary, false),
-    'Mount device if needed and express-install 3 downloaded releases in background (4 not yet downloaded skipped)',
+    'Mount a storage device and install the latest primary ROM for 3 downloaded games (4 not yet downloaded skipped)',
+  );
+  assert.equal(
+    formatInstallSelectedTooltip('express', summary, false, 'Roms'),
+    'Install the latest primary ROM for 3 downloaded games directly to Roms (4 not yet downloaded skipped)',
   );
   assert.equal(
     formatInstallSelectedTooltip('review', summary, false),
-    'Open interactive installer queue for 3 downloaded releases (4 not yet downloaded skipped)',
+    'Choose versions, rename ROMs, or preview destination folders for 3 downloaded games before installing (4 not yet downloaded skipped)',
   );
   assert.equal(
     formatInstallSelectedTooltip('express', summary, true),
-    'A storage installation is currently running in the background',
+    'Another storage device install is currently in progress',
   );
   assert.equal(
     formatDownloadFilteredTooltip({

@@ -2,10 +2,10 @@ import { useMemo, useState } from 'react';
 import {
   Eye,
   FolderPlus,
+  FolderSync,
   HardDrive,
   Loader2,
   Power,
-  RefreshCw,
   X,
 } from 'lucide-react';
 import type { BulkStorageInstallerController } from '../hooks/useBulkStorageInstaller';
@@ -13,6 +13,12 @@ import {
   isFileSystemAccessSupported,
   type FileSystemAccessSupportResult,
 } from '../utils/sdCardFs';
+import {
+  formatMountDeviceTooltip,
+  formatSwitchDeviceTooltip,
+  MOUNT_DEVICE_LABEL,
+  SWITCH_DEVICE_COMPACT_LABEL,
+} from '../utils/storageActionCopy';
 
 export type StorageDriveBayState =
   | 'standby'
@@ -259,15 +265,11 @@ export function StorageDeviceSidebarDock({
                 type="button"
                 disabled={isBusy}
                 onClick={handleMountOrSwitch}
-                title={
-                  isBusy
-                    ? 'Finish or cancel the active transfer before switching devices'
-                    : 'Switch to a different storage device (auto-configures immediately)'
-                }
+                title={formatSwitchDeviceTooltip(isBusy)}
                 className="inline-flex items-center gap-1 px-1.5 py-1 rounded text-crt-muted hover:text-crt-text hover:bg-crt-elevated/65 transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
               >
-                <RefreshCw className="h-3 w-3 shrink-0" />
-                <span>Switch</span>
+                <FolderSync className="h-3 w-3 shrink-0" />
+                <span>{SWITCH_DEVICE_COMPACT_LABEL}</span>
               </button>
               <span aria-hidden="true" className="text-crt-muted/40">
                 ·
@@ -294,11 +296,7 @@ export function StorageDeviceSidebarDock({
           <button
             type="button"
             onClick={handleMountOrSwitch}
-            title={
-              support.supported
-                ? 'Mount a storage device folder (auto-configures console paths immediately)'
-                : support.reason
-            }
+            title={formatMountDeviceTooltip(support)}
             className={`w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1.5 -mx-1 rounded border text-xs font-mono transition-colors whitespace-nowrap cursor-pointer ${
               support.supported
                 ? 'border-transparent text-crt-text hover:border-crt-border-strong hover:bg-crt-elevated/70 hover:text-crt-phosphor'
@@ -311,7 +309,7 @@ export function StorageDeviceSidebarDock({
                   support.supported ? 'text-crt-phosphor' : 'text-crt-amber'
                 }`}
               />
-              <span className="truncate">Mount Device...</span>
+              <span className="truncate">{MOUNT_DEVICE_LABEL}</span>
             </span>
             <span className="text-[11px] text-crt-muted/85 shrink-0">
               {support.supported ? 'Auto' : 'Info'}

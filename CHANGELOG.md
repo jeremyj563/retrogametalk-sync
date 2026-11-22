@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.31.1] - 2026-11-22
+
+- Unified all one-click storage device install actions across **Catalog** items (Grid cards and List rows), **Catalog** multi-select bulk bar, **Game Details** drawer, and the **Install to Device** window so they share identical behavior (auto-installing the latest primary playable ROM), consistent `HardDrive` iconography, unified naming (`Install` / `Reinstall`, `Install to <Device>` / `Install to Device`, `Install to <Device> (N)`), and matching tooltips:
+  - Replaced the legacy **Express Install** caption and `FolderInput` icon in the multi-select bar with **Install to `<Device>` (N)** (`HardDrive`) and switched **Install Options (N)** to the `SlidersHorizontal` icon matching **Game Details > More > Install Options…**.
+  - Unified the unmounted **Install to Device** button in **Game Details** to execute the exact same one-click mount-and-install flow as Catalog items while keeping **More > Install Options…** consistently accessible regardless of mount state.
+  - Aligned the **Install to `<Device>`** window's primary CTA (`HardDrive` + **Install to `<Device>`** / **Mount Device & Install**), subtitle copy, and device action strip.
+- Unified storage device **Mount Device**, **Switch Device**, and **Rescan** controls across the **Sidebar** dock, **Device Export** settings panel, and **Install to Device** window with consistent labels, icons (`FolderPlus`, `FolderSync`, `RefreshCw`), and descriptive tooltips.
+
 ## [1.31.0] - 2026-11-22
 
 - Added direct one-click **Install** / **Reinstall** buttons to **Catalog** items (both Box-Art Grid cards and List rows) so downloaded games can be installed directly to a mounted storage device without opening the Game Details drawer.

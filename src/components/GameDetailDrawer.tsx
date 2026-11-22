@@ -59,6 +59,10 @@ import {
 import { reportAchievementEvent } from '../utils/achievementsClient';
 import type { ResolvedItemDeviceInstallState } from '../utils/deviceInstallView';
 import { readJsonSafely } from '../utils/http';
+import {
+  formatQuickInstallTooltip,
+  INSTALL_OPTIONS_SINGLE_TOOLTIP,
+} from '../utils/storageActionCopy';
 import { resolveFileTransferProgress, resolveItemTransferProgress } from '../utils/transferProgress';
 
 export interface GameDetailNavigation {
@@ -2377,7 +2381,7 @@ export function GameDetailDrawer({
                   : deviceInstallState?.percent !== null && deviceInstallState?.percent !== undefined
                     ? `Installing… ${deviceInstallState.percent}%`
                     : 'Installing…';
-          const handlePrimaryMountedInstall = () => {
+          const handleOneClickDeviceInstall = () => {
             setMoreMenuOpen(false);
             setDismissedInstallJobId(null);
             if (onExpressInstallToDevice) {
@@ -2387,6 +2391,13 @@ export function GameDetailDrawer({
             }
           };
 
+          const installActionTooltip = formatQuickInstallTooltip({
+            mountedDeviceName,
+            isReinstall: footerPlan.isReinstallOnMountedDevice,
+            isActive: isThisItemInstalling,
+            isOtherBusy: isAnotherDeviceInstallBusy,
+          });
+
           return (
             <footer className="px-6 py-3.5 border-t border-crt-border bg-crt-bg flex items-center justify-between gap-3 shrink-0">
               <div className="flex flex-wrap items-center gap-2.5 min-w-0">
@@ -2395,14 +2406,8 @@ export function GameDetailDrawer({
                     <button
                       type="button"
                       disabled={isThisItemInstalling || isAnotherDeviceInstallBusy}
-                      onClick={handlePrimaryMountedInstall}
-                      title={
-                        isAnotherDeviceInstallBusy
-                          ? 'Another storage device install is currently in progress'
-                          : mountedDeviceName
-                            ? `One-click express install directly to ${mountedDeviceName}`
-                            : 'Install directly to mounted storage device'
-                      }
+                      onClick={handleOneClickDeviceInstall}
+                      title={installActionTooltip}
                       className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer tabular-nums"
                     >
                       {isThisItemInstalling ? (
@@ -2457,20 +2462,23 @@ export function GameDetailDrawer({
                           ? 'Download Started'
                           : 'Download ROM'}
                     </button>
-                    {footerPlan.secondaryAction === 'install_unmounted' && onExportToSdCard && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setMoreMenuOpen(false);
-                          onExportToSdCard(item.id);
-                        }}
-                        title="Mount a storage device and install this game"
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap cursor-pointer"
-                      >
-                        <HardDrive className="h-3.5 w-3.5 shrink-0" />
-                        {footerPlan.installButtonLabel}
-                      </button>
-                    )}
+                    {footerPlan.secondaryAction === 'install_unmounted' &&
+                      (onExpressInstallToDevice || onExportToSdCard) && (
+                        <button
+                          type="button"
+                          disabled={isThisItemInstalling || isAnotherDeviceInstallBusy}
+                          onClick={handleOneClickDeviceInstall}
+                          title={installActionTooltip}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer tabular-nums"
+                        >
+                          {isThisItemInstalling ? (
+                            <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
+                          ) : (
+                            <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                          )}
+                          {isThisItemInstalling ? installingButtonLabel : footerPlan.installButtonLabel}
+                        </button>
+                      )}
                   </>
                 )}
 
@@ -2580,7 +2588,7 @@ export function GameDetailDrawer({
                                   setMoreMenuOpen(false);
                                   onExportToSdCard(item.id);
                                 }}
-                                title="Choose version, rename ROM, or preview destination folder before installing"
+                                title={INSTALL_OPTIONS_SINGLE_TOOLTIP}
                                 className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-text hover:bg-crt-elevated hover:text-crt-phosphor transition-colors cursor-pointer"
                               >
                                 <SlidersHorizontal className="h-3.5 w-3.5 text-crt-muted shrink-0" />

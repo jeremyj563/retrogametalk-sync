@@ -11,7 +11,8 @@ import {
   ChevronDown,
   ChevronUp,
   FileText,
-  FolderSearch,
+  FolderPlus,
+  FolderSync,
   HardDrive,
   Loader2,
   Pin,
@@ -49,6 +50,14 @@ import type {
   ServiceStatusSnapshot,
 } from '../types';
 import { isFileSystemAccessSupported } from '../utils/sdCardFs';
+import {
+  formatMountDeviceTooltip,
+  formatRescanDeviceTooltip,
+  formatSwitchDeviceTooltip,
+  MOUNT_DEVICE_LABEL,
+  RESCAN_DEVICE_LABEL,
+  SWITCH_DEVICE_LABEL,
+} from '../utils/storageActionCopy';
 import { ConfigSaveBar } from './ConfigSaveBar';
 import { StorageFolderMappingsSection } from './StorageFolderMappingsSection';
 
@@ -440,19 +449,21 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
                       type="button"
                       disabled={isBusyTransfer}
                       onClick={() => void installer.rescanAutoConfigure()}
+                      title={formatRescanDeviceTooltip('layout', isBusyTransfer)}
                       className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong disabled:opacity-45 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                     >
                       <RefreshCw className="h-3.5 w-3.5 shrink-0" />
-                      <span>Rescan</span>
+                      <span>{RESCAN_DEVICE_LABEL}</span>
                     </button>
                     <button
                       type="button"
                       disabled={!fsSupport.supported || isBusyTransfer}
                       onClick={() => void installer.promptMountSdCard()}
+                      title={formatSwitchDeviceTooltip(isBusyTransfer)}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/70 bg-crt-phosphor/12 text-crt-phosphor hover:bg-crt-phosphor/20 disabled:opacity-45 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      <FolderSearch className="h-3.5 w-3.5 shrink-0" />
-                      <span>Switch Device</span>
+                      <FolderSync className="h-3.5 w-3.5 shrink-0" />
+                      <span>{SWITCH_DEVICE_LABEL}</span>
                     </button>
                   </>
                 ) : (
@@ -460,10 +471,11 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
                     type="button"
                     disabled={!fsSupport.supported}
                     onClick={() => void installer.promptMountSdCard()}
+                    title={formatMountDeviceTooltip(fsSupport)}
                     className="crt-cta-beam inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-crt-bg bg-crt-phosphor hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <FolderSearch className="h-3.5 w-3.5 shrink-0" />
-                    <span>Mount &amp; Auto-Configure Device</span>
+                    <FolderPlus className="h-3.5 w-3.5 shrink-0" />
+                    <span>{MOUNT_DEVICE_LABEL}</span>
                   </button>
                 )}
               </div>
