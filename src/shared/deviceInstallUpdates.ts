@@ -9,8 +9,14 @@ export type InstalledUpdateState =
 export interface InstalledUpdateFileLike {
   id: number;
   filename: string;
+  localPath?: string | null;
   status: string;
   downloadedAt: string | null;
+}
+
+export interface InstalledUpdateDownloadHintLike {
+  filename?: string | null;
+  fileSize?: string | null;
 }
 
 export interface InstalledUpdateItemLike {
@@ -21,6 +27,11 @@ export interface InstalledUpdateItemLike {
   installedFilename?: string | null;
   downloadedAt: string | null;
   remoteUpdatedAt: string | null;
+  remoteCheckedAt?: string | null;
+  downloadHints?: readonly InstalledUpdateDownloadHintLike[] | null;
+  metadata?: {
+    downloadHints?: readonly InstalledUpdateDownloadHintLike[] | null;
+  } | null;
   files?: InstalledUpdateFileLike[];
 }
 
@@ -47,6 +58,88 @@ function parseIsoMs(iso: string | null | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+/**
+ * Normalizes a ROM archive filename or path into a canonical comparison key
+ * matching the server's path sanitization rules (safe URI decoding, basename
+ * extraction, Windows-illegal char replacement, whitespace/case folding).
+ */
+export function normalizeUpdateFilenameKey(raw: string | null | undefined): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return '';
+  let decoded = trimmed;
+  try {
+    decoded = decodeURIComponent(trimmed);
+  } catch {
+    decoded = trimmed;
+  }
+  const normalizedSlashes = decoded.replace(/\\/g, '/');
+  const slashIdx = normalizedSlashes.lastIndexOf('/');
+  const base = slashIdx >= 0 ? normalizedSlashes.slice(slashIdx + 1) : normalizedSlashes;
+  return base
+    .replace(/[<>:"/\\|?*]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function resolveItemDownloadHints(
+  item: Pick<InstalledUpdateItemLike, 'downloadHints' | 'metadata'> | null | undefined,
+): readonly InstalledUpdateDownloadHintLike[] | null {
+  if (!item) return null;
+  if (Array.isArray(item.downloadHints)) return item.downloadHints;
+  if (Array.isArray(item.metadata?.downloadHints)) return item.metadata.downloadHints;
+  return null;
+}
+
+/**
+ * Compares catalog `downloadHints` filenames (from WordPress ACF or live page inspection)
+ * against locally mirrored files in `catalog_release_files`.
+ *
+ * Returns:
+ * - `null` when no usable `downloadHints` filenames are available (caller falls back to timestamps)
+ * - `false` when every remote hint filename is already mirrored locally (metadata-only WP edit)
+ * - `true` when at least one remote hint filename is not yet mirrored locally
+ */
+export function hasUnmirroredRemoteDownloadHints(
+  hints: readonly InstalledUpdateDownloadHintLike[] | null | undefined,
+  files: readonly InstalledUpdateFileLike[] | null | undefined,
+): boolean | null {
+  if (!hints || hints.length === 0) return null;
+  const hintKeys = new Set<string>();
+  for (const hint of hints) {
+    const key = normalizeUpdateFilenameKey(hint?.filename);
+    if (key) hintKeys.add(key);
+  }
+  if (hintKeys.size === 0) return null;
+
+  const localKeys = new Set<string>();
+  for (const file of files || []) {
+    if (file.status !== 'downloaded' && file.status !== 'skipped') continue;
+    const filenameKey = normalizeUpdateFilenameKey(file.filename);
+    if (filenameKey) localKeys.add(filenameKey);
+    if (file.localPath) {
+      const localPathKey = normalizeUpdateFilenameKey(file.localPath);
+      if (localPathKey) localKeys.add(localPathKey);
+    }
+  }
+
+  for (const hintKey of hintKeys) {
+    if (!localKeys.has(hintKey)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isRemoteTimestampAlreadyVerified(
+  remoteMs: number | null,
+  remoteCheckedMs: number | null,
+  graceMs: number,
+): boolean {
+  if (remoteMs === null || remoteCheckedMs === null) return false;
+  return remoteMs - remoteCheckedMs <= graceMs;
+}
+
 export function formatShortUpdateDate(iso: string | null | undefined): string {
   if (!iso) return 'unknown date';
   const ms = parseIsoMs(iso);
@@ -63,13 +156,64 @@ export function formatShortUpdateDate(iso: string | null | undefined): string {
 }
 
 /**
+ * Determines whether a downloaded release actually has an unverified, actionable
+ * upstream update on RetroGameTalk that warrants re-queueing for download.
+ *
+ * Prevents WordPress metadata-only edits (`post.modified_gmt` bumps where every
+ * `downloadHints` filename is already mirrored) and already-verified release pages
+ * (`remoteCheckedAt >= remoteUpdatedAt`) from looping forever in the download queue.
+ */
+export function hasActionableRemoteUpdate(
+  item: Pick<
+    InstalledUpdateItemLike,
+    'status' | 'downloadedAt' | 'remoteUpdatedAt' | 'remoteCheckedAt' | 'downloadHints' | 'metadata' | 'files'
+  > | null | undefined,
+  graceMs = INSTALL_UPDATE_GRACE_MS,
+): boolean {
+  if (!item) return false;
+  const remoteMs = parseIsoMs(item.remoteUpdatedAt);
+  if (remoteMs === null) return false;
+
+  const remoteCheckedMs = parseIsoMs(item.remoteCheckedAt);
+  if (isRemoteTimestampAlreadyVerified(remoteMs, remoteCheckedMs, graceMs)) {
+    return false;
+  }
+
+  let latestLocalMs: number | null =
+    item.status === 'downloaded' || item.status === 'partial'
+      ? parseIsoMs(item.downloadedAt)
+      : null;
+
+  for (const file of item.files || []) {
+    if (file.status !== 'downloaded' || !file.downloadedAt) continue;
+    const fileMs = parseIsoMs(file.downloadedAt);
+    if (fileMs !== null && (latestLocalMs === null || fileMs > latestLocalMs)) {
+      latestLocalMs = fileMs;
+    }
+  }
+
+  const remoteNewerThanLocal =
+    latestLocalMs === null || remoteMs - latestLocalMs > graceMs;
+  if (!remoteNewerThanLocal) {
+    return false;
+  }
+
+  const unmirroredHints = hasUnmirroredRemoteDownloadHints(
+    resolveItemDownloadHints(item),
+    item.files,
+  );
+  return unmirroredHints !== false;
+}
+
+/**
  * Classifies whether an installed catalog release has a newer version mirrored
  * locally (`update_ready_local`) or published upstream on RetroGameTalk
  * (`update_available_remote`).
  *
  * Uses a 60-second grace window to prevent false positives when a ROM is
- * downloaded and installed within the same minute. Keep aligned with the
- * SQLite `julianday()` predicates in `src/server/db.ts`.
+ * downloaded and installed within the same minute, cross-checks `downloadHints`
+ * against locally mirrored files to filter out WordPress metadata-only edits,
+ * and respects `remoteCheckedAt` once the live release page has been verified.
  */
 export function classifyInstalledUpdateState(
   item: InstalledUpdateItemLike | null | undefined,
@@ -151,12 +295,26 @@ export function classifyInstalledUpdateState(
   const isLocalUpdateReady = hasLocalUpdateByTimestamp || hasDifferentNewerFile;
 
   const remoteMs = parseIsoMs(item.remoteUpdatedAt);
+  const remoteCheckedMs = parseIsoMs(item.remoteCheckedAt);
   const remoteNewerThanInstalled =
     remoteMs !== null && remoteMs - installedMs > graceMs;
   const remoteNewerThanLocal =
     remoteMs !== null &&
     (latestLocalMs === null || remoteMs - latestLocalMs > graceMs);
-  const isRemoteUpdateAvailable = remoteNewerThanInstalled && remoteNewerThanLocal;
+  const remoteAlreadyVerified = isRemoteTimestampAlreadyVerified(
+    remoteMs,
+    remoteCheckedMs,
+    graceMs,
+  );
+  const unmirroredHints = hasUnmirroredRemoteDownloadHints(
+    resolveItemDownloadHints(item),
+    item.files,
+  );
+  const isRemoteUpdateAvailable =
+    remoteNewerThanInstalled &&
+    remoteNewerThanLocal &&
+    !remoteAlreadyVerified &&
+    unmirroredHints !== false;
 
   const installedDateLabel = formatShortUpdateDate(item.installedAt);
   const deviceSuffix = item.installedDeviceLabel ? ` on ${item.installedDeviceLabel}` : '';

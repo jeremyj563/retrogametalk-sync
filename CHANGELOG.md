@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.35.1] - 2026-11-22
+
+- Fixed false-positive **Update on RGT** alerts and infinite re-queue loops in **Installed ROM Updates**:
+  - **Filter Out WordPress Metadata-Only Edits**: Cross-checked each release's WordPress `downloadHints` filenames against locally mirrored files in `catalog_release_files` (with normalized URI/sanitized-character matching) so metadata-only WordPress `modified_gmt` edits (tags, descriptions, screenshots) no longer trigger bogus `Update on RGT` counts when every ROM archive is already mirrored locally.
+  - **SQLite Schema v26 (`remote_checked_at`)**: Added `remote_checked_at` on `catalog_releases` (`installed_remote_update_verification` migration) and persisted verified live release checks (plus authoritative discovered `downloadHints`) after Download Queue / Sync verification completes with 0 failures—clearing stale remote alerts immediately without bumping `downloaded_at` (so unchanged files never falsely flip to `Update ready`).
+  - **Unified Update Classification Parity**: Routed Sidebar totals, Catalog `Updates (N)` facet counts, `installed=outdated` filtering, `GET /api/items/outdated`, and remote-update queue checks through the shared `classifyInstalledUpdateState()` / `hasActionableRemoteUpdate()` logic so all views stay 100% in sync.
+
 ## [1.35.0] - 2026-11-22
 
 - Added **Favorites, Custom Collections & Per-Game Sync Rule Overrides** for personal library curation and handheld loadouts:

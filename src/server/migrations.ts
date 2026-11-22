@@ -1261,6 +1261,17 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `);
     },
   },
+  {
+    version: 26,
+    name: 'installed_remote_update_verification',
+    description:
+      'Add remote_checked_at column to catalog_releases so verified live release checks clear stale WordPress modified_gmt remote update alerts without altering downloaded_at.',
+    up: (db) => {
+      if (!tableHasColumn(db, 'catalog_releases', 'remote_checked_at')) {
+        db.exec(`ALTER TABLE catalog_releases ADD COLUMN remote_checked_at TEXT;`);
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
