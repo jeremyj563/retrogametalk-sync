@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.30.3] - 2026-11-22
+
+- Fixed live mid-run Sync Rule reloads and made newly added consoles appear in the **Catalog** immediately:
+  - **Immediate Mid-Run Queue Reload**: Fixed a bug where the worker pool's concurrency subscription could consume a mid-run `syncRulesRevision` change before Phase 2 workers checked for it, causing Full Sync to finish the old queue before indexing newly added consoles. Monotonic rule-version tracking now ensures Full Sync and Incremental Sync immediately break out after the in-flight transfer(s) and jump straight into indexing newly added consoles (and re-evaluating widened release types).
+  - **Page-by-Page Catalog Streaming in Full Sync Phase 1**: Streamed WordPress REST pages directly into SQLite and emitted live Catalog updates on every 100-item page during Full Sync Phase 1 (with an abort guard so stopped runs never mark half-indexed consoles as fully indexed).
+  - **Automatic Idle Indexing on Sync Rule Save**: Saving newly added unindexed consoles while idle (or queuing behind an active filtered index/download queue) now automatically kicks off background indexing for those consoles so the Catalog populates right away.
+
 ## [1.30.2] - 2026-11-21
 
 - Aligned **Sync Rule Readiness** pending counts, **View in Catalog** (`Sync Rules` + `Not Downloaded`), and **Queue Pending (N)** with Full Sync's per-file mirror coverage check:

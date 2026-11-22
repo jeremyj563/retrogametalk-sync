@@ -463,6 +463,7 @@ export class ScraperOrchestrator extends EventEmitter {
     lastError: null,
   };
   private indexerAbortController: AbortController | null = null;
+  private pendingAutoIndexAfterCurrent = false;
   private runFinishedWaiters: (() => void)[] = [];
   private pendingDownloadQueueIds: number[] = [];
   private pendingDownloadQueueSet = new Set<number>();
@@ -1025,6 +1026,26 @@ export class ScraperOrchestrator extends EventEmitter {
 
     if (ruleDiff.changed) {
       this.emitCatalogUpdated('sync_rules_updated');
+    }
+
+    // When consoles are added outside an active Full/Incremental Sync, immediately kick off
+    // background auto-indexing for any newly added unindexed consoles (or queue it behind an
+    // active filtered index / download queue) so Catalog populates right away.
+    const activeRunHandlesLiveIndex =
+      this.activeRun !== null && isSyncRunEligibleForLiveRuleReload(this.activeRun);
+    if (
+      ruleDiff.changed &&
+      ruleDiff.consolesChanged &&
+      !this.shuttingDown &&
+      !activeRunHandlesLiveIndex
+    ) {
+      if (this.indexerState.active) {
+        if (this.indexerState.scope === 'filtered') {
+          this.pendingAutoIndexAfterCurrent = true;
+        }
+      } else {
+        void this.startCatalogIndex('filtered', { auto: true }).catch(() => undefined);
+      }
     }
 
     if (input.lastWatermarkAt !== undefined) {
@@ -2652,6 +2673,9 @@ export class ScraperOrchestrator extends EventEmitter {
           this.log('warn', `Catalog indexing paused: ${msg}`);
         }
       } finally {
+        const shouldChainAutoIndex =
+          !signal.aborted && !this.shuttingDown && this.pendingAutoIndexAfterCurrent;
+        this.pendingAutoIndexAfterCurrent = false;
         this.indexerState = {
           ...this.indexerState,
           active: false,
@@ -2661,6 +2685,9 @@ export class ScraperOrchestrator extends EventEmitter {
         this.emitCatalogUpdated('indexer_finished');
         this.emitStatus();
         this.evaluateAndEmitAchievements();
+        if (shouldChainAutoIndex) {
+          void this.startCatalogIndex('filtered', { auto: true }).catch(() => undefined);
+        }
       }
     })();
 
@@ -3895,6 +3922,9 @@ export class ScraperOrchestrator extends EventEmitter {
     let liveHasReleaseTypeFilter = liveAllowedReleaseTypes.length > 0;
     let observedRuleRevision = this.syncRulesRevision;
     let observedRuntimeRevision = this.runtimeConfigRevision;
+    let appliedRuleVersion = 0;
+    let lastWidenedRuleVersion = 0;
+    let lastAppliedRuleDiff: SyncRuleDiff | null = null;
     let knownDiscoveredSystems: string[] = filterValidSystemSlugs(liveCfg.discoveredSystems).map((s) =>
       s.toLowerCase(),
     );
@@ -4017,6 +4047,14 @@ export class ScraperOrchestrator extends EventEmitter {
         liveAllowedReleaseTypes = normalizeAllowedReleaseTypes(freshCfg.allowedReleaseTypes);
         liveHasReleaseTypeFilter = liveAllowedReleaseTypes.length > 0;
         liveTargetSystems = resolveTargetConsoleScope(freshCfg.systemFilter, combinedDiscovered);
+
+        if (diff.changed) {
+          appliedRuleVersion += 1;
+          lastAppliedRuleDiff = diff;
+          if (diff.releaseTypesWidened) {
+            lastWidenedRuleVersion = appliedRuleVersion;
+          }
+        }
 
         if (diff.releaseTypesWidened) {
           for (const url of typeSkippedReleaseUrls) {
@@ -4913,9 +4951,11 @@ export class ScraperOrchestrator extends EventEmitter {
         );
 
         const MAX_CONVERGENCE_PASSES = 25;
+        let observedFullWidenedVersion = lastWidenedRuleVersion;
         for (let pass = 0; pass < MAX_CONVERGENCE_PASSES && !signal.aborted; pass += 1) {
-          const prePassDiff = syncLiveRules();
-          if (prePassDiff?.releaseTypesWidened) {
+          syncLiveRules();
+          if (lastWidenedRuleVersion !== observedFullWidenedVersion) {
+            observedFullWidenedVersion = lastWidenedRuleVersion;
             for (const u of checkedOrMirroredUrls) {
               if (!verifiedOnDiskUrls.has(u) && !visitedReleasePages.has(u)) {
                 checkedOrMirroredUrls.delete(u);
@@ -4964,6 +5004,7 @@ export class ScraperOrchestrator extends EventEmitter {
                 : `${isDryRun ? 'Dry Run · ' : ''}Delta check ${systemSlug} (${completedCount}/${totalActiveConsoles})`;
               this.emitStatus();
 
+              let upsertedForConsole = 0;
               const wpRes = await this.client.listConsoleReleasesViaWpRest(systemSlug, liveCfg, {
                 modifiedAfterIso: deltaCutoffIso,
                 signal,
@@ -4976,19 +5017,38 @@ export class ScraperOrchestrator extends EventEmitter {
                     : `${isDryRun ? 'Dry Run · ' : ''}Delta ${systemSlug} · WP page ${wpPage}/${wpTotalPages}`;
                   persistCounters();
                 },
+                onPostsPage: isDryRun
+                  ? undefined
+                  : (pagePosts) => {
+                      let pageUpserted = 0;
+                      for (const post of pagePosts) {
+                        recordObservedTimestamp(post.dateGmt);
+                        recordObservedTimestamp(post.modifiedGmt);
+                        if (!post.link) continue;
+                        const existingItem = getRepositoryItemByRemoteUrl(post.link.split('#')[0]);
+                        upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, liveCfg, run.id));
+                        if (!existingItem) {
+                          upsertedForConsole += 1;
+                          pageUpserted += 1;
+                        }
+                      }
+                      if (pageUpserted > 0 || pagePosts.length > 0) {
+                        this.emitCatalogUpdated('sync_indexed');
+                      }
+                    },
               });
+
+              if (signal.aborted) break;
 
               if (wpRes.supported) {
                 successfulPages += 1;
                 if (needsFullIndex && wpRes.posts.length === 0) {
                   htmlFallbackSystemsSet.add(systemSlug);
                 } else {
-                  for (const post of wpRes.posts) {
-                    recordObservedTimestamp(post.dateGmt);
-                    recordObservedTimestamp(post.modifiedGmt);
-                  }
                   if (isDryRun) {
                     for (const post of wpRes.posts) {
+                      recordObservedTimestamp(post.dateGmt);
+                      recordObservedTimestamp(post.modifiedGmt);
                       if (post.link) {
                         dryRunSimulatedPosts.push({ systemSlug: canonicalSlug, post });
                       }
@@ -4997,18 +5057,8 @@ export class ScraperOrchestrator extends EventEmitter {
                       refreshedConsoles.push(canonicalSlug);
                     }
                   } else {
-                    let upsertedForConsole = 0;
-                    for (const post of wpRes.posts) {
-                      if (!post.link) continue;
-                      const existingItem = getRepositoryItemByRemoteUrl(post.link.split('#')[0]);
-                      upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, liveCfg, run.id));
-                      if (!existingItem) {
-                        upsertedForConsole += 1;
-                      }
-                    }
                     if (upsertedForConsole > 0) {
                       newDeltaDiscoveredCount += upsertedForConsole;
-                      this.emitCatalogUpdated('sync_indexed');
                     }
                     const nowIso = new Date().toISOString();
                     const hasExplicitFilterNow = liveCfg.systemFilter.trim().length > 0;
@@ -5174,6 +5224,7 @@ export class ScraperOrchestrator extends EventEmitter {
           }
 
           let rulesChangedDuringMirror = false;
+          const mirrorPassRuleVersion = appliedRuleVersion;
           if (!isDryRun && pendingLiveItems.length > 0) {
             runLogger(
               'info',
@@ -5194,13 +5245,13 @@ export class ScraperOrchestrator extends EventEmitter {
               async (item) => {
                 if (signal.aborted || rulesChangedDuringMirror) return;
 
-                const midDiff = syncLiveRules();
-                if (midDiff?.changed) {
+                syncLiveRules();
+                if (appliedRuleVersion !== mirrorPassRuleVersion) {
                   if (!rulesChangedDuringMirror) {
                     runLogger(
                       'info',
                       `[Live Rules] Reloaded active Full Sync queue`,
-                      `${midDiff.changeSummary} · Recalculating pending matches`,
+                      `${lastAppliedRuleDiff?.changeSummary || 'Sync Rules updated'} · Recalculating pending matches`,
                     );
                   }
                   rulesChangedDuringMirror = true;
@@ -5261,8 +5312,8 @@ export class ScraperOrchestrator extends EventEmitter {
           for (const fallbackSlug of htmlFallbackSystemsSet) {
             if (signal.aborted) break;
             if (crawledHtmlFallbackSet.has(fallbackSlug)) continue;
-            const midDiff = syncLiveRules();
-            if (midDiff?.changed) {
+            syncLiveRules();
+            if (appliedRuleVersion !== mirrorPassRuleVersion) {
               rulesChangedDuringMirror = true;
               break;
             }
@@ -5275,8 +5326,8 @@ export class ScraperOrchestrator extends EventEmitter {
             await crawlHtmlScope([consoleHtmlUrl], fallbackSlug);
           }
 
-          const postPassDiff = syncLiveRules();
-          if (postPassDiff?.changed) {
+          syncLiveRules();
+          if (appliedRuleVersion !== mirrorPassRuleVersion) {
             rulesChangedDuringMirror = true;
           }
 
@@ -5433,6 +5484,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
           let consoleRemovedMidPass = false;
           let deltaProgressCount = 0;
+          const deltaPassWidenedVersion = lastWidenedRuleVersion;
           await runWithConcurrency(
             posts,
             () => {
@@ -5442,8 +5494,8 @@ export class ScraperOrchestrator extends EventEmitter {
             signal,
             async (post) => {
               if (signal.aborted || consoleRemovedMidPass) return;
-              const diff = syncLiveRules();
-              if (diff?.releaseTypesWidened) {
+              syncLiveRules();
+              if (lastWidenedRuleVersion !== deltaPassWidenedVersion) {
                 rulesWidened = true;
               }
               if (!isConsoleAllowedBySyncRules(systemSlug, liveCfg)) {
@@ -5516,10 +5568,12 @@ export class ScraperOrchestrator extends EventEmitter {
 
         const MAX_DELTA_PASSES = 25;
         let pendingReplayForWidenedTypes = false;
+        let observedDeltaWidenedVersion = lastWidenedRuleVersion;
 
         for (let pass = 0; pass < MAX_DELTA_PASSES && !signal.aborted; pass += 1) {
-          const passDiff = syncLiveRules();
-          if (passDiff?.releaseTypesWidened) {
+          syncLiveRules();
+          if (lastWidenedRuleVersion !== observedDeltaWidenedVersion) {
+            observedDeltaWidenedVersion = lastWidenedRuleVersion;
             pendingReplayForWidenedTypes = true;
           }
 
@@ -5527,8 +5581,9 @@ export class ScraperOrchestrator extends EventEmitter {
           let consoleGuard = 0;
           while (!signal.aborted && consoleGuard < 200) {
             consoleGuard += 1;
-            const stepDiff = syncLiveRules();
-            if (stepDiff?.releaseTypesWidened) {
+            syncLiveRules();
+            if (lastWidenedRuleVersion !== observedDeltaWidenedVersion) {
+              observedDeltaWidenedVersion = lastWidenedRuleVersion;
               pendingReplayForWidenedTypes = true;
             }
 
@@ -5728,8 +5783,9 @@ export class ScraperOrchestrator extends EventEmitter {
           }
 
           // If release types were widened mid-run, re-evaluate cached delta posts for still-allowed consoles
-          const endPassDiff = syncLiveRules();
-          if (endPassDiff?.releaseTypesWidened) {
+          syncLiveRules();
+          if (lastWidenedRuleVersion !== observedDeltaWidenedVersion) {
+            observedDeltaWidenedVersion = lastWidenedRuleVersion;
             pendingReplayForWidenedTypes = true;
           }
 
