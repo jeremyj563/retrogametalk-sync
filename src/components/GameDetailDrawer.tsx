@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  ArrowUpCircle,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -29,6 +30,10 @@ import {
   ZoomIn,
 } from 'lucide-react';
 import { isBrowsableArchiveName } from '../shared/archiveTree';
+import {
+  classifyInstalledUpdateState,
+  formatInstalledUpdateComparison,
+} from '../shared/deviceInstallUpdates';
 import type {
   ActiveTransferState,
   ArchiveBrowseListing,
@@ -95,6 +100,7 @@ interface GameDetailDrawerProps {
   onQueueDownload?: (ids: number[]) => Promise<unknown>;
   onDeleteItem: (id: number) => Promise<void>;
   onExpressInstallToDevice?: (id: number) => void;
+  onUpgradeOnDevice?: (id: number) => void;
   onExportToSdCard?: (id: number) => void;
   onCancelDeviceInstall?: () => void;
   onDismissDeviceInstall?: () => void;
@@ -283,6 +289,7 @@ export function GameDetailDrawer({
   onQueueDownload,
   onDeleteItem,
   onExpressInstallToDevice,
+  onUpgradeOnDevice,
   onExportToSdCard,
   onCancelDeviceInstall,
   onDismissDeviceInstall,
@@ -1324,20 +1331,37 @@ export function GameDetailDrawer({
                       : item.status
                   : item.status}
               </span>
-              {item.installedAt && (
-                <span
-                  title={`Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`}
-                  className="inline-flex items-center gap-1.5 font-mono text-xs text-crt-text/90"
-                >
-                  <span aria-hidden="true" className="text-crt-muted">
-                    ·
+              {item.installedAt && (() => {
+                const headerUpdateInfo = classifyInstalledUpdateState(item);
+                return (
+                  <span
+                    title={
+                      headerUpdateInfo.tooltip ||
+                      `Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`
+                    }
+                    className="inline-flex items-center gap-1.5 font-mono text-xs text-crt-text/90"
+                  >
+                    <span aria-hidden="true" className="text-crt-muted">
+                      ·
+                    </span>
+                    <HardDrive className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
+                    <span>
+                      Installed{item.installedDeviceLabel ? ` (${item.installedDeviceLabel})` : ''}
+                    </span>
+                    {headerUpdateInfo.hasUpdate && headerUpdateInfo.summaryLabel && (
+                      <>
+                        <span aria-hidden="true" className="text-crt-muted">
+                          ·
+                        </span>
+                        <span className="inline-flex items-center gap-1 text-crt-amber font-medium">
+                          <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
+                          <span>{headerUpdateInfo.summaryLabel}</span>
+                        </span>
+                      </>
+                    )}
                   </span>
-                  <HardDrive className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
-                  <span>
-                    Installed{item.installedDeviceLabel ? ` (${item.installedDeviceLabel})` : ''}
-                  </span>
-                </span>
-              )}
+                );
+              })()}
             </div>
             <p className="text-xs font-mono text-crt-muted truncate">
               {subtitleParts.join(' · ')}
@@ -2352,7 +2376,9 @@ export function GameDetailDrawer({
 
         {/* Unified Sticky Footer */}
         {(() => {
-          const canInstallToDevice = Boolean(onExpressInstallToDevice || onExportToSdCard);
+          const updateInfo = classifyInstalledUpdateState(item);
+          const updateComparison = formatInstalledUpdateComparison(updateInfo);
+          const canInstallToDevice = Boolean(onUpgradeOnDevice || onExpressInstallToDevice || onExportToSdCard);
           const footerPlan = resolveGameDetailFooterPlan({
             hasDownloadedFile: Boolean(primaryDownloadFile),
             canQueueRelease,
@@ -2362,6 +2388,7 @@ export function GameDetailDrawer({
             canInstallToDevice,
             installedAt: item.installedAt,
             installedDeviceLabel: item.installedDeviceLabel,
+            isUpdateReadyLocal: updateInfo.readyToUpgradeLocal,
           });
           const isPreparingPrimary = Boolean(
             primaryDownloadFile && inspectingFileId === primaryDownloadFile.id,
@@ -2379,12 +2406,16 @@ export function GameDetailDrawer({
                 : deviceInstallState?.stage === 'canceling'
                   ? 'Stopping…'
                   : deviceInstallState?.percent !== null && deviceInstallState?.percent !== undefined
-                    ? `Installing… ${deviceInstallState.percent}%`
-                    : 'Installing…';
+                    ? `${updateInfo.readyToUpgradeLocal ? 'Updating…' : 'Installing…'} ${deviceInstallState.percent}%`
+                    : updateInfo.readyToUpgradeLocal
+                      ? 'Updating…'
+                      : 'Installing…';
           const handleOneClickDeviceInstall = () => {
             setMoreMenuOpen(false);
             setDismissedInstallJobId(null);
-            if (onExpressInstallToDevice) {
+            if (updateInfo.readyToUpgradeLocal && onUpgradeOnDevice) {
+              onUpgradeOnDevice(item.id);
+            } else if (onExpressInstallToDevice) {
               onExpressInstallToDevice(item.id);
             } else if (onExportToSdCard) {
               onExportToSdCard(item.id);
@@ -2394,12 +2425,41 @@ export function GameDetailDrawer({
           const installActionTooltip = formatQuickInstallTooltip({
             mountedDeviceName,
             isReinstall: footerPlan.isReinstallOnMountedDevice,
+            isUpdateAvailable: updateInfo.readyToUpgradeLocal,
             isActive: isThisItemInstalling,
             isOtherBusy: isAnotherDeviceInstallBusy,
           });
 
           return (
-            <footer className="px-6 py-3.5 border-t border-crt-border bg-crt-bg flex items-center justify-between gap-3 shrink-0">
+            <>
+              {updateInfo.hasUpdate && !isThisItemInstalling && (
+                <div className="px-6 py-2 border-t border-crt-amber/35 bg-crt-amber/8 flex flex-wrap items-center justify-between gap-2 text-xs font-mono shrink-0">
+                  <div className="flex items-center gap-2 min-w-0 text-crt-amber">
+                    <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
+                    <span className="font-semibold shrink-0">{updateInfo.summaryLabel}</span>
+                    {updateComparison && (
+                      <span className="text-crt-text/85 truncate">{updateComparison}</span>
+                    )}
+                  </div>
+                  {updateInfo.needsLocalDownload && onQueueDownload && (
+                    <button
+                      type="button"
+                      disabled={queueingDownload || !canSync}
+                      title={
+                        !canSync
+                          ? 'Verify login in System Settings before downloading'
+                          : 'Download the latest release files from RetroGameTalk'
+                      }
+                      onClick={() => void handleQueueReleaseDownload()}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold bg-crt-amber text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      <Download className="h-3 w-3 shrink-0" />
+                      {queueingDownload ? 'Queueing...' : 'Download Update'}
+                    </button>
+                  )}
+                </div>
+              )}
+              <footer className="px-6 py-3.5 border-t border-crt-border bg-crt-bg flex items-center justify-between gap-3 shrink-0">
               <div className="flex flex-wrap items-center gap-2.5 min-w-0">
                 {footerPlan.primaryAction === 'install_mounted' && primaryDownloadFile && (
                   <>
@@ -2408,10 +2468,16 @@ export function GameDetailDrawer({
                       disabled={isThisItemInstalling || isAnotherDeviceInstallBusy}
                       onClick={handleOneClickDeviceInstall}
                       title={installActionTooltip}
-                      className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer tabular-nums"
+                      className={`crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer tabular-nums ${
+                        footerPlan.isUpdateOnMountedDevice
+                          ? 'bg-crt-amber text-crt-bg'
+                          : 'bg-crt-phosphor text-crt-bg'
+                      }`}
                     >
                       {isThisItemInstalling ? (
                         <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
+                      ) : footerPlan.isUpdateOnMountedDevice ? (
+                        <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
                       ) : (
                         <HardDrive className="h-3.5 w-3.5 shrink-0" />
                       )}
@@ -2463,16 +2529,22 @@ export function GameDetailDrawer({
                           : 'Download ROM'}
                     </button>
                     {footerPlan.secondaryAction === 'install_unmounted' &&
-                      (onExpressInstallToDevice || onExportToSdCard) && (
+                      (onUpgradeOnDevice || onExpressInstallToDevice || onExportToSdCard) && (
                         <button
                           type="button"
                           disabled={isThisItemInstalling || isAnotherDeviceInstallBusy}
                           onClick={handleOneClickDeviceInstall}
                           title={installActionTooltip}
-                          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium border border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer tabular-nums"
+                          className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium border rounded transition-colors whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer tabular-nums ${
+                            updateInfo.readyToUpgradeLocal
+                              ? 'border-crt-amber/70 bg-crt-amber/12 text-crt-amber hover:bg-crt-amber/20'
+                              : 'border-crt-border bg-crt-surface hover:bg-crt-elevated hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor'
+                          }`}
                         >
                           {isThisItemInstalling ? (
                             <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
+                          ) : updateInfo.readyToUpgradeLocal ? (
+                            <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
                           ) : (
                             <HardDrive className="h-3.5 w-3.5 shrink-0" />
                           )}
@@ -2736,6 +2808,7 @@ export function GameDetailDrawer({
                 )}
               </div>
             </footer>
+            </>
           );
         })()}
         </div>

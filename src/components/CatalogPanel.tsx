@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowDown,
   ArrowUp,
+  ArrowUpCircle,
   ArrowUpDown,
   BarChart3,
   CheckCircle2,
@@ -61,6 +62,7 @@ import {
   formatSyncRuleScopeSummary,
   resolveTargetConsoleScope,
 } from '../shared/syncRuleMatcher';
+import { classifyInstalledUpdateState } from '../shared/deviceInstallUpdates';
 import type {
   ArchiveBrowseListing,
   CatalogDownloadedFilter,
@@ -70,6 +72,7 @@ import type {
   FilterMatchMode,
   FsTreeNode,
   ItemStatus,
+  OutdatedInstalledSummary,
   RepositoryItemRecord,
   ScraperConfigPublic,
   ServiceStatusSnapshot,
@@ -102,6 +105,7 @@ interface CatalogPanelProps {
   filterPreset?: {
     syncRulesOnly?: boolean;
     downloadedFilter?: CatalogDownloadedFilter;
+    installedFilter?: CatalogInstalledFilter;
     nonce: number;
   } | null;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
@@ -375,7 +379,7 @@ function sanitizeStoredMatchMode(raw: unknown): FilterMatchMode {
 }
 
 function sanitizeStoredInstalledFilter(raw: unknown): CatalogInstalledFilter {
-  if (raw === 'only' || raw === 'exclude') return raw;
+  if (raw === 'only' || raw === 'exclude' || raw === 'outdated') return raw;
   return 'all';
 }
 
@@ -593,6 +597,12 @@ export function CatalogPanel({
     if (filterPreset.downloadedFilter) {
       setDownloadedFilter(filterPreset.downloadedFilter);
       if (filterPreset.downloadedFilter === 'only') {
+        setStatuses([]);
+      }
+    }
+    if (filterPreset.installedFilter) {
+      setInstalledFilter(filterPreset.installedFilter);
+      if (filterPreset.installedFilter === 'outdated') {
         setStatuses([]);
       }
     }
@@ -1288,12 +1298,17 @@ export function CatalogPanel({
   const knownItemMetaMap = useMemo(() => {
     const map = new Map<number, BulkInstallKnownItemMeta>();
     for (const item of items) {
-      map.set(item.id, { title: item.title, systemName: item.systemName });
+      map.set(item.id, {
+        title: item.title,
+        systemName: item.systemName,
+        previousInstalledFilename: item.installedFilename,
+      });
     }
     if (activeDetailItem && !map.has(activeDetailItem.id)) {
       map.set(activeDetailItem.id, {
         title: activeDetailItem.title,
         systemName: activeDetailItem.systemName,
+        previousInstalledFilename: activeDetailItem.installedFilename,
       });
     }
     return map;
@@ -1329,7 +1344,10 @@ export function CatalogPanel({
   const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
 
   const handleQuickInstallIds = useCallback(
-    (ids: number[], itemHint?: Pick<RepositoryItemRecord, 'id' | 'title' | 'systemName'>) => {
+    (
+      ids: number[],
+      itemHint?: Pick<RepositoryItemRecord, 'id' | 'title' | 'systemName' | 'installedFilename'>,
+    ) => {
       if (ids.length === 0) return;
       if (installer.isBusy) {
         if (ids.some((id) => installer.job?.itemIds.includes(id))) {
@@ -1339,7 +1357,11 @@ export function CatalogPanel({
       }
       const metaMap = new Map(knownItemMetaMap);
       if (itemHint) {
-        metaMap.set(itemHint.id, { title: itemHint.title, systemName: itemHint.systemName });
+        metaMap.set(itemHint.id, {
+          title: itemHint.title,
+          systemName: itemHint.systemName,
+          previousInstalledFilename: itemHint.installedFilename,
+        });
       }
       if (sdRootHandle || fsSupport.supported) {
         void installer.startExpressInstall(ids, currentSmartFilterContext, metaMap);
@@ -1355,6 +1377,42 @@ export function CatalogPanel({
       handleQuickInstallIds([item.id], item);
     },
     [handleQuickInstallIds],
+  );
+
+  const handleUpgradeIds = useCallback(
+    (
+      ids: number[],
+      itemHint?: Pick<RepositoryItemRecord, 'id' | 'title' | 'systemName' | 'installedFilename'>,
+    ) => {
+      if (ids.length === 0) return;
+      if (installer.isBusy) {
+        if (ids.some((id) => installer.job?.itemIds.includes(id))) {
+          installer.openModal();
+        }
+        return;
+      }
+      const metaMap = new Map(knownItemMetaMap);
+      if (itemHint) {
+        metaMap.set(itemHint.id, {
+          title: itemHint.title,
+          systemName: itemHint.systemName,
+          previousInstalledFilename: itemHint.installedFilename,
+        });
+      }
+      if (sdRootHandle || fsSupport.supported) {
+        void installer.upgradeOutdatedItems(ids, currentSmartFilterContext, metaMap);
+      } else {
+        void installer.openReviewQueue(ids, currentSmartFilterContext, metaMap);
+      }
+    },
+    [installer, knownItemMetaMap, sdRootHandle, fsSupport.supported, currentSmartFilterContext],
+  );
+
+  const handleUpgradeItem = useCallback(
+    (item: RepositoryItemRecord) => {
+      handleUpgradeIds([item.id], item);
+    },
+    [handleUpgradeIds],
   );
 
   const activeDetailInstallState = useMemo(
@@ -1637,6 +1695,55 @@ export function CatalogPanel({
       } else {
         setQueueingBulk(false);
       }
+    }
+  };
+
+  const handleBatchOutdatedAction = async (action: 'upgrade_local' | 'download_remote') => {
+    try {
+      const res = await fetch('/api/items/outdated');
+      const parsed = await readJsonSafely<OutdatedInstalledSummary>(res);
+      if (!parsed.ok || !parsed.data) {
+        setQueueNotice(parsed.errorMessage || 'Failed to inspect outdated installed games.');
+        return;
+      }
+      if (action === 'upgrade_local') {
+        if (parsed.data.localReadyIds.length === 0) {
+          setQueueNotice('No local ROM updates are ready to stream yet — download remote updates first.');
+          return;
+        }
+        const metaMap = new Map(knownItemMetaMap);
+        for (const entry of parsed.data.items) {
+          if (entry.updateState === 'update_ready_local') {
+            metaMap.set(entry.id, {
+              title: entry.title,
+              systemName: entry.systemName,
+              previousInstalledFilename: entry.installedFilename,
+            });
+          }
+        }
+        if (sdRootHandle || fsSupport.supported) {
+          await installer.upgradeOutdatedItems(
+            parsed.data.localReadyIds,
+            currentSmartFilterContext,
+            metaMap,
+          );
+        } else {
+          await installer.openReviewQueue(
+            parsed.data.localReadyIds,
+            currentSmartFilterContext,
+            metaMap,
+          );
+        }
+        return;
+      }
+
+      if (parsed.data.remoteOnlyIds.length === 0) {
+        setQueueNotice('All outdated installed games already have their latest files downloaded locally.');
+        return;
+      }
+      await handleQueueIds(parsed.data.remoteOnlyIds);
+    } catch (err) {
+      setQueueNotice(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -2038,6 +2145,14 @@ export function CatalogPanel({
         key: 'installed',
         groupLabel: 'Install',
         valueLabel: 'Not Installed',
+        matchAll: false,
+        onRemove: () => setInstalledFilter('all'),
+      });
+    } else if (installedFilter === 'outdated') {
+      tokens.push({
+        key: 'installed',
+        groupLabel: 'Install',
+        valueLabel: 'Updates Available',
         matchAll: false,
         onRemove: () => setInstalledFilter('all'),
       });
@@ -2598,6 +2713,34 @@ export function CatalogPanel({
                       </span>
                     )}
                   </button>
+                  {((facets.counts?.installed?.outdated ?? 0) > 0 ||
+                    installedFilter === 'outdated') && (
+                    <button
+                      type="button"
+                      aria-pressed={installedFilter === 'outdated'}
+                      onClick={() =>
+                        setInstalledFilter((prev) => (prev === 'outdated' ? 'all' : 'outdated'))
+                      }
+                      title={
+                        installedFilter === 'outdated'
+                          ? 'Click to clear Updates filter and show all matching games'
+                          : 'Show installed games with newer local or RetroGameTalk versions available'
+                      }
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        installedFilter === 'outdated'
+                          ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
+                          : 'bg-crt-bg text-crt-amber border-crt-amber/45 hover:border-crt-amber'
+                      }`}
+                    >
+                      <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
+                      <span>Updates</span>
+                      {facets.counts?.installed && (
+                        <span className="font-mono text-[11px] tabular-nums text-crt-amber/90">
+                          ({facets.counts.installed.outdated.toLocaleString()})
+                        </span>
+                      )}
+                    </button>
+                  )}
                 </div>
 
                 <span
@@ -2962,6 +3105,70 @@ export function CatalogPanel({
                 </button>
               </div>
             )}
+
+            {installedFilter === 'outdated' && (() => {
+              const globalOutdatedTotal = status.totals.outdatedInstalledItems ?? 0;
+              const globalLocalReady = status.totals.outdatedLocalReadyItems ?? 0;
+              const globalRemoteOnly = Math.max(0, globalOutdatedTotal - globalLocalReady);
+              if (globalOutdatedTotal === 0 && totalItems === 0) return null;
+              return (
+                <div className="border border-crt-amber/40 bg-crt-amber/8 rounded px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+                  <div className="flex items-center gap-2 min-w-0 text-crt-amber">
+                    <ArrowUpCircle className="h-4 w-4 shrink-0" />
+                    <span className="truncate">
+                      <span className="font-semibold">Installed ROM Updates</span>
+                      <span className="text-crt-text/85">
+                        {' · '}
+                        {globalLocalReady.toLocaleString()} ready locally
+                        {globalRemoteOnly > 0
+                          ? ` · ${globalRemoteOnly.toLocaleString()} newer on RGT`
+                          : ''}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {globalLocalReady > 0 && (
+                      <button
+                        type="button"
+                        disabled={installer.isBusy}
+                        onClick={() => void handleBatchOutdatedAction('upgrade_local')}
+                        title={
+                          sdRootHandle
+                            ? `Upgrade all ${globalLocalReady} ready ROMs directly on ${sdRootHandle.name} (replaces superseded copies)`
+                            : `Mount a storage device and upgrade all ${globalLocalReady} ready ROMs`
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-semibold bg-crt-amber text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
+                        {formatQuickInstallLabel({
+                          mountedDeviceName: sdRootHandle?.name || null,
+                          isUpdateAvailable: true,
+                          count: globalLocalReady,
+                        })}
+                      </button>
+                    )}
+                    {globalRemoteOnly > 0 && onQueueDownload && (
+                      <button
+                        type="button"
+                        disabled={queueingBulk || !status.auth.hasCompletedLogin}
+                        onClick={() => void handleBatchOutdatedAction('download_remote')}
+                        title={
+                          !status.auth.hasCompletedLogin
+                            ? 'Verify login in System Settings before downloading'
+                            : `Queue ${globalRemoteOnly} updated release${globalRemoteOnly === 1 ? '' : 's'} from RetroGameTalk`
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-medium border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/15 rounded transition-colors whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        <Download className="h-3.5 w-3.5 shrink-0" />
+                        {queueingBulk
+                          ? 'Queueing...'
+                          : `Download Updates (${globalRemoteOnly.toLocaleString()})`}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -3343,6 +3550,7 @@ export function CatalogPanel({
                           item.installedDeviceLabel.trim().toLowerCase() ===
                             sdRootHandle.name.trim().toLowerCase()),
                     );
+                    const updateInfo = classifyInstalledUpdateState(item);
                     const isOtherInstallBusy = installer.isBusy && !itemInstall.isActive;
 
                     return (
@@ -3581,13 +3789,26 @@ export function CatalogPanel({
                               </span>
                               {item.installedAt && (
                                 <div
-                                  title={`Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`}
-                                  className="flex items-center gap-1.5 text-[11px] text-crt-text/90"
+                                  title={
+                                    updateInfo.tooltip ||
+                                    `Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`
+                                  }
+                                  className="space-y-0.5"
                                 >
-                                  <HardDrive className="h-3 w-3 text-crt-phosphor shrink-0" />
-                                  <span className="truncate max-w-[140px]">
-                                    Installed{item.installedDeviceLabel ? ` · ${item.installedDeviceLabel}` : ''}
-                                  </span>
+                                  <div className="flex items-center gap-1.5 text-[11px] text-crt-text/90">
+                                    <HardDrive className="h-3 w-3 text-crt-phosphor shrink-0" />
+                                    <span className="truncate max-w-[140px]">
+                                      Installed{item.installedDeviceLabel ? ` · ${item.installedDeviceLabel}` : ''}
+                                    </span>
+                                  </div>
+                                  {updateInfo.hasUpdate && updateInfo.summaryLabel && (
+                                    <div className="flex items-center gap-1 text-[11px] text-crt-amber font-medium">
+                                      <ArrowUpCircle className="h-3 w-3 shrink-0" />
+                                      <span className="truncate max-w-[140px]">
+                                        {updateInfo.summaryLabel}
+                                      </span>
+                                    </div>
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -3667,27 +3888,61 @@ export function CatalogPanel({
                                   </span>
                                 )}
 
-                                {canQuickInstall && (
+                                {updateInfo.needsLocalDownload && onQueueDownload ? (
+                                  <button
+                                    type="button"
+                                    disabled={queueingIds.has(item.id) || !status.auth.hasCompletedLogin}
+                                    title={
+                                      !status.auth.hasCompletedLogin
+                                        ? 'Verify login in System Settings before downloading'
+                                        : updateInfo.tooltip || 'Download latest update from RetroGameTalk'
+                                    }
+                                    onClick={() => void handleQueueIds([item.id])}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-amber/70 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                                  >
+                                    <Download className="h-3 w-3 shrink-0" />
+                                    {queueingIds.has(item.id) ? 'Queueing...' : 'Download Update'}
+                                  </button>
+                                ) : canQuickInstall ? (
                                   <button
                                     type="button"
                                     disabled={isOtherInstallBusy}
-                                    title={formatQuickInstallTooltip({
-                                      mountedDeviceName: sdRootHandle?.name || null,
-                                      isReinstall: isReinstallOnMounted,
-                                      isActive: itemInstall.isActive,
-                                      isOtherBusy: isOtherInstallBusy,
-                                    })}
-                                    onClick={() => handleQuickInstallItem(item)}
+                                    title={
+                                      updateInfo.readyToUpgradeLocal
+                                        ? updateInfo.tooltip ||
+                                          formatQuickInstallTooltip({
+                                            mountedDeviceName: sdRootHandle?.name || null,
+                                            isReinstall: isReinstallOnMounted,
+                                            isUpdateAvailable: true,
+                                            isActive: itemInstall.isActive,
+                                            isOtherBusy: isOtherInstallBusy,
+                                          })
+                                        : formatQuickInstallTooltip({
+                                            mountedDeviceName: sdRootHandle?.name || null,
+                                            isReinstall: isReinstallOnMounted,
+                                            isActive: itemInstall.isActive,
+                                            isOtherBusy: isOtherInstallBusy,
+                                          })
+                                    }
+                                    onClick={() =>
+                                      updateInfo.readyToUpgradeLocal
+                                        ? handleUpgradeItem(item)
+                                        : handleQuickInstallItem(item)
+                                    }
                                     className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border rounded transition-colors disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer tabular-nums ${
                                       itemInstall.isActive
                                         ? 'border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor'
-                                        : isReinstallOnMounted
-                                          ? 'border-crt-border text-crt-muted hover:border-crt-phosphor hover:text-crt-phosphor'
-                                          : 'border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10'
+                                        : updateInfo.readyToUpgradeLocal
+                                          ? 'border-crt-amber/70 bg-crt-amber/12 text-crt-amber hover:bg-crt-amber/20'
+                                          : isReinstallOnMounted
+                                            ? 'border-crt-border text-crt-muted hover:border-crt-phosphor hover:text-crt-phosphor'
+                                            : 'border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10'
                                     }`}
                                   >
                                     {itemInstall.isActive ? (
                                       <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                                    ) : updateInfo.readyToUpgradeLocal ? (
+                                      <ArrowUpCircle className="h-3 w-3 shrink-0" />
                                     ) : (
                                       <HardDrive className="h-3 w-3 shrink-0" />
                                     )}
@@ -3696,14 +3951,17 @@ export function CatalogPanel({
                                         ? `${itemInstall.percent}%`
                                         : itemInstall.stage === 'queued'
                                           ? 'Queued'
-                                          : 'Installing'
+                                          : updateInfo.readyToUpgradeLocal
+                                            ? 'Updating'
+                                            : 'Installing'
                                       : formatQuickInstallLabel({
                                           mountedDeviceName: sdRootHandle?.name || null,
                                           isReinstall: isReinstallOnMounted,
+                                          isUpdateAvailable: updateInfo.readyToUpgradeLocal,
                                           compact: true,
                                         })}
                                   </button>
-                                )}
+                                ) : null}
 
                                 {(item.status === 'failed' || item.status === 'partial') && (
                                   <button
@@ -3805,6 +4063,7 @@ export function CatalogPanel({
                         item.installedDeviceLabel.trim().toLowerCase() ===
                           sdRootHandle.name.trim().toLowerCase()),
                   );
+                  const updateInfo = classifyInstalledUpdateState(item);
                   const isOtherInstallBusy = installer.isBusy && !itemInstall.isActive;
 
                   return (
@@ -3986,15 +4245,26 @@ export function CatalogPanel({
                           <p className="font-mono text-[11px] text-crt-muted truncate">{subline}</p>
                           <p className="font-mono text-[11px] text-crt-phosphor/90 truncate">{tagsDisplay}</p>
                           {item.installedAt && (
-                            <p
-                              title={`Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`}
-                              className="flex items-center gap-1.5 font-mono text-[11px] text-crt-text/90 truncate pt-0.5"
+                            <div
+                              title={
+                                updateInfo.tooltip ||
+                                `Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`
+                              }
+                              className="space-y-0.5 pt-0.5"
                             >
-                              <HardDrive className="h-3 w-3 text-crt-phosphor shrink-0" />
-                              <span className="truncate">
-                                Installed{item.installedDeviceLabel ? ` · ${item.installedDeviceLabel}` : ''}
-                              </span>
-                            </p>
+                              <p className="flex items-center gap-1.5 font-mono text-[11px] text-crt-text/90 truncate">
+                                <HardDrive className="h-3 w-3 text-crt-phosphor shrink-0" />
+                                <span className="truncate">
+                                  Installed{item.installedDeviceLabel ? ` · ${item.installedDeviceLabel}` : ''}
+                                </span>
+                              </p>
+                              {updateInfo.hasUpdate && updateInfo.summaryLabel && (
+                                <p className="flex items-center gap-1 font-mono text-[11px] text-crt-amber font-medium truncate">
+                                  <ArrowUpCircle className="h-3 w-3 shrink-0" />
+                                  <span className="truncate">{updateInfo.summaryLabel}</span>
+                                </p>
+                              )}
+                            </div>
                           )}
                         </div>
 
@@ -4083,7 +4353,25 @@ export function CatalogPanel({
                               {item.sizeIsEstimated && item.fileSizeBytes > 0 ? '~' : ''}
                               {formatBytes(item.fileSizeBytes)} · {item.filesCount}f
                             </span>
-                            {item.status === 'available' && onQueueDownload ? (
+                            {updateInfo.needsLocalDownload && onQueueDownload ? (
+                              <button
+                                type="button"
+                                disabled={queueingIds.has(item.id) || !status.auth.hasCompletedLogin}
+                                title={
+                                  !status.auth.hasCompletedLogin
+                                    ? 'Verify login in System Settings before downloading'
+                                    : updateInfo.tooltip || 'Download latest update from RetroGameTalk'
+                                }
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleQueueIds([item.id]);
+                                }}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium border border-crt-amber/70 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                              >
+                                <Download className="h-3 w-3 shrink-0" />
+                                {queueingIds.has(item.id) ? 'Queueing' : 'Download Update'}
+                              </button>
+                            ) : item.status === 'available' && onQueueDownload ? (
                               <button
                                 type="button"
                                 disabled={queueingIds.has(item.id) || !status.auth.hasCompletedLogin}
@@ -4105,26 +4393,48 @@ export function CatalogPanel({
                               <button
                                 type="button"
                                 disabled={isOtherInstallBusy}
-                                title={formatQuickInstallTooltip({
-                                  mountedDeviceName: sdRootHandle?.name || null,
-                                  isReinstall: isReinstallOnMounted,
-                                  isActive: false,
-                                  isOtherBusy: isOtherInstallBusy,
-                                })}
+                                title={
+                                  updateInfo.readyToUpgradeLocal
+                                    ? updateInfo.tooltip ||
+                                      formatQuickInstallTooltip({
+                                        mountedDeviceName: sdRootHandle?.name || null,
+                                        isReinstall: isReinstallOnMounted,
+                                        isUpdateAvailable: true,
+                                        isActive: false,
+                                        isOtherBusy: isOtherInstallBusy,
+                                      })
+                                    : formatQuickInstallTooltip({
+                                        mountedDeviceName: sdRootHandle?.name || null,
+                                        isReinstall: isReinstallOnMounted,
+                                        isActive: false,
+                                        isOtherBusy: isOtherInstallBusy,
+                                      })
+                                }
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  handleQuickInstallItem(item);
+                                  if (updateInfo.readyToUpgradeLocal) {
+                                    handleUpgradeItem(item);
+                                  } else {
+                                    handleQuickInstallItem(item);
+                                  }
                                 }}
                                 className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium border rounded transition-colors shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer ${
-                                  isReinstallOnMounted
-                                    ? 'border-crt-border text-crt-muted hover:border-crt-phosphor hover:text-crt-phosphor'
-                                    : 'border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10'
+                                  updateInfo.readyToUpgradeLocal
+                                    ? 'border-crt-amber/70 bg-crt-amber/12 text-crt-amber hover:bg-crt-amber/20'
+                                    : isReinstallOnMounted
+                                      ? 'border-crt-border text-crt-muted hover:border-crt-phosphor hover:text-crt-phosphor'
+                                      : 'border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10'
                                 }`}
                               >
-                                <HardDrive className="h-3 w-3 shrink-0" />
+                                {updateInfo.readyToUpgradeLocal ? (
+                                  <ArrowUpCircle className="h-3 w-3 shrink-0" />
+                                ) : (
+                                  <HardDrive className="h-3 w-3 shrink-0" />
+                                )}
                                 {formatQuickInstallLabel({
                                   mountedDeviceName: sdRootHandle?.name || null,
                                   isReinstall: isReinstallOnMounted,
+                                  isUpdateAvailable: updateInfo.readyToUpgradeLocal,
                                   compact: true,
                                 })}
                               </button>
@@ -4467,6 +4777,12 @@ export function CatalogPanel({
         onQueueDownload={onQueueDownload ? (ids) => handleQueueIds(ids) : undefined}
         onExpressInstallToDevice={(id) =>
           handleQuickInstallIds(
+            [id],
+            activeDetailItem && activeDetailItem.id === id ? activeDetailItem : undefined,
+          )
+        }
+        onUpgradeOnDevice={(id) =>
+          handleUpgradeIds(
             [id],
             activeDetailItem && activeDetailItem.id === id ? activeDetailItem : undefined,
           )
