@@ -19,6 +19,7 @@ import {
   Languages,
   Pause,
   RefreshCw,
+  RotateCcw,
   Search,
   X,
 } from 'lucide-react';
@@ -75,7 +76,10 @@ interface SyncRulesPanelProps {
   focusRequest?: ConfigFocusRequest | null;
   onDirtyChange?: (state: ConfigDirtyState) => void;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<ConfigSaveResult | void>;
-  onStartCatalogIndex?: (scope: 'filtered' | 'full') => Promise<void>;
+  onStartCatalogIndex?: (
+    scope: 'filtered' | 'full',
+    options?: { forceFull?: boolean },
+  ) => Promise<void>;
   onStopCatalogIndex?: () => Promise<void>;
   onPreviewRuleMatchesInCatalog?: () => void;
   onNavigateToAuth?: () => void;
@@ -1192,6 +1196,10 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
             const indexer = status.indexer;
             const staleCount = preflight?.staleConsoles.length ?? 0;
             const unindexedCount = preflight?.unindexedConsoles.length ?? 0;
+            const targetSystemsCount = preflight?.targetSystemsCount ?? 0;
+            const allTargetsIndexed = targetSystemsCount > 0 && unindexedCount === 0;
+            const hasAnyIndexedTarget = targetSystemsCount > unindexedCount;
+            const isDeltaRun = indexer.mode === 'delta';
             const readinessIssues: string[] = [];
             if (unindexedCount > 0) readinessIssues.push(`${unindexedCount} unindexed`);
             if (staleCount > 0) readinessIssues.push(`${staleCount} stale (>12h)`);
@@ -1203,13 +1211,16 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
                     <span aria-hidden="true" className="text-crt-muted">·</span>
                     {indexer.active ? (
                       <span className="text-crt-phosphor">
-                        Indexing {indexer.systemsCompleted + (indexer.currentSystem ? 1 : 0)}/
+                        {isDeltaRun ? 'Checking updates' : 'Indexing'}{' '}
+                        {indexer.systemsCompleted + (indexer.currentSystem ? 1 : 0)}/
                         {Math.max(1, indexer.systemsTotal)}
                         {indexer.currentSystem ? ` · ${indexer.currentSystem}` : ''}
-                        {indexer.totalPages > 0
+                        {indexer.totalPages > (isDeltaRun ? 1 : 0)
                           ? ` · Page ${indexer.currentPage}/${indexer.totalPages}`
                           : ''}
-                        {` · ${indexer.indexedCount} cataloged`}
+                        {isDeltaRun
+                          ? ` · ${indexer.indexedCount} updated`
+                          : ` · ${indexer.indexedCount} cataloged`}
                       </span>
                     ) : readinessIssues.length > 0 ? (
                       <span className="text-crt-amber">
@@ -1252,6 +1263,7 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
                     <button
                       type="button"
                       disabled={indexerBusy}
+                      title="Pause background catalog indexing (already indexed games stay saved)"
                       onClick={async () => {
                         if (!onStopCatalogIndex) return;
                         setIndexerBusy(true);
@@ -1271,6 +1283,11 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
                       <button
                         type="button"
                         disabled={indexerBusy || !onStartCatalogIndex}
+                        title={
+                          allTargetsIndexed
+                            ? 'Check RetroGameTalk for new or modified games across your target consoles since each was last indexed (fast delta update; does not download ROMs)'
+                            : 'Index unindexed target consoles and delta-check any stale ones from RetroGameTalk (does not download ROMs)'
+                        }
                         onClick={async () => {
                           if (!onStartCatalogIndex) return;
                           setIndexerBusy(true);
@@ -1283,12 +1300,33 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-border bg-crt-surface hover:border-crt-phosphor text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                       >
                         <RefreshCw className={`h-3.5 w-3.5 ${indexerBusy ? 'animate-spin' : ''}`} />
-                        Index Target Consoles
+                        {allTargetsIndexed ? 'Update Target Consoles' : 'Index Target Consoles'}
                       </button>
+                      {hasAnyIndexedTarget && (
+                        <button
+                          type="button"
+                          disabled={indexerBusy || !onStartCatalogIndex}
+                          title="Re-scan every page of all target consoles from scratch to rebuild local catalog metadata (slower; does not download ROMs)"
+                          onClick={async () => {
+                            if (!onStartCatalogIndex) return;
+                            setIndexerBusy(true);
+                            try {
+                              await onStartCatalogIndex('filtered', { forceFull: true });
+                            } finally {
+                              setIndexerBusy(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                        >
+                          <RotateCcw className="h-3 w-3 shrink-0" />
+                          Full Re-index
+                        </button>
+                      )}
                       {indexer.remainingUnindexedSystems > 0 && (
                         <button
                           type="button"
                           disabled={indexerBusy || !onStartCatalogIndex}
+                          title="Fetch game metadata from RetroGameTalk for all remaining unindexed consoles (does not download ROMs)"
                           onClick={async () => {
                             if (!onStartCatalogIndex) return;
                             setIndexerBusy(true);

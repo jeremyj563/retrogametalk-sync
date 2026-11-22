@@ -72,6 +72,10 @@ import {
   normalizeAllowedReleaseTypes,
 } from '../shared/releaseTypeFilter.ts';
 import {
+  buildUpdatedSystemIndexCursor,
+  planCatalogIndexTargets,
+} from '../shared/catalogIndexerPlan.ts';
+import {
   classifySystemIndexFreshness,
   diffRuntimeSyncSettings,
   diffSyncRules,
@@ -453,6 +457,7 @@ export class ScraperOrchestrator extends EventEmitter {
   private indexerState: CatalogIndexerStatus = {
     active: false,
     scope: null,
+    mode: null,
     currentSystem: null,
     systemsCompleted: 0,
     systemsTotal: 0,
@@ -2492,20 +2497,22 @@ export class ScraperOrchestrator extends EventEmitter {
 
   async startCatalogIndex(
     scope: 'filtered' | 'full' = 'filtered',
-    options: { auto?: boolean } = {},
-  ): Promise<{ started: boolean; targets: string[] }> {
+    options: { auto?: boolean; forceFull?: boolean } = {},
+  ): Promise<{ started: boolean; targets: string[]; mode: 'delta' | 'full' | 'mixed' | null }> {
     const cfg = getInternalConfig();
     const auth = this.client.getAuthStatus(cfg, getLastAuthenticatedAt());
     if (!auth.hasCompletedLogin && !auth.authenticated) {
-      if (options.auto) return { started: false, targets: [] };
+      if (options.auto) return { started: false, targets: [], mode: null };
       throw new Error('Verify RetroGameTalk credentials in System Settings before indexing the catalog.');
     }
 
     if (this.indexerState.active) {
-      if (scope === 'full' && this.indexerState.scope === 'filtered') {
+      const upgradingScope = scope === 'full' && this.indexerState.scope === 'filtered';
+      const upgradingToForceFull = Boolean(options.forceFull) && this.indexerState.mode !== 'full';
+      if (upgradingScope || upgradingToForceFull) {
         this.indexerAbortController?.abort();
       } else {
-        return { started: false, targets: [] };
+        return { started: false, targets: [], mode: this.indexerState.mode ?? null };
       }
     }
 
@@ -2543,23 +2550,31 @@ export class ScraperOrchestrator extends EventEmitter {
       }
     }
 
-    const unindexedTargets = candidateTargets.filter((slug) => !indexState[slug]?.fullyIndexed);
-    const targets =
-      unindexedTargets.length > 0 ? unindexedTargets : options.auto ? [] : candidateTargets;
+    const plan = planCatalogIndexTargets({
+      candidateTargets,
+      indexState,
+      scope,
+      auto: options.auto,
+      forceFull: options.forceFull,
+    });
+    const plannedTargets = plan.targets;
+    const targetSlugs = plannedTargets.map((t) => t.slug);
 
-    if (targets.length === 0) {
+    if (plannedTargets.length === 0) {
       this.emitStatus();
-      return { started: false, targets: [] };
+      return { started: false, targets: [], mode: null };
     }
 
     this.indexerAbortController = new AbortController();
     const signal = this.indexerAbortController.signal;
+    const runMode = plan.mode ?? 'full';
     this.indexerState = {
       active: true,
       scope,
-      currentSystem: targets[0],
+      mode: runMode,
+      currentSystem: plannedTargets[0].slug,
       systemsCompleted: 0,
-      systemsTotal: targets.length,
+      systemsTotal: plannedTargets.length,
       currentPage: 0,
       totalPages: 0,
       indexedCount: 0,
@@ -2567,10 +2582,19 @@ export class ScraperOrchestrator extends EventEmitter {
       lastError: null,
     };
     this.emitStatus();
+    const scopeLabel = scope === 'full' ? 'Full Site' : 'Target Consoles';
+    const modeLabel =
+      options.forceFull
+        ? 'Full Re-index'
+        : runMode === 'delta'
+          ? 'Delta Update'
+          : runMode === 'mixed'
+            ? 'Smart Index + Delta'
+            : 'Initial Index';
     this.log(
       'info',
-      `Catalog indexer started (${scope === 'full' ? 'Full Site' : 'Target Consoles'}): ${targets.length} system(s)`,
-      targets.join(', '),
+      `Catalog indexer started (${scopeLabel} · ${modeLabel}): ${plannedTargets.length} console(s)`,
+      targetSlugs.join(', '),
     );
 
     void (async () => {
@@ -2583,6 +2607,8 @@ export class ScraperOrchestrator extends EventEmitter {
       };
 
       const indexedRestBases = new Set<string>();
+      let totalNewDiscovered = 0;
+      let totalExistingUpdated = 0;
       try {
         const latestCfg = getInternalConfig();
         if (!this.client.getAuthStatus(latestCfg, getLastAuthenticatedAt()).authenticated) {
@@ -2593,12 +2619,13 @@ export class ScraperOrchestrator extends EventEmitter {
           }
         }
 
-        for (let i = 0; i < targets.length; i += 1) {
+        for (let i = 0; i < plannedTargets.length; i += 1) {
           if (signal.aborted || this.shuttingDown) break;
           await this.waitIfActiveRunBusy(signal);
           if (signal.aborted || this.shuttingDown) break;
 
-          const systemSlug = targets[i];
+          const planned = plannedTargets[i];
+          const systemSlug = planned.slug;
           const activeCfg = getInternalConfig();
           const restBase = await this.client.resolveWpRestBaseForSystem(systemSlug, activeCfg, signal, indexerLogger);
           if (restBase && indexedRestBases.has(restBase.toLowerCase())) {
@@ -2615,9 +2642,12 @@ export class ScraperOrchestrator extends EventEmitter {
           };
           this.emitStatus();
 
+          const scanStartedAtIso = new Date().toISOString();
           let pagesForSystem = 0;
           let postsForSystem = 0;
+          let newPostsForSystem = 0;
           const res = await this.client.listConsoleReleasesViaWpRest(systemSlug, activeCfg, {
+            modifiedAfterIso: planned.modifiedAfterIso,
             signal,
             log: indexerLogger,
             onPageFetched: (page, totalPages) => {
@@ -2633,8 +2663,21 @@ export class ScraperOrchestrator extends EventEmitter {
             onPostsPage: async (posts, page, totalPages) => {
               for (const post of posts) {
                 if (!post.link) continue;
+                const canonicalLink = post.link.split('#')[0];
+                const existedBefore =
+                  planned.strategy === 'delta'
+                    ? Boolean(getRepositoryItemByRemoteUrl(canonicalLink))
+                    : false;
                 upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, activeCfg));
                 postsForSystem += 1;
+                if (planned.strategy === 'delta') {
+                  if (existedBefore) {
+                    totalExistingUpdated += 1;
+                  } else {
+                    newPostsForSystem += 1;
+                    totalNewDiscovered += 1;
+                  }
+                }
                 this.indexerState.indexedCount += 1;
               }
               this.indexerState.currentPage = page;
@@ -2645,15 +2688,20 @@ export class ScraperOrchestrator extends EventEmitter {
             },
           });
 
-          if (!signal.aborted && !this.shuttingDown) {
-            updateSystemIndexCursor(systemSlug, {
-              lastIndexedAt: new Date().toISOString(),
-              totalWpPosts: postsForSystem,
-              totalPages: res.totalPages || pagesForSystem,
-              pagesIndexed: pagesForSystem,
-              fullyIndexed: true,
-              scope,
-            });
+          if (!signal.aborted && !this.shuttingDown && (res.supported || planned.strategy === 'full')) {
+            updateSystemIndexCursor(
+              systemSlug,
+              buildUpdatedSystemIndexCursor({
+                existingCursor: planned.existingCursor,
+                strategy: planned.strategy,
+                scope,
+                scanStartedAtIso,
+                totalPostsFetched: postsForSystem,
+                newPostsDiscovered: newPostsForSystem,
+                totalPagesFetched: res.totalPages || pagesForSystem,
+                pagesIndexed: pagesForSystem,
+              }),
+            );
           }
 
           this.indexerState.systemsCompleted = i + 1;
@@ -2661,10 +2709,21 @@ export class ScraperOrchestrator extends EventEmitter {
         }
 
         if (!signal.aborted && !this.shuttingDown) {
-          this.log(
-            'info',
-            `Catalog indexing complete: ${this.indexerState.indexedCount} release(s) cataloged across ${this.indexerState.systemsCompleted} console(s)`,
-          );
+          if (runMode === 'delta') {
+            const summary =
+              this.indexerState.indexedCount === 0
+                ? 'already up to date'
+                : `${totalNewDiscovered} new, ${totalExistingUpdated} updated`;
+            this.log(
+              'info',
+              `Catalog delta update complete: ${summary} across ${this.indexerState.systemsCompleted} console(s)`,
+            );
+          } else {
+            this.log(
+              'info',
+              `Catalog indexing complete: ${this.indexerState.indexedCount} release(s) cataloged across ${this.indexerState.systemsCompleted} console(s)`,
+            );
+          }
         }
       } catch (err) {
         if (!signal.aborted) {
@@ -2679,6 +2738,7 @@ export class ScraperOrchestrator extends EventEmitter {
         this.indexerState = {
           ...this.indexerState,
           active: false,
+          mode: null,
           currentSystem: null,
         };
         this.indexerAbortController = null;
@@ -2691,7 +2751,7 @@ export class ScraperOrchestrator extends EventEmitter {
       }
     })();
 
-    return { started: true, targets };
+    return { started: true, targets: targetSlugs, mode: runMode };
   }
 
   stopCatalogIndex(): boolean {
@@ -2700,6 +2760,7 @@ export class ScraperOrchestrator extends EventEmitter {
     this.indexerState = {
       ...this.indexerState,
       active: false,
+      mode: null,
       currentSystem: null,
     };
     this.log('info', 'Catalog background indexing paused by user');

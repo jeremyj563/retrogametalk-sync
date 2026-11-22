@@ -25,6 +25,7 @@ export interface SystemIndexCursor {
 export interface CatalogIndexerStatus {
   active: boolean;
   scope: 'filtered' | 'full' | null;
+  mode?: 'delta' | 'full' | 'mixed' | null;
   currentSystem: string | null;
   systemsCompleted: number;
   systemsTotal: number;

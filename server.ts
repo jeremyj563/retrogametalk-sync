@@ -258,8 +258,9 @@ async function bootstrap() {
 
   app.post('/api/catalog/index', async (req, res) => {
     const scope = req.body?.scope === 'full' ? 'full' : 'filtered';
+    const forceFull = Boolean(req.body?.forceFull);
     try {
-      const result = await orchestrator.startCatalogIndex(scope);
+      const result = await orchestrator.startCatalogIndex(scope, { forceFull });
       res.status(202).json({
         ...result,
         status: orchestrator.getStatusSnapshot(),
