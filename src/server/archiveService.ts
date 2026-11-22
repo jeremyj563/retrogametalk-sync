@@ -66,6 +66,152 @@ const PLAYABLE_ROM_EXTENSIONS = new Set([
 ]);
 
 let cached7zPath: string | null | undefined;
+let cached7zSupportsRar: boolean | undefined;
+let cachedUnrarPath: string | null | undefined;
+let cachedBsdtarPath: string | null | undefined;
+
+export type SniffedArchiveMagicKind =
+  | 'rar5'
+  | 'rar4'
+  | 'zip'
+  | '7z'
+  | 'gzip'
+  | 'xz'
+  | 'bzip2'
+  | 'html'
+  | 'empty'
+  | 'unknown';
+
+export interface SniffedArchiveMagic {
+  kind: SniffedArchiveMagicKind;
+  sizeBytes: number;
+  hexHead: string;
+}
+
+export function classifyArchiveMagicBytes(buf: Buffer, sizeBytes = buf.length): SniffedArchiveMagic {
+  if (sizeBytes === 0 || buf.length === 0) {
+    return { kind: 'empty', sizeBytes: 0, hexHead: '' };
+  }
+  const hexHead = Array.from(buf.subarray(0, 8))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join(' ');
+
+  // RAR5: 52 61 72 21 1a 07 01 00 ("Rar!\x1a\x07\x01\x00")
+  if (
+    buf.length >= 8 &&
+    buf[0] === 0x52 &&
+    buf[1] === 0x61 &&
+    buf[2] === 0x72 &&
+    buf[3] === 0x21 &&
+    buf[4] === 0x1a &&
+    buf[5] === 0x07 &&
+    buf[6] === 0x01 &&
+    buf[7] === 0x00
+  ) {
+    return { kind: 'rar5', sizeBytes, hexHead };
+  }
+
+  // RAR4 / legacy RAR: 52 61 72 21 1a 07 00 ("Rar!\x1a\x07\x00")
+  if (
+    buf.length >= 7 &&
+    buf[0] === 0x52 &&
+    buf[1] === 0x61 &&
+    buf[2] === 0x72 &&
+    buf[3] === 0x21 &&
+    buf[4] === 0x1a &&
+    buf[5] === 0x07 &&
+    buf[6] === 0x00
+  ) {
+    return { kind: 'rar4', sizeBytes, hexHead };
+  }
+
+  // ZIP: PK\x03\x04, PK\x05\x06, PK\x07\x08
+  if (
+    buf.length >= 4 &&
+    buf[0] === 0x50 &&
+    buf[1] === 0x4b &&
+    ((buf[2] === 0x03 && buf[3] === 0x04) ||
+      (buf[2] === 0x05 && buf[3] === 0x06) ||
+      (buf[2] === 0x07 && buf[3] === 0x08))
+  ) {
+    return { kind: 'zip', sizeBytes, hexHead };
+  }
+
+  // 7z: 37 7a bc af 27 1c
+  if (
+    buf.length >= 6 &&
+    buf[0] === 0x37 &&
+    buf[1] === 0x7a &&
+    buf[2] === 0xbc &&
+    buf[3] === 0xaf &&
+    buf[4] === 0x27 &&
+    buf[5] === 0x1c
+  ) {
+    return { kind: '7z', sizeBytes, hexHead };
+  }
+
+  // GZIP: 1f 8b
+  if (buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
+    return { kind: 'gzip', sizeBytes, hexHead };
+  }
+
+  // XZ: fd 37 7a 58 5a 00
+  if (
+    buf.length >= 6 &&
+    buf[0] === 0xfd &&
+    buf[1] === 0x37 &&
+    buf[2] === 0x7a &&
+    buf[3] === 0x58 &&
+    buf[4] === 0x5a &&
+    buf[5] === 0x00
+  ) {
+    return { kind: 'xz', sizeBytes, hexHead };
+  }
+
+  // BZIP2: BZh
+  if (buf.length >= 3 && buf[0] === 0x42 && buf[1] === 0x5a && buf[2] === 0x68) {
+    return { kind: 'bzip2', sizeBytes, hexHead };
+  }
+
+  // Detect HTML/XML error or login pages saved with an archive extension
+  const textHead = buf.toString('utf8').replace(/^\uFEFF/, '').trimStart().toLowerCase();
+  if (
+    textHead.startsWith('<!doctype html') ||
+    textHead.startsWith('<html') ||
+    textHead.startsWith('<head') ||
+    textHead.startsWith('<body') ||
+    textHead.startsWith('<?xml')
+  ) {
+    return { kind: 'html', sizeBytes, hexHead };
+  }
+
+  return { kind: 'unknown', sizeBytes, hexHead };
+}
+
+export function sniffArchiveMagic(archivePath: string): SniffedArchiveMagic {
+  const st = fs.statSync(archivePath);
+  if (st.size === 0) {
+    return { kind: 'empty', sizeBytes: 0, hexHead: '' };
+  }
+  const readLen = Math.min(st.size, 512);
+  const buf = Buffer.alloc(readLen);
+  const fd = fs.openSync(archivePath, 'r');
+  try {
+    fs.readSync(fd, buf, 0, readLen, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return classifyArchiveMagicBytes(buf, st.size);
+}
+
+export function detect7zRarSupportFromInfoOutput(stdout: string): boolean {
+  const normalized = stdout.replace(/\r\n/g, '\n');
+  const formatsIdx = normalized.indexOf('Formats:');
+  const section = formatsIdx >= 0 ? normalized.slice(formatsIdx) : normalized;
+  const codecsIdx = section.indexOf('\nCodecs:');
+  const formatsOnly = codecsIdx >= 0 ? section.slice(0, codecsIdx) : section;
+  return /^\s*[0-9A-Za-z.]+\s+Rar5?\b/im.test(formatsOnly);
+}
 
 export async function resolve7zBinary(): Promise<string | null> {
   if (cached7zPath !== undefined) return cached7zPath;
@@ -101,8 +247,83 @@ export async function resolve7zBinary(): Promise<string | null> {
   }
 
   cached7zPath = null;
-  logServer('ARCHIVE', 'debug', 'No 7-Zip binary resolved; falling back to unzip for .zip archives');
+  logServer('ARCHIVE', 'debug', 'No 7-Zip binary resolved; falling back to unzip/unrar/bsdtar');
   return null;
+}
+
+export async function check7zSupportsRar(bin7z: string): Promise<boolean> {
+  if (cached7zSupportsRar !== undefined) return cached7zSupportsRar;
+  try {
+    const res = await runProcessCapture(bin7z, ['i']);
+    cached7zSupportsRar = res.code === 0 && detect7zRarSupportFromInfoOutput(res.stdout);
+  } catch {
+    cached7zSupportsRar = false;
+  }
+  logServer(
+    'ARCHIVE',
+    'debug',
+    `7-Zip RAR codec probe (${path.basename(bin7z)}): ${cached7zSupportsRar ? 'supported' : 'not compiled in'}`,
+  );
+  return cached7zSupportsRar;
+}
+
+export async function resolveUnrarBinary(): Promise<string | null> {
+  if (cachedUnrarPath !== undefined) return cachedUnrarPath;
+  for (const cmd of ['unrar', 'unrar-nonfree']) {
+    try {
+      const found = execFileSync('which', [cmd], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      if (found) {
+        cachedUnrarPath = found;
+        logServer('ARCHIVE', 'debug', `Resolved unrar binary "${cmd}" -> ${found}`);
+        return cachedUnrarPath;
+      }
+    } catch {
+      // Not on PATH; continue
+    }
+  }
+  cachedUnrarPath = null;
+  return null;
+}
+
+export async function resolveBsdtarBinary(): Promise<string | null> {
+  if (cachedBsdtarPath !== undefined) return cachedBsdtarPath;
+  try {
+    const found = execFileSync('which', ['bsdtar'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (found) {
+      cachedBsdtarPath = found;
+      logServer('ARCHIVE', 'debug', `Resolved bsdtar binary -> ${found}`);
+      return cachedBsdtarPath;
+    }
+  } catch {
+    // Not on PATH
+  }
+  cachedBsdtarPath = null;
+  return null;
+}
+
+function describeUnrarExitCode(code: number): string {
+  switch (code) {
+    case 1:
+      return 'non-fatal warning';
+    case 2:
+      return 'fatal error';
+    case 3:
+      return 'CRC or corrupt archive data';
+    case 5:
+      return 'write error';
+    case 6:
+      return 'file open error';
+    case 7:
+      return 'invalid command line option';
+    case 8:
+      return 'not enough memory';
+    case 10:
+      return 'no matching files found in archive';
+    case 11:
+      return 'wrong password (encrypted RAR archive)';
+    default:
+      return `exit code ${code}`;
+  }
 }
 
 export function detectArchiveFormat(filePath: string): ArchiveFormat {
@@ -179,6 +400,84 @@ function parse7zSltOutput(stdout: string): RawArchiveEntry[] {
   return entries;
 }
 
+export function parseUnrarLtOutput(stdout: string): RawArchiveEntry[] {
+  const entries: RawArchiveEntry[] = [];
+  const normalized = stdout.replace(/\r\n/g, '\n');
+  let current: { entryPath: string; sizeBytes: number; isDir: boolean } | null = null;
+
+  const flush = () => {
+    if (!current) return;
+    const cleanedPath = current.entryPath.replace(/^\.\//, '');
+    if (cleanedPath && !current.isDir && isSafeArchiveEntryPath(cleanedPath)) {
+      entries.push({ entryPath: cleanedPath, sizeBytes: current.sizeBytes, isDir: false });
+    }
+    current = null;
+  };
+
+  for (const rawLine of normalized.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) {
+      flush();
+      continue;
+    }
+
+    const colonIdx = line.indexOf(':');
+    if (colonIdx < 0) continue;
+    const key = line.slice(0, colonIdx).trim();
+    const val = line.slice(colonIdx + 1).trim();
+
+    if (key === 'Name') {
+      flush();
+      current = {
+        entryPath: val.replace(/\\/g, '/'),
+        sizeBytes: 0,
+        isDir: false,
+      };
+      continue;
+    }
+
+    if (!current) continue;
+
+    if (key === 'Type') {
+      const lower = val.toLowerCase();
+      if (lower === 'directory' || lower === 'dir' || lower.includes('link')) {
+        current.isDir = true;
+      }
+    } else if (key === 'Size') {
+      current.sizeBytes = Math.max(0, Number(val.replace(/,/g, '')) || 0);
+    } else if (key === 'Attributes') {
+      if (val.startsWith('d') || val.startsWith('D') || /^[\.\-]*D[\.\-]*$/i.test(val)) {
+        current.isDir = true;
+      }
+    }
+  }
+  flush();
+  return entries;
+}
+
+export function parseBsdtarVerboseOutput(stdout: string): RawArchiveEntry[] {
+  const entries: RawArchiveEntry[] = [];
+  for (const rawLine of stdout.replace(/\r\n/g, '\n').split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    // Standard bsdtar -tvf format:
+    // -rw-r--r--  0 0      0   451234567 Mar 10  2024 Sonic Megamix 5.0a.bin
+    // drwxr-xr-x  0 0      0           0 Mar 10  2024 Docs/
+    const match = line.match(
+      /^([-dlbcps][rwxstST-]{9}[.+@]?)\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(?:[A-Za-z]{3}\s+\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})|\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+(.+)$/,
+    );
+    if (!match) continue;
+    const mode = match[1];
+    if (mode.startsWith('d') || mode.startsWith('l')) continue;
+    const sizeBytes = Math.max(0, Number(match[2]) || 0);
+    const entryPath = match[3].replace(/\\/g, '/').replace(/^\.\//, '').trim();
+    if (entryPath && !entryPath.endsWith('/') && isSafeArchiveEntryPath(entryPath)) {
+      entries.push({ entryPath, sizeBytes, isDir: false });
+    }
+  }
+  return entries;
+}
+
 export async function listArchiveEntries(archivePath: string): Promise<{ format: ArchiveFormat; entries: RawArchiveEntry[] }> {
   const format = detectArchiveFormat(archivePath);
   if (format === 'raw') {
@@ -187,6 +486,112 @@ export async function listArchiveEntries(archivePath: string): Promise<{ format:
       format: 'raw',
       entries: [{ entryPath: path.basename(archivePath), sizeBytes: st.size, isDir: false }],
     };
+  }
+
+  const magic = sniffArchiveMagic(archivePath);
+  if (magic.kind === 'empty') {
+    throw new Error(`Archive file "${path.basename(archivePath)}" is empty (0 bytes) on disk — retry downloading this release.`);
+  }
+  if (magic.kind === 'html') {
+    throw new Error(
+      `File "${path.basename(archivePath)}" appears to be an HTML page rather than a valid ${format.toUpperCase()} archive — retry downloading this release.`,
+    );
+  }
+
+  const isRarPayload =
+    magic.kind === 'rar4' ||
+    magic.kind === 'rar5' ||
+    (format === 'rar' && magic.kind !== 'zip' && magic.kind !== '7z');
+
+  if (isRarPayload) {
+    const errors: string[] = [];
+
+    // 1. Prefer native RARLAB `unrar` (supports RAR1-RAR5, solid archives, and multi-GB streams)
+    const unrarBin = await resolveUnrarBinary();
+    if (unrarBin) {
+      const res = await runProcessCapture(unrarBin, ['lt', '-p-', '--', archivePath]);
+      if (res.code === 0) {
+        const entries = parseUnrarLtOutput(res.stdout);
+        logServer(
+          'ARCHIVE',
+          'debug',
+          `Listed RAR archive via ${path.basename(unrarBin)}`,
+          `${path.basename(archivePath)} (${magic.kind}, ${entries.length} entries)`,
+        );
+        return { format: 'rar', entries };
+      }
+      const detail = res.stderr.trim() || res.stdout.trim() || describeUnrarExitCode(res.code);
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `unrar list returned exit code ${res.code} for ${path.basename(archivePath)}`,
+        detail,
+      );
+      errors.push(`unrar: ${detail}`);
+    }
+
+    // 2. Try 7-Zip if its compiled binary actually includes RAR codec support
+    const bin7z = await resolve7zBinary();
+    const sevenZipSupportsRar = bin7z ? await check7zSupportsRar(bin7z) : false;
+    if (bin7z && sevenZipSupportsRar) {
+      const res = await runProcessCapture(bin7z, ['l', '-slt', '-sccUTF-8', archivePath]);
+      if (res.code === 0) {
+        const entries = parse7zSltOutput(res.stdout);
+        logServer(
+          'ARCHIVE',
+          'debug',
+          `Listed RAR archive via ${path.basename(bin7z)}`,
+          `${path.basename(archivePath)} (${magic.kind}, ${entries.length} entries)`,
+        );
+        return { format: 'rar', entries };
+      }
+      const detail = res.stderr.trim() || `exit code ${res.code}`;
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `7-Zip list returned exit code ${res.code} for ${path.basename(archivePath)}`,
+        detail,
+      );
+      errors.push(`7-Zip: ${detail}`);
+    }
+
+    // 3. Fallback to libarchive's bsdtar (handles non-solid RAR4 and RAR5 when unrar is absent)
+    const bsdtarBin = await resolveBsdtarBinary();
+    if (bsdtarBin) {
+      const res = await runProcessCapture(bsdtarBin, ['-tvf', archivePath]);
+      if (res.code === 0) {
+        const entries = parseBsdtarVerboseOutput(res.stdout);
+        logServer(
+          'ARCHIVE',
+          'debug',
+          `Listed RAR archive via bsdtar fallback`,
+          `${path.basename(archivePath)} (${magic.kind}, ${entries.length} entries)`,
+        );
+        return { format: 'rar', entries };
+      }
+      const detail = res.stderr.trim() || `exit code ${res.code}`;
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `bsdtar list returned exit code ${res.code} for ${path.basename(archivePath)}`,
+        detail,
+      );
+      errors.push(`bsdtar: ${detail}`);
+    }
+
+    if (magic.kind !== 'rar4' && magic.kind !== 'rar5') {
+      throw new Error(
+        `Unable to list RAR archive: "${path.basename(archivePath)}" does not have a valid RAR header (magic: ${magic.hexHead || 'unknown'}). Try re-downloading this release.`,
+      );
+    }
+
+    if (!unrarBin && !sevenZipSupportsRar && !bsdtarBin) {
+      throw new Error(
+        `Unable to list RAR archive: this runtime has no RAR-capable extractor installed (install unrar or update to the latest container image).`,
+      );
+    }
+
+    throw new Error(`Unable to list RAR archive: ${errors.join(' | ')}`);
   }
 
   const bin7z = await resolve7zBinary();
@@ -204,6 +609,15 @@ export async function listArchiveEntries(archivePath: string): Promise<{ format:
       res.stderr.trim() || 'no stderr',
     );
     if (format !== 'zip') {
+      const bsdtarBin = await resolveBsdtarBinary();
+      if (bsdtarBin) {
+        const tarRes = await runProcessCapture(bsdtarBin, ['-tvf', archivePath]);
+        if (tarRes.code === 0) {
+          const entries = parseBsdtarVerboseOutput(tarRes.stdout);
+          logServer('ARCHIVE', 'debug', `Listed archive via bsdtar fallback`, `${path.basename(archivePath)} (${format}, ${entries.length} entries)`);
+          return { format, entries };
+        }
+      }
       throw new Error(`Unable to list ${format.toUpperCase()} archive: ${res.stderr.trim() || `exit code ${res.code}`}`);
     }
   }
@@ -615,6 +1029,113 @@ async function openEntryReadableStream(archivePath: string, entryPath: string): 
   if (format === 'raw') {
     logServer('ARCHIVE', 'debug', `Opening raw file read stream: ${path.basename(archivePath)}`);
     return fs.createReadStream(archivePath);
+  }
+
+  const magic = sniffArchiveMagic(archivePath);
+  const isRarPayload =
+    magic.kind === 'rar4' ||
+    magic.kind === 'rar5' ||
+    (format === 'rar' && magic.kind !== 'zip' && magic.kind !== '7z');
+
+  if (isRarPayload) {
+    const unrarBin = await resolveUnrarBinary();
+    if (unrarBin) {
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `Spawning ${path.basename(unrarBin)} extraction`,
+        `archive="${path.basename(archivePath)}", entry="${entryPath}"`,
+      );
+      const child = spawn(unrarBin, ['p', '-inul', '-p-', '--', archivePath, entryPath], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let errBuf = '';
+      child.stderr.on('data', (d: Buffer) => {
+        errBuf += d.toString('utf8');
+      });
+      child.on('error', (err) => {
+        logServer('ARCHIVE', 'debug', `unrar spawn error for "${entryPath}"`, formatErrorDetails(err));
+        if (!child.stdout.destroyed) {
+          child.stdout.destroy(err);
+        }
+      });
+      child.on('close', (code) => {
+        if (code !== 0) {
+          const reason = errBuf.trim() || describeUnrarExitCode(code ?? 1);
+          logServer('ARCHIVE', 'debug', `unrar extraction failed (exit=${code}) for "${entryPath}"`, reason);
+          if (!child.stdout.destroyed) {
+            child.stdout.destroy(new Error(`unrar extraction failed: ${reason}`));
+          }
+        }
+      });
+      return child.stdout;
+    }
+
+    const bin7z = await resolve7zBinary();
+    if (bin7z && (await check7zSupportsRar(bin7z))) {
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `Spawning ${path.basename(bin7z)} RAR extraction`,
+        `archive="${path.basename(archivePath)}", entry="${entryPath}"`,
+      );
+      const child = spawn(bin7z, ['e', '-so', archivePath, entryPath], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let errBuf = '';
+      child.stderr.on('data', (d: Buffer) => {
+        errBuf += d.toString('utf8');
+      });
+      child.on('error', (err) => {
+        logServer('ARCHIVE', 'debug', `7-Zip spawn error for "${entryPath}"`, formatErrorDetails(err));
+        if (!child.stdout.destroyed) {
+          child.stdout.destroy(err);
+        }
+      });
+      child.on('close', (code) => {
+        if (code !== 0) {
+          logServer('ARCHIVE', 'debug', `7-Zip extraction failed (exit=${code}) for "${entryPath}"`, errBuf.trim() || 'no stderr');
+          if (!child.stdout.destroyed) {
+            child.stdout.destroy(new Error(errBuf.trim() || `7-Zip extraction exited with code ${code}`));
+          }
+        }
+      });
+      return child.stdout;
+    }
+
+    const bsdtarBin = await resolveBsdtarBinary();
+    if (bsdtarBin) {
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `Spawning bsdtar RAR extraction fallback`,
+        `archive="${path.basename(archivePath)}", entry="${entryPath}"`,
+      );
+      const child = spawn(bsdtarBin, ['-xOf', archivePath, entryPath], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let errBuf = '';
+      child.stderr.on('data', (d: Buffer) => {
+        errBuf += d.toString('utf8');
+      });
+      child.on('error', (err) => {
+        logServer('ARCHIVE', 'debug', `bsdtar spawn error for "${entryPath}"`, formatErrorDetails(err));
+        if (!child.stdout.destroyed) {
+          child.stdout.destroy(err);
+        }
+      });
+      child.on('close', (code) => {
+        if (code !== 0) {
+          logServer('ARCHIVE', 'debug', `bsdtar extraction failed (exit=${code}) for "${entryPath}"`, errBuf.trim() || 'no stderr');
+          if (!child.stdout.destroyed) {
+            child.stdout.destroy(new Error(errBuf.trim() || `bsdtar extraction exited with code ${code}`));
+          }
+        }
+      });
+      return child.stdout;
+    }
+
+    throw new Error('Cannot extract RAR archive: no RAR-capable extractor (unrar) is installed in this runtime.');
   }
 
   const bin7z = await resolve7zBinary();

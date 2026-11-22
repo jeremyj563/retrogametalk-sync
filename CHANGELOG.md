@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.32.2] - 2026-11-22
+
+- Fixed `.rar` archive inspection and extraction failing in Alpine Docker containers with `Cannot open the file as archive` (Alpine's `7zip` package strips proprietary RAR codecs):
+  - **Multi-Arch Native `unrar` + `libarchive-tools` in Container Image**: Bundled the multi-arch Alpine `unrar` binary (from `ghcr.io/linuxserver/unrar`) alongside `libarchive-tools` (`bsdtar`) in the `Dockerfile` so RAR4, RAR5, and solid `.rar` archives inspect and stream natively on both `linux/amd64` and `linux/arm64`.
+  - **Multi-Backend RAR Inspection & Streaming**: Updated the archive service to prefer native `unrar` (`unrar lt` / `unrar p -inul`) for `.rar` files, probe whether `7z`/`7zz` actually has RAR codec support before invoking it, and fall back to `bsdtar` when `unrar` is unavailable.
+  - **Magic-Byte Archive Diagnostics**: Added header sniffing (`RAR4`, `RAR5`, `ZIP`, `7z`, HTML/error pages, and empty 0-byte files) so corrupted or HTML error downloads report an actionable re-download message instead of a generic archive error.
+
 ## [1.32.1] - 2026-11-22
 
 - Renamed **Index All Remaining Consoles** to **Index Remaining Consoles** across both the **Catalog** and **Sync Rules** pages for concise, consistent labeling.
