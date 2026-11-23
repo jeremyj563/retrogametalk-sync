@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.35.4] - 2026-11-23
+
+- Made archive inspection directly accessible in the **Release Details** drawer without opening the `... More` menu:
+  - **Clickable Archive Filenames & Inline Inspect Toggle**: Mirrored browsable archives (`.zip`, `.7z`, `.rar`, `.tar`) under **Included Downloads** now feature a clickable filename with folder icon + phosphor hover cue and a compact inline **Inspect** / **Hide Contents** toggle button on every row—allowing one-click inspection of both primary and secondary archives on multi-file releases, with active row highlighting while open.
+
 ## [1.35.3] - 2026-11-23
 
 - Fixed Sega Genesis / Mega Drive `.md` ROMs failing with **"No playable ROM found"** during installs and **"Failed - Network error"** on direct archive entry downloads:

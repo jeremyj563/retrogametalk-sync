@@ -1869,16 +1869,23 @@ export function GameDetailDrawer({
             const downloadedFilesCount = item.files.filter(
               (f) => f.status === 'downloaded' || f.status === 'skipped',
             ).length;
+            const hasInspectableArchive = item.files.some(
+              (f) =>
+                (f.status === 'downloaded' || f.status === 'skipped') &&
+                isBrowsableArchiveName(f.filename),
+            );
             const showRowDownloadButton = shouldShowPerFileDownloadButton(downloadedFilesCount);
             return (
           <section className="crt-panel-living space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <h3 className="font-display text-sm font-semibold text-crt-text flex items-center gap-2">
                 <FileArchive className="h-4 w-4 text-crt-phosphor crt-section-icon" />
                 Included Downloads ({displayFilesCount})
               </h3>
               <span className="font-mono text-[11px] text-crt-muted">
-                Individual mirrored ROMs &amp; patches
+                {hasInspectableArchive
+                  ? 'Click an archive to inspect its contents'
+                  : 'Individual mirrored ROMs & patches'}
               </span>
             </div>
 
@@ -1932,6 +1939,9 @@ export function GameDetailDrawer({
               <div className="border border-crt-border bg-crt-bg rounded-md divide-y divide-crt-border">
                 {item.files.map((file) => {
                   const canDownload = file.status === 'downloaded' || file.status === 'skipped';
+                  const canInspectArchive = canDownload && isBrowsableArchiveName(file.filename);
+                  const isBrowsingThis = browsingFileId === file.id;
+                  const isArchiveOpenForThis = archiveBrowse?.fileId === file.id;
                   const isRetryingThis = retryingKey === `file-${file.id}`;
                   const rowDownloadKey = `file-${file.id}`;
                   const isRowDownloadStarted = downloadStartedKey === rowDownloadKey;
@@ -1942,16 +1952,61 @@ export function GameDetailDrawer({
                   return (
                     <div
                       key={file.id}
-                      className="px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                      className={`px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 transition-colors ${
+                        isArchiveOpenForThis ? 'bg-crt-phosphor/6' : ''
+                      }`}
                     >
                       <div className="min-w-0 flex-1 space-y-1">
-                        <div className="text-xs font-medium text-crt-text break-words">
-                          {file.displayLabel || file.filename}
-                        </div>
-                        {showSecondaryFilename && (
-                          <div className="font-mono text-[11px] text-crt-muted/80 truncate">
-                            {file.filename}
-                          </div>
+                        {canInspectArchive ? (
+                          <button
+                            type="button"
+                            disabled={isBrowsingThis}
+                            aria-expanded={isArchiveOpenForThis}
+                            onClick={() => void handleBrowseArchive(file.id)}
+                            title={
+                              isArchiveOpenForThis
+                                ? `Hide contents of ${file.filename}`
+                                : `Click to inspect files inside ${file.filename} without unpacking`
+                            }
+                            className={`group/archive text-left inline-flex items-start gap-2 max-w-full cursor-pointer disabled:opacity-60 transition-colors ${
+                              isArchiveOpenForThis
+                                ? 'text-crt-phosphor'
+                                : 'text-crt-text hover:text-crt-phosphor'
+                            }`}
+                          >
+                            {isBrowsingThis ? (
+                              <RefreshCw className="h-3.5 w-3.5 mt-0.5 shrink-0 text-crt-phosphor animate-spin" />
+                            ) : (
+                              <FolderOpen
+                                className={`h-3.5 w-3.5 mt-0.5 shrink-0 transition-colors ${
+                                  isArchiveOpenForThis
+                                    ? 'text-crt-phosphor'
+                                    : 'text-crt-muted group-hover/archive:text-crt-phosphor'
+                                }`}
+                              />
+                            )}
+                            <span className="min-w-0 flex flex-col gap-0.5">
+                              <span className="text-xs font-medium break-words group-hover/archive:underline underline-offset-2">
+                                {file.displayLabel || file.filename}
+                              </span>
+                              {showSecondaryFilename && (
+                                <span className="font-mono text-[11px] text-crt-muted/80 group-hover/archive:text-crt-phosphor/80 truncate">
+                                  {file.filename}
+                                </span>
+                              )}
+                            </span>
+                          </button>
+                        ) : (
+                          <>
+                            <div className="text-xs font-medium text-crt-text break-words">
+                              {file.displayLabel || file.filename}
+                            </div>
+                            {showSecondaryFilename && (
+                              <div className="font-mono text-[11px] text-crt-muted/80 truncate">
+                                {file.filename}
+                              </div>
+                            )}
+                          </>
                         )}
                         <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-crt-muted tabular-nums">
                           <span className="text-crt-phosphor/90">{file.fileRole}</span>
@@ -2039,9 +2094,41 @@ export function GameDetailDrawer({
                       </div>
 
                       {(canDownload && showRowDownloadButton) ||
+                      (canInspectArchive && !fileTransfer.active) ||
                       file.status === 'failed' ||
                       fileTransfer.active ? (
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          {canInspectArchive && !fileTransfer.active && (
+                            <button
+                              type="button"
+                              disabled={isBrowsingThis}
+                              aria-expanded={isArchiveOpenForThis}
+                              onClick={() => void handleBrowseArchive(file.id)}
+                              title={
+                                isArchiveOpenForThis
+                                  ? `Close archive explorer for ${file.filename}`
+                                  : `Inspect files inside ${file.filename}`
+                              }
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer ${
+                                isArchiveOpenForThis
+                                  ? 'border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor'
+                                  : 'border-crt-border text-crt-muted hover:border-crt-phosphor hover:text-crt-phosphor'
+                              }`}
+                            >
+                              {isBrowsingThis ? (
+                                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <FolderOpen className="h-3.5 w-3.5" />
+                              )}
+                              <span>
+                                {isBrowsingThis
+                                  ? 'Reading...'
+                                  : isArchiveOpenForThis
+                                    ? 'Hide Contents'
+                                    : 'Inspect'}
+                              </span>
+                            </button>
+                          )}
                           {canDownload && showRowDownloadButton ? (
                             <button
                               type="button"
