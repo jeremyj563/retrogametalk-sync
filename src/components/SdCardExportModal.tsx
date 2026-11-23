@@ -110,7 +110,7 @@ export function SdCardExportModal({
 
   const rows = job?.rows || [];
   const storageConfig = installer.effectiveStorageFolderConfig;
-  const deviceName = sdRootHandle?.name || null;
+  const deviceName = installer.activeDeviceName || sdRootHandle?.name || null;
   const shortDeviceName = formatDeviceActionLabel(deviceName, 20);
 
   const games = useMemo<GroupedInstallGame[]>(() => {
@@ -503,7 +503,7 @@ export function SdCardExportModal({
                 <>
                   <span className="text-crt-muted">Device</span>
                   <span className="font-mono font-semibold text-crt-phosphor truncate max-w-[16rem]">
-                    {sdRootHandle.name}
+                    {deviceName || sdRootHandle.name}
                   </span>
                   {fsSupport.supported && !isRunning && (
                     <>

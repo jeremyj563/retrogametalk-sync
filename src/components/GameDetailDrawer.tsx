@@ -38,6 +38,11 @@ import {
   classifyInstalledUpdateState,
   formatInstalledUpdateComparison,
 } from '../shared/deviceInstallUpdates';
+import {
+  findItemInstallForDevice,
+  formatInstalledDevicesBadge,
+} from '../shared/deviceProfiles';
+import type { DeviceUninstallResult } from '../hooks/useBulkStorageInstaller';
 import type {
   ActiveTransferState,
   ArchiveBrowseListing,
@@ -97,9 +102,11 @@ interface GameDetailDrawerProps {
   canSync: boolean;
   retryingItem?: boolean;
   mountedDeviceName?: string | null;
+  mountedDeviceId?: string | null;
   isInstallingToDevice?: boolean;
   isAnotherDeviceInstallBusy?: boolean;
   canQueueDeviceInstall?: boolean;
+  uninstallingFromDevice?: boolean;
   deviceInstallState?: ResolvedItemDeviceInstallState | null;
   navigation?: GameDetailNavigation | null;
   onClose: () => void;
@@ -110,6 +117,7 @@ interface GameDetailDrawerProps {
   onExpressInstallToDevice?: (id: number) => void;
   onUpgradeOnDevice?: (id: number) => void;
   onExportToSdCard?: (id: number) => void;
+  onUninstallFromDevice?: (item: RepositoryItemRecord) => Promise<DeviceUninstallResult | void>;
   onCancelDeviceInstall?: () => void;
   onDismissDeviceInstall?: () => void;
   onViewDeviceInstallQueue?: () => void;
@@ -293,9 +301,11 @@ export function GameDetailDrawer({
   canSync,
   retryingItem = false,
   mountedDeviceName = null,
+  mountedDeviceId = null,
   isInstallingToDevice = false,
   isAnotherDeviceInstallBusy = false,
   canQueueDeviceInstall = false,
+  uninstallingFromDevice = false,
   deviceInstallState = null,
   navigation: activeNavigation = null,
   onClose,
@@ -306,6 +316,7 @@ export function GameDetailDrawer({
   onExpressInstallToDevice,
   onUpgradeOnDevice,
   onExportToSdCard,
+  onUninstallFromDevice,
   onCancelDeviceInstall,
   onDismissDeviceInstall,
   onViewDeviceInstallQueue,
@@ -332,6 +343,9 @@ export function GameDetailDrawer({
   const [queueingDownload, setQueueingDownload] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [confirmUninstall, setConfirmUninstall] = useState(false);
+  const [uninstallingLocal, setUninstallingLocal] = useState(false);
+  const [uninstallMessage, setUninstallMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [coverFailed, setCoverFailed] = useState(false);
   const [failedScreenshots, setFailedScreenshots] = useState<Set<number>>(new Set());
@@ -617,6 +631,8 @@ export function GameDetailDrawer({
     if (!activeItem) return;
     setMetaError(null);
     setConfirmDelete(false);
+    setConfirmUninstall(false);
+    setUninstallMessage(null);
     setMoreMenuOpen(false);
     setCoverFailed(false);
     setFailedScreenshots(new Set());
@@ -1142,7 +1158,12 @@ export function GameDetailDrawer({
           'Content-Type': 'application/json',
           'X-Requested-With': 'rgt-sync',
         },
-        body: JSON.stringify({ ids: [item.id], installed }),
+        body: JSON.stringify({
+          ids: [item.id],
+          installed,
+          ...(mountedDeviceId ? { deviceId: mountedDeviceId } : {}),
+          ...(installed && mountedDeviceName ? { deviceLabel: mountedDeviceName } : {}),
+        }),
       });
       const parsed = await readJsonSafely<{ items?: RepositoryItemRecord[] }>(res);
       if (parsed.ok && parsed.data?.items?.[0]) {
@@ -1150,6 +1171,35 @@ export function GameDetailDrawer({
       }
     } finally {
       setTogglingInstalled(false);
+    }
+  };
+
+  const handleConfirmUninstallFromDevice = async () => {
+    if (!activeItem || !onUninstallFromDevice || uninstallingLocal || uninstallingFromDevice) return;
+    setUninstallingLocal(true);
+    setUninstallMessage(null);
+    try {
+      const result = await onUninstallFromDevice(item);
+      setConfirmUninstall(false);
+      if (result && !result.ok && result.errors.length > 0) {
+        setUninstallMessage({ kind: 'error', text: result.errors[0] });
+      } else if (result) {
+        if (result.updatedItems[0]) {
+          onItemUpdated(result.updatedItems[0]);
+        }
+        const msg =
+          result.filesRemovedCount > 0
+            ? `Removed from ${mountedDeviceName || 'device'} (${result.filesRemovedCount} file${result.filesRemovedCount === 1 ? '' : 's'}). Local mirror untouched.`
+            : `Cleared install flag for ${mountedDeviceName || 'device'} (file already removed on device).`;
+        setUninstallMessage({ kind: 'ok', text: msg });
+      }
+    } catch (err) {
+      setUninstallMessage({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Failed uninstalling from device.',
+      });
+    } finally {
+      setUninstallingLocal(false);
     }
   };
 
@@ -1441,13 +1491,26 @@ export function GameDetailDrawer({
                       : item.status
                   : item.status}
               </span>
-              {item.installedAt && (() => {
-                const headerUpdateInfo = classifyInstalledUpdateState(item);
+              {(() => {
+                const badge = formatInstalledDevicesBadge(item);
+                if (!badge) return null;
+                const activeInstall = findItemInstallForDevice(item, mountedDeviceId, mountedDeviceName);
+                const headerUpdateInfo = classifyInstalledUpdateState(
+                  activeInstall
+                    ? {
+                        ...item,
+                        installedAt: activeInstall.installedAt,
+                        installedDeviceLabel: activeInstall.deviceName,
+                        installedFileId: activeInstall.installedFileId,
+                        installedFilename: activeInstall.installedFilename,
+                      }
+                    : item,
+                );
                 return (
                   <span
                     title={
                       headerUpdateInfo.tooltip ||
-                      `Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`
+                      `${badge.tooltip}${item.installedAt ? ` · Last installed ${formatDateTime(item.installedAt)}` : ''}`
                     }
                     className="inline-flex items-center gap-1.5 font-mono text-xs text-crt-text/90"
                   >
@@ -1456,7 +1519,9 @@ export function GameDetailDrawer({
                     </span>
                     <HardDrive className="h-3.5 w-3.5 text-crt-phosphor shrink-0" />
                     <span>
-                      Installed{item.installedDeviceLabel ? ` (${item.installedDeviceLabel})` : ''}
+                      {badge.deviceNames.length > 0
+                        ? `Installed on ${badge.deviceNames.join(' · ')}`
+                        : 'Installed'}
                     </span>
                     {headerUpdateInfo.hasUpdate && headerUpdateInfo.summaryLabel && (
                       <>
@@ -1797,9 +1862,30 @@ export function GameDetailDrawer({
                   </dd>
                 </div>
                 <div className="px-4 py-2 grid grid-cols-12 gap-3 items-baseline">
-                  <dt className="col-span-4 text-crt-muted font-medium">Storage Device</dt>
+                  <dt className="col-span-4 text-crt-muted font-medium">Storage Devices</dt>
                   <dd className="col-span-8 text-[11px] font-mono">
-                    {item.installedAt ? (
+                    {item.deviceInstalls && item.deviceInstalls.length > 0 ? (
+                      <div className="flex flex-col gap-1">
+                        {item.deviceInstalls.map((inst) => (
+                          <div
+                            key={inst.deviceId}
+                            title={
+                              inst.installedPaths.length > 0
+                                ? `Device paths: ${inst.installedPaths.join(', ')}`
+                                : inst.installedFilename
+                                  ? `Installed file: ${inst.installedFilename}`
+                                  : undefined
+                            }
+                            className="inline-flex items-center gap-1.5 text-crt-phosphor tabular-nums flex-wrap"
+                          >
+                            <HardDrive className="h-3 w-3 shrink-0" />
+                            <span className="font-medium">{inst.deviceName}</span>
+                            <span className="text-crt-muted">·</span>
+                            <span className="text-crt-text/80">{formatDateTime(inst.installedAt)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : item.installedAt ? (
                       <span className="inline-flex items-center gap-1.5 text-crt-phosphor tabular-nums">
                         <HardDrive className="h-3 w-3 shrink-0" />
                         <span>
@@ -2619,7 +2705,23 @@ export function GameDetailDrawer({
 
         {/* Unified Sticky Footer */}
         {(() => {
-          const updateInfo = classifyInstalledUpdateState(item);
+          const activeDeviceInstall = findItemInstallForDevice(
+            item,
+            mountedDeviceId,
+            mountedDeviceName,
+          );
+          const isInstalledOnActiveDevice = Boolean(mountedDeviceName && activeDeviceInstall);
+          const updateInfo = classifyInstalledUpdateState(
+            activeDeviceInstall
+              ? {
+                  ...item,
+                  installedAt: activeDeviceInstall.installedAt,
+                  installedDeviceLabel: activeDeviceInstall.deviceName,
+                  installedFileId: activeDeviceInstall.installedFileId,
+                  installedFilename: activeDeviceInstall.installedFilename,
+                }
+              : item,
+          );
           const updateComparison = formatInstalledUpdateComparison(updateInfo);
           const canInstallToDevice = Boolean(onUpgradeOnDevice || onExpressInstallToDevice || onExportToSdCard);
           const footerPlan = resolveGameDetailFooterPlan({
@@ -2629,8 +2731,10 @@ export function GameDetailDrawer({
             hasFailedFiles,
             mountedDeviceName,
             canInstallToDevice,
-            installedAt: item.installedAt,
-            installedDeviceLabel: item.installedDeviceLabel,
+            installedAt: mountedDeviceName ? (activeDeviceInstall?.installedAt ?? null) : item.installedAt,
+            installedDeviceLabel: mountedDeviceName
+              ? (activeDeviceInstall?.deviceName ?? null)
+              : item.installedDeviceLabel,
             isUpdateReadyLocal: updateInfo.readyToUpgradeLocal,
           });
           const isPreparingPrimary = Boolean(
@@ -2641,6 +2745,7 @@ export function GameDetailDrawer({
             primaryDownloadFile && isBrowsableArchiveName(primaryDownloadFile.filename),
           );
           const isThisItemInstalling = Boolean(isInstallingToDevice || deviceInstallState?.isActive);
+          const isUninstalling = Boolean(uninstallingLocal || uninstallingFromDevice);
           const installingButtonLabel =
             deviceInstallState?.stage === 'queued'
               ? 'Queued…'
@@ -2655,6 +2760,7 @@ export function GameDetailDrawer({
                       : 'Installing…';
           const handleOneClickDeviceInstall = () => {
             setMoreMenuOpen(false);
+            setConfirmUninstall(false);
             setDismissedInstallJobId(null);
             if (updateInfo.readyToUpgradeLocal && onUpgradeOnDevice) {
               onUpgradeOnDevice(item.id);
@@ -2674,8 +2780,71 @@ export function GameDetailDrawer({
             canQueueMore: canQueueDeviceInstall && !isThisItemInstalling,
           });
 
+          const uninstallPreviewPaths = activeDeviceInstall?.installedPaths || [];
+
           return (
             <>
+              {uninstallMessage && !confirmUninstall && (
+                <div
+                  className={`px-6 py-2 border-t flex items-center justify-between gap-2 text-xs font-mono shrink-0 ${
+                    uninstallMessage.kind === 'error'
+                      ? 'border-crt-crimson/40 bg-crt-crimson/10 text-crt-crimson'
+                      : 'border-crt-phosphor/35 bg-crt-phosphor/8 text-crt-phosphor'
+                  }`}
+                >
+                  <span className="truncate">{uninstallMessage.text}</span>
+                  <button
+                    type="button"
+                    onClick={() => setUninstallMessage(null)}
+                    className="p-0.5 text-crt-muted hover:text-crt-text cursor-pointer shrink-0"
+                    aria-label="Dismiss uninstall status"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {confirmUninstall && mountedDeviceName && isInstalledOnActiveDevice && (
+                <div className="px-6 py-3 border-t border-crt-crimson/45 bg-crt-crimson/10 space-y-2 text-xs font-mono shrink-0">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1 min-w-0">
+                      <p className="font-semibold text-crt-text">
+                        Remove from {mountedDeviceName}?
+                      </p>
+                      <p className="text-[11px] text-crt-muted">
+                        {uninstallPreviewPaths.length > 0
+                          ? `Will delete from device: ${uninstallPreviewPaths.join(', ')}`
+                          : `Will remove matching ROM file for "${activeDeviceInstall?.installedFilename || item.title}" from ${mountedDeviceName}.`}
+                        {' '}Local RGT Sync mirror is untouched.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        disabled={isUninstalling}
+                        onClick={() => void handleConfirmUninstallFromDevice()}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-crimson text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+                      >
+                        {isUninstalling ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-3.5 w-3.5" />
+                        )}
+                        {isUninstalling ? 'Removing…' : 'Remove from Device'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isUninstalling}
+                        onClick={() => setConfirmUninstall(false)}
+                        className="px-2.5 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {updateInfo.hasUpdate && !isThisItemInstalling && (
                 <div className="px-6 py-2 border-t border-crt-amber/35 bg-crt-amber/8 flex flex-wrap items-center justify-between gap-2 text-xs font-mono shrink-0">
                   <div className="flex items-center gap-2 min-w-0 text-crt-amber">
@@ -2967,13 +3136,32 @@ export function GameDetailDrawer({
                             </span>
                           </button>
 
+                          {mountedDeviceName && isInstalledOnActiveDevice && onUninstallFromDevice && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              disabled={isUninstalling || isThisItemInstalling}
+                              onClick={() => {
+                                setMoreMenuOpen(false);
+                                setConfirmDelete(false);
+                                setConfirmUninstall(true);
+                              }}
+                              className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-crimson hover:bg-crt-crimson/10 transition-colors disabled:opacity-50 cursor-pointer"
+                            >
+                              <Trash2 className="h-3.5 w-3.5 shrink-0" />
+                              <span className="truncate">Uninstall from {mountedDeviceName}</span>
+                            </button>
+                          )}
+
                           <button
                             type="button"
                             role="menuitem"
                             disabled={togglingInstalled}
                             onClick={() => {
                               setMoreMenuOpen(false);
-                              void handleToggleInstalled(!item.installedAt);
+                              void handleToggleInstalled(
+                                mountedDeviceName ? !isInstalledOnActiveDevice : !item.installedAt,
+                              );
                             }}
                             className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-text hover:bg-crt-elevated hover:text-crt-phosphor transition-colors disabled:opacity-50 cursor-pointer"
                           >
@@ -2981,9 +3169,13 @@ export function GameDetailDrawer({
                             <span className="truncate">
                               {togglingInstalled
                                 ? 'Updating Flag...'
-                                : item.installedAt
-                                  ? 'Clear Installed Flag'
-                                  : 'Mark as Installed'}
+                                : mountedDeviceName
+                                  ? isInstalledOnActiveDevice
+                                    ? `Clear Flag on ${mountedDeviceName}`
+                                    : `Mark Installed on ${mountedDeviceName}`
+                                  : item.installedAt
+                                    ? 'Clear Installed Flag'
+                                    : 'Mark as Installed'}
                             </span>
                           </button>
 

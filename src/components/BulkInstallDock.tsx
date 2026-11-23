@@ -30,7 +30,7 @@ export function BulkInstallDock({ installer }: BulkInstallDockProps) {
   const isError = job.phase === 'error';
   const isCompleted = job.phase === 'completed';
 
-  const deviceName = sdRootHandle?.name || 'Storage Device';
+  const deviceName = installer.activeDeviceName || sdRootHandle?.name || 'Storage Device';
   const active = isRunning ? job.activeTransfer : null;
   const activeBytesSummary = active
     ? active.stage === 'scanning_device'

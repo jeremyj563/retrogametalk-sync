@@ -70,6 +70,10 @@ import {
   resolveTargetConsoleScope,
 } from '../shared/syncRuleMatcher';
 import { classifyInstalledUpdateState } from '../shared/deviceInstallUpdates';
+import {
+  findItemInstallForDevice,
+  formatInstalledDevicesBadge,
+} from '../shared/deviceProfiles';
 import type {
   ArchiveBrowseListing,
   CatalogDownloadedFilter,
@@ -481,7 +485,7 @@ function buildCatalogQueryKey(
     | 'languagesMode'
     | 'sources'
     | 'sourcesMode'
-  >,
+  > & { deviceId?: string | null },
 ): string {
   return JSON.stringify([
     prefs.viewMode,
@@ -491,6 +495,7 @@ function buildCatalogQueryKey(
     prefs.statuses,
     prefs.downloadedFilter,
     prefs.installedFilter,
+    prefs.deviceId ?? null,
     prefs.syncRulesOnly,
     prefs.favoriteOnly,
     prefs.collectionId,
@@ -717,7 +722,15 @@ export function CatalogPanel({
   const [queueNotice, setQueueNotice] = useState<string | null>(null);
   const [indexerBusy, setIndexerBusy] = useState(false);
 
-  const { sdRootHandle } = installer;
+  const { sdRootHandle, activeDeviceProfile, activeDeviceName } = installer;
+  const effectiveMountedDeviceName = activeDeviceName || sdRootHandle?.name || null;
+  const [installedDeviceScope, setInstalledDeviceScope] = useState<'active' | 'any'>('active');
+  const effectiveDeviceId =
+    activeDeviceProfile && installedDeviceScope === 'active'
+      ? activeDeviceProfile.id
+      : undefined;
+  const [confirmBulkUninstall, setConfirmBulkUninstall] = useState(false);
+  const [bulkUninstallBusy, setBulkUninstallBusy] = useState(false);
 
   // Local Disk Tree state + search filter + selection + in-place archive browsing
   const [fsPath, setFsPath] = useState(() => memoryCatalogViewPrefs.fsPath);
@@ -741,6 +754,7 @@ export function CatalogPanel({
         statuses,
         downloadedFilter,
         installedFilter,
+        effectiveDeviceId ?? null,
         syncRulesOnly,
         favoriteOnly,
         collectionId,
@@ -762,6 +776,7 @@ export function CatalogPanel({
       statuses,
       downloadedFilter,
       installedFilter,
+      effectiveDeviceId,
       syncRulesOnly,
       favoriteOnly,
       collectionId,
@@ -784,6 +799,7 @@ export function CatalogPanel({
       prevFilterSelectionKeyRef.current = filterSelectionKey;
       setSelectedCatalogIds(new Set());
       setConfirmCatalogBulk(false);
+      setConfirmBulkUninstall(false);
       setFilteredDownloadConfirm((prev) => (prev.open ? { ...prev, open: false, error: null } : prev));
     }
   }, [filterSelectionKey]);
@@ -882,6 +898,7 @@ export function CatalogPanel({
       for (const st of statuses) qs.append('status', st);
       if (downloadedFilter !== 'all') qs.set('downloaded', downloadedFilter);
       if (installedFilter !== 'all') qs.set('installed', installedFilter);
+      if (effectiveDeviceId) qs.set('deviceId', effectiveDeviceId);
       if (syncRulesOnly) qs.set('syncRules', 'true');
       if (favoriteOnly) qs.set('favoriteOnly', 'true');
       if (collectionId !== null) qs.set('collectionId', String(collectionId));
@@ -905,6 +922,7 @@ export function CatalogPanel({
       statuses,
       downloadedFilter,
       installedFilter,
+      effectiveDeviceId,
       syncRulesOnly,
       favoriteOnly,
       collectionId,
@@ -973,6 +991,7 @@ export function CatalogPanel({
             statuses,
             downloadedFilter,
             installedFilter,
+            deviceId: effectiveDeviceId ?? null,
             syncRulesOnly,
             favoriteOnly,
             collectionId,
@@ -1078,6 +1097,7 @@ export function CatalogPanel({
       statuses,
       downloadedFilter,
       installedFilter,
+      effectiveDeviceId,
       syncRulesOnly,
       favoriteOnly,
       collectionId,
@@ -1184,6 +1204,7 @@ export function CatalogPanel({
           statuses,
           downloadedFilter,
           installedFilter,
+          deviceId: effectiveDeviceId ?? null,
           syncRulesOnly,
           favoriteOnly,
           collectionId,
@@ -1215,6 +1236,7 @@ export function CatalogPanel({
     statuses,
     downloadedFilter,
     installedFilter,
+    effectiveDeviceId,
     syncRulesOnly,
     favoriteOnly,
     collectionId,
@@ -1558,10 +1580,10 @@ export function CatalogPanel({
             activeDetailItem.id,
             installer.job,
             installer.metrics,
-            sdRootHandle?.name || null,
+            effectiveMountedDeviceName,
           )
         : null,
-    [activeDetailItem, installer.job, installer.metrics, sdRootHandle],
+    [activeDetailItem, installer.job, installer.metrics, effectiveMountedDeviceName],
   );
 
   const queueableFilteredCount = useMemo(() => {
@@ -1667,6 +1689,47 @@ export function CatalogPanel({
     }
   };
 
+  const selectedInstalledOnMountedItems = useMemo(() => {
+    if (!sdRootHandle || !activeDeviceProfile) return [];
+    return items.filter(
+      (item) =>
+        selectedCatalogIds.has(item.id) &&
+        Boolean(findItemInstallForDevice(item, activeDeviceProfile.id, effectiveMountedDeviceName)),
+    );
+  }, [items, selectedCatalogIds, sdRootHandle, activeDeviceProfile, effectiveMountedDeviceName]);
+
+  useEffect(() => {
+    if (selectedInstalledOnMountedItems.length === 0) {
+      setConfirmBulkUninstall(false);
+    }
+  }, [selectedInstalledOnMountedItems.length]);
+
+  const handleBulkUninstallFromMounted = async () => {
+    if (
+      !activeDeviceProfile ||
+      selectedInstalledOnMountedItems.length === 0 ||
+      bulkUninstallBusy
+    ) {
+      return;
+    }
+    setBulkUninstallBusy(true);
+    try {
+      const res = await installer.uninstallItemsFromMountedDevice(selectedInstalledOnMountedItems);
+      setConfirmBulkUninstall(false);
+      const targetLabel = effectiveMountedDeviceName || 'mounted device';
+      if (res.uninstalledCount > 0) {
+        setQueueNotice(
+          `Removed ${res.uninstalledCount} game${res.uninstalledCount === 1 ? '' : 's'} (${res.filesRemovedCount} file${res.filesRemovedCount === 1 ? '' : 's'}) from ${targetLabel}. Local mirror untouched.${res.errors.length > 0 ? ` (${res.errors.length} failed)` : ''}`,
+        );
+        await loadCatalog(true);
+      } else if (res.errors.length > 0) {
+        setQueueNotice(`Uninstall error: ${res.errors[0]}`);
+      }
+    } finally {
+      setBulkUninstallBusy(false);
+    }
+  };
+
   const handleBulkSetInstalled = async (ids: number[], installed: boolean) => {
     if (ids.length === 0 || markingInstalled) return;
     setMarkingInstalled(true);
@@ -1680,7 +1743,8 @@ export function CatalogPanel({
         body: JSON.stringify({
           ids,
           installed,
-          deviceLabel: installed ? (sdRootHandle?.name || null) : null,
+          deviceId: activeDeviceProfile?.id ?? undefined,
+          deviceLabel: installed ? effectiveMountedDeviceName : null,
         }),
       });
       if (res.ok) {
@@ -2082,7 +2146,10 @@ export function CatalogPanel({
 
   const handleBatchOutdatedAction = async (action: 'upgrade_local' | 'download_remote') => {
     try {
-      const res = await fetch('/api/items/outdated');
+      const outdatedUrl = effectiveDeviceId
+        ? `/api/items/outdated?deviceId=${encodeURIComponent(effectiveDeviceId)}`
+        : '/api/items/outdated';
+      const res = await fetch(outdatedUrl);
       const parsed = await readJsonSafely<OutdatedInstalledSummary>(res);
       if (!parsed.ok || !parsed.data) {
         setQueueNotice(parsed.errorMessage || 'Failed to inspect outdated installed games.');
@@ -3183,6 +3250,40 @@ export function CatalogPanel({
                       )}
                     </button>
                   )}
+                  {activeDeviceProfile && (
+                    <div
+                      role="group"
+                      aria-label="Installed filter device scope"
+                      className="inline-flex items-center rounded border border-crt-border bg-crt-bg p-0.5 text-[11px] font-mono shrink-0"
+                    >
+                      <button
+                        type="button"
+                        aria-pressed={installedDeviceScope === 'active'}
+                        onClick={() => setInstalledDeviceScope('active')}
+                        title={`Scope Installed / Not Installed / Updates filters to ${effectiveMountedDeviceName || 'the mounted device'}`}
+                        className={`px-2 py-0.5 rounded-sm transition-colors whitespace-nowrap cursor-pointer max-w-[130px] truncate ${
+                          installedDeviceScope === 'active'
+                            ? 'bg-crt-phosphor/15 text-crt-phosphor font-medium'
+                            : 'text-crt-muted hover:text-crt-text'
+                        }`}
+                      >
+                        {effectiveMountedDeviceName || 'This Device'}
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={installedDeviceScope === 'any'}
+                        onClick={() => setInstalledDeviceScope('any')}
+                        title="Scope Installed / Not Installed / Updates filters across all storage devices"
+                        className={`px-2 py-0.5 rounded-sm transition-colors whitespace-nowrap cursor-pointer ${
+                          installedDeviceScope === 'any'
+                            ? 'bg-crt-elevated text-crt-text font-medium'
+                            : 'text-crt-muted hover:text-crt-text'
+                        }`}
+                      >
+                        Any Device
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 <span
@@ -3837,17 +3938,17 @@ export function CatalogPanel({
                           void handleCollectionBatchAction(activeCollection, 'install_ready')
                         }
                         title={
-                          installer.canAppendToQueue && sdRootHandle
-                            ? `Add ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}" to the active install queue on ${sdRootHandle.name}`
-                            : sdRootHandle
-                              ? `Install ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}" directly to ${sdRootHandle.name}`
+                          installer.canAppendToQueue && effectiveMountedDeviceName
+                            ? `Add ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}" to the active install queue on ${effectiveMountedDeviceName}`
+                            : effectiveMountedDeviceName
+                              ? `Install ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}" directly to ${effectiveMountedDeviceName}`
                               : `Mount a storage device and install ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}"`
                         }
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
                       >
                         <HardDrive className="h-3.5 w-3.5 shrink-0" />
                         {formatQuickInstallLabel({
-                          mountedDeviceName: sdRootHandle?.name || null,
+                          mountedDeviceName: effectiveMountedDeviceName,
                           count: activeCollection.downloadedCount,
                         })}
                       </button>
@@ -3911,7 +4012,12 @@ export function CatalogPanel({
                   <div className="flex items-center gap-2 min-w-0 text-crt-amber">
                     <ArrowUpCircle className="h-4 w-4 shrink-0" />
                     <span className="truncate">
-                      <span className="font-semibold">Installed ROM Updates</span>
+                      <span className="font-semibold">
+                        Installed ROM Updates
+                        {effectiveDeviceId && effectiveMountedDeviceName
+                          ? ` on ${effectiveMountedDeviceName}`
+                          : ''}
+                      </span>
                       <span className="text-crt-text/85">
                         {' · '}
                         {globalLocalReady.toLocaleString()} ready locally
@@ -3928,17 +4034,17 @@ export function CatalogPanel({
                         disabled={installer.isBusy && !installer.canAppendToQueue}
                         onClick={() => void handleBatchOutdatedAction('upgrade_local')}
                         title={
-                          installer.canAppendToQueue && sdRootHandle
-                            ? `Add all ${globalLocalReady} ready ROM updates to the active install queue on ${sdRootHandle.name} (replaces superseded copies)`
-                            : sdRootHandle
-                              ? `Upgrade all ${globalLocalReady} ready ROMs directly on ${sdRootHandle.name} (replaces superseded copies)`
-                              : `Mount a storage device and upgrade all ${globalLocalReady} ready ROMs`
+                          installer.canAppendToQueue && effectiveMountedDeviceName
+                            ? `Add ready ROM updates to the active install queue on ${effectiveMountedDeviceName} (replaces superseded copies)`
+                            : effectiveMountedDeviceName
+                              ? `Upgrade ready ROMs directly on ${effectiveMountedDeviceName} (replaces superseded copies)`
+                              : `Mount a storage device and upgrade ready ROMs`
                         }
                         className="inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-semibold bg-crt-amber text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
                       >
                         <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
                         {formatQuickInstallLabel({
-                          mountedDeviceName: sdRootHandle?.name || null,
+                          mountedDeviceName: effectiveMountedDeviceName,
                           isUpdateAvailable: true,
                           count: globalLocalReady,
                         })}
@@ -3991,7 +4097,7 @@ export function CatalogPanel({
               )}
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              {!confirmCatalogBulk && (
+              {!confirmCatalogBulk && !confirmBulkUninstall && (
                 <>
                   {onQueueDownload && selectionSummary.queueableIds.length > 0 && (
                     <button
@@ -4019,7 +4125,7 @@ export function CatalogPanel({
                           'express',
                           selectionSummary,
                           installer.isBusy && !installer.canAppendToQueue,
-                          sdRootHandle?.name || null,
+                          effectiveMountedDeviceName,
                           installer.canAppendToQueue,
                         )}
                         onClick={() => handleQuickInstallIds(selectionSummary.installableIds)}
@@ -4027,7 +4133,7 @@ export function CatalogPanel({
                       >
                         <HardDrive className="h-3.5 w-3.5 shrink-0" />
                         {formatQuickInstallLabel({
-                          mountedDeviceName: sdRootHandle?.name || null,
+                          mountedDeviceName: effectiveMountedDeviceName,
                           count: selectionSummary.installableIds.length,
                         })}
                       </button>
@@ -4038,7 +4144,7 @@ export function CatalogPanel({
                           'review',
                           selectionSummary,
                           installer.isBusy,
-                          sdRootHandle?.name || null,
+                          effectiveMountedDeviceName,
                         )}
                         onClick={() =>
                           void installer.openReviewQueue(
@@ -4054,6 +4160,26 @@ export function CatalogPanel({
                       </button>
                     </>
                   )}
+                  {sdRootHandle &&
+                    activeDeviceProfile &&
+                    selectedInstalledOnMountedItems.length > 0 && (
+                      <button
+                        type="button"
+                        disabled={installer.isBusy || bulkUninstallBusy}
+                        title={`Delete ROM files for ${selectedInstalledOnMountedItems.length} selected game${selectedInstalledOnMountedItems.length === 1 ? '' : 's'} from ${effectiveMountedDeviceName || 'mounted device'} (local mirror stays untouched)`}
+                        onClick={() => {
+                          setConfirmCatalogBulk(false);
+                          setConfirmBulkUninstall(true);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 cursor-pointer"
+                      >
+                        <Trash2 className="h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          Uninstall from {effectiveMountedDeviceName || 'Device'} (
+                          {selectedInstalledOnMountedItems.length})
+                        </span>
+                      </button>
+                    )}
                   <CollectionPickerPopover
                     mode="bulk"
                     align="right"
@@ -4097,7 +4223,38 @@ export function CatalogPanel({
                   )}
                 </>
               )}
-              {confirmCatalogBulk ? (
+              {confirmBulkUninstall ? (
+                <>
+                  <span className="text-xs font-mono text-crt-amber">
+                    Remove {selectedInstalledOnMountedItems.length} game
+                    {selectedInstalledOnMountedItems.length === 1 ? '' : 's'} from{' '}
+                    {effectiveMountedDeviceName || 'Device'}? Local mirror is untouched.
+                  </span>
+                  <button
+                    type="button"
+                    disabled={bulkUninstallBusy}
+                    onClick={() => void handleBulkUninstallFromMounted()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    {bulkUninstallBusy ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                    ) : (
+                      <Trash2 className="h-3.5 w-3.5 shrink-0" />
+                    )}
+                    {bulkUninstallBusy
+                      ? 'Removing...'
+                      : `Confirm Uninstall (${selectedInstalledOnMountedItems.length})`}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={bulkUninstallBusy}
+                    onClick={() => setConfirmBulkUninstall(false)}
+                    className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : confirmCatalogBulk ? (
                 <>
                   <button
                     type="button"
@@ -4120,7 +4277,10 @@ export function CatalogPanel({
                 <>
                   <button
                     type="button"
-                    onClick={() => setConfirmCatalogBulk(true)}
+                    onClick={() => {
+                      setConfirmBulkUninstall(false);
+                      setConfirmCatalogBulk(true);
+                    }}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-crimson/60 text-crt-crimson hover:bg-crt-crimson/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <Trash2 className="h-3.5 w-3.5 shrink-0" />
@@ -4357,16 +4517,19 @@ export function CatalogPanel({
                       item.id,
                       installer.job,
                       installer.metrics,
-                      sdRootHandle?.name || null,
+                      effectiveMountedDeviceName,
                     );
                     const canQuickInstall = isCatalogStatusInstallable(item.status);
                     const isReinstallOnMounted = isItemInstalledOnMountedDevice({
-                      mountedDeviceName: sdRootHandle?.name || null,
+                      mountedDeviceName: effectiveMountedDeviceName,
+                      activeDeviceId: activeDeviceProfile?.id ?? null,
+                      deviceInstalls: item.deviceInstalls,
                       installedAt: item.installedAt,
                       installedDeviceLabel: item.installedDeviceLabel,
                       liveInstallState: itemInstall,
                       installerIsBusy: installer.isBusy,
                     });
+                    const installedDevicesBadge = formatInstalledDevicesBadge(item);
                     const updateInfo = classifyInstalledUpdateState(item);
                     const isOtherInstallBusy =
                       installer.isBusy && !installer.canAppendToQueue && !itemInstall.isActive;
@@ -4650,18 +4813,15 @@ export function CatalogPanel({
                                 {item.status === 'partial' && <AlertCircle className="h-3.5 w-3.5" />}
                                 {item.status}
                               </span>
-                              {item.installedAt && (
+                              {installedDevicesBadge && (
                                 <div
-                                  title={
-                                    updateInfo.tooltip ||
-                                    `Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`
-                                  }
+                                  title={updateInfo.tooltip || installedDevicesBadge.tooltip}
                                   className="space-y-0.5"
                                 >
                                   <div className="flex items-center gap-1.5 text-[11px] text-crt-text/90">
                                     <HardDrive className="h-3 w-3 text-crt-phosphor shrink-0" />
-                                    <span className="truncate max-w-[140px]">
-                                      Installed{item.installedDeviceLabel ? ` · ${item.installedDeviceLabel}` : ''}
+                                    <span className="truncate max-w-[160px]">
+                                      {installedDevicesBadge.label}
                                     </span>
                                   </div>
                                   {updateInfo.hasUpdate && updateInfo.summaryLabel && (
@@ -4775,7 +4935,7 @@ export function CatalogPanel({
                                         ? !canQueueMoreHere && updateInfo.tooltip
                                           ? updateInfo.tooltip
                                           : formatQuickInstallTooltip({
-                                              mountedDeviceName: sdRootHandle?.name || null,
+                                              mountedDeviceName: effectiveMountedDeviceName,
                                               isReinstall: isReinstallOnMounted,
                                               isUpdateAvailable: true,
                                               isActive: itemInstall.isActive,
@@ -4783,7 +4943,7 @@ export function CatalogPanel({
                                               canQueueMore: canQueueMoreHere,
                                             })
                                         : formatQuickInstallTooltip({
-                                            mountedDeviceName: sdRootHandle?.name || null,
+                                            mountedDeviceName: effectiveMountedDeviceName,
                                             isReinstall: isReinstallOnMounted,
                                             isActive: itemInstall.isActive,
                                             isOtherBusy: isOtherInstallBusy,
@@ -4821,7 +4981,7 @@ export function CatalogPanel({
                                             ? 'Updating'
                                             : 'Installing'
                                       : formatQuickInstallLabel({
-                                          mountedDeviceName: sdRootHandle?.name || null,
+                                          mountedDeviceName: effectiveMountedDeviceName,
                                           isReinstall: isReinstallOnMounted,
                                           isUpdateAvailable: updateInfo.readyToUpgradeLocal,
                                           compact: true,
@@ -4919,16 +5079,19 @@ export function CatalogPanel({
                     item.id,
                     installer.job,
                     installer.metrics,
-                    sdRootHandle?.name || null,
+                    effectiveMountedDeviceName,
                   );
                   const canQuickInstall = isCatalogStatusInstallable(item.status);
                   const isReinstallOnMounted = isItemInstalledOnMountedDevice({
-                    mountedDeviceName: sdRootHandle?.name || null,
+                    mountedDeviceName: effectiveMountedDeviceName,
+                    activeDeviceId: activeDeviceProfile?.id ?? null,
+                    deviceInstalls: item.deviceInstalls,
                     installedAt: item.installedAt,
                     installedDeviceLabel: item.installedDeviceLabel,
                     liveInstallState: itemInstall,
                     installerIsBusy: installer.isBusy,
                   });
+                  const installedDevicesBadge = formatInstalledDevicesBadge(item);
                   const updateInfo = classifyInstalledUpdateState(item);
                   const isOtherInstallBusy =
                     installer.isBusy && !installer.canAppendToQueue && !itemInstall.isActive;
@@ -5158,19 +5321,14 @@ export function CatalogPanel({
                               </span>
                             )}
                           </div>
-                          {item.installedAt && (
+                          {installedDevicesBadge && (
                             <div
-                              title={
-                                updateInfo.tooltip ||
-                                `Installed${item.installedDeviceLabel ? ` to ${item.installedDeviceLabel}` : ''} on ${formatDateTime(item.installedAt)}`
-                              }
+                              title={updateInfo.tooltip || installedDevicesBadge.tooltip}
                               className="space-y-0.5 pt-0.5"
                             >
                               <p className="flex items-center gap-1.5 font-mono text-[11px] text-crt-text/90 truncate">
                                 <HardDrive className="h-3 w-3 text-crt-phosphor shrink-0" />
-                                <span className="truncate">
-                                  Installed{item.installedDeviceLabel ? ` · ${item.installedDeviceLabel}` : ''}
-                                </span>
+                                <span className="truncate">{installedDevicesBadge.label}</span>
                               </p>
                               {updateInfo.hasUpdate && updateInfo.summaryLabel && (
                                 <p className="flex items-center gap-1 font-mono text-[11px] text-crt-amber font-medium truncate">
@@ -5312,7 +5470,7 @@ export function CatalogPanel({
                                     ? !canQueueMoreHere && updateInfo.tooltip
                                       ? updateInfo.tooltip
                                       : formatQuickInstallTooltip({
-                                          mountedDeviceName: sdRootHandle?.name || null,
+                                          mountedDeviceName: effectiveMountedDeviceName,
                                           isReinstall: isReinstallOnMounted,
                                           isUpdateAvailable: true,
                                           isActive: false,
@@ -5320,7 +5478,7 @@ export function CatalogPanel({
                                           canQueueMore: canQueueMoreHere,
                                         })
                                     : formatQuickInstallTooltip({
-                                        mountedDeviceName: sdRootHandle?.name || null,
+                                        mountedDeviceName: effectiveMountedDeviceName,
                                         isReinstall: isReinstallOnMounted,
                                         isActive: false,
                                         isOtherBusy: isOtherInstallBusy,
@@ -5349,7 +5507,7 @@ export function CatalogPanel({
                                   <HardDrive className="h-3 w-3 shrink-0" />
                                 )}
                                 {formatQuickInstallLabel({
-                                  mountedDeviceName: sdRootHandle?.name || null,
+                                  mountedDeviceName: effectiveMountedDeviceName,
                                   isReinstall: isReinstallOnMounted,
                                   isUpdateAvailable: updateInfo.readyToUpgradeLocal,
                                   compact: true,
@@ -5681,7 +5839,8 @@ export function CatalogPanel({
         activeTransfer={status.activeTransfer}
         canSync={Boolean(status.auth.hasCompletedLogin)}
         retryingItem={effectiveRetryingId === activeDetailItem?.id}
-        mountedDeviceName={sdRootHandle?.name || null}
+        mountedDeviceName={effectiveMountedDeviceName}
+        mountedDeviceId={activeDeviceProfile?.id ?? null}
         isInstallingToDevice={Boolean(activeDetailInstallState?.isActive)}
         isAnotherDeviceInstallBusy={Boolean(
           installer.isBusy && !installer.canAppendToQueue && !activeDetailInstallState?.isActive,
@@ -5690,6 +5849,9 @@ export function CatalogPanel({
           installer.canAppendToQueue && !activeDetailInstallState?.isActive,
         )}
         deviceInstallState={activeDetailInstallState}
+        uninstallingFromDevice={Boolean(
+          activeDetailItem && installer.uninstallingItemIds.has(activeDetailItem.id),
+        )}
         navigation={detailNavigation}
         onClose={closeDetailDrawer}
         onItemUpdated={handleItemUpdated}
@@ -5710,6 +5872,13 @@ export function CatalogPanel({
         onExportToSdCard={(id) =>
           void installer.openReviewQueue([id], currentSmartFilterContext, knownItemMetaMap)
         }
+        onUninstallFromDevice={async (targetItem) => {
+          const res = await installer.uninstallItemsFromMountedDevice([targetItem]);
+          if (res.uninstalledCount > 0) {
+            await loadCatalog(true);
+          }
+          return res;
+        }}
         onCancelDeviceInstall={installer.cancelInstall}
         onDismissDeviceInstall={installer.dismissJob}
         onViewDeviceInstallQueue={installer.openModal}

@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.37.0] - 2026-11-23
+
+- Added **Multi-Device Profiles, Persistent Reconnect Mounts & Device Uninstall** for managing multiple handhelds, SD cards, and FPGA devices independently:
+  - **Per-Device Install History & Profiles (SQLite v27)**: Migrated install tracking into `storage_device_profiles` and `catalog_release_device_installs` (with automatic backfill of existing installed games and backward-compatible rollup columns) so installing a game on one device never overwrites install records on another. Added `/api/devices` CRUD endpoints, friendly device renaming, and optional per-device folder-mapping and ROM-naming overrides in **Device Export**.
+  - **Persistent Handle Reconnect (IndexedDB)**: Mounted Chromium `FileSystemDirectoryHandle` references are saved locally in IndexedDB (`rgt_device_handles_v1`). On page load, previously authorized devices reconnect automatically when permission is still granted, or present a 1-click **Reconnect `<Device>`** button (plus quick-switch between remembered devices) in the Sidebar Drive Bay.
+  - **Per-Device Catalog Filtering & Badges**: Added an inline **`<Device>` / Any Device** scope switcher next to the Catalog **Installed / Not Installed / Updates** filters, updated `/api/items`, `/api/items/ids`, and `/api/items/outdated` with `deviceId` scoping, and upgraded Catalog cards/rows and the **Release Details** drawer to display multi-device install badges (`Installed · Miyoo Mini +1`) and full per-device install lists.
+  - **Safe Direct Uninstall from Mounted Device**: Added **Uninstall from `<Device>`** in the **Release Details** `More` menu and Catalog bulk selection bar with explicit inline confirmation, path-confined removal strictly inside the mounted external storage handle (removing only recorded ROM paths or legacy stem fallbacks without ever touching the local RGT Sync mirror), and immediate install-record cleanup.
+
 ## [1.36.0] - 2026-11-23
 
 - Added **Live Install Queueing** for 1-click device installs so you no longer have to wait for the current game to finish before queueing more:

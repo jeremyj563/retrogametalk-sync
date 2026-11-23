@@ -276,6 +276,35 @@ export interface ReleaseFileRecord {
   downloadedAt: string | null;
 }
 
+export interface DeviceRomNamingOverrides {
+  romNamingTemplate?: string | null;
+  romSanitizeFat32?: boolean | null;
+  romMaxFilenameLen?: number | null;
+}
+
+export interface StorageDeviceProfile {
+  id: string;
+  name: string;
+  volumeLabel: string;
+  folderConfig: import('../shared/storageFolderMappings.ts').StorageFolderMappingConfig | null;
+  romNaming: DeviceRomNamingOverrides | null;
+  lastMountedAt: string | null;
+  installedCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReleaseDeviceInstallRecord {
+  releaseId: number;
+  deviceId: string;
+  deviceName: string;
+  volumeLabel: string;
+  installedAt: string;
+  installedFileId: number | null;
+  installedFilename: string | null;
+  installedPaths: string[];
+}
+
 export interface RepositoryItemRecord {
   id: number;
   wpPostId: number | null;
@@ -312,6 +341,7 @@ export interface RepositoryItemRecord {
   installedDeviceLabel: string | null;
   installedFileId: number | null;
   installedFilename: string | null;
+  deviceInstalls?: ReleaseDeviceInstallRecord[];
   isFavorite: boolean;
   syncOverride: import('../shared/syncRuleMatcher.ts').SyncOverrideMode;
   collectionIds: number[];

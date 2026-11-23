@@ -8,6 +8,7 @@ import {
   useState,
 } from 'react';
 import {
+  Check,
   ChevronDown,
   ChevronUp,
   FileText,
@@ -15,13 +16,18 @@ import {
   FolderSync,
   HardDrive,
   Loader2,
+  Pencil,
   Pin,
+  Plug,
   RefreshCw,
+  Save,
   SlidersHorizontal,
+  Trash2,
   X,
 } from 'lucide-react';
 import type { BulkStorageInstallerController } from '../hooks/useBulkStorageInstaller';
 import { useSectionSpotlight } from '../hooks/useSectionSpotlight';
+import { formatDateTime } from '../utils/format';
 import {
   appendNamingToken,
   buildLiveExportDestinations,
@@ -117,6 +123,12 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
     const [saving, setSaving] = useState(false);
     const [saveMsg, setSaveMsg] = useState<string | null>(null);
     const [saveErr, setSaveErr] = useState<string | null>(null);
+    const [profileBusyId, setProfileBusyId] = useState<string | null>(null);
+    const [profileNotice, setProfileNotice] = useState<string | null>(null);
+    const [profileError, setProfileError] = useState<string | null>(null);
+    const [renamingProfileId, setRenamingProfileId] = useState<string | null>(null);
+    const [renameDraft, setRenameDraft] = useState('');
+    const [confirmDeleteProfileId, setConfirmDeleteProfileId] = useState<string | null>(null);
     const isDirtyRef = useRef(false);
     const saveNoticeTimerRef = useRef<number | null>(null);
 
@@ -341,7 +353,123 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
     );
 
     const mountedHandle = installer?.sdRootHandle ?? null;
+    const activeProfile = installer?.activeDeviceProfile ?? null;
+    const activeDeviceDisplayName = installer?.activeDeviceName || mountedHandle?.name || null;
+    const deviceProfiles = installer?.deviceProfiles ?? [];
+    const rememberedHandleIds = useMemo(
+      () => new Set((installer?.rememberedHandles ?? []).map((h) => h.deviceId)),
+      [installer?.rememberedHandles],
+    );
     const isBusyTransfer = installer?.isBusy ?? false;
+
+    const activeProfileHasOverrides = Boolean(
+      activeProfile && (activeProfile.folderConfig !== null || activeProfile.romNaming !== null),
+    );
+
+    const handleSaveToActiveProfile = async () => {
+      if (!installer || !activeProfile) return;
+      setProfileBusyId(activeProfile.id);
+      setProfileNotice(null);
+      setProfileError(null);
+      try {
+        const updated = await installer.saveDeviceProfileSettings(activeProfile.id, {
+          folderConfig: normalizeStorageFolderConfig(storageFolderConfig),
+          romNaming: {
+            romNamingTemplate,
+            romSanitizeFat32,
+            romMaxFilenameLen,
+          },
+        });
+        if (updated) {
+          setProfileNotice(`Saved layout & filename rules to "${updated.name}" profile.`);
+        } else {
+          setProfileError('Failed to save profile overrides.');
+        }
+      } finally {
+        setProfileBusyId(null);
+      }
+    };
+
+    const handleClearActiveProfileOverrides = async () => {
+      if (!installer || !activeProfile) return;
+      setProfileBusyId(activeProfile.id);
+      setProfileNotice(null);
+      setProfileError(null);
+      try {
+        const updated = await installer.saveDeviceProfileSettings(activeProfile.id, {
+          folderConfig: null,
+          romNaming: null,
+        });
+        if (updated) {
+          setProfileNotice(`"${updated.name}" now inherits global Device Export defaults.`);
+        } else {
+          setProfileError('Failed to clear profile overrides.');
+        }
+      } finally {
+        setProfileBusyId(null);
+      }
+    };
+
+    const handleLoadActiveProfileIntoEditor = () => {
+      if (!activeProfile) return;
+      if (activeProfile.folderConfig) {
+        setStorageFolderConfig(normalizeStorageFolderConfig(activeProfile.folderConfig));
+      }
+      if (activeProfile.romNaming) {
+        if (typeof activeProfile.romNaming.romNamingTemplate === 'string') {
+          setRomNamingTemplate(activeProfile.romNaming.romNamingTemplate);
+        }
+        if (typeof activeProfile.romNaming.romSanitizeFat32 === 'boolean') {
+          setRomSanitizeFat32(activeProfile.romNaming.romSanitizeFat32);
+        }
+        if (typeof activeProfile.romNaming.romMaxFilenameLen === 'number') {
+          setRomMaxFilenameLen(activeProfile.romNaming.romMaxFilenameLen);
+        }
+      }
+      setProfileNotice(`Loaded "${activeProfile.name}" overrides into the editor.`);
+      setProfileError(null);
+    };
+
+    const handleCommitRenameProfile = async (deviceId: string) => {
+      if (!installer) return;
+      const trimmed = renameDraft.trim();
+      if (!trimmed) {
+        setRenamingProfileId(null);
+        return;
+      }
+      setProfileBusyId(deviceId);
+      setProfileNotice(null);
+      setProfileError(null);
+      try {
+        const updated = await installer.renameDeviceProfile(deviceId, trimmed);
+        if (updated) {
+          setRenamingProfileId(null);
+          setProfileNotice(`Renamed device profile to "${updated.name}".`);
+        } else {
+          setProfileError('Failed to rename device profile.');
+        }
+      } finally {
+        setProfileBusyId(null);
+      }
+    };
+
+    const handleDeleteProfile = async (deviceId: string, name: string) => {
+      if (!installer) return;
+      setProfileBusyId(deviceId);
+      setProfileNotice(null);
+      setProfileError(null);
+      try {
+        const ok = await installer.deleteDeviceProfile(deviceId);
+        if (ok) {
+          setConfirmDeleteProfileId(null);
+          setProfileNotice(`Deleted "${name}" profile and install history.`);
+        } else {
+          setProfileError('Failed to delete device profile.');
+        }
+      } finally {
+        setProfileBusyId(null);
+      }
+    };
 
     const handlePinManualOverride = (slug: string) => {
       setPinOverrideRequest((prev) => ({
@@ -390,9 +518,23 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                   <h2 className="font-display text-lg font-semibold text-crt-text">
                     {mountedHandle
-                      ? `Mounted Device: ${mountedHandle.name}`
+                      ? `Mounted Device: ${activeDeviceDisplayName}`
                       : 'Live Export Destination Preview'}
                   </h2>
+                  {mountedHandle && activeProfile && renamingProfileId !== activeProfile.id && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRenameDraft(activeProfile.name);
+                        setRenamingProfileId(activeProfile.id);
+                      }}
+                      title="Rename this device profile"
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors cursor-pointer"
+                    >
+                      <Pencil className="h-3 w-3 shrink-0" />
+                      <span>Rename</span>
+                    </button>
+                  )}
                   {mountedHandle && autoConfigPhase === 'scanning' && (
                     <span className="inline-flex items-center gap-1.5 text-xs font-mono text-crt-phosphor tabular-nums">
                       <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
@@ -422,9 +564,48 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
                   )}
                 </div>
 
+                {mountedHandle && activeProfile && renamingProfileId === activeProfile.id && (
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    <input
+                      type="text"
+                      value={renameDraft}
+                      maxLength={80}
+                      onChange={(e) => setRenameDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void handleCommitRenameProfile(activeProfile.id);
+                        } else if (e.key === 'Escape') {
+                          setRenamingProfileId(null);
+                        }
+                      }}
+                      aria-label="Mounted device profile name"
+                      className="px-2.5 py-1 text-xs font-mono bg-crt-bg border border-crt-phosphor rounded text-crt-text focus:outline-none w-56"
+                    />
+                    <button
+                      type="button"
+                      disabled={profileBusyId === activeProfile.id}
+                      onClick={() => void handleCommitRenameProfile(activeProfile.id)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-crt-phosphor text-crt-bg rounded hover:brightness-110 disabled:opacity-50 cursor-pointer"
+                    >
+                      <Check className="h-3 w-3 shrink-0" />
+                      <span>Save</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRenamingProfileId(null)}
+                      className="px-2 py-1 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+
                 <p className="text-xs text-crt-muted max-w-2xl leading-relaxed">
                   {mountedHandle
-                    ? 'Console paths auto-configure automatically every time you mount a device. Review exactly where your games will land below.'
+                    ? activeProfile && activeProfile.name !== mountedHandle.name
+                      ? `Volume: ${mountedHandle.name} · ${activeProfile.installedCount.toLocaleString()} installed · Console paths auto-configure every time you mount this device.`
+                      : 'Console paths auto-configure automatically every time you mount a device. Review exactly where your games will land below.'
                     : fsSupport.supported
                       ? 'Mount any SD card, handheld, MiSTer, or flash cart to auto-configure its folder layout immediately and preview exact export paths.'
                       : fsSupport.reason}
@@ -481,6 +662,59 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
               </div>
             )}
           </div>
+
+          {/* Per-Device Profile Override Controls when Mounted */}
+          {mountedHandle && activeProfile && installer && (
+            <div className="border border-crt-border bg-crt-bg/70 rounded px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+              <div className="font-mono text-[11px] text-crt-muted min-w-0">
+                <span className="text-crt-text font-medium">{activeProfile.name}</span>
+                {' · '}
+                {activeProfileHasOverrides ? (
+                  <span className="text-crt-amber">Custom per-device overrides active</span>
+                ) : (
+                  <span>Using global defaults</span>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={profileBusyId === activeProfile.id}
+                  onClick={() => void handleSaveToActiveProfile()}
+                  title={`Save the folder organization & ROM naming rules below specifically for ${activeProfile.name}`}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors disabled:opacity-45 cursor-pointer"
+                >
+                  <Save className="h-3 w-3 shrink-0" />
+                  <span>Save to {activeProfile.name} Profile</span>
+                </button>
+                {activeProfileHasOverrides && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleLoadActiveProfileIntoEditor}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text rounded transition-colors cursor-pointer"
+                    >
+                      <span>Load Profile</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={profileBusyId === activeProfile.id}
+                      onClick={() => void handleClearActiveProfileOverrides()}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-amber hover:border-crt-amber/50 rounded transition-colors disabled:opacity-45 cursor-pointer"
+                    >
+                      <span>Use Global Defaults</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {profileNotice && (
+            <div className="text-xs font-mono text-crt-phosphor">{profileNotice}</div>
+          )}
+          {profileError && (
+            <div className="text-xs font-mono text-crt-crimson">{profileError}</div>
+          )}
 
           {/* Auto-Configure Error (if any) */}
           {autoConfigError && (
@@ -934,6 +1168,191 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
             )}
           </div>
         </section>
+
+        {/* Step 03: Saved Storage Device Profiles */}
+        {installer && deviceProfiles.length > 0 && (
+          <section
+            aria-label="Saved storage device profiles"
+            className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-6 space-y-4"
+          >
+            <div aria-hidden="true" className="crt-edge-beam">
+              <span />
+            </div>
+            <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
+              <div className="flex items-start gap-3 min-w-0">
+                <HardDrive className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
+                <div className="space-y-1 min-w-0">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <h2 className="font-display text-lg font-semibold text-crt-text">
+                      03. Saved Device Profiles
+                    </h2>
+                    <span className="text-xs font-mono text-crt-muted tabular-nums">
+                      · {deviceProfiles.length} device{deviceProfiles.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-crt-muted max-w-2xl leading-relaxed">
+                    Each handheld or SD card tracks its own installed games, friendly name, and optional folder/naming overrides. Deleting a profile only clears tracking history — ROM files on the card and local mirror stay untouched.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="divide-y divide-crt-border border border-crt-border bg-crt-bg rounded">
+              {deviceProfiles.map((profile) => {
+                const isActive = activeProfile?.id === profile.id;
+                const canReconnect = !isActive && rememberedHandleIds.has(profile.id);
+                const isRenaming = renamingProfileId === profile.id;
+                const isConfirmDelete = confirmDeleteProfileId === profile.id;
+                const isProfileBusy =
+                  profileBusyId === profile.id || installer.reconnectingDeviceId === profile.id;
+                const hasCustomOverrides =
+                  profile.folderConfig !== null || profile.romNaming !== null;
+
+                return (
+                  <div
+                    key={profile.id}
+                    className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                  >
+                    <div className="min-w-0 space-y-1">
+                      {isRenaming ? (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <input
+                            type="text"
+                            value={renameDraft}
+                            maxLength={80}
+                            onChange={(e) => setRenameDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                void handleCommitRenameProfile(profile.id);
+                              } else if (e.key === 'Escape') {
+                                setRenamingProfileId(null);
+                              }
+                            }}
+                            aria-label={`Rename ${profile.name}`}
+                            className="px-2 py-1 text-xs font-mono bg-crt-surface border border-crt-phosphor rounded text-crt-text focus:outline-none w-52"
+                          />
+                          <button
+                            type="button"
+                            disabled={isProfileBusy}
+                            onClick={() => void handleCommitRenameProfile(profile.id)}
+                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-crt-phosphor text-crt-bg rounded cursor-pointer"
+                          >
+                            <Check className="h-3 w-3 shrink-0" />
+                            <span>Save</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setRenamingProfileId(null)}
+                            className="px-2 py-1 text-[11px] border border-crt-border text-crt-muted hover:text-crt-text rounded cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                          <span className="font-mono font-semibold text-crt-text">
+                            {profile.name}
+                          </span>
+                          {isActive && (
+                            <span className="font-mono text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor">
+                              Mounted
+                            </span>
+                          )}
+                          {profile.volumeLabel && profile.volumeLabel !== profile.name && (
+                            <span className="font-mono text-[11px] text-crt-muted">
+                              ({profile.volumeLabel})
+                            </span>
+                          )}
+                          {hasCustomOverrides && (
+                            <span className="font-mono text-[11px] text-crt-amber">
+                              · Custom rules
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      <div className="font-mono text-[11px] text-crt-muted tabular-nums">
+                        {profile.installedCount.toLocaleString()} installed game
+                        {profile.installedCount === 1 ? '' : 's'}
+                        {profile.lastMountedAt
+                          ? ` · Last mounted ${formatDateTime(profile.lastMountedAt)}`
+                          : ''}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      {canReconnect && !isConfirmDelete && (
+                        <button
+                          type="button"
+                          disabled={isProfileBusy || isBusyTransfer}
+                          onClick={() => void installer.reconnectStoredDevice(profile.id)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors disabled:opacity-45 cursor-pointer"
+                        >
+                          {installer.reconnectingDeviceId === profile.id ? (
+                            <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                          ) : (
+                            <Plug className="h-3 w-3 shrink-0" />
+                          )}
+                          <span>Reconnect</span>
+                        </button>
+                      )}
+                      {!isRenaming && !isConfirmDelete && (
+                        <button
+                          type="button"
+                          disabled={isProfileBusy}
+                          onClick={() => {
+                            setConfirmDeleteProfileId(null);
+                            setRenameDraft(profile.name);
+                            setRenamingProfileId(profile.id);
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text rounded transition-colors cursor-pointer"
+                        >
+                          <Pencil className="h-3 w-3 shrink-0" />
+                          <span>Rename</span>
+                        </button>
+                      )}
+                      {isConfirmDelete ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={isProfileBusy}
+                            onClick={() => void handleDeleteProfile(profile.id, profile.name)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-crt-crimson text-crt-bg rounded hover:brightness-110 disabled:opacity-50 cursor-pointer"
+                          >
+                            <Trash2 className="h-3 w-3 shrink-0" />
+                            <span>Confirm Delete</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isProfileBusy}
+                            onClick={() => setConfirmDeleteProfileId(null)}
+                            className="px-2 py-1 text-[11px] border border-crt-border text-crt-muted hover:text-crt-text rounded cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={isProfileBusy || (isActive && isBusyTransfer)}
+                          onClick={() => {
+                            setRenamingProfileId(null);
+                            setConfirmDeleteProfileId(profile.id);
+                          }}
+                          title="Delete saved device profile and install history (does not touch ROM files)"
+                          className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono border border-crt-crimson/45 text-crt-crimson hover:bg-crt-crimson/10 rounded transition-colors disabled:opacity-45 cursor-pointer"
+                        >
+                          <Trash2 className="h-3 w-3 shrink-0" />
+                          <span>Delete</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         <ConfigSaveBar
           ariaLabel="Device Export configuration save actions"

@@ -1,4 +1,5 @@
 import { buildUpgradeMatchStem } from '../shared/romNaming';
+import { sanitizeInstalledRelativePath } from '../shared/deviceProfiles';
 import {
   IGNORED_SCAN_DIRECTORY_NAMES,
   type ScannedDirNode,
@@ -11,6 +12,8 @@ export interface SdDirectoryHandle {
   getDirectoryHandle(name: string, options?: { create?: boolean }): Promise<SdDirectoryHandle>;
   getFileHandle(name: string, options?: { create?: boolean }): Promise<SdFileHandle>;
   removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>;
+  queryPermission?: (descriptor?: { mode?: 'read' | 'readwrite' }) => Promise<'granted' | 'prompt' | 'denied'>;
+  requestPermission?: (descriptor?: { mode?: 'read' | 'readwrite' }) => Promise<'granted' | 'prompt' | 'denied'>;
 }
 
 export interface SdFileWritableStream extends WritableStream<Uint8Array> {
@@ -302,10 +305,7 @@ export function registerWrittenEntryInScan(
   removedOldName?: string | null,
 ): void {
   if (removedOldName) {
-    scan.exactNames.delete(removedOldName);
-    scan.exactNamesLower.delete(removedOldName.toLowerCase());
-    const oldIdx = scan.entries.findIndex((e) => e.name.toLowerCase() === removedOldName.toLowerCase());
-    if (oldIdx >= 0) scan.entries.splice(oldIdx, 1);
+    unregisterEntryInScan(scan, removedOldName);
   }
   const lower = name.toLowerCase();
   if (!scan.exactNamesLower.has(lower)) {
@@ -317,6 +317,123 @@ export function registerWrittenEntryInScan(
       stemInfo: buildUpgradeMatchStem(name),
     });
   }
+}
+
+export function unregisterEntryInScan(
+  scan: SdScanFolderResult | undefined,
+  name: string,
+): void {
+  if (!scan || !name) return;
+  const lower = name.toLowerCase();
+  const actual = scan.exactNamesLower.get(lower) ?? name;
+  scan.exactNames.delete(actual);
+  scan.exactNames.delete(name);
+  scan.exactNamesLower.delete(lower);
+  const idx = scan.entries.findIndex((e) => e.name.toLowerCase() === lower);
+  if (idx >= 0) scan.entries.splice(idx, 1);
+}
+
+export interface SdRemovePathResult {
+  status: 'removed' | 'not_found' | 'invalid' | 'error';
+  path: string;
+  error?: string;
+}
+
+/**
+ * Safely deletes a single relative file or subfolder strictly inside the mounted storage root.
+ * Never traverses upward (`..`), never touches root itself, and never accesses the local mirror.
+ */
+export async function removeRelativePathFromSdCard(
+  rootHandle: SdDirectoryHandle,
+  relativePath: string,
+  onDebug?: (message: string, detail?: string) => void,
+): Promise<SdRemovePathResult> {
+  const clean = sanitizeInstalledRelativePath(relativePath);
+  if (!clean) {
+    return {
+      status: 'invalid',
+      path: relativePath,
+      error: 'Refused to remove unsafe or empty relative path',
+    };
+  }
+
+  const segments = clean.split('/');
+  const leafName = segments[segments.length - 1];
+  const parentRel = segments.slice(0, -1).join('/');
+
+  let parentDir: SdDirectoryHandle | null = rootHandle;
+  if (parentRel) {
+    parentDir = await resolveOrCreateSubdirectory(rootHandle, parentRel, false, onDebug);
+    if (!parentDir) {
+      return { status: 'not_found', path: clean };
+    }
+  }
+
+  try {
+    await parentDir.removeEntry(leafName, { recursive: true });
+    onDebug?.(`Removed "${clean}" from mounted device`);
+    return { status: 'removed', path: clean };
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'NotFoundError') {
+      return { status: 'not_found', path: clean };
+    }
+    const errName = (err as { name?: string } | null)?.name;
+    if (errName === 'NotFoundError') {
+      return { status: 'not_found', path: clean };
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    onDebug?.(`Failed removing "${clean}" from mounted device`, msg);
+    return { status: 'error', path: clean, error: msg };
+  }
+}
+
+/**
+ * Fallback removal for legacy installs that predate `installedPaths` tracking:
+ * scans the resolved target folder and removes exact filename or stem+role match(es).
+ */
+export async function removeStemFallbackFromSdCard(
+  rootHandle: SdDirectoryHandle,
+  folderRel: string,
+  installedFilename: string | null | undefined,
+  onDebug?: (message: string, detail?: string) => void,
+): Promise<{ removedPaths: string[]; errors: string[] }> {
+  const removedPaths: string[] = [];
+  const errors: string[] = [];
+  const cleanFolder = sanitizeInstalledRelativePath(folderRel);
+  const candidateName = (installedFilename || '').trim();
+  if (!cleanFolder || !candidateName) {
+    return { removedPaths, errors };
+  }
+
+  const scan = await scanTargetFolder(rootHandle, cleanFolder);
+  const lowerTarget = candidateName.toLowerCase();
+  const exact = scan.exactNamesLower.get(lowerTarget);
+  const matchedNames = new Set<string>();
+
+  if (exact) {
+    matchedNames.add(exact);
+  } else {
+    const desired = buildUpgradeMatchStem(candidateName);
+    if (desired.stem) {
+      for (const entry of scan.entries) {
+        if (entry.stemInfo.stem !== desired.stem) continue;
+        if ((entry.stemInfo.role || null) !== (desired.role || null)) continue;
+        matchedNames.add(entry.name);
+      }
+    }
+  }
+
+  for (const name of matchedNames) {
+    const relPath = `${cleanFolder}/${name}`;
+    const res = await removeRelativePathFromSdCard(rootHandle, relPath, onDebug);
+    if (res.status === 'removed') {
+      removedPaths.push(res.path);
+    } else if (res.status === 'error' && res.error) {
+      errors.push(`${relPath}: ${res.error}`);
+    }
+  }
+
+  return { removedPaths, errors };
 }
 
 export function findUpgradeCandidateOnCard(
