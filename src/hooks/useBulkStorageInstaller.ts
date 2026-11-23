@@ -2,7 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { composeEffectiveStorageFolderConfig } from '../shared/deviceExportUi';
 import {
   findItemInstallForDevice,
+  generateUuidDeviceProfileId,
+  guessDefaultDeviceIcon,
   mergeProfileFolderConfig,
+  sortDeviceProfilesForFleet,
 } from '../shared/deviceProfiles';
 import { classifyReleaseTagToTypeKey } from '../shared/releaseTypeFilter';
 import { sanitizeFat32Filename } from '../shared/romNaming';
@@ -23,6 +26,8 @@ import {
 } from '../shared/storageFolderMappings';
 import type {
   ArchiveInspectResult,
+  DeviceColorKey,
+  DeviceIconKey,
   DeviceRomNamingOverrides,
   PlayableExportTarget,
   RepositoryItemRecord,
@@ -34,6 +39,7 @@ import { readJsonSafely } from '../utils/http';
 import { reportAchievementEvent } from '../utils/achievementsClient';
 import {
   checkHandlePermission,
+  findMatchingStoredDeviceHandle,
   listStoredDeviceHandles,
   removeStoredDeviceHandle,
   requestHandlePermission,
@@ -46,6 +52,7 @@ import {
   isAbortError,
   isFileSystemAccessSupported,
   pickSdCardRootDirectory,
+  readDeviceMarkerFromSdCard,
   registerWrittenEntryInScan,
   removeRelativePathFromSdCard,
   removeStemFallbackFromSdCard,
@@ -54,9 +61,20 @@ import {
   scanTargetFolder,
   streamHttpPayloadToSdFile,
   unregisterEntryInScan,
+  writeDeviceMarkerToSdCard,
   type SdDirectoryHandle,
   type SdScanFolderResult,
 } from '../utils/sdCardFs';
+
+export interface PendingDeviceIdentification {
+  handle: SdDirectoryHandle;
+  volumeLabel: string;
+  suggestedName: string;
+  suggestedIconKey: DeviceIconKey;
+  suggestedColorKey: DeviceColorKey;
+  matchingVolumeProfiles: StorageDeviceProfile[];
+  markerReadError: string | null;
+}
 
 export interface SdExportBatchItemResult extends SmartInspectItemInput {
   itemId: number;
@@ -558,6 +576,15 @@ export function useBulkStorageInstaller({
   const [rememberedHandles, setRememberedHandles] = useState<StoredDeviceHandleRecord[]>([]);
   const [reconnectingDeviceId, setReconnectingDeviceId] = useState<string | null>(null);
   const [uninstallingItemIds, setUninstallingItemIds] = useState<Set<number>>(() => new Set());
+  const [pendingDeviceIdentification, setPendingDeviceIdentification] =
+    useState<PendingDeviceIdentification | null>(null);
+  const [identifyingDeviceBusy, setIdentifyingDeviceBusy] = useState(false);
+  const [markerWriteNotice, setMarkerWriteNotice] = useState<string | null>(null);
+  const pendingMountResolverRef = useRef<((handle: SdDirectoryHandle | null) => void) | null>(null);
+  const deviceProfilesRef = useRef<StorageDeviceProfile[]>(deviceProfiles);
+  deviceProfilesRef.current = deviceProfiles;
+  const rememberedHandlesRef = useRef<StoredDeviceHandleRecord[]>(rememberedHandles);
+  rememberedHandlesRef.current = rememberedHandles;
 
   // Automatic per-mounted-device Auto-Configure state (session-scoped; clears on eject/switch)
   const [autoConfigPhase, setAutoConfigPhase] = useState<'idle' | 'scanning' | 'ready' | 'error'>(
@@ -793,9 +820,49 @@ export function useBulkStorageInstaller({
   const resolveOrRegisterDeviceProfile = useCallback(
     async (
       handle: SdDirectoryHandle,
-      preferredDeviceId?: string | null,
+      options?: {
+        preferredDeviceId?: string | null;
+        name?: string | null;
+        createNew?: boolean;
+        iconKey?: DeviceIconKey;
+        colorKey?: DeviceColorKey;
+        isPinned?: boolean;
+        ensureMarker?: boolean;
+        existingMarkerVerifiedAt?: string | null;
+      },
     ): Promise<StorageDeviceProfile | null> => {
       try {
+        let markerVerifiedAt: string | null | undefined = options?.existingMarkerVerifiedAt;
+        const volumeLabel = handle.name || 'Storage Device';
+        const targetIdForPreStamp =
+          options?.preferredDeviceId || (options?.createNew ? generateUuidDeviceProfileId() : null);
+
+        // Attempt to stamp `.rgt-device.json` when we already know the target ID
+        if (options?.ensureMarker && targetIdForPreStamp) {
+          const existingProfile = deviceProfilesRef.current.find((p) => p.id === targetIdForPreStamp);
+          const stampRes = await writeDeviceMarkerToSdCard(handle, {
+            deviceId: targetIdForPreStamp,
+            name: options.name || existingProfile?.name || volumeLabel,
+            createdAt: existingProfile?.createdAt || null,
+          });
+          if (stampRes.ok) {
+            markerVerifiedAt = stampRes.updatedAt;
+            setMarkerWriteNotice(null);
+            emitSdDebug(`Stamped .rgt-device.json (${targetIdForPreStamp}) onto "${volumeLabel}"`);
+          } else {
+            emitSdDebug(
+              `Could not write .rgt-device.json on "${volumeLabel}"`,
+              stampRes.error,
+              true,
+            );
+            setMarkerWriteNotice(
+              stampRes.readOnly
+                ? `"${options.name || existingProfile?.name || volumeLabel}" appears read-only — device ID linked locally in this browser.`
+                : `Could not stamp .rgt-device.json on "${volumeLabel}" — device ID linked locally in this browser.`,
+            );
+          }
+        }
+
         const res = await fetch('/api/devices', {
           method: 'POST',
           headers: {
@@ -803,19 +870,58 @@ export function useBulkStorageInstaller({
             'X-Requested-With': 'rgt-sync',
           },
           body: JSON.stringify({
-            id: preferredDeviceId || undefined,
-            volumeLabel: handle.name || 'Storage Device',
+            id: targetIdForPreStamp || undefined,
+            volumeLabel,
+            name: options?.name || undefined,
+            createNew: options?.createNew || undefined,
+            iconKey: options?.iconKey || undefined,
+            colorKey: options?.colorKey || undefined,
+            isPinned: options?.isPinned,
+            markerVerifiedAt: markerVerifiedAt !== undefined ? markerVerifiedAt : undefined,
           }),
         });
         const parsed = await readJsonSafely<{ device?: StorageDeviceProfile }>(res);
         if (parsed.ok && parsed.data?.device) {
-          const profile = parsed.data.device;
+          let profile = parsed.data.device;
+
+          // If we didn't have an ID prior to POST (legacy path), stamp now and record markerVerifiedAt
+          if (options?.ensureMarker && !targetIdForPreStamp) {
+            const stampRes = await writeDeviceMarkerToSdCard(handle, {
+              deviceId: profile.id,
+              name: profile.name,
+              createdAt: profile.createdAt,
+            });
+            if (stampRes.ok && stampRes.updatedAt) {
+              setMarkerWriteNotice(null);
+              const patchRes = await fetch(`/api/devices/${encodeURIComponent(profile.id)}`, {
+                method: 'PATCH',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Requested-With': 'rgt-sync',
+                },
+                body: JSON.stringify({ markerVerifiedAt: stampRes.updatedAt }),
+              });
+              const patchParsed = await readJsonSafely<{ device?: StorageDeviceProfile }>(patchRes);
+              if (patchParsed.ok && patchParsed.data?.device) {
+                profile = patchParsed.data.device;
+              }
+            } else if (!stampRes.ok) {
+              setMarkerWriteNotice(
+                stampRes.readOnly
+                  ? `"${profile.name}" appears read-only — device ID linked locally in this browser.`
+                  : `Could not stamp .rgt-device.json on "${profile.name}" — linked locally in this browser.`,
+              );
+            }
+          }
+
           activeDeviceProfileRef.current = profile;
           setActiveDeviceProfile(profile);
-          setDeviceProfiles((prev) => {
-            const others = prev.filter((d) => d.id !== profile.id);
-            return [profile, ...others];
-          });
+          setDeviceProfiles((prev) =>
+            sortDeviceProfilesForFleet(
+              [profile, ...prev.filter((d) => d.id !== profile.id)],
+              profile.id,
+            ),
+          );
           await saveStoredDeviceHandle({
             deviceId: profile.id,
             volumeName: handle.name || profile.volumeLabel,
@@ -831,17 +937,30 @@ export function useBulkStorageInstaller({
       }
       return null;
     },
-    [refreshRememberedHandles],
+    [emitSdDebug, refreshRememberedHandles],
   );
 
   const applyMountedHandle = useCallback(
-    (handle: SdDirectoryHandle | null, preferredDeviceId?: string | null) => {
+    (
+      handle: SdDirectoryHandle | null,
+      preferredDeviceId?: string | null,
+      options?: {
+        name?: string | null;
+        createNew?: boolean;
+        iconKey?: DeviceIconKey;
+        colorKey?: DeviceColorKey;
+        isPinned?: boolean;
+        ensureMarker?: boolean;
+        existingMarkerVerifiedAt?: string | null;
+      },
+    ) => {
       sdRootHandleRef.current = handle;
       setSdRootHandle(handle);
       setFolderScans({});
       if (!handle) {
         activeDeviceProfileRef.current = null;
         setActiveDeviceProfile(null);
+        setMarkerWriteNotice(null);
         clearAutoConfigState();
         effectiveStorageFolderConfigRef.current = composeEffectiveStorageFolderConfig(
           configRef.current?.storageFolderConfig,
@@ -849,7 +968,10 @@ export function useBulkStorageInstaller({
         );
         return;
       }
-      void resolveOrRegisterDeviceProfile(handle, preferredDeviceId);
+      void resolveOrRegisterDeviceProfile(handle, {
+        preferredDeviceId,
+        ...options,
+      });
       void runDeviceAutoConfigure(handle);
     },
     [clearAutoConfigState, resolveOrRegisterDeviceProfile, runDeviceAutoConfigure],
@@ -882,8 +1004,13 @@ export function useBulkStorageInstaller({
       if (!mostRecent) return;
       const perm = await checkHandlePermission(mostRecent.handle, 'readwrite');
       if (!cancelled && perm === 'granted' && !sdRootHandleRef.current) {
+        const markerRes = await readDeviceMarkerFromSdCard(mostRecent.handle);
+        const resolvedId = markerRes.found && markerRes.marker ? markerRes.marker.deviceId : mostRecent.deviceId;
         emitSdDebug(`Auto-reconnected remembered device "${mostRecent.profileName}"`);
-        applyMountedHandle(mostRecent.handle, mostRecent.deviceId);
+        applyMountedHandle(mostRecent.handle, resolvedId, {
+          ensureMarker: !markerRes.found,
+          existingMarkerVerifiedAt: markerRes.found ? new Date().toISOString() : undefined,
+        });
       }
     })();
     return () => {
@@ -894,6 +1021,7 @@ export function useBulkStorageInstaller({
   const reconnectStoredDevice = useCallback(
     async (deviceId?: string): Promise<boolean> => {
       setMountError(null);
+      setMarkerWriteNotice(null);
       const target = deviceId
         ? rememberedHandles.find((h) => h.deviceId === deviceId)
         : rememberedHandles[0];
@@ -909,7 +1037,13 @@ export function useBulkStorageInstaller({
             ? 'granted'
             : await requestHandlePermission(target.handle, 'readwrite');
         if (perm === 'granted') {
-          applyMountedHandle(target.handle, target.deviceId);
+          const markerRes = await readDeviceMarkerFromSdCard(target.handle);
+          const resolvedId =
+            markerRes.found && markerRes.marker ? markerRes.marker.deviceId : target.deviceId;
+          applyMountedHandle(target.handle, resolvedId, {
+            ensureMarker: !markerRes.found,
+            existingMarkerVerifiedAt: markerRes.found ? new Date().toISOString() : undefined,
+          });
           emitSdDebug(`Reconnected remembered storage device "${target.profileName}"`);
           return true;
         }
@@ -947,10 +1081,23 @@ export function useBulkStorageInstaller({
         throw new Error(parsed.errorMessage || 'Failed to rename device profile');
       }
       const updated = parsed.data.device;
-      setDeviceProfiles((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+      setDeviceProfiles((prev) =>
+        sortDeviceProfilesForFleet(
+          prev.map((d) => (d.id === updated.id ? updated : d)),
+          activeDeviceProfileRef.current?.id ?? null,
+        ),
+      );
       if (activeDeviceProfileRef.current?.id === updated.id) {
         activeDeviceProfileRef.current = updated;
         setActiveDeviceProfile(updated);
+        // Keep physical card `.rgt-device.json` display name synchronized
+        if (sdRootHandleRef.current) {
+          void writeDeviceMarkerToSdCard(sdRootHandleRef.current, {
+            deviceId: updated.id,
+            name: updated.name,
+            createdAt: updated.createdAt,
+          });
+        }
       }
       await updateStoredDeviceHandleName(updated.id, updated.name);
       await refreshRememberedHandles();
@@ -964,6 +1111,11 @@ export function useBulkStorageInstaller({
       deviceId: string,
       patch: {
         name?: string;
+        iconKey?: DeviceIconKey;
+        colorKey?: DeviceColorKey;
+        isPinned?: boolean;
+        isArchived?: boolean;
+        markerVerifiedAt?: string | null;
         folderConfig?: StorageFolderMappingConfig | null;
         romNaming?: DeviceRomNamingOverrides | null;
       },
@@ -981,10 +1133,22 @@ export function useBulkStorageInstaller({
         throw new Error(parsed.errorMessage || 'Failed to save device profile settings');
       }
       const updated = parsed.data.device;
-      setDeviceProfiles((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+      setDeviceProfiles((prev) =>
+        sortDeviceProfilesForFleet(
+          prev.map((d) => (d.id === updated.id ? updated : d)),
+          activeDeviceProfileRef.current?.id ?? null,
+        ),
+      );
       if (activeDeviceProfileRef.current?.id === updated.id) {
         activeDeviceProfileRef.current = updated;
         setActiveDeviceProfile(updated);
+        if (patch.name && sdRootHandleRef.current) {
+          void writeDeviceMarkerToSdCard(sdRootHandleRef.current, {
+            deviceId: updated.id,
+            name: updated.name,
+            createdAt: updated.createdAt,
+          });
+        }
       }
       if (patch.name) {
         await updateStoredDeviceHandleName(updated.id, updated.name);
@@ -994,6 +1158,33 @@ export function useBulkStorageInstaller({
     },
     [refreshRememberedHandles],
   );
+
+  const stampActiveDeviceMarker = useCallback(async (): Promise<{
+    ok: boolean;
+    error?: string;
+  }> => {
+    const handle = sdRootHandleRef.current;
+    const profile = activeDeviceProfileRef.current;
+    if (!handle || !profile) {
+      return { ok: false, error: 'No mounted storage device to stamp.' };
+    }
+    const writeRes = await writeDeviceMarkerToSdCard(handle, {
+      deviceId: profile.id,
+      name: profile.name,
+      createdAt: profile.createdAt,
+    });
+    if (!writeRes.ok || !writeRes.updatedAt) {
+      const msg = writeRes.readOnly
+        ? 'Storage device appears read-only and rejected writing .rgt-device.json.'
+        : writeRes.error || 'Failed to stamp .rgt-device.json.';
+      setMarkerWriteNotice(msg);
+      return { ok: false, error: msg };
+    }
+    setMarkerWriteNotice(null);
+    await saveDeviceProfileSettings(profile.id, { markerVerifiedAt: writeRes.updatedAt });
+    emitSdDebug(`Stamped .rgt-device.json (${profile.id}) onto "${profile.name}"`);
+    return { ok: true };
+  }, [emitSdDebug, saveDeviceProfileSettings]);
 
   const deleteDeviceProfile = useCallback(
     async (deviceId: string): Promise<boolean> => {
@@ -1015,8 +1206,84 @@ export function useBulkStorageInstaller({
     [applyMountedHandle, refreshRememberedHandles],
   );
 
+  const confirmNewDeviceIdentification = useCallback(
+    async (input: {
+      name: string;
+      iconKey: DeviceIconKey;
+      colorKey: DeviceColorKey;
+      isPinned: boolean;
+    }): Promise<StorageDeviceProfile | null> => {
+      const pending = pendingDeviceIdentification;
+      if (!pending) return null;
+      const cleanName = input.name.trim().slice(0, 80) || pending.volumeLabel;
+      setIdentifyingDeviceBusy(true);
+      try {
+        const newId = generateUuidDeviceProfileId();
+        sdRootHandleRef.current = pending.handle;
+        setSdRootHandle(pending.handle);
+        setFolderScans({});
+        const profile = await resolveOrRegisterDeviceProfile(pending.handle, {
+          preferredDeviceId: newId,
+          createNew: true,
+          name: cleanName,
+          iconKey: input.iconKey,
+          colorKey: input.colorKey,
+          isPinned: input.isPinned,
+          ensureMarker: true,
+        });
+        void runDeviceAutoConfigure(pending.handle);
+        setPendingDeviceIdentification(null);
+        emitSdDebug(`Registered & mounted new storage device "${cleanName}" (${newId})`);
+        const resolver = pendingMountResolverRef.current;
+        pendingMountResolverRef.current = null;
+        resolver?.(pending.handle);
+        return profile;
+      } finally {
+        setIdentifyingDeviceBusy(false);
+      }
+    },
+    [emitSdDebug, pendingDeviceIdentification, resolveOrRegisterDeviceProfile, runDeviceAutoConfigure],
+  );
+
+  const confirmLinkDeviceIdentification = useCallback(
+    async (existingDeviceId: string): Promise<StorageDeviceProfile | null> => {
+      const pending = pendingDeviceIdentification;
+      if (!pending) return null;
+      setIdentifyingDeviceBusy(true);
+      try {
+        sdRootHandleRef.current = pending.handle;
+        setSdRootHandle(pending.handle);
+        setFolderScans({});
+        const profile = await resolveOrRegisterDeviceProfile(pending.handle, {
+          preferredDeviceId: existingDeviceId,
+          ensureMarker: true,
+        });
+        void runDeviceAutoConfigure(pending.handle);
+        setPendingDeviceIdentification(null);
+        emitSdDebug(
+          `Linked storage folder "${pending.volumeLabel}" to existing device profile "${profile?.name || existingDeviceId}"`,
+        );
+        const resolver = pendingMountResolverRef.current;
+        pendingMountResolverRef.current = null;
+        resolver?.(pending.handle);
+        return profile;
+      } finally {
+        setIdentifyingDeviceBusy(false);
+      }
+    },
+    [emitSdDebug, pendingDeviceIdentification, resolveOrRegisterDeviceProfile, runDeviceAutoConfigure],
+  );
+
+  const cancelDeviceIdentification = useCallback(() => {
+    setPendingDeviceIdentification(null);
+    const resolver = pendingMountResolverRef.current;
+    pendingMountResolverRef.current = null;
+    resolver?.(null);
+  }, []);
+
   const promptMountSdCard = useCallback(async (): Promise<SdDirectoryHandle | null> => {
     setMountError(null);
+    setMarkerWriteNotice(null);
     const support = isFileSystemAccessSupported();
     if (!support.supported) {
       setMountError(support.reason || 'Folder picker not supported in this browser.');
@@ -1025,9 +1292,69 @@ export function useBulkStorageInstaller({
     }
     try {
       const handle = await pickSdCardRootDirectory();
-      applyMountedHandle(handle);
-      emitSdDebug(`Mounted storage root "${handle.name}"`);
-      return handle;
+      const volumeLabel = handle.name || 'Storage Device';
+
+      // 1. Primary Identity: Check card-resident `.rgt-device.json` marker
+      const markerRes = await readDeviceMarkerFromSdCard(handle);
+      if (markerRes.found && markerRes.marker) {
+        emitSdDebug(
+          `Identified storage device "${volumeLabel}" via .rgt-device.json (${markerRes.marker.deviceId})`,
+        );
+        applyMountedHandle(handle, markerRes.marker.deviceId, {
+          name: markerRes.marker.name || null,
+          ensureMarker: false,
+          existingMarkerVerifiedAt: new Date().toISOString(),
+        });
+        return handle;
+      }
+
+      // 2. Secondary Identity: Compare picked handle via `isSameEntry()` against stored browser handles
+      const currentHandles =
+        rememberedHandlesRef.current.length > 0
+          ? rememberedHandlesRef.current
+          : await refreshRememberedHandles();
+      const matchedHandle = await findMatchingStoredDeviceHandle(handle, currentHandles);
+      if (matchedHandle) {
+        emitSdDebug(
+          `Identified storage device "${volumeLabel}" via browser handle match (${matchedHandle.deviceId}); stamping .rgt-device.json`,
+        );
+        applyMountedHandle(handle, matchedHandle.deviceId, {
+          ensureMarker: true,
+        });
+        return handle;
+      }
+
+      // 3. Unmarked & Unrecognized Folder: Open Identify / Link Storage Device Modal
+      const latestProfiles =
+        deviceProfilesRef.current.length > 0
+          ? deviceProfilesRef.current
+          : await refreshDeviceProfiles();
+      const lowerVol = volumeLabel.trim().toLowerCase();
+      const matchingVolumeProfiles = latestProfiles.filter(
+        (p) => p.volumeLabel.trim().toLowerCase() === lowerVol,
+      );
+
+      // Cancel any stale pending promise before opening a fresh prompt
+      if (pendingMountResolverRef.current) {
+        pendingMountResolverRef.current(null);
+        pendingMountResolverRef.current = null;
+      }
+
+      return await new Promise<SdDirectoryHandle | null>((resolve) => {
+        pendingMountResolverRef.current = resolve;
+        setPendingDeviceIdentification({
+          handle,
+          volumeLabel,
+          suggestedName: volumeLabel,
+          suggestedIconKey: guessDefaultDeviceIcon(volumeLabel),
+          suggestedColorKey: 'phosphor',
+          matchingVolumeProfiles,
+          markerReadError:
+            markerRes.reason === 'invalid' || markerRes.reason === 'oversized'
+              ? markerRes.error || null
+              : null,
+        });
+      });
     } catch (err) {
       if (isAbortError(err)) return null;
       const msg = err instanceof Error ? err.message : String(err);
@@ -1039,7 +1366,7 @@ export function useBulkStorageInstaller({
       );
       return null;
     }
-  }, [applyMountedHandle, emitSdDebug]);
+  }, [applyMountedHandle, emitSdDebug, refreshDeviceProfiles, refreshRememberedHandles]);
 
   const syncInstalledIdsToServer = useCallback(
     async (
@@ -3092,6 +3419,14 @@ export function useBulkStorageInstaller({
     promptMountSdCard,
     mountError,
     clearMountError: () => setMountError(null),
+    markerWriteNotice,
+    clearMarkerWriteNotice: () => setMarkerWriteNotice(null),
+    pendingDeviceIdentification,
+    identifyingDeviceBusy,
+    confirmNewDeviceIdentification,
+    confirmLinkDeviceIdentification,
+    cancelDeviceIdentification,
+    stampActiveDeviceMarker,
     deviceProfiles,
     activeDeviceProfile,
     activeDeviceName,

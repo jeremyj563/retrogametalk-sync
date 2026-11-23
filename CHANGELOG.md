@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.38.0] - 2026-11-23
+
+- Added **Hardware-Pinned Storage Device Identity & 10+ Device Fleet Management** so multi-handheld and multi-SD-card libraries stay uniquely identified and effortless to organize:
+  - **Auto-Stamped Card Identity (`.rgt-device.json` + `isSameEntry()`)**: Automatically stamps a compact hidden `.rgt-device.json` UUID marker (`dev_<uuid>`) at the root of mounted storage cards (with strict 4 KB validation, ROM scanner/uninstall protection, and non-blocking read-only fallback) paired with Chromium `FileSystemHandle.isSameEntry()` handle matching—uniquely identifying cards even when multiple devices share identical folder names (`Roms`, `SDCARD`) or move across machines.
+  - **Identify / Link Storage Device Modal**: Mounting an unrecognized or unmarked storage root opens a 1-step prompt to either **Create New Device** (name, hardware form-factor icon, CRT color badge, optional pin) or **Link Existing Profile** (seamlessly migrating legacy `1.37.0` profiles or replacement SD cards while preserving install history and stamping the new card).
+  - **Compact Sidebar Drive Bay & Searchable Devices Fleet Drawer**: Keeps the left sidebar Drive Bay compact at any fleet size (active device or smartest single reconnect shortcut + **Devices** drawer trigger) while introducing a slide-over **Devices Fleet Drawer** with live search, **Active / Pinned / Archived** tabs, inline editing (name, 7 hardware form-factor icons, 6 CRT-harmonized color badges), **Stamp Card ID** repair, one-click **Reconnect**, **Browse Installed** offline jump, **Pin / Unpin**, **Archive / Restore**, and inline **Delete** confirmation (SQLite migration v28).
+  - **Offline Saved-Device Catalog Filtering**: Upgraded the Catalog device scope switcher into a searchable dropdown grouped by **Any Device**, **Mounted Now**, **Pinned**, **Saved Devices**, and collapsible **Archived**—enabling offline inspection of **Installed**, **Not Installed**, and **Updates** for any saved device even when its SD card is unplugged, plus color-coded device icons in **Release Details** and **Device Export**.
+
 ## [1.37.0] - 2026-11-23
 
 - Added **Multi-Device Profiles, Persistent Reconnect Mounts & Device Uninstall** for managing multiple handhelds, SD cards, and FPGA devices independently:

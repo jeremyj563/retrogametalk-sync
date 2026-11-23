@@ -302,10 +302,32 @@ export interface DeviceRomNamingOverrides {
   romMaxFilenameLen?: number | null;
 }
 
+export type DeviceIconKey =
+  | 'handheld'
+  | 'vertical'
+  | 'clamshell'
+  | 'sdcard'
+  | 'console'
+  | 'desktop'
+  | 'drive';
+
+export type DeviceColorKey =
+  | 'phosphor'
+  | 'amber'
+  | 'cyan'
+  | 'crimson'
+  | 'violet'
+  | 'slate';
+
 export interface StorageDeviceProfile {
   id: string;
   name: string;
   volumeLabel: string;
+  iconKey: DeviceIconKey;
+  colorKey: DeviceColorKey;
+  isPinned: boolean;
+  isArchived: boolean;
+  markerVerifiedAt: string | null;
   folderConfig: import('./shared/storageFolderMappings').StorageFolderMappingConfig | null;
   romNaming: DeviceRomNamingOverrides | null;
   lastMountedAt: string | null;
@@ -319,6 +341,8 @@ export interface ReleaseDeviceInstallRecord {
   deviceId: string;
   deviceName: string;
   volumeLabel: string;
+  iconKey?: DeviceIconKey;
+  colorKey?: DeviceColorKey;
   installedAt: string;
   installedFileId: number | null;
   installedFilename: string | null;

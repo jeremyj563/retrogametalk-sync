@@ -109,6 +109,7 @@ import {
   formatQuickInstallTooltip,
 } from '../utils/storageActionCopy';
 import { resolveItemTransferProgress } from '../utils/transferProgress';
+import { CatalogDeviceScopeDropdown } from './CatalogDeviceScopeDropdown';
 import { CatalogStatsPanel } from './CatalogStatsPanel';
 import { GameDetailDrawer, type GameDetailNavigation } from './GameDetailDrawer';
 import { MultiSelectFilterDropdown, type FilterDropdownOption } from './MultiSelectFilterDropdown';
@@ -123,8 +124,10 @@ interface CatalogPanelProps {
     syncRulesOnly?: boolean;
     downloadedFilter?: CatalogDownloadedFilter;
     installedFilter?: CatalogInstalledFilter;
+    deviceId?: string | 'any' | null;
     nonce: number;
   } | null;
+  onOpenDevicesDrawer?: () => void;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onQueueDownload?: (payload: {
     ids?: number[];
@@ -540,6 +543,7 @@ export function CatalogPanel({
   catalogRevision = 0,
   activeRetryItemId = null,
   filterPreset = null,
+  onOpenDevicesDrawer,
   onRetryItem,
   onQueueDownload,
   onStartCatalogIndex,
@@ -665,6 +669,13 @@ export function CatalogPanel({
         setStatuses([]);
       }
     }
+    if (filterPreset.deviceId !== undefined) {
+      if (filterPreset.deviceId === null || filterPreset.deviceId === 'any') {
+        setDeviceScopeSelection('any');
+      } else {
+        setDeviceScopeSelection(filterPreset.deviceId);
+      }
+    }
   }, [filterPreset]);
   const [items, setItems] = useState<RepositoryItemRecord[]>(() => initialMatchedCatalog?.items ?? []);
   const [facets, setFacets] = useState<CatalogFacets>(() => memoryCatalogFacets);
@@ -722,13 +733,21 @@ export function CatalogPanel({
   const [queueNotice, setQueueNotice] = useState<string | null>(null);
   const [indexerBusy, setIndexerBusy] = useState(false);
 
-  const { sdRootHandle, activeDeviceProfile, activeDeviceName } = installer;
+  const { sdRootHandle, deviceProfiles, activeDeviceProfile, activeDeviceName } = installer;
   const effectiveMountedDeviceName = activeDeviceName || sdRootHandle?.name || null;
-  const [installedDeviceScope, setInstalledDeviceScope] = useState<'active' | 'any'>('active');
-  const effectiveDeviceId =
-    activeDeviceProfile && installedDeviceScope === 'active'
-      ? activeDeviceProfile.id
-      : undefined;
+  // 'auto' tracks currently mounted device when connected (or 'any' when disconnected);
+  // selecting any saved device ID persists offline inspection even when unplugged.
+  const [deviceScopeSelection, setDeviceScopeSelection] = useState<'auto' | 'any' | string>('auto');
+  const selectedDeviceId: string | 'any' = useMemo(() => {
+    if (deviceScopeSelection === 'any') return 'any';
+    if (deviceScopeSelection === 'auto') {
+      return activeDeviceProfile?.id ?? 'any';
+    }
+    const stillExists = deviceProfiles.some((d) => d.id === deviceScopeSelection);
+    if (stillExists) return deviceScopeSelection;
+    return activeDeviceProfile?.id ?? 'any';
+  }, [deviceScopeSelection, activeDeviceProfile?.id, deviceProfiles]);
+  const effectiveDeviceId = selectedDeviceId === 'any' ? undefined : selectedDeviceId;
   const [confirmBulkUninstall, setConfirmBulkUninstall] = useState(false);
   const [bulkUninstallBusy, setBulkUninstallBusy] = useState(false);
 
@@ -3250,39 +3269,22 @@ export function CatalogPanel({
                       )}
                     </button>
                   )}
-                  {activeDeviceProfile && (
-                    <div
-                      role="group"
-                      aria-label="Installed filter device scope"
-                      className="inline-flex items-center rounded border border-crt-border bg-crt-bg p-0.5 text-[11px] font-mono shrink-0"
-                    >
-                      <button
-                        type="button"
-                        aria-pressed={installedDeviceScope === 'active'}
-                        onClick={() => setInstalledDeviceScope('active')}
-                        title={`Scope Installed / Not Installed / Updates filters to ${effectiveMountedDeviceName || 'the mounted device'}`}
-                        className={`px-2 py-0.5 rounded-sm transition-colors whitespace-nowrap cursor-pointer max-w-[130px] truncate ${
-                          installedDeviceScope === 'active'
-                            ? 'bg-crt-phosphor/15 text-crt-phosphor font-medium'
-                            : 'text-crt-muted hover:text-crt-text'
-                        }`}
-                      >
-                        {effectiveMountedDeviceName || 'This Device'}
-                      </button>
-                      <button
-                        type="button"
-                        aria-pressed={installedDeviceScope === 'any'}
-                        onClick={() => setInstalledDeviceScope('any')}
-                        title="Scope Installed / Not Installed / Updates filters across all storage devices"
-                        className={`px-2 py-0.5 rounded-sm transition-colors whitespace-nowrap cursor-pointer ${
-                          installedDeviceScope === 'any'
-                            ? 'bg-crt-elevated text-crt-text font-medium'
-                            : 'text-crt-muted hover:text-crt-text'
-                        }`}
-                      >
-                        Any Device
-                      </button>
-                    </div>
+                  {deviceProfiles.length > 0 && (
+                    <CatalogDeviceScopeDropdown
+                      devices={deviceProfiles}
+                      mountedDeviceId={activeDeviceProfile?.id ?? null}
+                      selectedDeviceId={selectedDeviceId}
+                      onSelectDevice={(next) => {
+                        if (next === 'any') {
+                          setDeviceScopeSelection('any');
+                        } else if (activeDeviceProfile && next === activeDeviceProfile.id) {
+                          setDeviceScopeSelection('auto');
+                        } else {
+                          setDeviceScopeSelection(next);
+                        }
+                      }}
+                      onManageDevices={() => onOpenDevicesDrawer?.()}
+                    />
                   )}
                 </div>
 

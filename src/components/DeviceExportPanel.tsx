@@ -15,12 +15,14 @@ import {
   FolderPlus,
   FolderSync,
   HardDrive,
+  Layers,
   Loader2,
   Pencil,
   Pin,
   Plug,
   RefreshCw,
   Save,
+  ShieldCheck,
   SlidersHorizontal,
   Trash2,
   X,
@@ -65,7 +67,9 @@ import {
   SWITCH_DEVICE_LABEL,
 } from '../utils/storageActionCopy';
 import { ConfigSaveBar } from './ConfigSaveBar';
+import { DeviceEmblem } from './DeviceBadge';
 import { StorageFolderMappingsSection } from './StorageFolderMappingsSection';
+import { sortDeviceProfilesForFleet } from '../shared/deviceProfiles';
 
 interface DeviceExportPanelProps {
   config: ScraperConfigPublic;
@@ -73,6 +77,7 @@ interface DeviceExportPanelProps {
   installer?: BulkStorageInstallerController;
   focusRequest?: ConfigFocusRequest | null;
   onDirtyChange?: (state: ConfigDirtyState) => void;
+  onOpenDevicesDrawer?: () => void;
   onSaveConfig: (patch: Partial<ScraperConfigPublic>) => Promise<void>;
 }
 
@@ -84,6 +89,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
       installer,
       focusRequest = null,
       onDirtyChange,
+      onOpenDevicesDrawer,
       onSaveConfig,
     },
     ref,
@@ -1170,189 +1176,255 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
         </section>
 
         {/* Step 03: Saved Storage Device Profiles */}
-        {installer && deviceProfiles.length > 0 && (
-          <section
-            aria-label="Saved storage device profiles"
-            className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-6 space-y-4"
-          >
-            <div aria-hidden="true" className="crt-edge-beam">
-              <span />
-            </div>
-            <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
-              <div className="flex items-start gap-3 min-w-0">
-                <HardDrive className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
-                <div className="space-y-1 min-w-0">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                    <h2 className="font-display text-lg font-semibold text-crt-text">
-                      03. Saved Device Profiles
-                    </h2>
-                    <span className="text-xs font-mono text-crt-muted tabular-nums">
-                      · {deviceProfiles.length} device{deviceProfiles.length === 1 ? '' : 's'}
-                    </span>
-                  </div>
-                  <p className="text-xs text-crt-muted max-w-2xl leading-relaxed">
-                    Each handheld or SD card tracks its own installed games, friendly name, and optional folder/naming overrides. Deleting a profile only clears tracking history — ROM files on the card and local mirror stay untouched.
-                  </p>
-                </div>
+        {installer && deviceProfiles.length > 0 && (() => {
+          const orderedProfiles = sortDeviceProfilesForFleet(
+            deviceProfiles,
+            activeProfile?.id ?? null,
+          );
+          const previewProfiles = orderedProfiles.slice(0, 6);
+          const hiddenCount = Math.max(0, orderedProfiles.length - previewProfiles.length);
+
+          return (
+            <section
+              aria-label="Saved storage device profiles"
+              className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md p-6 space-y-4"
+            >
+              <div aria-hidden="true" className="crt-edge-beam">
+                <span />
               </div>
-            </div>
-
-            <div className="divide-y divide-crt-border border border-crt-border bg-crt-bg rounded">
-              {deviceProfiles.map((profile) => {
-                const isActive = activeProfile?.id === profile.id;
-                const canReconnect = !isActive && rememberedHandleIds.has(profile.id);
-                const isRenaming = renamingProfileId === profile.id;
-                const isConfirmDelete = confirmDeleteProfileId === profile.id;
-                const isProfileBusy =
-                  profileBusyId === profile.id || installer.reconnectingDeviceId === profile.id;
-                const hasCustomOverrides =
-                  profile.folderConfig !== null || profile.romNaming !== null;
-
-                return (
-                  <div
-                    key={profile.id}
-                    className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
-                  >
-                    <div className="min-w-0 space-y-1">
-                      {isRenaming ? (
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <input
-                            type="text"
-                            value={renameDraft}
-                            maxLength={80}
-                            onChange={(e) => setRenameDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault();
-                                void handleCommitRenameProfile(profile.id);
-                              } else if (e.key === 'Escape') {
-                                setRenamingProfileId(null);
-                              }
-                            }}
-                            aria-label={`Rename ${profile.name}`}
-                            className="px-2 py-1 text-xs font-mono bg-crt-surface border border-crt-phosphor rounded text-crt-text focus:outline-none w-52"
-                          />
-                          <button
-                            type="button"
-                            disabled={isProfileBusy}
-                            onClick={() => void handleCommitRenameProfile(profile.id)}
-                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-crt-phosphor text-crt-bg rounded cursor-pointer"
-                          >
-                            <Check className="h-3 w-3 shrink-0" />
-                            <span>Save</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setRenamingProfileId(null)}
-                            className="px-2 py-1 text-[11px] border border-crt-border text-crt-muted hover:text-crt-text rounded cursor-pointer"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                          <span className="font-mono font-semibold text-crt-text">
-                            {profile.name}
-                          </span>
-                          {isActive && (
-                            <span className="font-mono text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor">
-                              Mounted
-                            </span>
-                          )}
-                          {profile.volumeLabel && profile.volumeLabel !== profile.name && (
-                            <span className="font-mono text-[11px] text-crt-muted">
-                              ({profile.volumeLabel})
-                            </span>
-                          )}
-                          {hasCustomOverrides && (
-                            <span className="font-mono text-[11px] text-crt-amber">
-                              · Custom rules
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      <div className="font-mono text-[11px] text-crt-muted tabular-nums">
-                        {profile.installedCount.toLocaleString()} installed game
-                        {profile.installedCount === 1 ? '' : 's'}
-                        {profile.lastMountedAt
-                          ? ` · Last mounted ${formatDateTime(profile.lastMountedAt)}`
-                          : ''}
-                      </div>
+              <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
+                <div className="flex items-start gap-3 min-w-0">
+                  <HardDrive className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <h2 className="font-display text-lg font-semibold text-crt-text">
+                        03. Saved Device Profiles
+                      </h2>
+                      <span className="text-xs font-mono text-crt-muted tabular-nums">
+                        · {deviceProfiles.length} device{deviceProfiles.length === 1 ? '' : 's'}
+                      </span>
                     </div>
+                    <p className="text-xs text-crt-muted max-w-2xl leading-relaxed">
+                      Each card or handheld is identified by a hidden <span className="font-mono text-crt-text">.rgt-device.json</span> ID and tracks its own installed games, badge, and optional folder/naming overrides. Deleting a profile only clears tracking history — ROM files stay untouched.
+                    </p>
+                  </div>
+                </div>
+                {onOpenDevicesDrawer && (
+                  <button
+                    type="button"
+                    onClick={onOpenDevicesDrawer}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-border-strong bg-crt-bg text-crt-text hover:border-crt-phosphor/60 hover:text-crt-phosphor rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Layers className="h-3.5 w-3.5 shrink-0" />
+                    <span>Manage Fleet ({deviceProfiles.length})</span>
+                  </button>
+                )}
+              </div>
 
-                    <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      {canReconnect && !isConfirmDelete && (
-                        <button
-                          type="button"
-                          disabled={isProfileBusy || isBusyTransfer}
-                          onClick={() => void installer.reconnectStoredDevice(profile.id)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors disabled:opacity-45 cursor-pointer"
-                        >
-                          {installer.reconnectingDeviceId === profile.id ? (
-                            <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+              <div className="divide-y divide-crt-border border border-crt-border bg-crt-bg rounded">
+                {previewProfiles.map((profile) => {
+                  const isActive = activeProfile?.id === profile.id;
+                  const canReconnect = !isActive && rememberedHandleIds.has(profile.id);
+                  const isRenaming = renamingProfileId === profile.id;
+                  const isConfirmDelete = confirmDeleteProfileId === profile.id;
+                  const isProfileBusy =
+                    profileBusyId === profile.id || installer.reconnectingDeviceId === profile.id;
+                  const hasCustomOverrides =
+                    profile.folderConfig !== null || profile.romNaming !== null;
+
+                  return (
+                    <div
+                      key={profile.id}
+                      className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                    >
+                      <div className="flex items-start gap-3 min-w-0">
+                        <DeviceEmblem
+                          iconKey={profile.iconKey}
+                          colorKey={profile.colorKey}
+                          size="sm"
+                          className="mt-0.5"
+                        />
+                        <div className="min-w-0 space-y-1">
+                          {isRenaming ? (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <input
+                                type="text"
+                                value={renameDraft}
+                                maxLength={80}
+                                onChange={(e) => setRenameDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    void handleCommitRenameProfile(profile.id);
+                                  } else if (e.key === 'Escape') {
+                                    setRenamingProfileId(null);
+                                  }
+                                }}
+                                aria-label={`Rename ${profile.name}`}
+                                className="px-2 py-1 text-xs font-mono bg-crt-surface border border-crt-phosphor rounded text-crt-text focus:outline-none w-52"
+                              />
+                              <button
+                                type="button"
+                                disabled={isProfileBusy}
+                                onClick={() => void handleCommitRenameProfile(profile.id)}
+                                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-crt-phosphor text-crt-bg rounded cursor-pointer"
+                              >
+                                <Check className="h-3 w-3 shrink-0" />
+                                <span>Save</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setRenamingProfileId(null)}
+                                className="px-2 py-1 text-[11px] border border-crt-border text-crt-muted hover:text-crt-text rounded cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+                            </div>
                           ) : (
-                            <Plug className="h-3 w-3 shrink-0" />
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                              <span className="font-mono font-semibold text-crt-text">
+                                {profile.name}
+                              </span>
+                              {profile.isPinned && (
+                                <Pin
+                                  aria-label="Pinned device"
+                                  className="h-3 w-3 text-crt-amber shrink-0"
+                                />
+                              )}
+                              {isActive && (
+                                <span className="font-mono text-[11px] text-crt-phosphor font-medium">
+                                  · Mounted
+                                </span>
+                              )}
+                              {profile.isArchived && (
+                                <span className="font-mono text-[11px] text-crt-muted">
+                                  · Archived
+                                </span>
+                              )}
+                              {profile.volumeLabel && profile.volumeLabel !== profile.name && (
+                                <span className="font-mono text-[11px] text-crt-muted">
+                                  ({profile.volumeLabel})
+                                </span>
+                              )}
+                              {hasCustomOverrides && (
+                                <span className="font-mono text-[11px] text-crt-amber">
+                                  · Custom rules
+                                </span>
+                              )}
+                            </div>
                           )}
-                          <span>Reconnect</span>
-                        </button>
-                      )}
-                      {!isRenaming && !isConfirmDelete && (
-                        <button
-                          type="button"
-                          disabled={isProfileBusy}
-                          onClick={() => {
-                            setConfirmDeleteProfileId(null);
-                            setRenameDraft(profile.name);
-                            setRenamingProfileId(profile.id);
-                          }}
-                          className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text rounded transition-colors cursor-pointer"
-                        >
-                          <Pencil className="h-3 w-3 shrink-0" />
-                          <span>Rename</span>
-                        </button>
-                      )}
-                      {isConfirmDelete ? (
-                        <>
+                          <div className="font-mono text-[11px] text-crt-muted tabular-nums flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                            <span>
+                              {profile.installedCount.toLocaleString()} installed game
+                              {profile.installedCount === 1 ? '' : 's'}
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            {profile.markerVerifiedAt ? (
+                              <span className="inline-flex items-center gap-1 text-crt-phosphor/90">
+                                <ShieldCheck className="h-3 w-3 shrink-0" />
+                                <span>Card ID</span>
+                              </span>
+                            ) : (
+                              <span className="text-crt-amber/90">Unstamped</span>
+                            )}
+                            {profile.lastMountedAt && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span>Last mounted {formatDateTime(profile.lastMountedAt)}</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        {canReconnect && !isConfirmDelete && (
+                          <button
+                            type="button"
+                            disabled={isProfileBusy || isBusyTransfer}
+                            onClick={() => void installer.reconnectStoredDevice(profile.id)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 cursor-pointer"
+                          >
+                            {installer.reconnectingDeviceId === profile.id ? (
+                              <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                            ) : (
+                              <Plug className="h-3 w-3 shrink-0" />
+                            )}
+                            <span>Reconnect</span>
+                          </button>
+                        )}
+                        {!isRenaming && !isConfirmDelete && (
                           <button
                             type="button"
                             disabled={isProfileBusy}
-                            onClick={() => void handleDeleteProfile(profile.id, profile.name)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-crt-crimson text-crt-bg rounded hover:brightness-110 disabled:opacity-50 cursor-pointer"
+                            onClick={() => {
+                              setConfirmDeleteProfileId(null);
+                              setRenameDraft(profile.name);
+                              setRenamingProfileId(profile.id);
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono border border-crt-border bg-crt-surface text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            <Pencil className="h-3 w-3 shrink-0" />
+                            <span>Rename</span>
+                          </button>
+                        )}
+                        {isConfirmDelete ? (
+                          <>
+                            <button
+                              type="button"
+                              disabled={isProfileBusy}
+                              onClick={() => void handleDeleteProfile(profile.id, profile.name)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-crt-crimson text-crt-bg rounded hover:brightness-110 whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+                            >
+                              <Trash2 className="h-3 w-3 shrink-0" />
+                              <span>Confirm Delete</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isProfileBusy}
+                              onClick={() => setConfirmDeleteProfileId(null)}
+                              className="px-2 py-1 text-[11px] border border-crt-border text-crt-muted hover:text-crt-text rounded whitespace-nowrap shrink-0 cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={isProfileBusy || (isActive && isBusyTransfer)}
+                            onClick={() => {
+                              setRenamingProfileId(null);
+                              setConfirmDeleteProfileId(profile.id);
+                            }}
+                            title="Delete saved device profile and install history (does not touch ROM files)"
+                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono border border-crt-crimson/45 text-crt-crimson hover:bg-crt-crimson/10 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 cursor-pointer"
                           >
                             <Trash2 className="h-3 w-3 shrink-0" />
-                            <span>Confirm Delete</span>
+                            <span>Delete</span>
                           </button>
-                          <button
-                            type="button"
-                            disabled={isProfileBusy}
-                            onClick={() => setConfirmDeleteProfileId(null)}
-                            className="px-2 py-1 text-[11px] border border-crt-border text-crt-muted hover:text-crt-text rounded cursor-pointer"
-                          >
-                            Cancel
-                          </button>
-                        </>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={isProfileBusy || (isActive && isBusyTransfer)}
-                          onClick={() => {
-                            setRenamingProfileId(null);
-                            setConfirmDeleteProfileId(profile.id);
-                          }}
-                          title="Delete saved device profile and install history (does not touch ROM files)"
-                          className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono border border-crt-crimson/45 text-crt-crimson hover:bg-crt-crimson/10 rounded transition-colors disabled:opacity-45 cursor-pointer"
-                        >
-                          <Trash2 className="h-3 w-3 shrink-0" />
-                          <span>Delete</span>
-                        </button>
-                      )}
+                        )}
+                      </div>
                     </div>
+                  );
+                })}
+                {hiddenCount > 0 && onOpenDevicesDrawer && (
+                  <div className="px-4 py-2.5 bg-crt-surface/40 flex items-center justify-between gap-3 text-xs font-mono">
+                    <span className="text-crt-muted">
+                      +{hiddenCount} more saved device{hiddenCount === 1 ? '' : 's'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={onOpenDevicesDrawer}
+                      className="text-crt-phosphor hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      View & Search All Devices →
+                    </button>
                   </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
+                )}
+              </div>
+            </section>
+          );
+        })()}
 
         <ConfigSaveBar
           ariaLabel="Device Export configuration save actions"

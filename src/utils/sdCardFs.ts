@@ -1,5 +1,12 @@
 import { buildUpgradeMatchStem } from '../shared/romNaming';
-import { sanitizeInstalledRelativePath } from '../shared/deviceProfiles';
+import {
+  DEVICE_MARKER_FILENAME,
+  DEVICE_MARKER_MAX_BYTES,
+  parseDeviceMarkerJson,
+  sanitizeInstalledRelativePath,
+  serializeDeviceMarkerJson,
+  type DeviceMarkerPayload,
+} from '../shared/deviceProfiles';
 import {
   IGNORED_SCAN_DIRECTORY_NAMES,
   type ScannedDirNode,
@@ -12,6 +19,7 @@ export interface SdDirectoryHandle {
   getDirectoryHandle(name: string, options?: { create?: boolean }): Promise<SdDirectoryHandle>;
   getFileHandle(name: string, options?: { create?: boolean }): Promise<SdFileHandle>;
   removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>;
+  isSameEntry?: (other: SdDirectoryHandle) => Promise<boolean>;
   queryPermission?: (descriptor?: { mode?: 'read' | 'readwrite' }) => Promise<'granted' | 'prompt' | 'denied'>;
   requestPermission?: (descriptor?: { mode?: 'read' | 'readwrite' }) => Promise<'granted' | 'prompt' | 'denied'>;
 }
@@ -169,6 +177,9 @@ export async function scanTargetFolder(
   }
 
   for await (const entry of dir.values()) {
+    if (entry.name.trim().toLowerCase() === DEVICE_MARKER_FILENAME.toLowerCase()) {
+      continue;
+    }
     exactNames.add(entry.name);
     exactNamesLower.set(entry.name.toLowerCase(), entry.name);
     entries.push({
@@ -179,6 +190,127 @@ export async function scanTargetFolder(
   }
 
   return { exactNames, exactNamesLower, entries };
+}
+
+export interface ReadDeviceMarkerResult {
+  found: boolean;
+  marker: DeviceMarkerPayload | null;
+  reason?: 'not_found' | 'oversized' | 'invalid' | 'error';
+  error?: string;
+}
+
+/**
+ * Reads and strictly validates `.rgt-device.json` from the root of a mounted storage handle.
+ * Enforces a hard 4 KB file size cap and returns a clean structured result without throwing.
+ */
+export async function readDeviceMarkerFromSdCard(
+  rootHandle: SdDirectoryHandle,
+): Promise<ReadDeviceMarkerResult> {
+  try {
+    const fileHandle = await rootHandle.getFileHandle(DEVICE_MARKER_FILENAME, { create: false });
+    const file = await fileHandle.getFile();
+    if (typeof file.size === 'number' && file.size > DEVICE_MARKER_MAX_BYTES) {
+      return {
+        found: false,
+        marker: null,
+        reason: 'oversized',
+        error: `${DEVICE_MARKER_FILENAME} exceeds ${DEVICE_MARKER_MAX_BYTES} byte safety limit`,
+      };
+    }
+    const text =
+      typeof file.text === 'function'
+        ? await file.text()
+        : await new Response(file).text();
+    const marker = parseDeviceMarkerJson(text);
+    if (!marker) {
+      return {
+        found: false,
+        marker: null,
+        reason: 'invalid',
+        error: `${DEVICE_MARKER_FILENAME} is malformed or unsupported`,
+      };
+    }
+    return { found: true, marker };
+  } catch (err) {
+    const errName = (err as { name?: string } | null)?.name;
+    if ((err instanceof DOMException && err.name === 'NotFoundError') || errName === 'NotFoundError') {
+      return { found: false, marker: null, reason: 'not_found' };
+    }
+    return {
+      found: false,
+      marker: null,
+      reason: 'error',
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export interface WriteDeviceMarkerResult {
+  ok: boolean;
+  readOnly: boolean;
+  updatedAt: string | null;
+  error?: string;
+}
+
+/**
+ * Writes or updates the hidden `.rgt-device.json` marker at the mounted storage root.
+ * Degrades gracefully on read-only media or denied write permission without failing the mount.
+ */
+export async function writeDeviceMarkerToSdCard(
+  rootHandle: SdDirectoryHandle,
+  payload: {
+    deviceId: string;
+    name?: string | null;
+    createdAt?: string | null;
+  },
+): Promise<WriteDeviceMarkerResult> {
+  const updatedAt = new Date().toISOString();
+  let serialized: string;
+  try {
+    serialized = serializeDeviceMarkerJson({
+      deviceId: payload.deviceId,
+      name: payload.name,
+      createdAt: payload.createdAt,
+      updatedAt,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      readOnly: false,
+      updatedAt: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  let writable: SdFileWritableStream | null = null;
+  try {
+    const fileHandle = await rootHandle.getFileHandle(DEVICE_MARKER_FILENAME, { create: true });
+    writable = await fileHandle.createWritable({ keepExistingData: false });
+    await writable.write(serialized);
+    await writable.close();
+    return { ok: true, readOnly: false, updatedAt };
+  } catch (err) {
+    if (writable) {
+      try {
+        await writable.abort();
+      } catch {
+        // Ignore secondary abort failure
+      }
+    }
+    const errName = (err as { name?: string } | null)?.name || '';
+    const msg = err instanceof Error ? err.message : String(err);
+    const readOnly =
+      errName === 'NotAllowedError' ||
+      errName === 'NoModificationAllowedError' ||
+      errName === 'SecurityError' ||
+      /read[- ]?only|permission|denied|not allowed/i.test(msg);
+    return {
+      ok: false,
+      readOnly,
+      updatedAt: null,
+      error: msg,
+    };
+  }
 }
 
 function extractFileExtension(filename: string): string {
