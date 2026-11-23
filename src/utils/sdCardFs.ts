@@ -2,9 +2,13 @@ import { buildUpgradeMatchStem } from '../shared/romNaming';
 import {
   DEVICE_MARKER_FILENAME,
   DEVICE_MARKER_MAX_BYTES,
+  formatMuosDeviceId,
+  parseAutorunInfLabel,
   parseDeviceMarkerJson,
+  parseHostnameFromConf,
   sanitizeInstalledRelativePath,
   serializeDeviceMarkerJson,
+  type DeviceIdentityProbeHints,
   type DeviceMarkerPayload,
 } from '../shared/deviceProfiles';
 import {
@@ -311,6 +315,149 @@ export async function writeDeviceMarkerToSdCard(
       error: msg,
     };
   }
+}
+
+const PROBE_TEXT_MAX_BYTES = 16 * 1024;
+
+async function readSmallTextFileFromSdCard(
+  rootHandle: SdDirectoryHandle,
+  relativePath: string,
+): Promise<string | null> {
+  try {
+    const segments = relativePath.split('/').filter(Boolean);
+    if (segments.length === 0) return null;
+    let dir = rootHandle;
+    for (let i = 0; i < segments.length - 1; i += 1) {
+      dir = await dir.getDirectoryHandle(segments[i], { create: false });
+    }
+    const fileHandle = await dir.getFileHandle(segments[segments.length - 1], { create: false });
+    const file = await fileHandle.getFile();
+    if (typeof file.size === 'number' && file.size > PROBE_TEXT_MAX_BYTES) {
+      return null;
+    }
+    return typeof file.text === 'function' ? await file.text() : await new Response(file).text();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Performs a fast, bounded root-level probe of a mounted storage handle to discover
+ * device/volume labels (e.g. `autorun.inf` label, muOS `device.txt`, custom Batocera/Recalbox
+ * hostnames) and well-known handheld/FPGA/flashcart firmware signatures.
+ * Never scans deep ROM trees and never throws.
+ */
+export async function probeDeviceIdentityHintsFromSdCard(
+  rootHandle: SdDirectoryHandle,
+): Promise<DeviceIdentityProbeHints> {
+  const rootDirs = new Map<string, string>();
+  const rootFiles = new Map<string, string>();
+
+  try {
+    let seen = 0;
+    for await (const entry of rootHandle.values()) {
+      const lower = entry.name.trim().toLowerCase();
+      if (entry.kind === 'directory') {
+        rootDirs.set(lower, entry.name);
+      } else {
+        rootFiles.set(lower, entry.name);
+      }
+      seen += 1;
+      if (seen >= 200) break;
+    }
+  } catch {
+    return { explicitLabel: null, explicitLabelSource: null, firmwareLabel: null };
+  }
+
+  let explicitLabel: string | null = null;
+  let explicitLabelSource: string | null = null;
+  let firmwareLabel: string | null = null;
+
+  // 1. Check Windows/FAT32 `autorun.inf` explicit volume label
+  const autorunName = rootFiles.get('autorun.inf');
+  if (autorunName) {
+    const text = await readSmallTextFileFromSdCard(rootHandle, autorunName);
+    const label = parseAutorunInfLabel(text);
+    if (label) {
+      explicitLabel = label;
+      explicitLabelSource = 'autorun.inf';
+    }
+  }
+
+  // 2. Check muOS device model identifier (`MUOS/info/config/device.txt` or `MUOS/info/device.txt`)
+  const muosDir = rootDirs.get('muos');
+  if (muosDir) {
+    firmwareLabel = 'muOS Handheld';
+    if (!explicitLabel) {
+      const deviceTxt =
+        (await readSmallTextFileFromSdCard(rootHandle, `${muosDir}/info/config/device.txt`)) ||
+        (await readSmallTextFileFromSdCard(rootHandle, `${muosDir}/info/device.txt`));
+      const formatted = formatMuosDeviceId(deviceTxt);
+      if (formatted) {
+        explicitLabel = formatted;
+        explicitLabelSource = 'muOS device config';
+      }
+    }
+  }
+
+  // 3. Check Batocera / KNULLI / Recalbox hostname config
+  const confCandidates: { path: string; defaultFirmware: string }[] = [];
+  if (rootFiles.has('batocera.conf')) {
+    confCandidates.push({ path: rootFiles.get('batocera.conf')!, defaultFirmware: 'Batocera / KNULLI' });
+  }
+  if (rootFiles.has('recalbox.conf')) {
+    confCandidates.push({ path: rootFiles.get('recalbox.conf')!, defaultFirmware: 'Recalbox' });
+  }
+  const systemDir = rootDirs.get('system');
+  if (systemDir) {
+    confCandidates.push({ path: `${systemDir}/batocera.conf`, defaultFirmware: 'Batocera / KNULLI' });
+    confCandidates.push({ path: `${systemDir}/recalbox.conf`, defaultFirmware: 'Recalbox' });
+  }
+  for (const cand of confCandidates) {
+    const confText = await readSmallTextFileFromSdCard(rootHandle, cand.path);
+    if (!confText) continue;
+    if (!firmwareLabel) firmwareLabel = cand.defaultFirmware;
+    if (!explicitLabel) {
+      const hostname = parseHostnameFromConf(confText);
+      if (hostname) {
+        explicitLabel = hostname;
+        explicitLabelSource = cand.path.split('/').pop() || 'firmware config';
+      }
+    }
+    break;
+  }
+
+  // 4. Well-known handheld, FPGA, and flashcart directory signatures
+  if (!firmwareLabel) {
+    const hasRoms = rootDirs.has('roms');
+    if (rootDirs.has('.tmp_update') || (rootDirs.has('miyoo') && (hasRoms || rootDirs.has('emu')))) {
+      firmwareLabel = 'Miyoo Mini (OnionOS)';
+    } else if (rootDirs.has('cfw') && hasRoms) {
+      firmwareLabel = 'RG35XX (GarlicOS)';
+    } else if (rootDirs.has('platforms') && rootDirs.has('cores') && rootDirs.has('assets')) {
+      firmwareLabel = 'Analogue Pocket';
+    } else if (rootFiles.has('mister.ini') || (rootDirs.has('games') && rootDirs.has('_console'))) {
+      firmwareLabel = 'MiSTer FPGA';
+    } else if (rootDirs.has('sd2snes') || rootDirs.has('fxpak')) {
+      firmwareLabel = 'FXPAK Pro / SD2SNES';
+    } else if (rootDirs.has('edn8')) {
+      firmwareLabel = 'EverDrive N8';
+    } else if (rootDirs.has('edgb')) {
+      firmwareLabel = 'EverDrive-GB';
+    } else if (rootDirs.has('edgba')) {
+      firmwareLabel = 'EverDrive-GBA';
+    } else if (rootDirs.has('ed64')) {
+      firmwareLabel = 'EverDrive-64';
+    } else if (rootDirs.has('mega') || rootDirs.has('megasd')) {
+      firmwareLabel = 'Mega EverDrive';
+    } else if (rootFiles.has('minui.zip') || (rootDirs.has('.system') && hasRoms)) {
+      firmwareLabel = 'MinUI Handheld';
+    } else if (rootDirs.has('es-de') || rootDirs.has('emulation')) {
+      firmwareLabel = 'ES-DE / EmuDeck';
+    }
+  }
+
+  return { explicitLabel, explicitLabelSource, firmwareLabel };
 }
 
 function extractFileExtension(filename: string): string {

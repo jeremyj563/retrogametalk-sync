@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.38.1] - 2026-11-23
+
+- Improved default device name detection in the **Identify Storage Device** modal so newly mounted cards no longer pre-fill generic folder names like `Roms`, `SDCARD`, or `E:`:
+  - **On-Card Label & Firmware Probing**: Added a fast root-level probe before opening the Identify modal that reads explicit labels when present (`autorun.inf` `label=`, muOS `MUOS/info/config/device.txt` hardware models, and custom Batocera/KNULLI/Recalbox `system.hostname`) and detects handheld/FPGA/flashcart signatures (OnionOS/Miyoo Mini, GarlicOS, Analogue Pocket, MiSTer FPGA, EverDrive/FXPAK, MinUI, ES-DE/EmuDeck) to pre-fill both the device name and matching form-factor icon.
+  - **Clean Generic-Folder Handling**: Preserves real OS volume labels when the card root is selected (e.g., `/Volumes/MIYOO_MINI` → `MIYOO_MINI`), leaves the auto-focused **Device Name** input cleanly blank (with a 1-click `Use "<folder>"` shortcut and clear browser sandbox tip) when only a generic subfolder name is exposed, and stabilizes form state so background profile refreshes never reset typed input.
+
 ## [1.38.0] - 2026-11-23
 
 - Added **Hardware-Pinned Storage Device Identity & 10+ Device Fleet Management** so multi-handheld and multi-SD-card libraries stay uniquely identified and effortless to organize:

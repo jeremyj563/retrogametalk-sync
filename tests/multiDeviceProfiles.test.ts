@@ -9,11 +9,16 @@ import {
   DEVICE_MARKER_MAX_BYTES,
   findItemInstallForDevice,
   formatInstalledDevicesBadge,
+  formatMuosDeviceId,
   generateUuidDeviceProfileId,
   guessDefaultDeviceIcon,
+  isGenericStorageFolderName,
   makeStableDeviceProfileId,
   mergeProfileFolderConfig,
+  parseAutorunInfLabel,
   parseDeviceMarkerJson,
+  parseHostnameFromConf,
+  resolveSuggestedDeviceIdentity,
   sanitizeDeviceColorKey,
   sanitizeDeviceIconKey,
   sanitizeDeviceProfileId,
@@ -40,6 +45,7 @@ import {
 } from '../src/utils/deviceHandleStore.ts';
 import { isItemInstalledOnMountedDevice } from '../src/utils/deviceInstallView.ts';
 import {
+  probeDeviceIdentityHintsFromSdCard,
   readDeviceMarkerFromSdCard,
   removeRelativePathFromSdCard,
   removeStemFallbackFromSdCard,
@@ -980,4 +986,92 @@ test('SQLite migration v28 adds fleet metadata, prevents same-volume collisions 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('smart device label probing prefers on-card labels and firmware signatures over generic folder names', async () => {
+  // Generic folder / bare drive letter detection
+  assert.equal(isGenericStorageFolderName('Roms'), true);
+  assert.equal(isGenericStorageFolderName('SDCARD'), true);
+  assert.equal(isGenericStorageFolderName('NO NAME'), true);
+  assert.equal(isGenericStorageFolderName('E:'), true);
+  assert.equal(isGenericStorageFolderName('E:\\'), true);
+  assert.equal(isGenericStorageFolderName('MIYOO_MINI'), false);
+  assert.equal(isGenericStorageFolderName('SteamDeck_512'), false);
+
+  // Metadata parsers
+  assert.equal(parseAutorunInfLabel('[autorun]\nicon=card.ico\nlabel=Retroid Pocket 5\n'), 'Retroid Pocket 5');
+  assert.equal(parseAutorunInfLabel('[autorun]\nlabel=Roms\n'), null);
+  assert.equal(parseHostnameFromConf('# system.hostname=BATOCERA\nsystem.hostname=LivingRoom-Pi\n'), 'LivingRoom-Pi');
+  assert.equal(parseHostnameFromConf('system.hostname=BATOCERA\n'), null);
+  assert.equal(formatMuosDeviceId('rg35xx-sp\n'), 'Anbernic RG35XX SP');
+  assert.equal(formatMuosDeviceId('trimui-brick'), 'Trimui Brick');
+
+  // 1. autorun.inf explicit label overrides generic E: drive root
+  const autorunCard = createMockDirectoryHandle('E:', {
+    'autorun.inf': '[autorun]\nlabel=Miyoo Flip 256GB\n',
+    Roms: {},
+  });
+  const autorunHints = await probeDeviceIdentityHintsFromSdCard(autorunCard);
+  const autorunResolved = resolveSuggestedDeviceIdentity({
+    volumeLabel: 'E:',
+    probeHints: autorunHints,
+  });
+  assert.equal(autorunResolved.suggestedName, 'Miyoo Flip 256GB');
+  assert.equal(autorunResolved.detectedHintSource, 'autorun.inf');
+  assert.equal(autorunResolved.isGenericFolderName, true);
+
+  // 2. muOS card with MUOS/info/config/device.txt resolves exact model & clamshell icon
+  const muosCard = createMockDirectoryHandle('SDCARD', {
+    MUOS: { info: { config: { 'device.txt': 'rg35xx-sp\n' } } },
+    ROMS: {},
+  });
+  const muosHints = await probeDeviceIdentityHintsFromSdCard(muosCard);
+  const muosResolved = resolveSuggestedDeviceIdentity({
+    volumeLabel: 'SDCARD',
+    probeHints: muosHints,
+  });
+  assert.equal(muosResolved.suggestedName, 'Anbernic RG35XX SP');
+  assert.equal(muosResolved.suggestedIconKey, 'clamshell');
+
+  // 3. OnionOS root with generic folder name suggests Miyoo Mini (OnionOS) & vertical icon
+  const onionCard = createMockDirectoryHandle('SDCARD', {
+    '.tmp_update': {},
+    Roms: {},
+    Emu: {},
+  });
+  const onionHints = await probeDeviceIdentityHintsFromSdCard(onionCard);
+  const onionResolved = resolveSuggestedDeviceIdentity({
+    volumeLabel: 'SDCARD',
+    probeHints: onionHints,
+  });
+  assert.equal(onionResolved.suggestedName, 'Miyoo Mini (OnionOS)');
+  assert.equal(onionResolved.suggestedIconKey, 'vertical');
+
+  // 4. Non-generic OS mount root (e.g. /Volumes/MIYOO_MINI) keeps the volume label directly
+  const macVolumeCard = createMockDirectoryHandle('MIYOO_MINI', {
+    Roms: {},
+  });
+  const macHints = await probeDeviceIdentityHintsFromSdCard(macVolumeCard);
+  const macResolved = resolveSuggestedDeviceIdentity({
+    volumeLabel: 'MIYOO_MINI',
+    probeHints: macHints,
+  });
+  assert.equal(macResolved.suggestedName, 'MIYOO_MINI');
+  assert.equal(macResolved.isGenericFolderName, false);
+  assert.equal(macResolved.suggestedIconKey, 'vertical');
+
+  // 5. Plain generic subfolder ("Roms") with no firmware hints leaves suggestedName empty for quick typing
+  const plainRomsDir = createMockDirectoryHandle('Roms', {
+    SNES: {},
+    GBA: {},
+  });
+  const plainHints = await probeDeviceIdentityHintsFromSdCard(plainRomsDir);
+  const plainResolved = resolveSuggestedDeviceIdentity({
+    volumeLabel: 'Roms',
+    probeHints: plainHints,
+  });
+  assert.equal(plainResolved.suggestedName, '');
+  assert.equal(plainResolved.isGenericFolderName, true);
+  assert.equal(plainResolved.detectedHintLabel, null);
+});
+
 

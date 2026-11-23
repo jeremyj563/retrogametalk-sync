@@ -64,7 +64,9 @@ export function IdentifyDeviceModal({ installer }: IdentifyDeviceModalProps) {
       setMode('new');
       setSelectedLinkId(anyVolumeMatch?.id || allProfiles[0]?.id || '');
     }
-  }, [pending, allProfiles]);
+    // Intentionally initialize only when a new pending mount arrives so typing isn't reset
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending]);
 
   useEffect(() => {
     if (!pending) return;
@@ -157,9 +159,18 @@ export function IdentifyDeviceModal({ installer }: IdentifyDeviceModalProps) {
                 Identify Storage Device
               </h2>
               <p className="text-xs font-mono text-crt-muted truncate">
-                Mounted folder:{' '}
-                <span className="text-crt-text">{pending.volumeLabel}</span> · No{' '}
-                <span className="text-crt-phosphor">.rgt-device.json</span> ID found
+                Selected folder:{' '}
+                <span className="text-crt-text">{pending.volumeLabel}</span>
+                {pending.detectedHintLabel ? (
+                  <>
+                    {' '}· Detected:{' '}
+                    <span className="text-crt-phosphor">{pending.detectedHintLabel}</span>
+                  </>
+                ) : (
+                  <>
+                    {' '}· No <span className="text-crt-phosphor">.rgt-device.json</span> ID found
+                  </>
+                )}
               </p>
             </div>
           </div>
@@ -234,12 +245,23 @@ export function IdentifyDeviceModal({ installer }: IdentifyDeviceModalProps) {
           {mode === 'new' ? (
             <form id="identify-new-device-form" onSubmit={(e) => void handleSubmitNew(e)} className="space-y-4">
               <div className="space-y-1.5">
-                <label
-                  htmlFor="new-device-name-input"
-                  className="block text-xs font-medium text-crt-text"
-                >
-                  Device Name
-                </label>
+                <div className="flex items-center justify-between gap-2">
+                  <label
+                    htmlFor="new-device-name-input"
+                    className="block text-xs font-medium text-crt-text"
+                  >
+                    Device Name
+                  </label>
+                  {pending.isGenericFolderName && !name.trim() && pending.volumeLabel && (
+                    <button
+                      type="button"
+                      onClick={() => setName(pending.volumeLabel)}
+                      className="text-[11px] font-mono text-crt-muted hover:text-crt-phosphor transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Use &ldquo;{pending.volumeLabel}&rdquo;
+                    </button>
+                  )}
+                </div>
                 <input
                   id="new-device-name-input"
                   type="text"
@@ -250,11 +272,26 @@ export function IdentifyDeviceModal({ installer }: IdentifyDeviceModalProps) {
                   placeholder="e.g., Miyoo Mini+, Steam Deck 512GB, MiSTer"
                   className="w-full px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border-strong rounded text-crt-text placeholder:text-crt-muted/50 focus:outline-none focus:border-crt-phosphor"
                 />
-                <p className="text-[11px] text-crt-muted leading-relaxed">
-                  A unique hardware ID will be stamped into a hidden{' '}
-                  <span className="font-mono text-crt-text">.rgt-device.json</span> file at the folder root so this card is recognized automatically even if other cards also use{' '}
-                  <span className="font-mono text-crt-text">{pending.volumeLabel}</span>.
-                </p>
+                {pending.isGenericFolderName && !pending.detectedHintLabel ? (
+                  <p className="text-[11px] text-crt-muted leading-relaxed">
+                    Browsers only share the selected folder name (
+                    <span className="font-mono text-crt-text">{pending.volumeLabel}</span>
+                    ), not the OS drive or SD card volume label. Enter your device label above (or pick the SD card root on macOS/Linux) — it will be stamped into{' '}
+                    <span className="font-mono text-crt-text">.rgt-device.json</span> for automatic recognition next time.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-crt-muted leading-relaxed">
+                    {pending.detectedHintLabel && pending.detectedHintSource ? (
+                      <>
+                        Pre-filled from{' '}
+                        <span className="font-mono text-crt-text">{pending.detectedHintSource}</span>.{' '}
+                      </>
+                    ) : null}
+                    A unique hardware ID will be stamped into a hidden{' '}
+                    <span className="font-mono text-crt-text">.rgt-device.json</span> file at the folder root so this card is recognized automatically even if other cards also use{' '}
+                    <span className="font-mono text-crt-text">{pending.volumeLabel}</span>.
+                  </p>
+                )}
               </div>
 
               {/* Form-Factor Icon Picker */}
