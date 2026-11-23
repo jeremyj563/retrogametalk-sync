@@ -1585,7 +1585,7 @@ export default function App() {
   }, [requestSectionChange]);
 
   const handleUpdateOutdatedOnDevice = useCallback(async () => {
-    if (bulkInstaller.isBusy) {
+    if (bulkInstaller.isBusy && !bulkInstaller.canAppendToQueue) {
       bulkInstaller.openModal();
       return;
     }

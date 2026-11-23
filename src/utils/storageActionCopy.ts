@@ -88,6 +88,7 @@ export function formatQuickInstallTooltip(params: {
   isUpdateAvailable?: boolean;
   isActive?: boolean;
   isOtherBusy?: boolean;
+  canQueueMore?: boolean;
 }): string {
   const {
     mountedDeviceName,
@@ -95,6 +96,7 @@ export function formatQuickInstallTooltip(params: {
     isUpdateAvailable = false,
     isActive = false,
     isOtherBusy = false,
+    canQueueMore = false,
   } = params;
 
   if (isActive) {
@@ -105,6 +107,22 @@ export function formatQuickInstallTooltip(params: {
   }
 
   const trimmedDevice = (mountedDeviceName || '').trim();
+  if (canQueueMore) {
+    if (isUpdateAvailable) {
+      return trimmedDevice
+        ? `Add upgrade to active install queue on ${trimmedDevice} (replaces older copy)`
+        : 'Add upgrade to active device install queue';
+    }
+    if (isReinstall) {
+      return trimmedDevice
+        ? `Add reinstall to active install queue on ${trimmedDevice}`
+        : 'Add reinstall to active device install queue';
+    }
+    return trimmedDevice
+      ? `Add to active install queue on ${trimmedDevice}`
+      : 'Add to active device install queue';
+  }
+
   if (isUpdateAvailable) {
     return trimmedDevice
       ? `Upgrade to latest local ROM on ${trimmedDevice} (replaces older copy)`

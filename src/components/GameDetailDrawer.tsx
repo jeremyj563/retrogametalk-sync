@@ -99,6 +99,7 @@ interface GameDetailDrawerProps {
   mountedDeviceName?: string | null;
   isInstallingToDevice?: boolean;
   isAnotherDeviceInstallBusy?: boolean;
+  canQueueDeviceInstall?: boolean;
   deviceInstallState?: ResolvedItemDeviceInstallState | null;
   navigation?: GameDetailNavigation | null;
   onClose: () => void;
@@ -294,6 +295,7 @@ export function GameDetailDrawer({
   mountedDeviceName = null,
   isInstallingToDevice = false,
   isAnotherDeviceInstallBusy = false,
+  canQueueDeviceInstall = false,
   deviceInstallState = null,
   navigation: activeNavigation = null,
   onClose,
@@ -2669,6 +2671,7 @@ export function GameDetailDrawer({
             isUpdateAvailable: updateInfo.readyToUpgradeLocal,
             isActive: isThisItemInstalling,
             isOtherBusy: isAnotherDeviceInstallBusy,
+            canQueueMore: canQueueDeviceInstall && !isThisItemInstalling,
           });
 
           return (

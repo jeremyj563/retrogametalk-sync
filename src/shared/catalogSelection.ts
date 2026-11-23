@@ -157,6 +157,7 @@ export function formatInstallSelectedTooltip(
   summary: CatalogSelectionSummary,
   isBusy: boolean,
   mountedDeviceName?: string | null,
+  canQueueMore = false,
 ): string {
   if (isBusy) {
     return 'Another storage device install is currently in progress';
@@ -166,9 +167,13 @@ export function formatInstallSelectedTooltip(
   const trimmedDevice = (mountedDeviceName || '').trim();
   const base =
     mode === 'express'
-      ? trimmedDevice
-        ? `Install the latest primary ROM for ${count.toLocaleString()} downloaded ${gameWord} directly to ${trimmedDevice}`
-        : `Mount a storage device and install the latest primary ROM for ${count.toLocaleString()} downloaded ${gameWord}`
+      ? canQueueMore
+        ? trimmedDevice
+          ? `Add ${count.toLocaleString()} downloaded ${gameWord} to the active install queue on ${trimmedDevice}`
+          : `Add ${count.toLocaleString()} downloaded ${gameWord} to the active device install queue`
+        : trimmedDevice
+          ? `Install the latest primary ROM for ${count.toLocaleString()} downloaded ${gameWord} directly to ${trimmedDevice}`
+          : `Mount a storage device and install the latest primary ROM for ${count.toLocaleString()} downloaded ${gameWord}`
       : `Choose versions, rename ROMs, or preview destination folders for ${count.toLocaleString()} downloaded ${gameWord} before installing`;
   if (summary.notYetDownloadedCount <= 0) {
     return base;

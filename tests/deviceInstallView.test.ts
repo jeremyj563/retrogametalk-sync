@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type {
-  BulkInstallJobState,
-  ExportQueueRow,
+import {
+  planExpressQueueAppend,
+  type BulkInstallJobState,
+  type ExportQueueRow,
 } from '../src/hooks/useBulkStorageInstaller.ts';
+import { formatInstallSelectedTooltip } from '../src/shared/catalogSelection.ts';
 import {
   DEFAULT_ROM_TYPE_SUBFOLDERS,
   type StorageFolderMappingConfig,
@@ -604,4 +606,193 @@ test('isItemInstalledOnMountedDevice switches immediately to Reinstall without s
     false,
   );
 });
+
+test('planExpressQueueAppend appends new games to a running job, deduplicates active items, and preserves per-item options', () => {
+  const activeWritingRow = makeRow({
+    rowKey: '10-100',
+    itemId: 10,
+    title: 'Chrono Trigger',
+    writeState: 'writing',
+    writeDetail: 'Writing 2 MB / 4 MB (50%)',
+  });
+  const finishedRow = makeRow({
+    rowKey: '11-110',
+    itemId: 11,
+    title: 'EarthBound',
+    writeState: 'written',
+    writeDetail: 'Installed',
+    bytesWritten: 3_000_000,
+  });
+  const runningJob: BulkInstallJobState = {
+    jobId: 7,
+    mode: 'express',
+    phase: 'running',
+    itemIds: [11, 10],
+    filterContext: {},
+    rows: [finishedRow, activeWritingRow],
+    currentTitle: 'Chrono Trigger',
+    activeTransfer: {
+      itemId: 10,
+      rowKey: '10-100',
+      title: 'Chrono Trigger',
+      stage: 'writing',
+      filename: 'Chrono Trigger.sfc',
+      destinationFolder: 'SNES/Translations',
+      bytesWritten: 2_000_000,
+      totalBytes: 4_000_000,
+      percent: 50,
+      bytesPerSec: 1_000_000,
+      fileIndex: 1,
+      totalFiles: 1,
+    },
+    errorMessage: null,
+    startedAt: '2026-11-23T00:00:00.000Z',
+    finishedAt: null,
+  };
+
+  // Appending item 10 (already writing) + item 12 (new) + item 12 duplicate
+  const metaMap = new Map([
+    [12, { title: 'Super Metroid', systemName: 'snes-rom', previousInstalledFilename: 'Old.sfc' }],
+  ]);
+  const plan1 = planExpressQueueAppend(
+    runningJob,
+    [10, 12, 12],
+    { tags: ['Retail'] },
+    metaMap,
+    { overwriteExisting: true },
+  );
+
+  assert.deepEqual(plan1.alreadyActiveItemIds, [10]);
+  assert.equal(plan1.entriesToEnqueue.length, 1);
+  assert.equal(plan1.entriesToEnqueue[0].itemId, 12);
+  assert.equal(plan1.entriesToEnqueue[0].overwriteExisting, true);
+  assert.equal(plan1.entriesToEnqueue[0].meta?.previousInstalledFilename, 'Old.sfc');
+  assert.deepEqual(plan1.nextJob.itemIds, [11, 10, 12]);
+  assert.equal(plan1.nextJob.rows.length, 3);
+  const queuedRow = plan1.nextJob.rows[2];
+  assert.equal(queuedRow.itemId, 12);
+  assert.equal(queuedRow.isPlaceholder, true);
+  assert.equal(queuedRow.writeState, 'pending');
+  assert.equal(queuedRow.writeDetail, 'Queued');
+  assert.equal(queuedRow.overwriteExisting, true);
+
+  // Resolved view state immediately marks newly appended item 12 as Queued & active
+  const resolved12 = resolveItemDeviceInstallState(
+    12,
+    plan1.nextJob,
+    {
+      totalItems: 3,
+      completedItems: 1,
+    },
+    'Roms',
+  );
+  assert.equal(resolved12.status, 'queued');
+  assert.equal(resolved12.isActive, true);
+  assert.equal(resolved12.stage, 'queued');
+  assert.equal(resolved12.stageLabel, 'Queued for Roms');
+
+  // Trying to append item 12 again while it is still queued deduplicates cleanly
+  const planDuplicate = planExpressQueueAppend(plan1.nextJob, [12], {});
+  assert.equal(planDuplicate.entriesToEnqueue.length, 0);
+  assert.deepEqual(planDuplicate.alreadyActiveItemIds, [12]);
+  assert.equal(planDuplicate.nextJob, plan1.nextJob);
+
+  // Re-queueing already-finished item 11 while the job is still running refreshes its row without duplicating itemIds
+  const planRequeue = planExpressQueueAppend(plan1.nextJob, [11], {}, undefined, {
+    overwriteExisting: false,
+  });
+  assert.equal(planRequeue.entriesToEnqueue.length, 1);
+  assert.equal(planRequeue.entriesToEnqueue[0].itemId, 11);
+  assert.deepEqual(planRequeue.nextJob.itemIds, [11, 10, 12]);
+  const rowsFor11 = planRequeue.nextJob.rows.filter((r) => r.itemId === 11);
+  assert.equal(rowsFor11.length, 1);
+  assert.equal(rowsFor11[0].isPlaceholder, true);
+  assert.equal(rowsFor11[0].writeState, 'pending');
+  assert.equal(rowsFor11[0].title, 'EarthBound');
+});
+
+test('planExpressQueueAppend allows queueing an unselected item from a running Review job', () => {
+  const unselectedReviewRow = makeRow({
+    rowKey: '20-200',
+    itemId: 20,
+    title: 'Castlevania',
+    selectedTargetIds: [],
+    writeState: 'pending',
+    isPlaceholder: false,
+  });
+  const writingReviewRow = makeRow({
+    rowKey: '21-210',
+    itemId: 21,
+    title: 'Contra',
+    writeState: 'writing',
+  });
+  const reviewJob: BulkInstallJobState = {
+    jobId: 9,
+    mode: 'review',
+    phase: 'running',
+    itemIds: [20, 21],
+    filterContext: {},
+    rows: [unselectedReviewRow, writingReviewRow],
+    currentTitle: 'Contra',
+    activeTransfer: null,
+    errorMessage: null,
+    startedAt: '2026-11-23T00:00:00.000Z',
+    finishedAt: null,
+  };
+
+  const plan = planExpressQueueAppend(reviewJob, [20, 21], {});
+  assert.deepEqual(plan.alreadyActiveItemIds, [21]);
+  assert.deepEqual(
+    plan.entriesToEnqueue.map((e) => e.itemId),
+    [20],
+  );
+  const refreshed20 = plan.nextJob.rows.find((r) => r.itemId === 20);
+  assert.equal(refreshed20?.isPlaceholder, true);
+  assert.equal(refreshed20?.writeState, 'pending');
+});
+
+test('queue-aware tooltips clearly indicate adding to an active install queue', () => {
+  assert.equal(
+    formatQuickInstallTooltip({
+      mountedDeviceName: 'Roms',
+      canQueueMore: true,
+    }),
+    'Add to active install queue on Roms',
+  );
+  assert.equal(
+    formatQuickInstallTooltip({
+      mountedDeviceName: 'Roms',
+      isReinstall: true,
+      canQueueMore: true,
+    }),
+    'Add reinstall to active install queue on Roms',
+  );
+  assert.equal(
+    formatQuickInstallTooltip({
+      mountedDeviceName: 'Roms',
+      isUpdateAvailable: true,
+      canQueueMore: true,
+    }),
+    'Add upgrade to active install queue on Roms (replaces older copy)',
+  );
+  assert.equal(
+    formatInstallSelectedTooltip(
+      'express',
+      {
+        totalSelected: 3,
+        queueableIds: [],
+        installableIds: [1, 2, 3],
+        alreadyDownloadedCount: 3,
+        alreadyQueuedCount: 0,
+        notYetDownloadedCount: 0,
+        unknownStatusCount: 0,
+      },
+      false,
+      'Roms',
+      true,
+    ),
+    'Add 3 downloaded games to the active install queue on Roms',
+  );
+});
+
 

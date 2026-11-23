@@ -1485,7 +1485,7 @@ export function CatalogPanel({
       itemHint?: Pick<RepositoryItemRecord, 'id' | 'title' | 'systemName' | 'installedFilename'>,
     ) => {
       if (ids.length === 0) return;
-      if (installer.isBusy) {
+      if (installer.isBusy && !installer.canAppendToQueue) {
         if (ids.some((id) => installer.job?.itemIds.includes(id))) {
           installer.openModal();
         }
@@ -1521,7 +1521,7 @@ export function CatalogPanel({
       itemHint?: Pick<RepositoryItemRecord, 'id' | 'title' | 'systemName' | 'installedFilename'>,
     ) => {
       if (ids.length === 0) return;
-      if (installer.isBusy) {
+      if (installer.isBusy && !installer.canAppendToQueue) {
         if (ids.some((id) => installer.job?.itemIds.includes(id))) {
           installer.openModal();
         }
@@ -3829,14 +3829,19 @@ export function CatalogPanel({
                     {!confirmDeleteCollection && activeCollection.downloadedCount > 0 && (
                       <button
                         type="button"
-                        disabled={collectionActionBusy || installer.isBusy}
+                        disabled={
+                          collectionActionBusy ||
+                          (installer.isBusy && !installer.canAppendToQueue)
+                        }
                         onClick={() =>
                           void handleCollectionBatchAction(activeCollection, 'install_ready')
                         }
                         title={
-                          sdRootHandle
-                            ? `Install ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}" directly to ${sdRootHandle.name}`
-                            : `Mount a storage device and install ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}"`
+                          installer.canAppendToQueue && sdRootHandle
+                            ? `Add ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}" to the active install queue on ${sdRootHandle.name}`
+                            : sdRootHandle
+                              ? `Install ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}" directly to ${sdRootHandle.name}`
+                              : `Mount a storage device and install ${activeCollection.downloadedCount} downloaded game(s) from "${activeCollection.name}"`
                         }
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
                       >
@@ -3920,12 +3925,14 @@ export function CatalogPanel({
                     {globalLocalReady > 0 && (
                       <button
                         type="button"
-                        disabled={installer.isBusy}
+                        disabled={installer.isBusy && !installer.canAppendToQueue}
                         onClick={() => void handleBatchOutdatedAction('upgrade_local')}
                         title={
-                          sdRootHandle
-                            ? `Upgrade all ${globalLocalReady} ready ROMs directly on ${sdRootHandle.name} (replaces superseded copies)`
-                            : `Mount a storage device and upgrade all ${globalLocalReady} ready ROMs`
+                          installer.canAppendToQueue && sdRootHandle
+                            ? `Add all ${globalLocalReady} ready ROM updates to the active install queue on ${sdRootHandle.name} (replaces superseded copies)`
+                            : sdRootHandle
+                              ? `Upgrade all ${globalLocalReady} ready ROMs directly on ${sdRootHandle.name} (replaces superseded copies)`
+                              : `Mount a storage device and upgrade all ${globalLocalReady} ready ROMs`
                         }
                         className="inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-semibold bg-crt-amber text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
                       >
@@ -4007,12 +4014,13 @@ export function CatalogPanel({
                     <>
                       <button
                         type="button"
-                        disabled={installer.isBusy}
+                        disabled={installer.isBusy && !installer.canAppendToQueue}
                         title={formatInstallSelectedTooltip(
                           'express',
                           selectionSummary,
-                          installer.isBusy,
+                          installer.isBusy && !installer.canAppendToQueue,
                           sdRootHandle?.name || null,
+                          installer.canAppendToQueue,
                         )}
                         onClick={() => handleQuickInstallIds(selectionSummary.installableIds)}
                         className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold border border-crt-phosphor/70 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
@@ -4360,7 +4368,9 @@ export function CatalogPanel({
                       installerIsBusy: installer.isBusy,
                     });
                     const updateInfo = classifyInstalledUpdateState(item);
-                    const isOtherInstallBusy = installer.isBusy && !itemInstall.isActive;
+                    const isOtherInstallBusy =
+                      installer.isBusy && !installer.canAppendToQueue && !itemInstall.isActive;
+                    const canQueueMoreHere = installer.canAppendToQueue && !itemInstall.isActive;
 
                     return (
                       <tr
@@ -4762,19 +4772,22 @@ export function CatalogPanel({
                                     disabled={isOtherInstallBusy}
                                     title={
                                       updateInfo.readyToUpgradeLocal
-                                        ? updateInfo.tooltip ||
-                                          formatQuickInstallTooltip({
-                                            mountedDeviceName: sdRootHandle?.name || null,
-                                            isReinstall: isReinstallOnMounted,
-                                            isUpdateAvailable: true,
-                                            isActive: itemInstall.isActive,
-                                            isOtherBusy: isOtherInstallBusy,
-                                          })
+                                        ? !canQueueMoreHere && updateInfo.tooltip
+                                          ? updateInfo.tooltip
+                                          : formatQuickInstallTooltip({
+                                              mountedDeviceName: sdRootHandle?.name || null,
+                                              isReinstall: isReinstallOnMounted,
+                                              isUpdateAvailable: true,
+                                              isActive: itemInstall.isActive,
+                                              isOtherBusy: isOtherInstallBusy,
+                                              canQueueMore: canQueueMoreHere,
+                                            })
                                         : formatQuickInstallTooltip({
                                             mountedDeviceName: sdRootHandle?.name || null,
                                             isReinstall: isReinstallOnMounted,
                                             isActive: itemInstall.isActive,
                                             isOtherBusy: isOtherInstallBusy,
+                                            canQueueMore: canQueueMoreHere,
                                           })
                                     }
                                     onClick={() =>
@@ -4917,7 +4930,9 @@ export function CatalogPanel({
                     installerIsBusy: installer.isBusy,
                   });
                   const updateInfo = classifyInstalledUpdateState(item);
-                  const isOtherInstallBusy = installer.isBusy && !itemInstall.isActive;
+                  const isOtherInstallBusy =
+                    installer.isBusy && !installer.canAppendToQueue && !itemInstall.isActive;
+                  const canQueueMoreHere = installer.canAppendToQueue && !itemInstall.isActive;
 
                   return (
                     <div
@@ -5294,19 +5309,22 @@ export function CatalogPanel({
                                 disabled={isOtherInstallBusy}
                                 title={
                                   updateInfo.readyToUpgradeLocal
-                                    ? updateInfo.tooltip ||
-                                      formatQuickInstallTooltip({
-                                        mountedDeviceName: sdRootHandle?.name || null,
-                                        isReinstall: isReinstallOnMounted,
-                                        isUpdateAvailable: true,
-                                        isActive: false,
-                                        isOtherBusy: isOtherInstallBusy,
-                                      })
+                                    ? !canQueueMoreHere && updateInfo.tooltip
+                                      ? updateInfo.tooltip
+                                      : formatQuickInstallTooltip({
+                                          mountedDeviceName: sdRootHandle?.name || null,
+                                          isReinstall: isReinstallOnMounted,
+                                          isUpdateAvailable: true,
+                                          isActive: false,
+                                          isOtherBusy: isOtherInstallBusy,
+                                          canQueueMore: canQueueMoreHere,
+                                        })
                                     : formatQuickInstallTooltip({
                                         mountedDeviceName: sdRootHandle?.name || null,
                                         isReinstall: isReinstallOnMounted,
                                         isActive: false,
                                         isOtherBusy: isOtherInstallBusy,
+                                        canQueueMore: canQueueMoreHere,
                                       })
                                 }
                                 onClick={(e) => {
@@ -5666,7 +5684,10 @@ export function CatalogPanel({
         mountedDeviceName={sdRootHandle?.name || null}
         isInstallingToDevice={Boolean(activeDetailInstallState?.isActive)}
         isAnotherDeviceInstallBusy={Boolean(
-          installer.isBusy && !activeDetailInstallState?.isActive,
+          installer.isBusy && !installer.canAppendToQueue && !activeDetailInstallState?.isActive,
+        )}
+        canQueueDeviceInstall={Boolean(
+          installer.canAppendToQueue && !activeDetailInstallState?.isActive,
         )}
         deviceInstallState={activeDetailInstallState}
         navigation={detailNavigation}
