@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.35.3] - 2026-11-23
+
+- Fixed Sega Genesis / Mega Drive `.md` ROMs failing with **"No playable ROM found"** during installs and **"Failed - Network error"** on direct archive entry downloads:
+  - **Disambiguated `.md` ROMs vs. Markdown Docs**: Removed `.md` from the unconditional clutter list and added `isMarkdownDocEntry()` / `isClutterEntry()` so `.md` Sega Genesis / Mega Drive ROMs are detected as playable ROMs (and classified as `ROM` without bogus text preview in Archive Explorer) while actual Markdown documentation files (`README.md`, `CHANGELOG.md`, `Docs/*.md`, and small `.md` docs on non-Genesis systems) are still stripped as docs.
+  - **Hardened Archive Entry Extraction & HTTP Streaming**: Wrapped extractor subprocesses (`7z`, `unzip`, `unrar`, `bsdtar`) in a `PassThrough` stream that waits for both stdout EOF and exit status before closing (preventing fast extractor failures from sending premature `200 OK` responses with `Content-Length` mismatches), passed `-sccUTF-8 -spd -i!<entry> --` to 7-Zip, escaped glob metacharacters (`[`, `]`, `*`, `?`) for `unzip`/`bsdtar`, fixed the `unzip -l` fallback parser, enforced `C.UTF-8` locale in extractor subprocesses and the Alpine `Dockerfile` runner stage, and deferred HTTP download headers until the first extracted byte arrives so failures return a clean HTTP 500 JSON error instead of Chrome's `"Failed - Network error"`.
+  - **Expanded `ARCHIVE` & `HTTP` Debug Diagnostics**: Added detailed `DEBUG` log output whenever archive inspection finds zero playable targets (listing entry count, ignored count, and sample filenames/sizes) as well as across archive entry download routes and extraction stream lifecycle events.
+
 ## [1.35.2] - 2026-11-23
 
 - Fixed a brief race window where a Catalog item's **Install** button flashed back to **Install** (and could be clicked again to start a duplicate transfer) after an install finished before switching to **Reinstall**:
