@@ -13,6 +13,7 @@ import {
   buildInstallModalTitle,
   formatDevicePath,
   groupInstallRowsByGame,
+  isItemInstalledOnMountedDevice,
   resolveItemDeviceInstallState,
   summarizeDestinationFolders,
 } from '../src/utils/deviceInstallView.ts';
@@ -548,3 +549,59 @@ test('storageActionCopy produces unified labels and tooltips across install, mou
     'Rescan mounted device folders to check for existing or older ROM files',
   );
 });
+
+test('isItemInstalledOnMountedDevice switches immediately to Reinstall without stale post-unmark stickiness', () => {
+  assert.equal(
+    isItemInstalledOnMountedDevice({
+      mountedDeviceName: null,
+      installedAt: '2026-11-23T00:00:00.000Z',
+      installedDeviceLabel: 'Roms',
+    }),
+    false,
+  );
+
+  // Persisted install on same device (case-insensitive) -> true
+  assert.equal(
+    isItemInstalledOnMountedDevice({
+      mountedDeviceName: 'Roms',
+      installedAt: '2026-11-23T00:00:00.000Z',
+      installedDeviceLabel: 'roms',
+    }),
+    true,
+  );
+
+  // Persisted install on a different device -> false (shows Install to new device)
+  assert.equal(
+    isItemInstalledOnMountedDevice({
+      mountedDeviceName: 'MIYOO',
+      installedAt: '2026-11-23T00:00:00.000Z',
+      installedDeviceLabel: 'ANBERNIC',
+    }),
+    false,
+  );
+
+  // Mid-batch completed row before server flush finishes -> true so button never flashes Install
+  assert.equal(
+    isItemInstalledOnMountedDevice({
+      mountedDeviceName: 'Roms',
+      installedAt: null,
+      installedDeviceLabel: null,
+      liveInstallState: { isFinished: true, outcomeKind: 'written' },
+      installerIsBusy: true,
+    }),
+    true,
+  );
+
+  // After job completes, if item is later unmarked as not installed -> cleanly reverts to false
+  assert.equal(
+    isItemInstalledOnMountedDevice({
+      mountedDeviceName: 'Roms',
+      installedAt: null,
+      installedDeviceLabel: null,
+      liveInstallState: { isFinished: true, outcomeKind: 'written' },
+      installerIsBusy: false,
+    }),
+    false,
+  );
+});
+

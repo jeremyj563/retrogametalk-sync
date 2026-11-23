@@ -88,7 +88,10 @@ import type {
 } from '../types';
 import { ArchiveExplorer } from './ArchiveExplorer';
 import { CollectionPickerPopover } from './CollectionPickerPopover';
-import { resolveItemDeviceInstallState } from '../utils/deviceInstallView';
+import {
+  isItemInstalledOnMountedDevice,
+  resolveItemDeviceInstallState,
+} from '../utils/deviceInstallView';
 import { formatBytes, formatDateTime } from '../utils/format';
 import { reportAchievementEvent } from '../utils/achievementsClient';
 import {
@@ -1239,6 +1242,36 @@ export function CatalogPanel({
       void loadFsTree(fsPath, true);
     }
   }, [catalogRevision, viewMode, fsPath, loadCatalog, loadFsTree, loadCollections]);
+
+  // Patch installed metadata into visible items & open drawer synchronously before
+  // the installer transitions to 'completed' so Install buttons switch straight to
+  // Reinstall with zero flash or window for accidental duplicate clicks.
+  useEffect(() => {
+    return installer.subscribeItemsInstalled((updatedItems) => {
+      if (updatedItems.length === 0) return;
+      const byId = new Map(updatedItems.map((row) => [row.id, row]));
+      catalogReqSeqRef.current += 1;
+      setItems((prev) => {
+        let changed = false;
+        const next = prev.map((row) => {
+          const updated = byId.get(row.id);
+          if (updated) {
+            changed = true;
+            return updated;
+          }
+          return row;
+        });
+        if (changed && memoryCatalogSnapshot) {
+          memoryCatalogSnapshot = {
+            ...memoryCatalogSnapshot,
+            items: memoryCatalogSnapshot.items.map((row) => byId.get(row.id) ?? row),
+          };
+        }
+        return changed ? next : prev;
+      });
+      setActiveDetailItem((current) => (current ? (byId.get(current.id) ?? current) : current));
+    });
+  }, [installer]);
 
   const filteredFsNodes = useMemo(() => {
     const q = fsSearch.trim().toLowerCase();
@@ -4319,13 +4352,13 @@ export function CatalogPanel({
                       sdRootHandle?.name || null,
                     );
                     const canQuickInstall = isCatalogStatusInstallable(item.status);
-                    const isReinstallOnMounted = Boolean(
-                      sdRootHandle &&
-                        item.installedAt &&
-                        (!item.installedDeviceLabel ||
-                          item.installedDeviceLabel.trim().toLowerCase() ===
-                            sdRootHandle.name.trim().toLowerCase()),
-                    );
+                    const isReinstallOnMounted = isItemInstalledOnMountedDevice({
+                      mountedDeviceName: sdRootHandle?.name || null,
+                      installedAt: item.installedAt,
+                      installedDeviceLabel: item.installedDeviceLabel,
+                      liveInstallState: itemInstall,
+                      installerIsBusy: installer.isBusy,
+                    });
                     const updateInfo = classifyInstalledUpdateState(item);
                     const isOtherInstallBusy = installer.isBusy && !itemInstall.isActive;
 
@@ -4876,13 +4909,13 @@ export function CatalogPanel({
                     sdRootHandle?.name || null,
                   );
                   const canQuickInstall = isCatalogStatusInstallable(item.status);
-                  const isReinstallOnMounted = Boolean(
-                    sdRootHandle &&
-                      item.installedAt &&
-                      (!item.installedDeviceLabel ||
-                        item.installedDeviceLabel.trim().toLowerCase() ===
-                          sdRootHandle.name.trim().toLowerCase()),
-                  );
+                  const isReinstallOnMounted = isItemInstalledOnMountedDevice({
+                    mountedDeviceName: sdRootHandle?.name || null,
+                    installedAt: item.installedAt,
+                    installedDeviceLabel: item.installedDeviceLabel,
+                    liveInstallState: itemInstall,
+                    installerIsBusy: installer.isBusy,
+                  });
                   const updateInfo = classifyInstalledUpdateState(item);
                   const isOtherInstallBusy = installer.isBusy && !itemInstall.isActive;
 
