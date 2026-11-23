@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.36.0] - 2026-11-23
+
+- Added **Live Install Queueing** for 1-click device installs so you no longer have to wait for the current game to finish before queueing more:
+  - **Keep Clicking Install / Update / Reinstall While Transferring**: Clicking **Install**, **Update**, or **Reinstall** on additional games in the Catalog grid, Catalog list, Release Details drawer, Collections banner, Bulk Selection bar, or Updates bar while an install is actively running immediately appends them to the live install queue and shows their status as **Queued** until their turn starts.
+  - **Automatic Deduplication & Per-Item Options**: Repeated clicks on an already-queued or actively installing game open the install queue details instead of creating duplicates, while newly queued upgrades preserve per-item overwrite/replacement rules and completed items persist immediately to **Reinstall** as the queue continues draining.
+
 ## [1.35.4] - 2026-11-23
 
 - Made archive inspection directly accessible in the **Release Details** drawer without opening the `... More` menu:

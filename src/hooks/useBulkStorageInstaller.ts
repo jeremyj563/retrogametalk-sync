@@ -145,6 +145,19 @@ export interface ExpressInstallOptions {
   overwriteExisting?: boolean;
 }
 
+export interface PendingExpressQueueEntry {
+  itemId: number;
+  overwriteExisting: boolean;
+  filterContext: SmartRomFilterContext;
+  meta?: BulkInstallKnownItemMeta;
+}
+
+export interface ExpressQueueAppendPlan {
+  entriesToEnqueue: PendingExpressQueueEntry[];
+  alreadyActiveItemIds: number[];
+  nextJob: BulkInstallJobState;
+}
+
 export interface BulkInstallMetrics {
   totalItems: number;
   completedItems: number;
@@ -163,8 +176,166 @@ interface UseBulkStorageInstallerOptions {
   onItemsInstalled?: (updatedItems: RepositoryItemRecord[], deviceLabel: string) => void;
 }
 
+interface ActiveRunControl {
+  jobId: number;
+  pendingQueue: PendingExpressQueueEntry[];
+  /** Item IDs currently waiting in pendingQueue or actively inspecting/writing. */
+  inFlightItemIds: Set<number>;
+  /** True once the worker is canceling or transitioning to a terminal state. */
+  closing: boolean;
+}
+
 const EXPRESS_INSPECT_CHUNK_SIZE = 15;
 const REVIEW_INSPECT_CHUNK_SIZE = 30;
+
+export function buildExpressPlaceholderRow(
+  itemId: number,
+  options: {
+    meta?: BulkInstallKnownItemMeta;
+    fallbackTitle?: string;
+    fallbackSystemName?: string;
+    overwriteExisting: boolean;
+    waitingForAutoConfig?: boolean;
+  },
+): ExportQueueRow {
+  const {
+    meta,
+    fallbackTitle,
+    fallbackSystemName,
+    overwriteExisting,
+    waitingForAutoConfig = false,
+  } = options;
+  return {
+    rowKey: `${itemId}-placeholder`,
+    itemId,
+    fileId: 0,
+    title: meta?.title || fallbackTitle || `Catalog Release #${itemId}`,
+    systemName: meta?.systemName || fallbackSystemName || '',
+    releaseTags: [],
+    sourceFilename: 'Queued for inspection...',
+    targets: [],
+    selectedTargetIds: [],
+    recommendedTargetIds: [],
+    smartReasonsByTargetId: {},
+    isMultiChoiceItem: false,
+    isPlaceholder: true,
+    outputNamesByTargetId: {},
+    replaceOlderByTargetId: {},
+    overwriteExisting,
+    previousInstalledFilename: meta?.previousInstalledFilename ?? null,
+    error: null,
+    patchOnly: false,
+    ignoredEntriesCount: 0,
+    writeState: 'pending',
+    writeDetail: waitingForAutoConfig ? 'Scanning device folders...' : 'Queued',
+    bytesWritten: 0,
+  };
+}
+
+function isRowActivelyInFlight(row: ExportQueueRow): boolean {
+  if (row.writeState === 'inspecting' || row.writeState === 'writing') {
+    return true;
+  }
+  if (row.writeState === 'pending') {
+    return Boolean(row.isPlaceholder) || row.selectedTargetIds.length > 0;
+  }
+  return false;
+}
+
+/**
+ * Pure helper that merges newly requested Express Install item IDs into an already-running
+ * BulkInstallJobState:
+ * - Deduplicates any items that are already queued, inspecting, or writing.
+ * - Replaces finished/unselected rows for items the user explicitly re-queues so they get
+ *   a fresh Queued placeholder and run again cleanly.
+ * - Appends new placeholder rows and extends job.itemIds synchronously so the UI reflects
+ *   "Queued" immediately with zero flicker.
+ */
+export function planExpressQueueAppend(
+  job: BulkInstallJobState,
+  rawItemIds: number[],
+  filterContext: SmartRomFilterContext,
+  knownMeta?: Map<number, BulkInstallKnownItemMeta>,
+  options?: ExpressInstallOptions & { inFlightItemIds?: ReadonlySet<number> },
+): ExpressQueueAppendPlan {
+  const cleanIds = Array.from(
+    new Set(rawItemIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
+  );
+  if (cleanIds.length === 0) {
+    return { entriesToEnqueue: [], alreadyActiveItemIds: [], nextJob: job };
+  }
+
+  const overwriteExisting = Boolean(options?.overwriteExisting);
+  const existingRowsByItem = new Map<number, ExportQueueRow[]>();
+  for (const row of job.rows) {
+    const list = existingRowsByItem.get(row.itemId);
+    if (list) {
+      list.push(row);
+    } else {
+      existingRowsByItem.set(row.itemId, [row]);
+    }
+  }
+
+  const entriesToEnqueue: PendingExpressQueueEntry[] = [];
+  const alreadyActiveItemIds: number[] = [];
+
+  for (const itemId of cleanIds) {
+    const existingRows = existingRowsByItem.get(itemId) || [];
+    const activeInRows = existingRows.some(isRowActivelyInFlight);
+    const activeInRef = Boolean(options?.inFlightItemIds?.has(itemId));
+    if (activeInRows || activeInRef) {
+      alreadyActiveItemIds.push(itemId);
+      continue;
+    }
+    const existingFirst = existingRows[0];
+    const meta = knownMeta?.get(itemId);
+    entriesToEnqueue.push({
+      itemId,
+      overwriteExisting,
+      filterContext,
+      meta: meta ?? (existingFirst ? {
+        title: existingFirst.title,
+        systemName: existingFirst.systemName,
+        previousInstalledFilename: existingFirst.previousInstalledFilename ?? null,
+      } : undefined),
+    });
+  }
+
+  if (entriesToEnqueue.length === 0) {
+    return { entriesToEnqueue: [], alreadyActiveItemIds, nextJob: job };
+  }
+
+  const enqueueIdSet = new Set(entriesToEnqueue.map((e) => e.itemId));
+  const preservedRows = job.rows.filter((r) => !enqueueIdSet.has(r.itemId));
+  const appendedPlaceholders = entriesToEnqueue.map((entry) => {
+    const existingFirst = existingRowsByItem.get(entry.itemId)?.[0];
+    return buildExpressPlaceholderRow(entry.itemId, {
+      meta: entry.meta,
+      fallbackTitle: existingFirst?.title,
+      fallbackSystemName: existingFirst?.systemName,
+      overwriteExisting: entry.overwriteExisting,
+    });
+  });
+
+  const existingItemIdSet = new Set(job.itemIds);
+  const nextItemIds = [...job.itemIds];
+  for (const entry of entriesToEnqueue) {
+    if (!existingItemIdSet.has(entry.itemId)) {
+      existingItemIdSet.add(entry.itemId);
+      nextItemIds.push(entry.itemId);
+    }
+  }
+
+  return {
+    entriesToEnqueue,
+    alreadyActiveItemIds,
+    nextJob: {
+      ...job,
+      itemIds: nextItemIds,
+      rows: [...preservedRows, ...appendedPlaceholders],
+    },
+  };
+}
 
 function extractPreferredTypeKeys(filterContext?: SmartRomFilterContext | null): string[] {
   if (!filterContext) return [];
@@ -409,6 +580,7 @@ export function useBulkStorageInstaller({
 
   const jobSeqRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeRunRef = useRef<ActiveRunControl | null>(null);
   const autoConfigAbortRef = useRef<AbortController | null>(null);
   const autoConfigPromiseRef = useRef<Promise<DeviceAutoConfigResult | null> | null>(null);
 
@@ -436,6 +608,7 @@ export function useBulkStorageInstaller({
 
   const isBusy =
     job?.phase === 'inspecting' || job?.phase === 'running' || job?.phase === 'canceling';
+  const canAppendToQueue = Boolean(sdRootHandle && job?.phase === 'running');
 
   const clearAutoConfigState = useCallback(() => {
     autoConfigAbortRef.current?.abort();
@@ -1055,9 +1228,320 @@ export function useBulkStorageInstaller({
   );
 
   /**
-   * 2-Click Express Install:
+   * Shared worker loop that drains entries from `activeRun.pendingQueue` in chunks,
+   * inspecting each chunk via `/api/items/inspect-batch` and streaming selected ROMs
+   * directly to the mounted storage device. Any items appended by the user while a
+   * chunk is executing are picked up on the next loop iteration without interrupting
+   * the current transfer.
+   */
+  const drainPendingExpressQueue = useCallback(
+    async (params: {
+      jobId: number;
+      activeRun: ActiveRunControl;
+      activeHandle: SdDirectoryHandle;
+      fallbackFilterContext: SmartRomFilterContext;
+      scanCache: Record<string, SdScanFolderResult>;
+      dirCache: Map<string, SdDirectoryHandle>;
+      controller: AbortController;
+      unsyncedInstalledIds: Set<number>;
+      unsyncedItemMeta: Record<number, { fileId?: number | null; filename?: string | null }>;
+      flushInstalled: () => Promise<void>;
+    }) => {
+      const {
+        jobId,
+        activeRun,
+        activeHandle,
+        fallbackFilterContext,
+        scanCache,
+        dirCache,
+        controller,
+        unsyncedInstalledIds,
+        unsyncedItemMeta,
+        flushInstalled,
+      } = params;
+
+      while (activeRun.pendingQueue.length > 0) {
+        if (controller.signal.aborted) {
+          throw new DOMException('Installation canceled by user.', 'AbortError');
+        }
+
+        const chunkEntries = activeRun.pendingQueue.splice(0, EXPRESS_INSPECT_CHUNK_SIZE);
+        const chunkIds = chunkEntries.map((entry) => entry.itemId);
+        const chunkIdSet = new Set(chunkIds);
+        const entryById = new Map<number, PendingExpressQueueEntry>();
+        for (const qEntry of chunkEntries) {
+          entryById.set(qEntry.itemId, qEntry);
+        }
+        const chunkLead = chunkEntries[0];
+
+        setJob((prev) => {
+          if (!prev || prev.jobId !== jobId) return prev;
+          return {
+            ...prev,
+            currentTitle: chunkLead.meta?.title || prev.currentTitle,
+            activeTransfer: {
+              itemId: chunkLead.itemId,
+              rowKey: `${chunkLead.itemId}-placeholder`,
+              title: chunkLead.meta?.title || `Catalog Release #${chunkLead.itemId}`,
+              stage: 'inspecting',
+              filename: null,
+              destinationFolder: null,
+              bytesWritten: 0,
+              totalBytes: null,
+              percent: null,
+              bytesPerSec: null,
+              fileIndex: 1,
+              totalFiles: 1,
+            },
+            rows: prev.rows.map((r) =>
+              r.isPlaceholder && chunkIdSet.has(r.itemId)
+                ? { ...r, writeState: 'inspecting', writeDetail: 'Inspecting archive...' }
+                : r,
+            ),
+          };
+        });
+
+        const res = await fetch('/api/items/inspect-batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: chunkIds }),
+          signal: controller.signal,
+        });
+        const parsed = await readJsonSafely<{ results?: SdExportBatchItemResult[]; error?: string }>(
+          res,
+        );
+        if (!parsed.ok || !parsed.data?.results) {
+          const inspectErr = parsed.errorMessage || `Archive inspection failed (HTTP ${res.status})`;
+          emitSdDebug('Express inspect-batch failed', `chunk=${chunkIds.join(',')}, ${inspectErr}`, true);
+          throw new Error(inspectErr);
+        }
+
+        const expandedChunkRows: ExportQueueRow[] = [];
+        const returnedIds = new Set<number>();
+        for (const entry of parsed.data.results) {
+          returnedIds.add(entry.itemId);
+          const qEntry = entryById.get(entry.itemId);
+          const itemRows = buildRowsFromInspectedItem(
+            entry,
+            'express',
+            qEntry?.filterContext ?? fallbackFilterContext,
+            {
+              overwriteExisting: qEntry?.overwriteExisting ?? false,
+              previousInstalledFilename: qEntry?.meta?.previousInstalledFilename ?? null,
+            },
+          );
+          expandedChunkRows.push(...itemRows);
+        }
+
+        // Guard against any missing/deleted IDs so their placeholders don't remain stuck
+        for (const qEntry of chunkEntries) {
+          if (!returnedIds.has(qEntry.itemId)) {
+            const missingRows = buildRowsFromInspectedItem(
+              {
+                itemId: qEntry.itemId,
+                title: qEntry.meta?.title || `Catalog Release #${qEntry.itemId}`,
+                systemName: qEntry.meta?.systemName || '',
+                releaseTags: [],
+                languages: [],
+                regions: [],
+                inspections: [],
+                error: 'Release could not be found for inspection',
+              },
+              'express',
+              qEntry.filterContext,
+              {
+                overwriteExisting: qEntry.overwriteExisting,
+                previousInstalledFilename: qEntry.meta?.previousInstalledFilename ?? null,
+              },
+            );
+            expandedChunkRows.push(...missingRows);
+          }
+        }
+
+        // Replace chunk placeholders with real inspected rows
+        setJob((prev) => {
+          if (!prev || prev.jobId !== jobId) return prev;
+          const nextRows: ExportQueueRow[] = [];
+          const insertedItems = new Set<number>();
+          for (const existing of prev.rows) {
+            if (existing.isPlaceholder && chunkIdSet.has(existing.itemId)) {
+              if (!insertedItems.has(existing.itemId)) {
+                insertedItems.add(existing.itemId);
+                nextRows.push(
+                  ...expandedChunkRows.filter((er) => er.itemId === existing.itemId),
+                );
+              }
+            } else {
+              nextRows.push(existing);
+            }
+          }
+          return { ...prev, rows: nextRows };
+        });
+
+        // Release in-flight tracking immediately for items with no writable targets (e.g. error/skipped)
+        for (const itemId of chunkIds) {
+          const hasWritableRow = expandedChunkRows.some(
+            (r) => r.itemId === itemId && r.selectedTargetIds.length > 0,
+          );
+          if (!hasWritableRow) {
+            activeRun.inFlightItemIds.delete(itemId);
+          }
+        }
+
+        // Stream each inspected row in this chunk directly to the mounted storage device
+        for (let rowIdx = 0; rowIdx < expandedChunkRows.length; rowIdx += 1) {
+          const row = expandedChunkRows[rowIdx];
+          if (controller.signal.aborted) {
+            throw new DOMException('Installation canceled by user.', 'AbortError');
+          }
+          if (row.selectedTargetIds.length === 0) {
+            continue;
+          }
+
+          const qEntry = entryById.get(row.itemId);
+          const rowFilterContext = qEntry?.filterContext ?? fallbackFilterContext;
+          const firstSelectedTarget = row.targets.find((t) =>
+            row.selectedTargetIds.includes(t.id),
+          );
+          const expectedRowBytes = row.selectedTargetIds.reduce((sum, tid) => {
+            const t = row.targets.find((cand) => cand.id === tid);
+            return sum + (t?.sizeBytes || 0);
+          }, 0);
+
+          setJob((prev) => {
+            if (!prev || prev.jobId !== jobId) return prev;
+            return {
+              ...prev,
+              currentTitle: row.title,
+              activeTransfer: {
+                itemId: row.itemId,
+                rowKey: row.rowKey,
+                title: row.title,
+                stage: 'extracting',
+                filename:
+                  (firstSelectedTarget &&
+                    (row.outputNamesByTargetId[firstSelectedTarget.id] ||
+                      firstSelectedTarget.suggestedFilename)) ||
+                  null,
+                destinationFolder: null,
+                bytesWritten: 0,
+                totalBytes: expectedRowBytes > 0 ? expectedRowBytes : null,
+                percent: null,
+                bytesPerSec: null,
+                fileIndex: 1,
+                totalFiles: Math.max(1, row.selectedTargetIds.length),
+              },
+              rows: prev.rows.map((r) =>
+                r.rowKey === row.rowKey
+                  ? { ...r, writeState: 'writing', writeDetail: 'Extracting ROM...' }
+                  : r,
+              ),
+            };
+          });
+
+          const outcome = await writeSingleRowToDevice(
+            row,
+            rowFilterContext,
+            activeHandle,
+            scanCache,
+            dirCache,
+            controller.signal,
+            (transfer) => {
+              const detailText =
+                transfer.stage === 'extracting'
+                  ? 'Extracting ROM...'
+                  : transfer.stage === 'finalizing'
+                    ? 'Finalizing on device...'
+                    : transfer.totalBytes && transfer.percent !== null
+                      ? `Writing ${formatBytes(transfer.bytesWritten)} / ${formatBytes(transfer.totalBytes)} (${transfer.percent}%)`
+                      : transfer.bytesWritten > 0
+                        ? `Writing ${formatBytes(transfer.bytesWritten)}...`
+                        : 'Writing ROM...';
+              setJob((prev) => {
+                if (!prev || prev.jobId !== jobId) return prev;
+                return {
+                  ...prev,
+                  activeTransfer: transfer,
+                  rows: prev.rows.map((r) =>
+                    r.rowKey === row.rowKey
+                      ? { ...r, writeDetail: detailText, bytesWritten: transfer.bytesWritten }
+                      : r,
+                  ),
+                };
+              });
+            },
+          );
+
+          if (outcome.installedSuccess) {
+            unsyncedInstalledIds.add(row.itemId);
+            unsyncedItemMeta[row.itemId] = {
+              fileId: outcome.installedFileId,
+              filename: outcome.installedFilename,
+            };
+          }
+
+          const hasMoreSelectedRowsForItem = expandedChunkRows
+            .slice(rowIdx + 1)
+            .some((r) => r.itemId === row.itemId && r.selectedTargetIds.length > 0);
+          if (!hasMoreSelectedRowsForItem && unsyncedInstalledIds.size > 0) {
+            // Keep the item visibly in "Finalizing" until the server persists installed_at
+            // and subscribers synchronously patch Catalog rows — prevents flashing back to "Install"
+            // even while additional queued items continue installing behind it.
+            setJob((prev) => {
+              if (!prev || prev.jobId !== jobId) return prev;
+              return {
+                ...prev,
+                activeTransfer:
+                  prev.activeTransfer && prev.activeTransfer.rowKey === row.rowKey
+                    ? {
+                        ...prev.activeTransfer,
+                        stage: 'finalizing',
+                        percent: 100,
+                        bytesPerSec: null,
+                      }
+                    : prev.activeTransfer,
+              };
+            });
+            await flushInstalled();
+          }
+
+          if (!hasMoreSelectedRowsForItem) {
+            activeRun.inFlightItemIds.delete(row.itemId);
+          }
+
+          setJob((prev) => {
+            if (!prev || prev.jobId !== jobId) return prev;
+            return {
+              ...prev,
+              activeTransfer:
+                prev.activeTransfer?.rowKey === row.rowKey ? null : prev.activeTransfer,
+              rows: prev.rows.map((r) =>
+                r.rowKey === row.rowKey
+                  ? {
+                      ...r,
+                      writeState: outcome.nextState,
+                      writeDetail: outcome.detail,
+                      bytesWritten: outcome.bytesWritten,
+                    }
+                  : r,
+              ),
+            };
+          });
+        }
+
+        // Commit any remaining installed flags at the end of every chunk
+        await flushInstalled();
+      }
+    },
+    [emitSdDebug, writeSingleRowToDevice],
+  );
+
+  /**
+   * 2-Click Express Install (with live queue appending):
    * Prompts storage device mount if none is mounted yet, then immediately inspects
-   * and streams Smart Primary ROMs asynchronously in the background.
+   * and streams Smart Primary ROMs asynchronously in the background. If another transfer
+   * is already running on the mounted device, newly clicked items are dynamically appended
+   * to the live queue instead of blocking the user.
    */
   const startExpressInstall = useCallback(
     async (
@@ -1070,6 +1554,53 @@ export function useBulkStorageInstaller({
         new Set(rawItemIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
       );
       if (cleanIds.length === 0) return false;
+
+      const overwriteExisting = Boolean(options?.overwriteExisting);
+
+      // If an install transfer is already actively running on the mounted device,
+      // append any new (non-in-flight) items directly into the live pending queue.
+      const existingRun = activeRunRef.current;
+      if (existingRun && !existingRun.closing && sdRootHandleRef.current) {
+        const currentJob = jobRef.current;
+        const knownInFlight = existingRun.inFlightItemIds;
+        const freshIds = cleanIds.filter((id) => !knownInFlight.has(id));
+        if (freshIds.length === 0) {
+          setModalOpen(true);
+          return false;
+        }
+
+        const entriesToPush: PendingExpressQueueEntry[] = freshIds.map((itemId) => ({
+          itemId,
+          overwriteExisting,
+          filterContext,
+          meta: knownMeta?.get(itemId),
+        }));
+        for (const entry of entriesToPush) {
+          existingRun.inFlightItemIds.add(entry.itemId);
+          existingRun.pendingQueue.push(entry);
+        }
+
+        emitSdDebug(
+          `Appended ${entriesToPush.length} item(s) to live install queue`,
+          `jobId=${existingRun.jobId}, ids=${freshIds.join(',')}, overwrite=${overwriteExisting}`,
+        );
+
+        const targetJobId = existingRun.jobId;
+        setJob((prev) => {
+          const base = prev ?? currentJob;
+          if (!base || base.jobId !== targetJobId) return prev;
+          const plan = planExpressQueueAppend(
+            base,
+            freshIds,
+            filterContext,
+            knownMeta,
+            { overwriteExisting },
+          );
+          return plan.nextJob;
+        });
+
+        return true;
+      }
 
       if (isBusy) {
         setModalOpen(true);
@@ -1084,42 +1615,39 @@ export function useBulkStorageInstaller({
         }
       }
 
+      // Re-check in case another job started while waiting on the folder picker
+      if (activeRunRef.current && !activeRunRef.current.closing) {
+        return startExpressInstall(cleanIds, filterContext, knownMeta, options);
+      }
+
       const waitingForAutoConfig = Boolean(autoConfigPromiseRef.current);
-      const overwriteExisting = Boolean(options?.overwriteExisting);
 
       setMountError(null);
       const jobId = ++jobSeqRef.current;
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
-      const placeholderRows: ExportQueueRow[] = cleanIds.map((id) => {
-        const meta = knownMeta?.get(id);
-        return {
-          rowKey: `${id}-placeholder`,
-          itemId: id,
-          fileId: 0,
-          title: meta?.title || `Catalog Release #${id}`,
-          systemName: meta?.systemName || '',
-          releaseTags: [],
-          sourceFilename: 'Queued for inspection...',
-          targets: [],
-          selectedTargetIds: [],
-          recommendedTargetIds: [],
-          smartReasonsByTargetId: {},
-          isMultiChoiceItem: false,
-          isPlaceholder: true,
-          outputNamesByTargetId: {},
-          replaceOlderByTargetId: {},
+      const initialEntries: PendingExpressQueueEntry[] = cleanIds.map((id) => ({
+        itemId: id,
+        overwriteExisting,
+        filterContext,
+        meta: knownMeta?.get(id),
+      }));
+      const activeRun: ActiveRunControl = {
+        jobId,
+        pendingQueue: [...initialEntries],
+        inFlightItemIds: new Set(cleanIds),
+        closing: false,
+      };
+      activeRunRef.current = activeRun;
+
+      const placeholderRows: ExportQueueRow[] = cleanIds.map((id) =>
+        buildExpressPlaceholderRow(id, {
+          meta: knownMeta?.get(id),
           overwriteExisting,
-          previousInstalledFilename: meta?.previousInstalledFilename ?? null,
-          error: null,
-          patchOnly: false,
-          ignoredEntriesCount: 0,
-          writeState: 'pending',
-          writeDetail: waitingForAutoConfig ? 'Scanning device folders...' : 'Queued',
-          bytesWritten: 0,
-        };
-      });
+          waitingForAutoConfig,
+        }),
+      );
 
       const firstPlaceholder = placeholderRows[0];
       const initialJob: BulkInstallJobState = {
@@ -1150,6 +1678,7 @@ export function useBulkStorageInstaller({
         startedAt: new Date().toISOString(),
         finishedAt: null,
       };
+      jobRef.current = initialJob;
       setJob(initialJob);
 
       // Run pipeline asynchronously without awaiting in the UI gesture caller
@@ -1175,226 +1704,26 @@ export function useBulkStorageInstaller({
             await autoConfigPromiseRef.current;
           }
 
-          for (let offset = 0; offset < cleanIds.length; offset += EXPRESS_INSPECT_CHUNK_SIZE) {
-            if (controller.signal.aborted) {
-              throw new DOMException('Installation canceled by user.', 'AbortError');
-            }
-
-            const chunkIds = cleanIds.slice(offset, offset + EXPRESS_INSPECT_CHUNK_SIZE);
-            const chunkIdSet = new Set(chunkIds);
-            const chunkLeadId = chunkIds[0];
-            const chunkLeadMeta = knownMeta?.get(chunkLeadId);
-
-            setJob((prev) => {
-              if (!prev || prev.jobId !== jobId) return prev;
-              return {
-                ...prev,
-                currentTitle: chunkLeadMeta?.title || prev.currentTitle,
-                activeTransfer: {
-                  itemId: chunkLeadId,
-                  rowKey: `${chunkLeadId}-placeholder`,
-                  title: chunkLeadMeta?.title || `Catalog Release #${chunkLeadId}`,
-                  stage: 'inspecting',
-                  filename: null,
-                  destinationFolder: null,
-                  bytesWritten: 0,
-                  totalBytes: null,
-                  percent: null,
-                  bytesPerSec: null,
-                  fileIndex: 1,
-                  totalFiles: 1,
-                },
-                rows: prev.rows.map((r) =>
-                  r.isPlaceholder && chunkIdSet.has(r.itemId)
-                    ? { ...r, writeState: 'inspecting', writeDetail: 'Inspecting archive...' }
-                    : r,
-                ),
-              };
+          while (activeRun.pendingQueue.length > 0 && !controller.signal.aborted) {
+            await drainPendingExpressQueue({
+              jobId,
+              activeRun,
+              activeHandle: activeHandle!,
+              fallbackFilterContext: filterContext,
+              scanCache,
+              dirCache,
+              controller,
+              unsyncedInstalledIds,
+              unsyncedItemMeta,
+              flushInstalled,
             });
-
-            const res = await fetch('/api/items/inspect-batch', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ ids: chunkIds }),
-              signal: controller.signal,
-            });
-            const parsed = await readJsonSafely<{ results?: SdExportBatchItemResult[]; error?: string }>(
-              res,
-            );
-            if (!parsed.ok || !parsed.data?.results) {
-              const inspectErr = parsed.errorMessage || `Archive inspection failed (HTTP ${res.status})`;
-              emitSdDebug('Express inspect-batch failed', `chunk=${chunkIds.join(',')}, ${inspectErr}`, true);
-              throw new Error(inspectErr);
-            }
-
-            const expandedChunkRows: ExportQueueRow[] = [];
-            for (const entry of parsed.data.results) {
-              const itemRows = buildRowsFromInspectedItem(entry, 'express', filterContext, {
-                overwriteExisting,
-                previousInstalledFilename: knownMeta?.get(entry.itemId)?.previousInstalledFilename ?? null,
-              });
-              expandedChunkRows.push(...itemRows);
-            }
-
-            // Replace chunk placeholders with real inspected rows
-            setJob((prev) => {
-              if (!prev || prev.jobId !== jobId) return prev;
-              const nextRows: ExportQueueRow[] = [];
-              const insertedItems = new Set<number>();
-              for (const existing of prev.rows) {
-                if (existing.isPlaceholder && chunkIdSet.has(existing.itemId)) {
-                  if (!insertedItems.has(existing.itemId)) {
-                    insertedItems.add(existing.itemId);
-                    nextRows.push(
-                      ...expandedChunkRows.filter((er) => er.itemId === existing.itemId),
-                    );
-                  }
-                } else {
-                  nextRows.push(existing);
-                }
-              }
-              return { ...prev, rows: nextRows };
-            });
-
-            // Stream each inspected row in this chunk directly to the mounted storage device
-            for (let rowIdx = 0; rowIdx < expandedChunkRows.length; rowIdx += 1) {
-              const row = expandedChunkRows[rowIdx];
-              if (controller.signal.aborted) {
-                throw new DOMException('Installation canceled by user.', 'AbortError');
-              }
-              if (row.selectedTargetIds.length === 0) {
-                continue;
-              }
-
-              const firstSelectedTarget = row.targets.find((t) =>
-                row.selectedTargetIds.includes(t.id),
-              );
-              const expectedRowBytes = row.selectedTargetIds.reduce((sum, tid) => {
-                const t = row.targets.find((cand) => cand.id === tid);
-                return sum + (t?.sizeBytes || 0);
-              }, 0);
-
-              setJob((prev) => {
-                if (!prev || prev.jobId !== jobId) return prev;
-                return {
-                  ...prev,
-                  currentTitle: row.title,
-                  activeTransfer: {
-                    itemId: row.itemId,
-                    rowKey: row.rowKey,
-                    title: row.title,
-                    stage: 'extracting',
-                    filename:
-                      (firstSelectedTarget &&
-                        (row.outputNamesByTargetId[firstSelectedTarget.id] ||
-                          firstSelectedTarget.suggestedFilename)) ||
-                      null,
-                    destinationFolder: null,
-                    bytesWritten: 0,
-                    totalBytes: expectedRowBytes > 0 ? expectedRowBytes : null,
-                    percent: null,
-                    bytesPerSec: null,
-                    fileIndex: 1,
-                    totalFiles: Math.max(1, row.selectedTargetIds.length),
-                  },
-                  rows: prev.rows.map((r) =>
-                    r.rowKey === row.rowKey
-                      ? { ...r, writeState: 'writing', writeDetail: 'Extracting ROM...' }
-                      : r,
-                  ),
-                };
-              });
-
-              const outcome = await writeSingleRowToDevice(
-                row,
-                filterContext,
-                activeHandle!,
-                scanCache,
-                dirCache,
-                controller.signal,
-                (transfer) => {
-                  const detailText =
-                    transfer.stage === 'extracting'
-                      ? 'Extracting ROM...'
-                      : transfer.stage === 'finalizing'
-                        ? 'Finalizing on device...'
-                        : transfer.totalBytes && transfer.percent !== null
-                          ? `Writing ${formatBytes(transfer.bytesWritten)} / ${formatBytes(transfer.totalBytes)} (${transfer.percent}%)`
-                          : transfer.bytesWritten > 0
-                            ? `Writing ${formatBytes(transfer.bytesWritten)}...`
-                            : 'Writing ROM...';
-                  setJob((prev) => {
-                    if (!prev || prev.jobId !== jobId) return prev;
-                    return {
-                      ...prev,
-                      activeTransfer: transfer,
-                      rows: prev.rows.map((r) =>
-                        r.rowKey === row.rowKey
-                          ? { ...r, writeDetail: detailText, bytesWritten: transfer.bytesWritten }
-                          : r,
-                      ),
-                    };
-                  });
-                },
-              );
-
-              if (outcome.installedSuccess) {
-                unsyncedInstalledIds.add(row.itemId);
-                unsyncedItemMeta[row.itemId] = {
-                  fileId: outcome.installedFileId,
-                  filename: outcome.installedFilename,
-                };
-              }
-
-              const hasMoreRowsInChunk = expandedChunkRows
-                .slice(rowIdx + 1)
-                .some((r) => r.selectedTargetIds.length > 0);
-              if (!hasMoreRowsInChunk && unsyncedInstalledIds.size > 0) {
-                // Keep the item visibly in "Finalizing" until the server persists installed_at
-                // and subscribers synchronously patch Catalog rows — prevents flashing back to "Install".
-                setJob((prev) => {
-                  if (!prev || prev.jobId !== jobId) return prev;
-                  return {
-                    ...prev,
-                    activeTransfer:
-                      prev.activeTransfer && prev.activeTransfer.rowKey === row.rowKey
-                        ? {
-                            ...prev.activeTransfer,
-                            stage: 'finalizing',
-                            percent: 100,
-                            bytesPerSec: null,
-                          }
-                        : prev.activeTransfer,
-                  };
-                });
-                await flushInstalled();
-              }
-
-              setJob((prev) => {
-                if (!prev || prev.jobId !== jobId) return prev;
-                return {
-                  ...prev,
-                  activeTransfer:
-                    prev.activeTransfer?.rowKey === row.rowKey ? null : prev.activeTransfer,
-                  rows: prev.rows.map((r) =>
-                    r.rowKey === row.rowKey
-                      ? {
-                          ...r,
-                          writeState: outcome.nextState,
-                          writeDetail: outcome.detail,
-                          bytesWritten: outcome.bytesWritten,
-                        }
-                      : r,
-                  ),
-                };
-              });
-            }
-
-            // Commit any remaining installed flags at the end of every chunk
             await flushInstalled();
           }
 
-          await flushInstalled();
+          activeRun.closing = true;
+          if (activeRunRef.current === activeRun) {
+            activeRunRef.current = null;
+          }
           setJob((prev) =>
             prev && prev.jobId === jobId
               ? {
@@ -1407,6 +1736,8 @@ export function useBulkStorageInstaller({
               : prev,
           );
         } catch (err) {
+          activeRun.closing = true;
+          activeRun.pendingQueue.length = 0;
           await flushInstalled();
           if (isAbortError(err) || controller.signal.aborted) {
             setJob((prev) => {
@@ -1443,6 +1774,10 @@ export function useBulkStorageInstaller({
             );
           }
         } finally {
+          activeRun.closing = true;
+          if (activeRunRef.current === activeRun) {
+            activeRunRef.current = null;
+          }
           if (abortControllerRef.current === controller) {
             abortControllerRef.current = null;
           }
@@ -1451,7 +1786,13 @@ export function useBulkStorageInstaller({
 
       return true;
     },
-    [emitSdDebug, isBusy, promptMountSdCard, syncInstalledIdsToServer, writeSingleRowToDevice],
+    [
+      drainPendingExpressQueue,
+      emitSdDebug,
+      isBusy,
+      promptMountSdCard,
+      syncInstalledIdsToServer,
+    ],
   );
 
   const upgradeOutdatedItems = useCallback(
@@ -1669,6 +2010,14 @@ export function useBulkStorageInstaller({
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    const activeRun: ActiveRunControl = {
+      jobId,
+      pendingQueue: [],
+      inFlightItemIds: new Set(selectedRows.map((r) => r.itemId)),
+      closing: false,
+    };
+    activeRunRef.current = activeRun;
+
     setJob((prev) =>
       prev && prev.jobId === jobId
         ? {
@@ -1691,7 +2040,6 @@ export function useBulkStorageInstaller({
       const dirCache = new Map<string, SdDirectoryHandle>();
       const unsyncedInstalledIds = new Set<number>();
       const unsyncedItemMeta: Record<number, { fileId?: number | null; filename?: string | null }> = {};
-      let sinceLastSync = 0;
 
       const flushInstalled = async () => {
         if (unsyncedInstalledIds.size === 0) return;
@@ -1701,7 +2049,6 @@ export function useBulkStorageInstaller({
         for (const key of Object.keys(unsyncedItemMeta)) {
           delete unsyncedItemMeta[Number(key)];
         }
-        sinceLastSync = 0;
         await syncInstalledIdsToServer(batch, activeHandle!.name, metaBatch);
       };
 
@@ -1792,31 +2139,32 @@ export function useBulkStorageInstaller({
               fileId: outcome.installedFileId,
               filename: outcome.installedFilename,
             };
-            sinceLastSync += 1;
           }
 
-          const hasMoreRows = snapshotRows
+          const hasMoreSelectedRowsForItem = snapshotRows
             .slice(rowIdx + 1)
-            .some((r) => r.selectedTargetIds.length > 0);
-          if ((!hasMoreRows || sinceLastSync >= 10) && unsyncedInstalledIds.size > 0) {
-            if (!hasMoreRows) {
-              setJob((prev) => {
-                if (!prev || prev.jobId !== jobId) return prev;
-                return {
-                  ...prev,
-                  activeTransfer:
-                    prev.activeTransfer && prev.activeTransfer.rowKey === row.rowKey
-                      ? {
-                          ...prev.activeTransfer,
-                          stage: 'finalizing',
-                          percent: 100,
-                          bytesPerSec: null,
-                        }
-                      : prev.activeTransfer,
-                };
-              });
-            }
+            .some((r) => r.itemId === row.itemId && r.selectedTargetIds.length > 0);
+          if (!hasMoreSelectedRowsForItem && unsyncedInstalledIds.size > 0) {
+            setJob((prev) => {
+              if (!prev || prev.jobId !== jobId) return prev;
+              return {
+                ...prev,
+                activeTransfer:
+                  prev.activeTransfer && prev.activeTransfer.rowKey === row.rowKey
+                    ? {
+                        ...prev.activeTransfer,
+                        stage: 'finalizing',
+                        percent: 100,
+                        bytesPerSec: null,
+                      }
+                    : prev.activeTransfer,
+              };
+            });
             await flushInstalled();
+          }
+
+          if (!hasMoreSelectedRowsForItem) {
+            activeRun.inFlightItemIds.delete(row.itemId);
           }
 
           setJob((prev) => {
@@ -1839,8 +2187,47 @@ export function useBulkStorageInstaller({
           });
         }
 
+        // Drain any 1-click items queued by the user while this Review batch was writing
+        while (activeRun.pendingQueue.length > 0 && !controller.signal.aborted) {
+          await drainPendingExpressQueue({
+            jobId,
+            activeRun,
+            activeHandle: activeHandle!,
+            fallbackFilterContext: currentJob.filterContext,
+            scanCache,
+            dirCache,
+            controller,
+            unsyncedInstalledIds,
+            unsyncedItemMeta,
+            flushInstalled,
+          });
+          await flushInstalled();
+        }
+
         await flushInstalled();
         await rescanMountedSdFolders();
+
+        // Catch any items queued while rescanMountedSdFolders was running
+        while (activeRun.pendingQueue.length > 0 && !controller.signal.aborted) {
+          await drainPendingExpressQueue({
+            jobId,
+            activeRun,
+            activeHandle: activeHandle!,
+            fallbackFilterContext: currentJob.filterContext,
+            scanCache,
+            dirCache,
+            controller,
+            unsyncedInstalledIds,
+            unsyncedItemMeta,
+            flushInstalled,
+          });
+          await flushInstalled();
+        }
+
+        activeRun.closing = true;
+        if (activeRunRef.current === activeRun) {
+          activeRunRef.current = null;
+        }
         setJob((prev) =>
           prev && prev.jobId === jobId
             ? {
@@ -1853,6 +2240,8 @@ export function useBulkStorageInstaller({
             : prev,
         );
       } catch (err) {
+        activeRun.closing = true;
+        activeRun.pendingQueue.length = 0;
         await flushInstalled();
         if (isAbortError(err) || controller.signal.aborted) {
           setJob((prev) => {
@@ -1864,7 +2253,9 @@ export function useBulkStorageInstaller({
               activeTransfer: null,
               finishedAt: new Date().toISOString(),
               rows: prev.rows.map((r) =>
-                r.writeState === 'pending' || r.writeState === 'writing'
+                r.writeState === 'pending' ||
+                r.writeState === 'inspecting' ||
+                r.writeState === 'writing'
                   ? { ...r, writeState: 'canceled', writeDetail: 'Canceled by user' }
                   : r,
               ),
@@ -1887,12 +2278,17 @@ export function useBulkStorageInstaller({
           );
         }
       } finally {
+        activeRun.closing = true;
+        if (activeRunRef.current === activeRun) {
+          activeRunRef.current = null;
+        }
         if (abortControllerRef.current === controller) {
           abortControllerRef.current = null;
         }
       }
     })();
   }, [
+    drainPendingExpressQueue,
     emitSdDebug,
     folderScans,
     isBusy,
@@ -1904,6 +2300,10 @@ export function useBulkStorageInstaller({
 
   const cancelInstall = useCallback(() => {
     if (!abortControllerRef.current) return;
+    if (activeRunRef.current) {
+      activeRunRef.current.closing = true;
+      activeRunRef.current.pendingQueue.length = 0;
+    }
     setJob((prev) => (prev ? { ...prev, phase: 'canceling' } : prev));
     abortControllerRef.current.abort();
   }, []);
@@ -2254,6 +2654,7 @@ export function useBulkStorageInstaller({
     job,
     metrics,
     isBusy,
+    canAppendToQueue,
     folderScans,
     scanningCard,
     rescanMountedSdFolders,
