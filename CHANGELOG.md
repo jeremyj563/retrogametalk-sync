@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.38.2] - 2026-11-23
+
+- Eliminated the misleading **`Extracting ROM...`** status flash and unnecessary I/O when installing or reviewing games that are already present on the mounted storage device:
+  - **Check Before Creating Folders or Extracting**: Reordered device write checks so `scanTargetFolder()` and exact-file duplicate detection run before creating destination subdirectories or entering the `extracting` stage; `Extracting ROM...` now appears only when an archive extraction and transfer is actually triggered (with truthful `Checking device...` shown only when an uncached folder is scanned).
+  - **Fast Batched Skips**: Already-installed games skip immediately without per-row `Finalizing on device...` stalls or redundant post-run folder rescans when no files were written.
+
 ## [1.38.1] - 2026-11-23
 
 - Improved default device name detection in the **Identify Storage Device** modal so newly mounted cards no longer pre-fill generic folder names like `Roms`, `SDCARD`, or `E:`:
