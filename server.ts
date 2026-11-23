@@ -48,8 +48,11 @@ import {
 } from './src/shared/configBackup.ts';
 import {
   normalizeDeviceRomNaming,
+  sanitizeDeviceColorKey,
+  sanitizeDeviceIconKey,
   sanitizeDeviceProfileId,
   sanitizeInstalledPathsList,
+  sanitizeIsoTimestamp,
 } from './src/shared/deviceProfiles.ts';
 import { normalizeStorageFolderConfig } from './src/shared/storageFolderMappings.ts';
 import { sanitizeFat32Filename } from './src/shared/romNaming.ts';
@@ -994,11 +997,28 @@ async function bootstrap() {
       typeof req.body?.name === 'string' && req.body.name.trim()
         ? req.body.name.trim().slice(0, 80)
         : null;
+    const createNew = req.body?.createNew === true;
+    const iconKey =
+      req.body?.iconKey !== undefined ? sanitizeDeviceIconKey(req.body.iconKey) : undefined;
+    const colorKey =
+      req.body?.colorKey !== undefined ? sanitizeDeviceColorKey(req.body.colorKey) : undefined;
+    const isPinned = typeof req.body?.isPinned === 'boolean' ? req.body.isPinned : undefined;
+    const markerVerifiedAt =
+      req.body?.markerVerifiedAt !== undefined
+        ? req.body.markerVerifiedAt === null
+          ? null
+          : sanitizeIsoTimestamp(req.body.markerVerifiedAt)
+        : undefined;
     try {
       const device = upsertStorageDeviceProfileOnMount({
         id: requestedId,
         volumeLabel,
         name,
+        createNew,
+        iconKey,
+        colorKey,
+        isPinned,
+        markerVerifiedAt,
       });
       res.status(200).json({ device });
     } catch (err) {
@@ -1019,6 +1039,11 @@ async function bootstrap() {
     }
     const patch: {
       name?: string;
+      iconKey?: string;
+      colorKey?: string;
+      isPinned?: boolean;
+      isArchived?: boolean;
+      markerVerifiedAt?: string | null;
       folderConfig?: ReturnType<typeof normalizeStorageFolderConfig> | null;
       romNaming?: ReturnType<typeof normalizeDeviceRomNaming>;
     } = {};
@@ -1030,6 +1055,30 @@ async function bootstrap() {
         return;
       }
       patch.name = nextName;
+    }
+    if (req.body?.iconKey !== undefined) {
+      patch.iconKey = sanitizeDeviceIconKey(req.body.iconKey, existing.iconKey);
+    }
+    if (req.body?.colorKey !== undefined) {
+      patch.colorKey = sanitizeDeviceColorKey(req.body.colorKey, existing.colorKey);
+    }
+    if (req.body?.isPinned !== undefined) {
+      if (typeof req.body.isPinned !== 'boolean') {
+        res.status(400).json({ error: 'isPinned must be a boolean' });
+        return;
+      }
+      patch.isPinned = req.body.isPinned;
+    }
+    if (req.body?.isArchived !== undefined) {
+      if (typeof req.body.isArchived !== 'boolean') {
+        res.status(400).json({ error: 'isArchived must be a boolean' });
+        return;
+      }
+      patch.isArchived = req.body.isArchived;
+    }
+    if (req.body?.markerVerifiedAt !== undefined) {
+      patch.markerVerifiedAt =
+        req.body.markerVerifiedAt === null ? null : sanitizeIsoTimestamp(req.body.markerVerifiedAt);
     }
     if (req.body?.folderConfig !== undefined) {
       patch.folderConfig =
@@ -1046,7 +1095,7 @@ async function bootstrap() {
         res.status(404).json({ error: 'Device profile not found' });
         return;
       }
-      if (patch.name !== undefined) {
+      if (patch.name !== undefined || patch.iconKey !== undefined || patch.colorKey !== undefined) {
         orchestrator.notifyInstalledStateChanged();
       }
       res.json({ device });

@@ -54,6 +54,7 @@ import type {
 } from '../types';
 import { ArchiveExplorer } from './ArchiveExplorer';
 import { CollectionPickerPopover } from './CollectionPickerPopover';
+import { DeviceIconGlyph, getDeviceColorOption } from './DeviceBadge';
 import { formatBytes, formatDateTime } from '../utils/format';
 import {
   getDrawerCloseDurationMs,
@@ -1866,24 +1867,30 @@ export function GameDetailDrawer({
                   <dd className="col-span-8 text-[11px] font-mono">
                     {item.deviceInstalls && item.deviceInstalls.length > 0 ? (
                       <div className="flex flex-col gap-1">
-                        {item.deviceInstalls.map((inst) => (
-                          <div
-                            key={inst.deviceId}
-                            title={
-                              inst.installedPaths.length > 0
-                                ? `Device paths: ${inst.installedPaths.join(', ')}`
-                                : inst.installedFilename
-                                  ? `Installed file: ${inst.installedFilename}`
-                                  : undefined
-                            }
-                            className="inline-flex items-center gap-1.5 text-crt-phosphor tabular-nums flex-wrap"
-                          >
-                            <HardDrive className="h-3 w-3 shrink-0" />
-                            <span className="font-medium">{inst.deviceName}</span>
-                            <span className="text-crt-muted">·</span>
-                            <span className="text-crt-text/80">{formatDateTime(inst.installedAt)}</span>
-                          </div>
-                        ))}
+                        {item.deviceInstalls.map((inst) => {
+                          const color = getDeviceColorOption(inst.colorKey);
+                          return (
+                            <div
+                              key={inst.deviceId}
+                              title={
+                                inst.installedPaths.length > 0
+                                  ? `Device paths: ${inst.installedPaths.join(', ')}`
+                                  : inst.installedFilename
+                                    ? `Installed file: ${inst.installedFilename}`
+                                    : undefined
+                              }
+                              className="inline-flex items-center gap-1.5 text-crt-phosphor tabular-nums flex-wrap"
+                            >
+                              <DeviceIconGlyph
+                                iconKey={inst.iconKey}
+                                className={`h-3.5 w-3.5 shrink-0 ${color.textClass}`}
+                              />
+                              <span className="font-medium text-crt-text">{inst.deviceName}</span>
+                              <span className="text-crt-muted">·</span>
+                              <span className="text-crt-text/80">{formatDateTime(inst.installedAt)}</span>
+                            </div>
+                          );
+                        })}
                       </div>
                     ) : item.installedAt ? (
                       <span className="inline-flex items-center gap-1.5 text-crt-phosphor tabular-nums">

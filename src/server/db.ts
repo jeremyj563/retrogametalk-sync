@@ -24,10 +24,14 @@ import {
   type StorageFolderMappingConfig,
 } from '../shared/storageFolderMappings.ts';
 import {
+  generateUuidDeviceProfileId,
   makeStableDeviceProfileId,
   normalizeDeviceRomNaming,
+  sanitizeDeviceColorKey,
+  sanitizeDeviceIconKey,
   sanitizeDeviceProfileId,
   sanitizeInstalledPathsList,
+  sanitizeIsoTimestamp,
 } from '../shared/deviceProfiles.ts';
 import {
   canonicalizeSystemSlug,
@@ -1068,7 +1072,9 @@ function loadDeviceInstallsByReleaseIds(releaseIds: number[]): Map<number, Relea
          di.installed_filename,
          di.installed_paths_json,
          COALESCE(dp.name, dp.volume_label, di.device_id) AS device_name,
-         COALESCE(dp.volume_label, dp.name, di.device_id) AS volume_label
+         COALESCE(dp.volume_label, dp.name, di.device_id) AS volume_label,
+         dp.icon_key AS device_icon_key,
+         dp.color_key AS device_color_key
        FROM catalog_release_device_installs di
        LEFT JOIN storage_device_profiles dp ON dp.id = di.device_id
        WHERE di.release_id IN (${placeholders})
@@ -1091,6 +1097,8 @@ function loadDeviceInstallsByReleaseIds(releaseIds: number[]): Map<number, Relea
       deviceId: String(row.device_id),
       deviceName: String(row.device_name),
       volumeLabel: String(row.volume_label),
+      iconKey: sanitizeDeviceIconKey(row.device_icon_key),
+      colorKey: sanitizeDeviceColorKey(row.device_color_key),
       installedAt: String(row.installed_at),
       installedFileId:
         row.installed_file_id !== null && row.installed_file_id !== undefined
@@ -3699,6 +3707,11 @@ function mapStorageDeviceProfileRow(row: Record<string, unknown>): StorageDevice
     id: String(row.id),
     name: String(row.name || row.volume_label || row.id),
     volumeLabel: String(row.volume_label || row.name || row.id),
+    iconKey: sanitizeDeviceIconKey(row.icon_key),
+    colorKey: sanitizeDeviceColorKey(row.color_key),
+    isPinned: Boolean(Number(row.is_pinned || 0)),
+    isArchived: Boolean(Number(row.is_archived || 0)),
+    markerVerifiedAt: row.marker_verified_at ? String(row.marker_verified_at) : null,
     folderConfig,
     romNaming,
     lastMountedAt: row.last_mounted_at ? String(row.last_mounted_at) : null,
@@ -3713,6 +3726,11 @@ const STORAGE_DEVICE_PROFILE_SELECT_SQL = `
     p.id,
     p.name,
     p.volume_label,
+    p.icon_key,
+    p.color_key,
+    p.is_pinned,
+    p.is_archived,
+    p.marker_verified_at,
     p.folder_config_json,
     p.rom_naming_json,
     p.last_mounted_at,
@@ -3728,7 +3746,7 @@ export function listStorageDeviceProfiles(): StorageDeviceProfile[] {
     .prepare(
       `${STORAGE_DEVICE_PROFILE_SELECT_SQL}
        GROUP BY p.id
-       ORDER BY COALESCE(p.last_mounted_at, p.updated_at, p.created_at) DESC, p.name COLLATE NOCASE ASC`,
+       ORDER BY p.is_archived ASC, p.is_pinned DESC, COALESCE(p.last_mounted_at, p.updated_at, p.created_at) DESC, p.name COLLATE NOCASE ASC`,
     )
     .all() as Record<string, unknown>[];
   return rows.map(mapStorageDeviceProfileRow);
@@ -3812,71 +3830,106 @@ export function upsertStorageDeviceProfileOnMount(options: {
   id?: string | null;
   volumeLabel: string;
   name?: string | null;
+  createNew?: boolean;
+  iconKey?: string | null;
+  colorKey?: string | null;
+  isPinned?: boolean;
+  markerVerifiedAt?: string | null;
 }): StorageDeviceProfile {
   const volumeLabel = (options.volumeLabel || '').trim().slice(0, 120) || 'Storage Device';
   const requestedName = options.name?.trim() ? options.name.trim().slice(0, 80) : null;
   const requestedId = sanitizeDeviceProfileId(options.id);
+  const cleanMarkerVerifiedAt =
+    options.markerVerifiedAt !== undefined ? sanitizeIsoTimestamp(options.markerVerifiedAt) : undefined;
   const now = new Date().toISOString();
 
-  // 1. Match by explicit profile ID first
-  if (requestedId) {
+  // 1. Match by explicit profile ID first (unless explicitly forcing new creation with an unused ID)
+  if (requestedId && !options.createNew) {
     const existingById = getStorageDeviceProfileById(requestedId);
     if (existingById) {
+      const nextMarkerVerifiedAt =
+        cleanMarkerVerifiedAt !== undefined ? cleanMarkerVerifiedAt : existingById.markerVerifiedAt;
       getDb()
         .prepare(
           `UPDATE storage_device_profiles
            SET volume_label = ?,
+               marker_verified_at = ?,
                last_mounted_at = ?,
                updated_at = ?
            WHERE id = ?`,
         )
-        .run(volumeLabel, now, now, existingById.id);
+        .run(volumeLabel, nextMarkerVerifiedAt, now, now, existingById.id);
       return getStorageDeviceProfileById(existingById.id) || existingById;
     }
   }
 
-  // 2. If no explicit ID was requested, try matching an existing profile by volume label
-  if (!requestedId) {
+  // 2. If no explicit ID was requested and createNew is not forced, fall back to volume label match
+  if (!requestedId && !options.createNew) {
     const existingByVolume = getDb()
       .prepare(
         `SELECT id FROM storage_device_profiles
          WHERE LOWER(TRIM(volume_label)) = LOWER(TRIM(?))
-         ORDER BY COALESCE(last_mounted_at, updated_at, created_at) DESC
+         ORDER BY is_archived ASC, COALESCE(last_mounted_at, updated_at, created_at) DESC
          LIMIT 1`,
       )
       .get(volumeLabel) as { id: string } | undefined;
     if (existingByVolume?.id) {
+      const existingProfile = getStorageDeviceProfileById(existingByVolume.id);
+      const nextMarkerVerifiedAt =
+        cleanMarkerVerifiedAt !== undefined
+          ? cleanMarkerVerifiedAt
+          : existingProfile?.markerVerifiedAt ?? null;
       getDb()
         .prepare(
           `UPDATE storage_device_profiles
-           SET last_mounted_at = ?,
+           SET marker_verified_at = ?,
+               last_mounted_at = ?,
                updated_at = ?
            WHERE id = ?`,
         )
-        .run(now, now, existingByVolume.id);
+        .run(nextMarkerVerifiedAt, now, now, existingByVolume.id);
       const found = getStorageDeviceProfileById(existingByVolume.id);
       if (found) return found;
     }
   }
 
-  // 3. Create new profile with deterministic (or requested) ID, avoiding collisions
-  const baseId = requestedId || makeStableDeviceProfileId(volumeLabel);
+  // 3. Create new profile with hardware UUID (when createNew) or requested/deterministic ID
+  const baseId =
+    requestedId ||
+    (options.createNew ? generateUuidDeviceProfileId() : makeStableDeviceProfileId(volumeLabel));
   let finalId = baseId;
   let suffix = 2;
   while (getDb().prepare('SELECT 1 FROM storage_device_profiles WHERE id = ?').get(finalId)) {
-    finalId = `${baseId.slice(0, 68)}-${suffix}`;
-    suffix += 1;
+    finalId = options.createNew
+      ? generateUuidDeviceProfileId()
+      : `${baseId.slice(0, 68)}-${suffix++}`;
   }
 
   const displayName = requestedName || volumeLabel.slice(0, 80);
+  const iconKey = sanitizeDeviceIconKey(options.iconKey);
+  const colorKey = sanitizeDeviceColorKey(options.colorKey);
+  const isPinned = options.isPinned ? 1 : 0;
+  const markerVerifiedAt = cleanMarkerVerifiedAt ?? null;
+
   getDb()
     .prepare(
       `INSERT INTO storage_device_profiles (
-         id, name, volume_label, folder_config_json, rom_naming_json,
-         art_export_json, last_mounted_at, created_at, updated_at
-       ) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?)`,
+         id, name, volume_label, icon_key, color_key, is_pinned, is_archived, marker_verified_at,
+         folder_config_json, rom_naming_json, art_export_json, last_mounted_at, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, NULL, NULL, ?, ?, ?)`,
     )
-    .run(finalId, displayName, volumeLabel, now, now, now);
+    .run(
+      finalId,
+      displayName,
+      volumeLabel,
+      iconKey,
+      colorKey,
+      isPinned,
+      markerVerifiedAt,
+      now,
+      now,
+      now,
+    );
 
   const created = getStorageDeviceProfileById(finalId);
   if (!created) {
@@ -3889,6 +3942,11 @@ export function updateStorageDeviceProfile(
   id: string,
   patch: {
     name?: string;
+    iconKey?: string;
+    colorKey?: string;
+    isPinned?: boolean;
+    isArchived?: boolean;
+    markerVerifiedAt?: string | null;
     folderConfig?: StorageFolderMappingConfig | null;
     romNaming?: DeviceRomNamingOverrides | null;
   },
@@ -3901,6 +3959,25 @@ export function updateStorageDeviceProfile(
   if (!nextName) {
     throw new Error('Device profile name cannot be empty');
   }
+
+  const nextIconKey =
+    patch.iconKey !== undefined ? sanitizeDeviceIconKey(patch.iconKey, existing.iconKey) : existing.iconKey;
+  const nextColorKey =
+    patch.colorKey !== undefined ? sanitizeDeviceColorKey(patch.colorKey, existing.colorKey) : existing.colorKey;
+  const nextIsArchived = patch.isArchived !== undefined ? Boolean(patch.isArchived) : existing.isArchived;
+  // Archiving a device automatically unpins it unless explicitly re-pinned in the same call
+  const nextIsPinned =
+    patch.isPinned !== undefined
+      ? Boolean(patch.isPinned)
+      : nextIsArchived && !existing.isArchived
+        ? false
+        : existing.isPinned;
+  const nextMarkerVerifiedAt =
+    patch.markerVerifiedAt !== undefined
+      ? patch.markerVerifiedAt === null
+        ? null
+        : sanitizeIsoTimestamp(patch.markerVerifiedAt)
+      : existing.markerVerifiedAt;
 
   const nextFolderConfig =
     patch.folderConfig !== undefined
@@ -3921,6 +3998,11 @@ export function updateStorageDeviceProfile(
     .prepare(
       `UPDATE storage_device_profiles
        SET name = ?,
+           icon_key = ?,
+           color_key = ?,
+           is_pinned = ?,
+           is_archived = ?,
+           marker_verified_at = ?,
            folder_config_json = ?,
            rom_naming_json = ?,
            updated_at = ?
@@ -3928,6 +4010,11 @@ export function updateStorageDeviceProfile(
     )
     .run(
       nextName,
+      nextIconKey,
+      nextColorKey,
+      nextIsPinned ? 1 : 0,
+      nextIsArchived ? 1 : 0,
+      nextMarkerVerifiedAt,
       nextFolderConfig ? JSON.stringify(nextFolderConfig) : null,
       nextRomNaming ? JSON.stringify(nextRomNaming) : null,
       now,

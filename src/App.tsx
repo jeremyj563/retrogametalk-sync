@@ -13,7 +13,9 @@ import { CrtArcadeModal } from './components/CrtArcadeModal';
 import { CatalogPanel } from './components/CatalogPanel';
 import { CrtDisplayControl } from './components/CrtDisplayControl';
 import { DeviceExportPanel } from './components/DeviceExportPanel';
+import { DevicesFleetDrawer } from './components/DevicesFleetDrawer';
 import { HeaderSoundDeck } from './components/HeaderSoundDeck';
+import { IdentifyDeviceModal } from './components/IdentifyDeviceModal';
 import { LivingNavIcon } from './components/LivingNavIcon';
 import { MirroredSystemsSidebar } from './components/MirroredSystemsSidebar';
 import { OverviewPanel } from './components/OverviewPanel';
@@ -480,8 +482,10 @@ export default function App() {
     syncRulesOnly?: boolean;
     downloadedFilter?: CatalogDownloadedFilter;
     installedFilter?: CatalogInstalledFilter;
+    deviceId?: string | 'any' | null;
     nonce: number;
   } | null>(null);
+  const [devicesDrawerOpen, setDevicesDrawerOpen] = useState(false);
   const [selectedScope, setSelectedScope] = useState<SyncScope>(() => loadInitialSyncScope());
   const [dryRunEnabled, setDryRunEnabled] = useState<boolean>(() => loadInitialDryRunEnabled());
   const [crtSettings, setCrtSettings] = useState<CrtDisplaySettings>(() =>
@@ -2140,6 +2144,7 @@ export default function App() {
               outdatedInstalledCount={status?.totals.outdatedInstalledItems ?? 0}
               outdatedLocalReadyCount={status?.totals.outdatedLocalReadyItems ?? 0}
               onPreviewDevicePaths={handlePreviewMountedDevicePaths}
+              onOpenDevicesDrawer={() => setDevicesDrawerOpen(true)}
               onUpdateOutdatedOnDevice={() => void handleUpdateOutdatedOnDevice()}
               onViewOutdatedInCatalog={handleViewOutdatedInCatalog}
             />
@@ -2262,6 +2267,7 @@ export default function App() {
                   catalogRevision={catalogRevision}
                   activeRetryItemId={activeRetryItemId}
                   filterPreset={catalogPresetIntent}
+                  onOpenDevicesDrawer={() => setDevicesDrawerOpen(true)}
                   onRetryItem={handleRetryItem}
                   onQueueDownload={handleQueueDownload}
                   onStartCatalogIndex={handleStartCatalogIndex}
@@ -2293,6 +2299,7 @@ export default function App() {
                   installer={bulkInstaller}
                   focusRequest={configFocus}
                   onDirtyChange={setConfigDirty}
+                  onOpenDevicesDrawer={() => setDevicesDrawerOpen(true)}
                   onSaveConfig={handleSaveConfigVoid}
                 />
               )}
@@ -2334,6 +2341,24 @@ export default function App() {
         }
         onClose={() => setArcadeOpen(false)}
       />
+
+      {/* Searchable Storage Devices Fleet Slide-Over Drawer */}
+      <DevicesFleetDrawer
+        open={devicesDrawerOpen}
+        installer={bulkInstaller}
+        onBrowseDeviceInCatalog={(deviceId) => {
+          setCatalogPresetIntent({
+            installedFilter: 'only',
+            deviceId,
+            nonce: Date.now(),
+          });
+          requestSectionChange('catalog');
+        }}
+        onClose={() => setDevicesDrawerOpen(false)}
+      />
+
+      {/* Identify / Link Unmarked Storage Device Modal */}
+      <IdentifyDeviceModal installer={bulkInstaller} />
 
       {/* Console Achievements Trophy Case Slide-Over Drawer */}
       <TrophyCaseDrawer

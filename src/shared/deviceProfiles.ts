@@ -3,10 +3,207 @@ import {
   type StorageFolderMappingConfig,
 } from './storageFolderMappings.ts';
 import type {
+  DeviceColorKey,
+  DeviceIconKey,
   DeviceRomNamingOverrides,
   ReleaseDeviceInstallRecord,
   RepositoryItemRecord,
+  StorageDeviceProfile,
 } from '../types.ts';
+
+export const DEVICE_MARKER_FILENAME = '.rgt-device.json';
+export const DEVICE_MARKER_SCHEMA_VERSION = 1;
+export const DEVICE_MARKER_MAX_BYTES = 4096;
+
+export const DEVICE_ICON_KEYS: readonly DeviceIconKey[] = [
+  'handheld',
+  'vertical',
+  'clamshell',
+  'sdcard',
+  'console',
+  'desktop',
+  'drive',
+] as const;
+
+export const DEVICE_COLOR_KEYS: readonly DeviceColorKey[] = [
+  'phosphor',
+  'amber',
+  'cyan',
+  'crimson',
+  'violet',
+  'slate',
+] as const;
+
+const DEVICE_ICON_SET = new Set<string>(DEVICE_ICON_KEYS);
+const DEVICE_COLOR_SET = new Set<string>(DEVICE_COLOR_KEYS);
+
+export interface DeviceMarkerPayload {
+  schemaVersion: 1;
+  deviceId: string;
+  name?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export function sanitizeDeviceIconKey(raw: unknown, fallback: DeviceIconKey = 'handheld'): DeviceIconKey {
+  if (typeof raw !== 'string') return fallback;
+  const trimmed = raw.trim().toLowerCase();
+  return DEVICE_ICON_SET.has(trimmed) ? (trimmed as DeviceIconKey) : fallback;
+}
+
+export function sanitizeDeviceColorKey(raw: unknown, fallback: DeviceColorKey = 'phosphor'): DeviceColorKey {
+  if (typeof raw !== 'string') return fallback;
+  const trimmed = raw.trim().toLowerCase();
+  return DEVICE_COLOR_SET.has(trimmed) ? (trimmed as DeviceColorKey) : fallback;
+}
+
+export function sanitizeIsoTimestamp(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 48) return null;
+  const ms = Date.parse(trimmed);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
+}
+
+/**
+ * Generates a globally unique, URL-safe hardware-pinned device profile ID (`dev_<uuid>`).
+ */
+export function generateUuidDeviceProfileId(): string {
+  const g = globalThis as unknown as { crypto?: { randomUUID?: () => string } };
+  if (typeof g.crypto?.randomUUID === 'function') {
+    return `dev_${g.crypto.randomUUID().toLowerCase()}`;
+  }
+  const rand = () => Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
+  return `dev_${Date.now().toString(36)}_${rand()}${rand()}`;
+}
+
+/**
+ * Suggests a sensible default form-factor icon based on volume label or detected firmware layout.
+ */
+export function guessDefaultDeviceIcon(
+  volumeLabel: string,
+  detectedLayoutLabel?: string | null,
+): DeviceIconKey {
+  const haystack = `${volumeLabel || ''} ${detectedLayoutLabel || ''}`.toLowerCase();
+  if (/\b(miyoo|pocket|analogue|game\s?boy|gb|gbc|trimui\s*brick|rg35xx\s*plus|rg40xxv|vertical)\b/.test(haystack)) {
+    return 'vertical';
+  }
+  if (/\b(3ds|nds|ds|flip|sp|clamshell|rg35xxsp|retroid\s*flip|gba\s*sp)\b/.test(haystack)) {
+    return 'clamshell';
+  }
+  if (/\b(mister|fpga|retropie|batocera|recalbox|emuelec|kodi|console|shield|apple\s*tv|pi\b)\b/.test(haystack)) {
+    return 'console';
+  }
+  if (/\b(everdrive|ez-?flash|flashcart|sdcard|sd\s*card|microsd|tf\s*card)\b/.test(haystack)) {
+    return 'sdcard';
+  }
+  if (/\b(desktop|mac|linux|windows|pc|nas|server|home|documents|retroarch)\b/.test(haystack)) {
+    return 'desktop';
+  }
+  if (/\b(deck|odin|retroid|anbernic|rg\d|amber|jelos|rocknix|arkos|muos|onion|handheld|psp|vita|switch|ally|legion)\b/.test(haystack)) {
+    return 'handheld';
+  }
+  return 'handheld';
+}
+
+/**
+ * Parses and strictly validates an untrusted `.rgt-device.json` marker file read from removable media.
+ * Rejects oversized payloads, non-objects, unknown schema versions, and unsafe device IDs.
+ */
+export function parseDeviceMarkerJson(rawText: string): DeviceMarkerPayload | null {
+  if (typeof rawText !== 'string') return null;
+  const trimmed = rawText.trim();
+  if (!trimmed || trimmed.length > DEVICE_MARKER_MAX_BYTES) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.schemaVersion !== DEVICE_MARKER_SCHEMA_VERSION) {
+    return null;
+  }
+
+  const deviceId = sanitizeDeviceProfileId(obj.deviceId);
+  if (!deviceId) return null;
+
+  const payload: DeviceMarkerPayload = {
+    schemaVersion: DEVICE_MARKER_SCHEMA_VERSION,
+    deviceId,
+  };
+
+  if (typeof obj.name === 'string' && obj.name.trim()) {
+    payload.name = obj.name.trim().slice(0, 80);
+  }
+  const createdAt = sanitizeIsoTimestamp(obj.createdAt);
+  if (createdAt) payload.createdAt = createdAt;
+  const updatedAt = sanitizeIsoTimestamp(obj.updatedAt);
+  if (updatedAt) payload.updatedAt = updatedAt;
+
+  return payload;
+}
+
+/**
+ * Serializes a clean, compact `.rgt-device.json` marker file for stamping at a mounted storage root.
+ */
+export function serializeDeviceMarkerJson(input: {
+  deviceId: string;
+  name?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}): string {
+  const cleanId = sanitizeDeviceProfileId(input.deviceId);
+  if (!cleanId) {
+    throw new Error('Cannot serialize device marker with invalid deviceId');
+  }
+  const now = new Date().toISOString();
+  const payload: DeviceMarkerPayload = {
+    schemaVersion: DEVICE_MARKER_SCHEMA_VERSION,
+    deviceId: cleanId,
+    ...(input.name?.trim() ? { name: input.name.trim().slice(0, 80) } : {}),
+    createdAt: sanitizeIsoTimestamp(input.createdAt) || now,
+    updatedAt: sanitizeIsoTimestamp(input.updatedAt) || now,
+  };
+  return `${JSON.stringify(payload, null, 2)}\n`;
+}
+
+/**
+ * Sorts a fleet of saved storage device profiles predictably for 10+ device workflows:
+ * Currently mounted first -> Non-archived before archived -> Pinned first -> Most recently mounted -> Name ASC.
+ */
+export function sortDeviceProfilesForFleet(
+  profiles: readonly StorageDeviceProfile[],
+  activeDeviceId?: string | null,
+): StorageDeviceProfile[] {
+  const activeId = (activeDeviceId || '').trim();
+  return [...profiles].sort((a, b) => {
+    const aMounted = activeId && a.id === activeId ? 1 : 0;
+    const bMounted = activeId && b.id === activeId ? 1 : 0;
+    if (aMounted !== bMounted) return bMounted - aMounted;
+
+    const aArchived = a.isArchived ? 1 : 0;
+    const bArchived = b.isArchived ? 1 : 0;
+    if (aArchived !== bArchived) return aArchived - bArchived;
+
+    const aPinned = a.isPinned ? 1 : 0;
+    const bPinned = b.isPinned ? 1 : 0;
+    if (aPinned !== bPinned) return bPinned - aPinned;
+
+    const aRecent = a.lastMountedAt || a.updatedAt || a.createdAt || '';
+    const bRecent = b.lastMountedAt || b.updatedAt || b.createdAt || '';
+    const timeCmp = bRecent.localeCompare(aRecent);
+    if (timeCmp !== 0) return timeCmp;
+
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
+}
 
 /**
  * Generates a deterministic, URL-safe device profile ID from a volume label.
@@ -35,8 +232,9 @@ export function sanitizeDeviceProfileId(raw: unknown): string | null {
 
 /**
  * Normalizes a relative path stored for an installed ROM/folder on a mounted storage device.
- * Strictly blocks traversal segments (`..`, `.`), drive prefixes, backslashes, and null bytes
- * so uninstall operations can never escape or delete the mounted root directory.
+ * Strictly blocks traversal segments (`..`, `.`), drive prefixes, backslashes, null bytes,
+ * and the protected `.rgt-device.json` root marker file so uninstall operations can never
+ * escape the mounted root or erase hardware device identity.
  */
 export function sanitizeInstalledRelativePath(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
@@ -55,7 +253,11 @@ export function sanitizeInstalledRelativePath(raw: unknown): string | null {
       return null;
     }
   }
-  return segments.join('/');
+  const joined = segments.join('/');
+  if (joined.toLowerCase() === DEVICE_MARKER_FILENAME.toLowerCase()) {
+    return null;
+  }
+  return joined;
 }
 
 export function sanitizeInstalledPathsList(raw: unknown): string[] {

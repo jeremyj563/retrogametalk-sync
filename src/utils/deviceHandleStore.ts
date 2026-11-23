@@ -207,3 +207,31 @@ export async function removeStoredDeviceHandle(deviceId: string): Promise<boolea
     }
   });
 }
+
+/**
+ * Compares a freshly picked directory handle against stored IndexedDB device handles
+ * via Chromium's `FileSystemHandle.isSameEntry()`. Allows instant recognition of the
+ * exact same physical directory even when a card is read-only or lacks `.rgt-device.json`.
+ */
+export async function findMatchingStoredDeviceHandle(
+  pickedHandle: SdDirectoryHandle | null | undefined,
+  existingRecords?: readonly StoredDeviceHandleRecord[],
+): Promise<StoredDeviceHandleRecord | null> {
+  if (!pickedHandle) return null;
+  const records = existingRecords ?? (await listStoredDeviceHandles());
+  for (const record of records) {
+    try {
+      if (typeof record.handle?.isSameEntry === 'function') {
+        const same = await record.handle.isSameEntry(pickedHandle);
+        if (same) return record;
+      } else if (typeof pickedHandle.isSameEntry === 'function') {
+        const same = await pickedHandle.isSameEntry(record.handle);
+        if (same) return record;
+      }
+    } catch {
+      // Ignore stale/invalid handles and continue checking remaining records
+    }
+  }
+  return null;
+}
+

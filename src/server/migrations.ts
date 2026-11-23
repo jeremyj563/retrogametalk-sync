@@ -1396,6 +1396,43 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 28,
+    name: 'device_profile_identity_and_fleet_metadata',
+    description:
+      'Add form-factor icon_key, color_key, is_pinned, is_archived, and marker_verified_at columns to storage_device_profiles for hardware-pinned identity and 10+ device fleet management',
+    up: (db) => {
+      if (!tableHasColumn(db, 'storage_device_profiles', 'icon_key')) {
+        db.exec(
+          `ALTER TABLE storage_device_profiles ADD COLUMN icon_key TEXT NOT NULL DEFAULT 'handheld';`,
+        );
+      }
+      if (!tableHasColumn(db, 'storage_device_profiles', 'color_key')) {
+        db.exec(
+          `ALTER TABLE storage_device_profiles ADD COLUMN color_key TEXT NOT NULL DEFAULT 'phosphor';`,
+        );
+      }
+      if (!tableHasColumn(db, 'storage_device_profiles', 'is_pinned')) {
+        db.exec(
+          `ALTER TABLE storage_device_profiles ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;`,
+        );
+      }
+      if (!tableHasColumn(db, 'storage_device_profiles', 'is_archived')) {
+        db.exec(
+          `ALTER TABLE storage_device_profiles ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0;`,
+        );
+      }
+      if (!tableHasColumn(db, 'storage_device_profiles', 'marker_verified_at')) {
+        db.exec(
+          `ALTER TABLE storage_device_profiles ADD COLUMN marker_verified_at TEXT;`,
+        );
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_storage_device_profiles_fleet_order
+          ON storage_device_profiles(is_archived, is_pinned, last_mounted_at DESC);
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

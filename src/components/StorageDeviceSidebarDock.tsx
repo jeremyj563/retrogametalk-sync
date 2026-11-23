@@ -2,14 +2,17 @@ import { useMemo, useState } from 'react';
 import {
   ArrowUpCircle,
   Check,
+  ChevronRight,
   Eye,
   FolderPlus,
   FolderSync,
   HardDrive,
+  Layers,
   Loader2,
   Pencil,
   Power,
   RotateCcw,
+  ShieldCheck,
   X,
 } from 'lucide-react';
 import type { BulkStorageInstallerController } from '../hooks/useBulkStorageInstaller';
@@ -23,6 +26,7 @@ import {
   MOUNT_DEVICE_LABEL,
   SWITCH_DEVICE_COMPACT_LABEL,
 } from '../utils/storageActionCopy';
+import { DeviceIconGlyph, getDeviceColorOption } from './DeviceBadge';
 
 export type StorageDriveBayState =
   | 'standby'
@@ -93,6 +97,7 @@ interface StorageDeviceSidebarDockProps {
   outdatedInstalledCount?: number;
   outdatedLocalReadyCount?: number;
   onPreviewDevicePaths: () => void;
+  onOpenDevicesDrawer?: () => void;
   onUpdateOutdatedOnDevice?: () => void;
   onViewOutdatedInCatalog?: () => void;
 }
@@ -102,6 +107,7 @@ export function StorageDeviceSidebarDock({
   outdatedInstalledCount = 0,
   outdatedLocalReadyCount = 0,
   onPreviewDevicePaths,
+  onOpenDevicesDrawer,
   onUpdateOutdatedOnDevice,
   onViewOutdatedInCatalog,
 }: StorageDeviceSidebarDockProps) {
@@ -114,13 +120,14 @@ export function StorageDeviceSidebarDock({
 
   const {
     sdRootHandle,
+    deviceProfiles,
     activeDeviceProfile,
     activeDeviceName,
     rememberedHandles,
-    lastRememberedHandle,
     reconnectingDeviceId,
     isBusy,
     mountError,
+    markerWriteNotice,
     autoConfigPhase,
     autoConfigResult,
     autoConfigError,
@@ -128,12 +135,37 @@ export function StorageDeviceSidebarDock({
 
   const isScanningAutoConfig = autoConfigPhase === 'scanning';
   const displayDeviceName = activeDeviceName || sdRootHandle?.name || 'Storage Device';
-  const otherRememberedHandles = useMemo(
+  const activeColor = activeDeviceProfile
+    ? getDeviceColorOption(activeDeviceProfile.colorKey)
+    : null;
+
+  const activeFleetCount = useMemo(
+    () => deviceProfiles.filter((d) => !d.isArchived).length,
+    [deviceProfiles],
+  );
+
+  // Pick a single smartest reconnect shortcut when disconnected: prefer a pinned non-archived remembered handle, then most recent
+  const primaryReconnectHandle = useMemo(() => {
+    if (rememberedHandles.length === 0) return null;
+    const profileById = new Map(deviceProfiles.map((p) => [p.id, p]));
+    const pinnedFirst = rememberedHandles.find((h) => {
+      const p = profileById.get(h.deviceId);
+      return p && !p.isArchived && p.isPinned;
+    });
+    if (pinnedFirst) return pinnedFirst;
+    const activeFirst = rememberedHandles.find((h) => {
+      const p = profileById.get(h.deviceId);
+      return !p || !p.isArchived;
+    });
+    return activeFirst || rememberedHandles[0];
+  }, [rememberedHandles, deviceProfiles]);
+
+  const primaryReconnectProfile = useMemo(
     () =>
-      rememberedHandles.filter(
-        (h) => !activeDeviceProfile || h.deviceId !== activeDeviceProfile.id,
-      ),
-    [rememberedHandles, activeDeviceProfile],
+      primaryReconnectHandle
+        ? deviceProfiles.find((p) => p.id === primaryReconnectHandle.deviceId) || null
+        : null,
+    [primaryReconnectHandle, deviceProfiles],
   );
 
   const bayInfo = useMemo(
@@ -334,16 +366,32 @@ export function StorageDeviceSidebarDock({
             <div
               title={
                 activeDeviceProfile && activeDeviceProfile.name !== activeDeviceProfile.volumeLabel
-                  ? `${activeDeviceProfile.name} (Volume: ${activeDeviceProfile.volumeLabel})`
+                  ? `${activeDeviceProfile.name} (Volume: ${activeDeviceProfile.volumeLabel})${activeDeviceProfile.markerVerifiedAt ? ' · Card ID verified' : ''}`
                   : `Mounted storage root: ${displayDeviceName}`
               }
               className="flex items-center justify-between gap-1.5 px-1.5 py-1 -mx-1 rounded border border-transparent text-xs font-mono text-crt-muted"
             >
-              <span className="shrink-0">Device</span>
+              <span className="inline-flex items-center gap-1.5 shrink-0">
+                {activeDeviceProfile ? (
+                  <DeviceIconGlyph
+                    iconKey={activeDeviceProfile.iconKey}
+                    className={`h-3.5 w-3.5 shrink-0 ${activeColor?.textClass || 'text-crt-phosphor'}`}
+                  />
+                ) : (
+                  <HardDrive className="h-3.5 w-3.5 shrink-0 text-crt-phosphor" />
+                )}
+                <span>Device</span>
+              </span>
               <span className="inline-flex items-center gap-1 min-w-0">
                 <span className="text-crt-phosphor font-medium truncate min-w-0">
                   {displayDeviceName}
                 </span>
+                {activeDeviceProfile?.markerVerifiedAt && (
+                  <ShieldCheck
+                    aria-label="Card ID verified"
+                    className="h-3 w-3 text-crt-phosphor/75 shrink-0"
+                  />
+                )}
                 {activeDeviceProfile && (
                   <button
                     type="button"
@@ -427,34 +475,6 @@ export function StorageDeviceSidebarDock({
             </div>
           )}
 
-          {/* Quick-switch to other remembered handles when multiple handhelds are saved */}
-          {otherRememberedHandles.length > 0 && !isBusy && (
-            <div className="pt-1 space-y-0.5">
-              {otherRememberedHandles.slice(0, 2).map((handleRec) => {
-                const isReconnecting = reconnectingDeviceId === handleRec.deviceId;
-                return (
-                  <button
-                    key={handleRec.deviceId}
-                    type="button"
-                    disabled={Boolean(reconnectingDeviceId)}
-                    onClick={() => handleReconnect(handleRec.deviceId)}
-                    title={`Switch mounted device to ${handleRec.profileName}`}
-                    className="w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1 -mx-1 rounded text-[11px] font-mono text-crt-muted hover:text-crt-text hover:bg-crt-elevated/60 transition-colors cursor-pointer disabled:opacity-50"
-                  >
-                    <span className="inline-flex items-center gap-1.5 min-w-0">
-                      {isReconnecting ? (
-                        <Loader2 className="h-3 w-3 animate-spin text-crt-phosphor shrink-0" />
-                      ) : (
-                        <RotateCcw className="h-3 w-3 text-crt-muted/80 shrink-0" />
-                      )}
-                      <span className="truncate">Switch · {handleRec.profileName}</span>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
           {/* Quiet inline action strip — zero heavy nested buttons */}
           <div className="flex items-center justify-between gap-2 pt-1 text-[11px] font-mono">
             <button
@@ -497,47 +517,52 @@ export function StorageDeviceSidebarDock({
               </button>
             </div>
           </div>
+
+          {onOpenDevicesDrawer && deviceProfiles.length > 0 && (
+            <div className="pt-1.5 mt-1 border-t border-crt-border/60">
+              <button
+                type="button"
+                onClick={onOpenDevicesDrawer}
+                title="Open searchable Storage Devices drawer to switch, pin, archive, or browse any saved device"
+                className="w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1 -mx-1 rounded border border-transparent text-[11px] font-mono text-crt-muted hover:border-crt-border-strong hover:bg-crt-elevated/65 hover:text-crt-text transition-colors cursor-pointer"
+              >
+                <span className="inline-flex items-center gap-1.5 min-w-0">
+                  <Layers className="h-3 w-3 shrink-0" />
+                  <span className="truncate">Manage Devices</span>
+                </span>
+                <span className="inline-flex items-center gap-0.5 tabular-nums shrink-0 text-crt-muted/85">
+                  <span>{activeFleetCount || deviceProfiles.length}</span>
+                  <ChevronRight className="h-3 w-3 shrink-0" />
+                </span>
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div className="space-y-1">
-          {lastRememberedHandle && support.supported ? (
+          {primaryReconnectHandle && support.supported ? (
             <>
               <button
                 type="button"
                 disabled={Boolean(reconnectingDeviceId)}
-                onClick={() => handleReconnect(lastRememberedHandle.deviceId)}
-                title={`Reconnect remembered storage device "${lastRememberedHandle.profileName}" without re-browsing folders`}
+                onClick={() => handleReconnect(primaryReconnectHandle.deviceId)}
+                title={`Reconnect remembered storage device "${primaryReconnectHandle.profileName}" without re-browsing folders`}
                 className="w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1.5 -mx-1 rounded border border-crt-phosphor/35 bg-crt-phosphor/8 text-xs font-mono text-crt-phosphor hover:bg-crt-phosphor/15 transition-colors whitespace-nowrap cursor-pointer disabled:opacity-55"
               >
                 <span className="inline-flex items-center gap-2 min-w-0">
-                  {reconnectingDeviceId === lastRememberedHandle.deviceId ? (
+                  {reconnectingDeviceId === primaryReconnectHandle.deviceId ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                  ) : primaryReconnectProfile ? (
+                    <DeviceIconGlyph
+                      iconKey={primaryReconnectProfile.iconKey}
+                      className={`h-3.5 w-3.5 shrink-0 ${getDeviceColorOption(primaryReconnectProfile.colorKey).textClass}`}
+                    />
                   ) : (
                     <RotateCcw className="h-3.5 w-3.5 shrink-0" />
                   )}
-                  <span className="truncate">Reconnect {lastRememberedHandle.profileName}</span>
+                  <span className="truncate">Reconnect {primaryReconnectHandle.profileName}</span>
                 </span>
               </button>
-
-              {rememberedHandles.slice(1, 3).map((handleRec) => (
-                <button
-                  key={handleRec.deviceId}
-                  type="button"
-                  disabled={Boolean(reconnectingDeviceId)}
-                  onClick={() => handleReconnect(handleRec.deviceId)}
-                  title={`Reconnect remembered device "${handleRec.profileName}"`}
-                  className="w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1 -mx-1 rounded border border-transparent text-[11px] font-mono text-crt-muted hover:border-crt-border-strong hover:bg-crt-elevated/65 hover:text-crt-text transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  <span className="inline-flex items-center gap-1.5 min-w-0">
-                    {reconnectingDeviceId === handleRec.deviceId ? (
-                      <Loader2 className="h-3 w-3 animate-spin text-crt-phosphor shrink-0" />
-                    ) : (
-                      <RotateCcw className="h-3 w-3 shrink-0" />
-                    )}
-                    <span className="truncate">Reconnect {handleRec.profileName}</span>
-                  </span>
-                </button>
-              ))}
 
               <button
                 type="button"
@@ -576,6 +601,24 @@ export function StorageDeviceSidebarDock({
             </button>
           )}
 
+          {onOpenDevicesDrawer && deviceProfiles.length > 0 && (
+            <button
+              type="button"
+              onClick={onOpenDevicesDrawer}
+              title="Open searchable Storage Devices drawer to reconnect, organize, or inspect any saved device offline"
+              className="w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1 -mx-1 rounded border border-transparent text-[11px] font-mono text-crt-muted hover:border-crt-border-strong hover:bg-crt-elevated/65 hover:text-crt-text transition-colors cursor-pointer"
+            >
+              <span className="inline-flex items-center gap-1.5 min-w-0">
+                <Layers className="h-3 w-3 shrink-0" />
+                <span className="truncate">Devices</span>
+              </span>
+              <span className="inline-flex items-center gap-0.5 tabular-nums shrink-0 text-crt-muted/85">
+                <span>{activeFleetCount || deviceProfiles.length}</span>
+                <ChevronRight className="h-3 w-3 shrink-0" />
+              </span>
+            </button>
+          )}
+
           {outdatedInstalledCount > 0 && onViewOutdatedInCatalog && (
             <button
               type="button"
@@ -610,16 +653,17 @@ export function StorageDeviceSidebarDock({
         </div>
       )}
 
-      {/* Accurate Secure Context / Browser Guidance, Auto-Config Error, or Mount Error */}
-      {(mountError || autoConfigError || (showSupportDetails && !support.supported)) && (
+      {/* Accurate Secure Context / Browser Guidance, Auto-Config Error, Marker Notice, or Mount Error */}
+      {(mountError || autoConfigError || markerWriteNotice || (showSupportDetails && !support.supported)) && (
         <div className="pt-2 border-t border-crt-border/70 flex items-start justify-between gap-2 text-[11px] font-mono leading-relaxed text-crt-amber">
           <span className="break-words min-w-0">
-            {mountError || autoConfigError || support.reason}
+            {mountError || autoConfigError || markerWriteNotice || support.reason}
           </span>
           <button
             type="button"
             onClick={() => {
               installer.clearMountError();
+              installer.clearMarkerWriteNotice();
               setShowSupportDetails(false);
             }}
             aria-label="Dismiss storage device notice"

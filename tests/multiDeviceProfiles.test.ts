@@ -5,13 +5,22 @@ import path from 'node:path';
 import test from 'node:test';
 import Database from 'better-sqlite3';
 import {
+  DEVICE_MARKER_FILENAME,
+  DEVICE_MARKER_MAX_BYTES,
   findItemInstallForDevice,
   formatInstalledDevicesBadge,
+  generateUuidDeviceProfileId,
+  guessDefaultDeviceIcon,
   makeStableDeviceProfileId,
   mergeProfileFolderConfig,
+  parseDeviceMarkerJson,
+  sanitizeDeviceColorKey,
+  sanitizeDeviceIconKey,
   sanitizeDeviceProfileId,
   sanitizeInstalledPathsList,
   sanitizeInstalledRelativePath,
+  serializeDeviceMarkerJson,
+  sortDeviceProfilesForFleet,
 } from '../src/shared/deviceProfiles.ts';
 import {
   DEFAULT_ROM_TYPE_SUBFOLDERS,
@@ -22,37 +31,72 @@ import {
   runDatabaseMigrations,
   SCHEMA_MIGRATIONS,
 } from '../src/server/migrations.ts';
-import type { ReleaseDeviceInstallRecord } from '../src/types.ts';
+import type { ReleaseDeviceInstallRecord, StorageDeviceProfile } from '../src/types.ts';
 import {
   checkHandlePermission,
+  findMatchingStoredDeviceHandle,
   requestHandlePermission,
+  type StoredDeviceHandleRecord,
 } from '../src/utils/deviceHandleStore.ts';
 import { isItemInstalledOnMountedDevice } from '../src/utils/deviceInstallView.ts';
 import {
+  readDeviceMarkerFromSdCard,
   removeRelativePathFromSdCard,
   removeStemFallbackFromSdCard,
+  scanTargetFolder,
+  writeDeviceMarkerToSdCard,
   type SdDirectoryHandle,
   type SdFileHandle,
   type SdFileWritableStream,
 } from '../src/utils/sdCardFs.ts';
 
-function makeMockFileHandle(fileName: string, content: string): SdFileHandle {
+function makeMockFileHandle(
+  fileName: string,
+  initialContent: string,
+  onWrite?: (nextContent: string) => void,
+  readOnly?: boolean,
+): SdFileHandle {
+  let content = initialContent;
   return {
     kind: 'file',
     name: fileName,
     async createWritable() {
+      if (readOnly) {
+        const err = new Error('Read-only storage medium');
+        err.name = 'NotAllowedError';
+        throw err;
+      }
+      let nextBuffer = '';
       return {
         locked: false,
         getWriter() {
           throw new Error('not implemented in mock');
         },
-        async write() {},
-        async close() {},
+        async write(data: Uint8Array | ArrayBuffer | Blob | string) {
+          if (typeof data === 'string') {
+            nextBuffer += data;
+          } else if (data instanceof Uint8Array) {
+            nextBuffer += new TextDecoder().decode(data);
+          } else if (data instanceof ArrayBuffer) {
+            nextBuffer += new TextDecoder().decode(new Uint8Array(data));
+          }
+        },
+        async close() {
+          content = nextBuffer;
+          onWrite?.(content);
+        },
         async abort() {},
       } as unknown as SdFileWritableStream;
     },
     async getFile() {
-      return { size: content.length, name: fileName } as unknown as File;
+      const snapshot = content;
+      return {
+        size: Buffer.byteLength(snapshot, 'utf8'),
+        name: fileName,
+        async text() {
+          return snapshot;
+        },
+      } as unknown as File;
     },
   };
 }
@@ -61,6 +105,9 @@ function createMockDirectoryHandle(
   name: string,
   tree: Record<string, unknown>,
   options?: {
+    readOnly?: boolean;
+    entryId?: string;
+    isSameEntry?: (other: SdDirectoryHandle) => Promise<boolean>;
     queryPermission?: () => Promise<'granted' | 'prompt' | 'denied'>;
     requestPermission?: () => Promise<'granted' | 'prompt' | 'denied'>;
   },
@@ -73,11 +120,19 @@ function createMockDirectoryHandle(
     return err;
   };
 
-  const dir: SdDirectoryHandle = {
+  const dir: SdDirectoryHandle & { __entryId?: string } = {
     kind: 'directory',
     name,
+    __entryId: options?.entryId,
     queryPermission: options?.queryPermission,
     requestPermission: options?.requestPermission,
+    isSameEntry:
+      options?.isSameEntry ||
+      (async (other: SdDirectoryHandle) => {
+        if (other === dir) return true;
+        const otherId = (other as { __entryId?: string }).__entryId;
+        return Boolean(options?.entryId && otherId && options.entryId === otherId);
+      }),
     async getDirectoryHandle(subName: string, opts?: { create?: boolean }) {
       const existing = map.get(subName);
       if (
@@ -89,21 +144,47 @@ function createMockDirectoryHandle(
         return existing as SdDirectoryHandle;
       }
       if (existing && typeof existing === 'object') {
-        const child = createMockDirectoryHandle(subName, existing as Record<string, unknown>);
+        const child = createMockDirectoryHandle(subName, existing as Record<string, unknown>, {
+          readOnly: options?.readOnly,
+        });
         map.set(subName, child);
         return child;
       }
       if (opts?.create) {
-        const child = createMockDirectoryHandle(subName, {});
+        if (options?.readOnly) {
+          const err = new Error('Read-only storage medium');
+          err.name = 'NotAllowedError';
+          throw err;
+        }
+        const child = createMockDirectoryHandle(subName, {}, { readOnly: options?.readOnly });
         map.set(subName, child);
         return child;
       }
       throw makeNotFoundError(subName);
     },
-    async getFileHandle(fileName: string) {
+    async getFileHandle(fileName: string, opts?: { create?: boolean }) {
       const existing = map.get(fileName);
       if (typeof existing === 'string') {
-        return makeMockFileHandle(fileName, existing);
+        return makeMockFileHandle(
+          fileName,
+          existing,
+          (next) => map.set(fileName, next),
+          options?.readOnly,
+        );
+      }
+      if (opts?.create) {
+        if (options?.readOnly) {
+          const err = new Error('Read-only storage medium');
+          err.name = 'NotAllowedError';
+          throw err;
+        }
+        map.set(fileName, '');
+        return makeMockFileHandle(
+          fileName,
+          '',
+          (next) => map.set(fileName, next),
+          options?.readOnly,
+        );
       }
       throw makeNotFoundError(fileName);
     },
@@ -116,12 +197,14 @@ function createMockDirectoryHandle(
     async *values() {
       for (const [k, v] of map.entries()) {
         if (typeof v === 'string') {
-          yield makeMockFileHandle(k, v);
+          yield makeMockFileHandle(k, v, (next) => map.set(k, next), options?.readOnly);
         } else if (v && typeof v === 'object') {
           const child =
             'kind' in v
               ? (v as SdDirectoryHandle)
-              : createMockDirectoryHandle(k, v as Record<string, unknown>);
+              : createMockDirectoryHandle(k, v as Record<string, unknown>, {
+                  readOnly: options?.readOnly,
+                });
           map.set(k, child);
           yield child;
         }
@@ -586,3 +669,315 @@ test('SQLite migration v27 backfills legacy installs and supports multi-device C
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('device marker validation, SD marker read/write, read-only fallback, and handle isSameEntry matching', async () => {
+  // UUID generator and icon/color sanitizers
+  const uuidId = generateUuidDeviceProfileId();
+  assert.match(uuidId, /^dev_[a-z0-9-]+$/);
+  assert.equal(sanitizeDeviceIconKey('clamshell'), 'clamshell');
+  assert.equal(sanitizeDeviceIconKey('bogus-icon', 'sdcard'), 'sdcard');
+  assert.equal(sanitizeDeviceColorKey('violet'), 'violet');
+  assert.equal(sanitizeDeviceColorKey('neon-pink', 'cyan'), 'cyan');
+  assert.equal(guessDefaultDeviceIcon('Miyoo Mini+'), 'vertical');
+  assert.equal(guessDefaultDeviceIcon('RG35XX SP'), 'clamshell');
+  assert.equal(guessDefaultDeviceIcon('MiSTer FPGA'), 'console');
+  assert.equal(guessDefaultDeviceIcon('EverDrive N8'), 'sdcard');
+
+  // Protected marker path must never be accepted as a removable ROM path
+  assert.equal(sanitizeInstalledRelativePath(DEVICE_MARKER_FILENAME), null);
+  assert.equal(sanitizeInstalledRelativePath('/.rgt-device.json'), null);
+
+  // Valid serialize -> parse roundtrip
+  const serialized = serializeDeviceMarkerJson({
+    deviceId: uuidId,
+    name: 'Analogue Pocket',
+    createdAt: '2026-11-23T10:00:00.000Z',
+    updatedAt: '2026-11-23T11:00:00.000Z',
+  });
+  const parsed = parseDeviceMarkerJson(serialized);
+  assert.ok(parsed);
+  assert.equal(parsed.schemaVersion, 1);
+  assert.equal(parsed.deviceId, uuidId);
+  assert.equal(parsed.name, 'Analogue Pocket');
+  assert.equal(parsed.createdAt, '2026-11-23T10:00:00.000Z');
+
+  // Reject malformed, oversized, wrong schemaVersion, and unsafe deviceId markers
+  assert.equal(parseDeviceMarkerJson('not-json'), null);
+  assert.equal(parseDeviceMarkerJson('[]'), null);
+  assert.equal(
+    parseDeviceMarkerJson(JSON.stringify({ schemaVersion: 2, deviceId: uuidId })),
+    null,
+  );
+  assert.equal(
+    parseDeviceMarkerJson(JSON.stringify({ schemaVersion: 1, deviceId: '../escape' })),
+    null,
+  );
+  assert.equal(
+    parseDeviceMarkerJson(
+      JSON.stringify({
+        schemaVersion: 1,
+        deviceId: uuidId,
+        name: 'x'.repeat(DEVICE_MARKER_MAX_BYTES + 100),
+      }),
+    ),
+    null,
+  );
+
+  // SD card marker write + read roundtrip + scanner exclusion + uninstall protection
+  const writableCard = createMockDirectoryHandle(
+    'Roms',
+    { 'Chrono Trigger.sfc': 'ROM' },
+    { entryId: 'card-phys-a' },
+  );
+  const beforeStamp = await readDeviceMarkerFromSdCard(writableCard);
+  assert.equal(beforeStamp.found, false);
+  assert.equal(beforeStamp.reason, 'not_found');
+
+  const writeRes = await writeDeviceMarkerToSdCard(writableCard, {
+    deviceId: uuidId,
+    name: 'Living Room Miyoo',
+  });
+  assert.equal(writeRes.ok, true);
+  assert.equal(writeRes.readOnly, false);
+  assert.ok(writeRes.updatedAt);
+
+  const afterStamp = await readDeviceMarkerFromSdCard(writableCard);
+  assert.equal(afterStamp.found, true);
+  assert.equal(afterStamp.marker?.deviceId, uuidId);
+  assert.equal(afterStamp.marker?.name, 'Living Room Miyoo');
+
+  // scanTargetFolder must ignore .rgt-device.json
+  const scanned = await scanTargetFolder(writableCard, '');
+  assert.equal(scanned.exactNames.has(DEVICE_MARKER_FILENAME), false);
+  assert.equal(scanned.exactNames.has('Chrono Trigger.sfc'), true);
+
+  // Direct uninstall of .rgt-device.json must be rejected as invalid
+  const markerDeleteAttempt = await removeRelativePathFromSdCard(
+    writableCard,
+    DEVICE_MARKER_FILENAME,
+  );
+  assert.equal(markerDeleteAttempt.status, 'invalid');
+
+  // Oversized & corrupted markers on disk return clean non-throwing failure reasons
+  const oversizedCard = createMockDirectoryHandle('Roms', {
+    [DEVICE_MARKER_FILENAME]: 'a'.repeat(DEVICE_MARKER_MAX_BYTES + 64),
+  });
+  const oversizedRes = await readDeviceMarkerFromSdCard(oversizedCard);
+  assert.equal(oversizedRes.found, false);
+  assert.equal(oversizedRes.reason, 'oversized');
+
+  const corruptCard = createMockDirectoryHandle('Roms', {
+    [DEVICE_MARKER_FILENAME]: '{bad json',
+  });
+  const corruptRes = await readDeviceMarkerFromSdCard(corruptCard);
+  assert.equal(corruptRes.found, false);
+  assert.equal(corruptRes.reason, 'invalid');
+
+  // Read-only card degrades gracefully without throwing
+  const readOnlyCard = createMockDirectoryHandle('Roms', {}, { readOnly: true });
+  const readOnlyWrite = await writeDeviceMarkerToSdCard(readOnlyCard, {
+    deviceId: uuidId,
+    name: 'Write Protected Card',
+  });
+  assert.equal(readOnlyWrite.ok, false);
+  assert.equal(readOnlyWrite.readOnly, true);
+
+  // isSameEntry matching across stored handles (even with identical volume names & broken handles)
+  const pickedCardA = createMockDirectoryHandle('Roms', {}, { entryId: 'card-phys-a' });
+  const storedCardB = createMockDirectoryHandle('Roms', {}, { entryId: 'card-phys-b' });
+  const brokenHandle = createMockDirectoryHandle('Roms', {}, {
+    isSameEntry: async () => {
+      throw new Error('Stale handle');
+    },
+  });
+  const records: StoredDeviceHandleRecord[] = [
+    {
+      deviceId: 'dev_broken',
+      volumeName: 'Roms',
+      profileName: 'Broken',
+      handle: brokenHandle,
+      lastMountedAt: '2026-11-23T01:00:00.000Z',
+    },
+    {
+      deviceId: 'dev_card_b',
+      volumeName: 'Roms',
+      profileName: 'Card B',
+      handle: storedCardB,
+      lastMountedAt: '2026-11-23T02:00:00.000Z',
+    },
+    {
+      deviceId: 'dev_card_a',
+      volumeName: 'Roms',
+      profileName: 'Card A',
+      handle: writableCard,
+      lastMountedAt: '2026-11-23T00:30:00.000Z',
+    },
+  ];
+  const matched = await findMatchingStoredDeviceHandle(pickedCardA, records);
+  assert.equal(matched?.deviceId, 'dev_card_a');
+
+  const pickedUnknown = createMockDirectoryHandle('Roms', {}, { entryId: 'card-phys-c' });
+  assert.equal(await findMatchingStoredDeviceHandle(pickedUnknown, records), null);
+
+  // Fleet sorting: Mounted -> Active Pinned -> Active Recent -> Archived
+  const mkProfile = (overrides: Partial<StorageDeviceProfile>): StorageDeviceProfile => ({
+    id: 'dev_x',
+    name: 'Device',
+    volumeLabel: 'Roms',
+    iconKey: 'handheld',
+    colorKey: 'phosphor',
+    isPinned: false,
+    isArchived: false,
+    markerVerifiedAt: null,
+    folderConfig: null,
+    romNaming: null,
+    createdAt: '2026-11-20T00:00:00.000Z',
+    updatedAt: '2026-11-20T00:00:00.000Z',
+    lastMountedAt: '2026-11-20T00:00:00.000Z',
+    installedCount: 0,
+    ...overrides,
+  });
+  const sorted = sortDeviceProfilesForFleet(
+    [
+      mkProfile({ id: 'dev_arch', name: 'Old', isArchived: true, lastMountedAt: '2026-11-23T12:00:00.000Z' }),
+      mkProfile({ id: 'dev_recent', name: 'Recent', lastMountedAt: '2026-11-23T10:00:00.000Z' }),
+      mkProfile({ id: 'dev_pinned', name: 'Pinned', isPinned: true, lastMountedAt: '2026-11-21T00:00:00.000Z' }),
+      mkProfile({ id: 'dev_mounted', name: 'Mounted', lastMountedAt: '2026-11-19T00:00:00.000Z' }),
+    ],
+    'dev_mounted',
+  );
+  assert.deepEqual(
+    sorted.map((p) => p.id),
+    ['dev_mounted', 'dev_pinned', 'dev_recent', 'dev_arch'],
+  );
+});
+
+test('SQLite migration v28 adds fleet metadata, prevents same-volume collisions on createNew, and orders fleet profiles', async () => {
+  assert.ok(
+    LATEST_SCHEMA_VERSION >= 28,
+    `Expected LATEST_SCHEMA_VERSION >= 28, got ${LATEST_SCHEMA_VERSION}`,
+  );
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rgt-fleet-v28-'));
+  const dataDir = path.join(tmpDir, 'data');
+  const downloadDir = path.join(tmpDir, 'roms');
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(downloadDir, { recursive: true });
+
+  // 1. Explicit v27 -> v28 migration test on an isolated in-memory DB
+  const memDb = new Database(':memory:');
+  try {
+    const preV28Migrations = SCHEMA_MIGRATIONS.filter((m) => m.version <= 27);
+    runDatabaseMigrations(memDb, { dataDir, defaultDownloadDir: downloadDir }, preV28Migrations);
+
+    memDb
+      .prepare(
+        `INSERT INTO storage_device_profiles (id, name, volume_label, created_at, updated_at, last_mounted_at)
+         VALUES ('dev-legacy-miyoo', 'Legacy Miyoo', 'Roms', '2026-11-22T00:00:00.000Z', '2026-11-22T00:00:00.000Z', '2026-11-22T00:00:00.000Z')`,
+      )
+      .run();
+
+    const summary = runDatabaseMigrations(
+      memDb,
+      { dataDir, defaultDownloadDir: downloadDir },
+      SCHEMA_MIGRATIONS,
+    );
+    assert.ok(
+      summary.appliedNow.some((rec) => rec.version === 28),
+      'Migration v28 should apply cleanly onto v27 DB',
+    );
+
+    const row = memDb
+      .prepare(
+        `SELECT icon_key, color_key, is_pinned, is_archived, marker_verified_at
+         FROM storage_device_profiles WHERE id = 'dev-legacy-miyoo'`,
+      )
+      .get() as {
+      icon_key: string;
+      color_key: string;
+      is_pinned: number;
+      is_archived: number;
+      marker_verified_at: string | null;
+    };
+    assert.equal(row.icon_key, 'handheld');
+    assert.equal(row.color_key, 'phosphor');
+    assert.equal(row.is_pinned, 0);
+    assert.equal(row.is_archived, 0);
+    assert.equal(row.marker_verified_at, null);
+  } finally {
+    memDb.close();
+  }
+
+  // 2. Test db.ts v28 createNew collision prevention, pin/archive transitions, and icon/color install hydration
+  const prevDataDir = process.env.DATA_DIR;
+  const prevDownloadDir = process.env.DOWNLOAD_DIR;
+  process.env.DATA_DIR = dataDir;
+  process.env.DOWNLOAD_DIR = downloadDir;
+
+  try {
+    const db = await import('../src/server/db.ts');
+    db.initDb();
+
+    // Two different physical cards both mounted with volumeLabel = "Roms"
+    const cardA = db.upsertStorageDeviceProfileOnMount({
+      createNew: true,
+      name: 'Miyoo Mini Plus',
+      volumeLabel: 'Roms',
+      iconKey: 'vertical',
+      colorKey: 'amber',
+      isPinned: true,
+      markerVerifiedAt: '2026-11-23T12:00:00.000Z',
+    });
+    const cardB = db.upsertStorageDeviceProfileOnMount({
+      createNew: true,
+      name: 'Retroid Pocket 5',
+      volumeLabel: 'Roms',
+      iconKey: 'handheld',
+      colorKey: 'cyan',
+      isPinned: false,
+      markerVerifiedAt: '2026-11-23T12:05:00.000Z',
+    });
+
+    assert.notEqual(cardA.id, cardB.id);
+    assert.match(cardA.id, /^dev_/);
+    assert.match(cardB.id, /^dev_/);
+    assert.equal(cardA.iconKey, 'vertical');
+    assert.equal(cardA.colorKey, 'amber');
+    assert.equal(cardA.isPinned, true);
+    assert.equal(cardA.markerVerifiedAt, '2026-11-23T12:00:00.000Z');
+    assert.equal(cardB.iconKey, 'handheld');
+    assert.equal(cardB.colorKey, 'cyan');
+
+    // Archiving a pinned device automatically unpins it and moves it to the end of listStorageDeviceProfiles
+    const archivedA = db.updateStorageDeviceProfile(cardA.id, {
+      isArchived: true,
+    });
+    assert.equal(archivedA?.isArchived, true);
+    assert.equal(archivedA?.isPinned, false);
+
+    const listed = db.listStorageDeviceProfiles();
+    const idxB = listed.findIndex((p) => p.id === cardB.id);
+    const idxA = listed.findIndex((p) => p.id === cardA.id);
+    assert.ok(idxB >= 0 && idxA >= 0);
+    assert.ok(idxB < idxA, 'Active device should sort before archived device');
+
+    // Re-mounting via explicit hardware marker ID updates the exact profile and restores metadata cleanly
+    const remountedB = db.upsertStorageDeviceProfileOnMount({
+      id: cardB.id,
+      volumeLabel: 'Roms',
+      markerVerifiedAt: '2026-11-23T13:00:00.000Z',
+    });
+    assert.equal(remountedB.id, cardB.id);
+    assert.equal(remountedB.name, 'Retroid Pocket 5');
+    assert.equal(remountedB.iconKey, 'handheld');
+    assert.equal(remountedB.colorKey, 'cyan');
+    assert.equal(remountedB.markerVerifiedAt, '2026-11-23T13:00:00.000Z');
+  } finally {
+    if (prevDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prevDataDir;
+    if (prevDownloadDir === undefined) delete process.env.DOWNLOAD_DIR;
+    else process.env.DOWNLOAD_DIR = prevDownloadDir;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
