@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.35.2] - 2026-11-23
+
+- Fixed a brief race window where a Catalog item's **Install** button flashed back to **Install** (and could be clicked again to start a duplicate transfer) after an install finished before switching to **Reinstall**:
+  - **Atomic Finalizing → Reinstall Transition**: Kept the active device transfer in the **Finalizing** state while persisting `installed_at` to the server and synchronously patching visible Catalog rows, the open Game Details drawer, and cached snapshot state via `subscribeItemsInstalled` before marking the install job `completed`.
+  - **Consistent Mid-Batch State**: Added `isItemInstalledOnMountedDevice()` so completed items in multi-game installs also stay labeled **Reinstall** while subsequent games in the same batch are still transferring, without sticking if an item is later unmarked as not installed.
+
 ## [1.35.1] - 2026-11-22
 
 - Fixed false-positive **Update on RGT** alerts and infinite re-queue loops in **Installed ROM Updates**:

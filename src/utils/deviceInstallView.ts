@@ -728,3 +728,43 @@ export function resolveItemDeviceInstallState(
 
   return IDLE_ITEM_DEVICE_INSTALL;
 }
+
+/**
+ * Determines whether a catalog item should present as already installed on the
+ * currently mounted storage device (`Reinstall` instead of `Install`).
+ *
+ * Checks persisted catalog metadata (`installedAt` + `installedDeviceLabel`), and
+ * while a multi-item device install job is still running (`installerIsBusy`), also
+ * honors an already-completed live row outcome (`written` / `upgraded` / `skipped`)
+ * so completed rows never flash back to `Install` before the batch finishes.
+ */
+export function isItemInstalledOnMountedDevice(params: {
+  mountedDeviceName: string | null | undefined;
+  installedAt: string | null | undefined;
+  installedDeviceLabel: string | null | undefined;
+  liveInstallState?: Pick<ResolvedItemDeviceInstallState, 'isFinished' | 'outcomeKind'> | null;
+  installerIsBusy?: boolean;
+}): boolean {
+  const mounted = (params.mountedDeviceName || '').trim().toLowerCase();
+  if (!mounted) return false;
+
+  if (params.installedAt) {
+    const installedLabel = (params.installedDeviceLabel || '').trim().toLowerCase();
+    if (!installedLabel || installedLabel === mounted) {
+      return true;
+    }
+  }
+
+  if (
+    params.installerIsBusy &&
+    params.liveInstallState?.isFinished &&
+    (params.liveInstallState.outcomeKind === 'written' ||
+      params.liveInstallState.outcomeKind === 'upgraded' ||
+      params.liveInstallState.outcomeKind === 'skipped')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+

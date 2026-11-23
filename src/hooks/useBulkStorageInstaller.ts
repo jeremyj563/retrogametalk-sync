@@ -391,8 +391,21 @@ export function useBulkStorageInstaller({
   sdRootHandleRef.current = sdRootHandle;
   const onItemsInstalledRef = useRef(onItemsInstalled);
   onItemsInstalledRef.current = onItemsInstalled;
+  const installedListenersRef = useRef<
+    Set<(updatedItems: RepositoryItemRecord[], deviceLabel: string) => void>
+  >(new Set());
   const jobRef = useRef(job);
   jobRef.current = job;
+
+  const subscribeItemsInstalled = useCallback(
+    (listener: (updatedItems: RepositoryItemRecord[], deviceLabel: string) => void) => {
+      installedListenersRef.current.add(listener);
+      return () => {
+        installedListenersRef.current.delete(listener);
+      };
+    },
+    [],
+  );
 
   const jobSeqRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -597,6 +610,13 @@ export function useBulkStorageInstaller({
         });
         const parsed = await readJsonSafely<{ items?: RepositoryItemRecord[] }>(res);
         if (parsed.ok && Array.isArray(parsed.data?.items) && parsed.data.items.length > 0) {
+          for (const listener of installedListenersRef.current) {
+            try {
+              listener(parsed.data.items, deviceLabel);
+            } catch {
+              // Ignore subscriber errors so all listeners & job teardown still run
+            }
+          }
           onItemsInstalledRef.current?.(parsed.data.items, deviceLabel);
           reportAchievementEvent('sd_export_complete', parsed.data.items.length);
         }
@@ -1237,7 +1257,8 @@ export function useBulkStorageInstaller({
             });
 
             // Stream each inspected row in this chunk directly to the mounted storage device
-            for (const row of expandedChunkRows) {
+            for (let rowIdx = 0; rowIdx < expandedChunkRows.length; rowIdx += 1) {
+              const row = expandedChunkRows[rowIdx];
               if (controller.signal.aborted) {
                 throw new DOMException('Installation canceled by user.', 'AbortError');
               }
@@ -1325,6 +1346,30 @@ export function useBulkStorageInstaller({
                 };
               }
 
+              const hasMoreRowsInChunk = expandedChunkRows
+                .slice(rowIdx + 1)
+                .some((r) => r.selectedTargetIds.length > 0);
+              if (!hasMoreRowsInChunk && unsyncedInstalledIds.size > 0) {
+                // Keep the item visibly in "Finalizing" until the server persists installed_at
+                // and subscribers synchronously patch Catalog rows — prevents flashing back to "Install".
+                setJob((prev) => {
+                  if (!prev || prev.jobId !== jobId) return prev;
+                  return {
+                    ...prev,
+                    activeTransfer:
+                      prev.activeTransfer && prev.activeTransfer.rowKey === row.rowKey
+                        ? {
+                            ...prev.activeTransfer,
+                            stage: 'finalizing',
+                            percent: 100,
+                            bytesPerSec: null,
+                          }
+                        : prev.activeTransfer,
+                  };
+                });
+                await flushInstalled();
+              }
+
               setJob((prev) => {
                 if (!prev || prev.jobId !== jobId) return prev;
                 return {
@@ -1345,7 +1390,7 @@ export function useBulkStorageInstaller({
               });
             }
 
-            // Commit installed flags at the end of every chunk so progress persists live
+            // Commit any remaining installed flags at the end of every chunk
             await flushInstalled();
           }
 
@@ -1662,7 +1707,8 @@ export function useBulkStorageInstaller({
 
       try {
         const snapshotRows = jobRef.current?.rows || currentJob.rows;
-        for (const row of snapshotRows) {
+        for (let rowIdx = 0; rowIdx < snapshotRows.length; rowIdx += 1) {
+          const row = snapshotRows[rowIdx];
           if (controller.signal.aborted) {
             throw new DOMException('Installation canceled by user.', 'AbortError');
           }
@@ -1749,6 +1795,30 @@ export function useBulkStorageInstaller({
             sinceLastSync += 1;
           }
 
+          const hasMoreRows = snapshotRows
+            .slice(rowIdx + 1)
+            .some((r) => r.selectedTargetIds.length > 0);
+          if ((!hasMoreRows || sinceLastSync >= 10) && unsyncedInstalledIds.size > 0) {
+            if (!hasMoreRows) {
+              setJob((prev) => {
+                if (!prev || prev.jobId !== jobId) return prev;
+                return {
+                  ...prev,
+                  activeTransfer:
+                    prev.activeTransfer && prev.activeTransfer.rowKey === row.rowKey
+                      ? {
+                          ...prev.activeTransfer,
+                          stage: 'finalizing',
+                          percent: 100,
+                          bytesPerSec: null,
+                        }
+                      : prev.activeTransfer,
+                };
+              });
+            }
+            await flushInstalled();
+          }
+
           setJob((prev) => {
             if (!prev || prev.jobId !== jobId) return prev;
             return {
@@ -1767,10 +1837,6 @@ export function useBulkStorageInstaller({
               ),
             };
           });
-
-          if (sinceLastSync >= 10) {
-            await flushInstalled();
-          }
         }
 
         await flushInstalled();
@@ -2206,6 +2272,7 @@ export function useBulkStorageInstaller({
     resetItemToRecommended,
     autoPickSmartPrimaries,
     updateRowTargetName,
+    subscribeItemsInstalled,
   };
 }
 
