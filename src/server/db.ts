@@ -32,6 +32,7 @@ import {
   sanitizeDeviceProfileId,
   sanitizeInstalledPathsList,
   sanitizeIsoTimestamp,
+  type DeviceUninstallTargetRecord,
 } from '../shared/deviceProfiles.ts';
 import {
   canonicalizeSystemSlug,
@@ -1020,18 +1021,31 @@ function mapReleaseRow(
   };
 }
 
+const SQLITE_ID_CHUNK_SIZE = 400;
+
+function chunkNumberIds(ids: number[], chunkSize: number = SQLITE_ID_CHUNK_SIZE): number[][] {
+  if (ids.length === 0) return [];
+  const chunks: number[][] = [];
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    chunks.push(ids.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
 function loadFilesByReleaseIds(releaseIds: number[]): Map<number, ReleaseFileRecord[]> {
   const map = new Map<number, ReleaseFileRecord[]>();
   if (releaseIds.length === 0) return map;
-  const placeholders = releaseIds.map(() => '?').join(',');
-  const rows = getDb()
-    .prepare(`SELECT * FROM catalog_release_files WHERE release_id IN (${placeholders}) ORDER BY id ASC`)
-    .all(...releaseIds) as Record<string, unknown>[];
-  for (const row of rows) {
-    const file = mapFileRow(row);
-    const list = map.get(file.releaseId) || [];
-    list.push(file);
-    map.set(file.releaseId, list);
+  for (const chunk of chunkNumberIds(releaseIds)) {
+    const placeholders = chunk.map(() => '?').join(',');
+    const rows = getDb()
+      .prepare(`SELECT * FROM catalog_release_files WHERE release_id IN (${placeholders}) ORDER BY id ASC`)
+      .all(...chunk) as Record<string, unknown>[];
+    for (const row of rows) {
+      const file = mapFileRow(row);
+      const list = map.get(file.releaseId) || [];
+      list.push(file);
+      map.set(file.releaseId, list);
+    }
   }
   return map;
 }
@@ -1039,21 +1053,23 @@ function loadFilesByReleaseIds(releaseIds: number[]): Map<number, ReleaseFileRec
 function loadCollectionIdsByReleaseIds(releaseIds: number[]): Map<number, number[]> {
   const map = new Map<number, number[]>();
   if (releaseIds.length === 0) return map;
-  const placeholders = releaseIds.map(() => '?').join(',');
-  const rows = getDb()
-    .prepare(
-      `SELECT release_id, collection_id
-       FROM user_collection_items
-       WHERE release_id IN (${placeholders})
-       ORDER BY collection_id ASC`,
-    )
-    .all(...releaseIds) as { release_id: number; collection_id: number }[];
-  for (const row of rows) {
-    const rid = Number(row.release_id);
-    const cid = Number(row.collection_id);
-    const list = map.get(rid) || [];
-    list.push(cid);
-    map.set(rid, list);
+  for (const chunk of chunkNumberIds(releaseIds)) {
+    const placeholders = chunk.map(() => '?').join(',');
+    const rows = getDb()
+      .prepare(
+        `SELECT release_id, collection_id
+         FROM user_collection_items
+         WHERE release_id IN (${placeholders})
+         ORDER BY collection_id ASC`,
+      )
+      .all(...chunk) as { release_id: number; collection_id: number }[];
+    for (const row of rows) {
+      const rid = Number(row.release_id);
+      const cid = Number(row.collection_id);
+      const list = map.get(rid) || [];
+      list.push(cid);
+      map.set(rid, list);
+    }
   }
   return map;
 }
@@ -1061,53 +1077,55 @@ function loadCollectionIdsByReleaseIds(releaseIds: number[]): Map<number, number
 function loadDeviceInstallsByReleaseIds(releaseIds: number[]): Map<number, ReleaseDeviceInstallRecord[]> {
   const map = new Map<number, ReleaseDeviceInstallRecord[]>();
   if (releaseIds.length === 0) return map;
-  const placeholders = releaseIds.map(() => '?').join(',');
-  const rows = getDb()
-    .prepare(
-      `SELECT
-         di.release_id,
-         di.device_id,
-         di.installed_at,
-         di.installed_file_id,
-         di.installed_filename,
-         di.installed_paths_json,
-         COALESCE(dp.name, dp.volume_label, di.device_id) AS device_name,
-         COALESCE(dp.volume_label, dp.name, di.device_id) AS volume_label,
-         dp.icon_key AS device_icon_key,
-         dp.color_key AS device_color_key
-       FROM catalog_release_device_installs di
-       LEFT JOIN storage_device_profiles dp ON dp.id = di.device_id
-       WHERE di.release_id IN (${placeholders})
-       ORDER BY di.installed_at DESC, device_name COLLATE NOCASE ASC`,
-    )
-    .all(...releaseIds) as Record<string, unknown>[];
-  for (const row of rows) {
-    const rid = Number(row.release_id);
-    let parsedPaths: string[] = [];
-    if (row.installed_paths_json) {
-      try {
-        parsedPaths = sanitizeInstalledPathsList(JSON.parse(String(row.installed_paths_json)));
-      } catch {
-        parsedPaths = [];
+  for (const chunk of chunkNumberIds(releaseIds)) {
+    const placeholders = chunk.map(() => '?').join(',');
+    const rows = getDb()
+      .prepare(
+        `SELECT
+           di.release_id,
+           di.device_id,
+           di.installed_at,
+           di.installed_file_id,
+           di.installed_filename,
+           di.installed_paths_json,
+           COALESCE(dp.name, dp.volume_label, di.device_id) AS device_name,
+           COALESCE(dp.volume_label, dp.name, di.device_id) AS volume_label,
+           dp.icon_key AS device_icon_key,
+           dp.color_key AS device_color_key
+         FROM catalog_release_device_installs di
+         LEFT JOIN storage_device_profiles dp ON dp.id = di.device_id
+         WHERE di.release_id IN (${placeholders})
+         ORDER BY di.installed_at DESC, device_name COLLATE NOCASE ASC`,
+      )
+      .all(...chunk) as Record<string, unknown>[];
+    for (const row of rows) {
+      const rid = Number(row.release_id);
+      let parsedPaths: string[] = [];
+      if (row.installed_paths_json) {
+        try {
+          parsedPaths = sanitizeInstalledPathsList(JSON.parse(String(row.installed_paths_json)));
+        } catch {
+          parsedPaths = [];
+        }
       }
+      const list = map.get(rid) || [];
+      list.push({
+        releaseId: rid,
+        deviceId: String(row.device_id),
+        deviceName: String(row.device_name),
+        volumeLabel: String(row.volume_label),
+        iconKey: sanitizeDeviceIconKey(row.device_icon_key),
+        colorKey: sanitizeDeviceColorKey(row.device_color_key),
+        installedAt: String(row.installed_at),
+        installedFileId:
+          row.installed_file_id !== null && row.installed_file_id !== undefined
+            ? Number(row.installed_file_id)
+            : null,
+        installedFilename: row.installed_filename ? String(row.installed_filename) : null,
+        installedPaths: parsedPaths,
+      });
+      map.set(rid, list);
     }
-    const list = map.get(rid) || [];
-    list.push({
-      releaseId: rid,
-      deviceId: String(row.device_id),
-      deviceName: String(row.device_name),
-      volumeLabel: String(row.volume_label),
-      iconKey: sanitizeDeviceIconKey(row.device_icon_key),
-      colorKey: sanitizeDeviceColorKey(row.device_color_key),
-      installedAt: String(row.installed_at),
-      installedFileId:
-        row.installed_file_id !== null && row.installed_file_id !== undefined
-          ? Number(row.installed_file_id)
-          : null,
-      installedFilename: row.installed_filename ? String(row.installed_filename) : null,
-      installedPaths: parsedPaths,
-    });
-    map.set(rid, list);
   }
   return map;
 }
@@ -3093,6 +3111,7 @@ export interface CatalogQueryFilterParams {
   downloaded?: string;
   installed?: string;
   deviceId?: string;
+  mountedDeviceId?: string;
   syncRules?: boolean;
   favoriteOnly?: boolean;
   collectionId?: number;
@@ -3259,6 +3278,7 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   downloadableIds: number[];
   queueableIds: number[];
   alreadyQueuedIds: number[];
+  installedOnMountedIds: number[];
   estimatedQueueBytes: number;
   alreadyDownloadedCount: number;
   alreadyQueuedCount: number;
@@ -3333,11 +3353,32 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
     }
   }
 
+  const mountedDeviceId = sanitizeDeviceProfileId(params.mountedDeviceId);
+  let installedOnMountedIds: number[] = [];
+  if (mountedDeviceId && ids.length > 0) {
+    const installedSet = new Set<number>();
+    for (const chunk of chunkNumberIds(ids)) {
+      const placeholders = chunk.map(() => '?').join(',');
+      const installedRows = getDb()
+        .prepare(
+          `SELECT release_id
+           FROM catalog_release_device_installs
+           WHERE device_id = ? AND release_id IN (${placeholders})`,
+        )
+        .all(mountedDeviceId, ...chunk) as { release_id: number }[];
+      for (const installedRow of installedRows) {
+        installedSet.add(Number(installedRow.release_id));
+      }
+    }
+    installedOnMountedIds = ids.filter((id) => installedSet.has(id));
+  }
+
   return {
     ids,
     downloadableIds,
     queueableIds,
     alreadyQueuedIds,
+    installedOnMountedIds,
     estimatedQueueBytes,
     alreadyDownloadedCount,
     alreadyQueuedCount,
@@ -4052,6 +4093,110 @@ export function deleteStorageDeviceProfile(id: string): {
   return { deleted: info.changes > 0, affectedReleaseIds };
 }
 
+export function getDeviceUninstallTargets(
+  deviceId: string,
+  releaseIds: number[],
+): DeviceUninstallTargetRecord[] {
+  const cleanDeviceId = sanitizeDeviceProfileId(deviceId);
+  const cleanIds = Array.from(
+    new Set(releaseIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
+  );
+  if (!cleanDeviceId || cleanIds.length === 0) {
+    return [];
+  }
+
+  const byId = new Map<number, DeviceUninstallTargetRecord>();
+  const needsFallbackFileIds: number[] = [];
+
+  for (const chunk of chunkNumberIds(cleanIds)) {
+    const placeholders = chunk.map(() => '?').join(', ');
+    const rows = getDb()
+      .prepare(
+        `SELECT
+           r.id,
+           r.title,
+           r.system_name,
+           r.release_tags_json,
+           r.installed_filename AS rollup_installed_filename,
+           di.installed_filename AS device_installed_filename,
+           di.installed_paths_json
+         FROM catalog_release_device_installs di
+         INNER JOIN catalog_releases r ON r.id = di.release_id
+         WHERE di.device_id = ? AND di.release_id IN (${placeholders})`,
+      )
+      .all(cleanDeviceId, ...chunk) as Record<string, unknown>[];
+
+    for (const row of rows) {
+      const rid = Number(row.id);
+      let releaseTags: string[] = [];
+      if (row.release_tags_json) {
+        try {
+          const parsed = JSON.parse(String(row.release_tags_json));
+          if (Array.isArray(parsed)) {
+            releaseTags = parsed.map((t) => String(t)).filter(Boolean);
+          }
+        } catch {
+          releaseTags = [];
+        }
+      }
+      let installedPaths: string[] = [];
+      if (row.installed_paths_json) {
+        try {
+          installedPaths = sanitizeInstalledPathsList(JSON.parse(String(row.installed_paths_json)));
+        } catch {
+          installedPaths = [];
+        }
+      }
+      const installedFilename = row.device_installed_filename
+        ? String(row.device_installed_filename)
+        : row.rollup_installed_filename
+          ? String(row.rollup_installed_filename)
+          : null;
+
+      if (installedPaths.length === 0 && !installedFilename) {
+        needsFallbackFileIds.push(rid);
+      }
+
+      byId.set(rid, {
+        id: rid,
+        title: String(row.title || `Release #${rid}`),
+        systemName: String(row.system_name || ''),
+        releaseTags,
+        installedFilename,
+        fallbackFilename: null,
+        installedPaths,
+      });
+    }
+  }
+
+  if (needsFallbackFileIds.length > 0) {
+    for (const chunk of chunkNumberIds(needsFallbackFileIds)) {
+      const placeholders = chunk.map(() => '?').join(', ');
+      const fileRows = getDb()
+        .prepare(
+          `SELECT release_id, filename
+           FROM catalog_release_files
+           WHERE release_id IN (${placeholders})
+           ORDER BY id ASC`,
+        )
+        .all(...chunk) as { release_id: number; filename: string | null }[];
+      for (const fileRow of fileRows) {
+        const target = byId.get(Number(fileRow.release_id));
+        if (target && !target.fallbackFilename && fileRow.filename) {
+          target.fallbackFilename = String(fileRow.filename);
+        }
+      }
+    }
+  }
+
+  const ordered: DeviceUninstallTargetRecord[] = [];
+  for (const id of cleanIds) {
+    const match = byId.get(id);
+    if (match) ordered.push(match);
+  }
+  return ordered;
+}
+
 export function removeDeviceInstalls(
   deviceId: string,
   releaseIds: number[],
@@ -4064,25 +4209,37 @@ export function removeDeviceInstalls(
     return { removed: 0, items: [] };
   }
 
-  const placeholders = cleanIds.map(() => '?').join(', ');
-  const info = getDb()
-    .prepare(
-      `DELETE FROM catalog_release_device_installs
-       WHERE device_id = ? AND release_id IN (${placeholders})`,
-    )
-    .run(cleanDeviceId, ...cleanIds);
+  let totalRemoved = 0;
+  const deleteTx = getDb().transaction(() => {
+    for (const chunk of chunkNumberIds(cleanIds)) {
+      const placeholders = chunk.map(() => '?').join(', ');
+      const info = getDb()
+        .prepare(
+          `DELETE FROM catalog_release_device_installs
+           WHERE device_id = ? AND release_id IN (${placeholders})`,
+        )
+        .run(cleanDeviceId, ...chunk);
+      totalRemoved += info.changes;
+    }
+  });
+  deleteTx();
 
   recomputeReleaseInstallRollups(cleanIds);
 
-  const rows = getDb()
-    .prepare(`SELECT * FROM catalog_releases WHERE id IN (${placeholders})`)
-    .all(...cleanIds) as Record<string, unknown>[];
+  const rows: Record<string, unknown>[] = [];
+  for (const chunk of chunkNumberIds(cleanIds)) {
+    const placeholders = chunk.map(() => '?').join(', ');
+    const chunkRows = getDb()
+      .prepare(`SELECT * FROM catalog_releases WHERE id IN (${placeholders})`)
+      .all(...chunk) as Record<string, unknown>[];
+    rows.push(...chunkRows);
+  }
   const filesMap = loadFilesByReleaseIds(cleanIds);
   const collectionsMap = loadCollectionIdsByReleaseIds(cleanIds);
   const deviceInstallsMap = loadDeviceInstallsByReleaseIds(cleanIds);
 
   return {
-    removed: info.changes,
+    removed: totalRemoved,
     items: rows.map((r) =>
       mapReleaseRow(
         r,

@@ -1074,4 +1074,174 @@ test('smart device label probing prefers on-card labels and firmware signatures 
   assert.equal(plainResolved.detectedHintLabel, null);
 });
 
+test('cross-page bulk uninstall queries and deletes >1,000 installed items safely across SQLite chunks', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rgt-bulk-uninstall-test-'));
+  const prevDataDir = process.env.DATA_DIR;
+  const prevDownloadDir = process.env.DOWNLOAD_DIR;
+  try {
+    process.env.DATA_DIR = path.join(tmpDir, 'data');
+    process.env.DOWNLOAD_DIR = path.join(tmpDir, 'downloads');
+
+    const db = await import(`../src/server/db.ts?bulk-uninstall=${Date.now()}`);
+    const rawDb = db.initDb();
+
+    const miyoo = db.upsertStorageDeviceProfileOnMount({
+      volumeLabel: 'MIYOO_256GB',
+      name: 'MIYOO_256GB',
+      createNew: true,
+    });
+    const deck = db.upsertStorageDeviceProfileOnMount({
+      volumeLabel: 'STEAM_DECK',
+      name: 'Steam Deck',
+      createNew: true,
+    });
+
+    // Seed 1,050 SNES releases (exceeds both the 150-row page size and SQLite's 999 variable limit)
+    const now = new Date().toISOString();
+    const insertRelease = rawDb.prepare(
+      `INSERT INTO catalog_releases (
+         remote_url, remote_path, local_path, system_name, release_type, release_tags_json,
+         title, file_size_bytes, status, discovered_at, downloaded_at
+       ) VALUES (?, ?, ?, 'snes-rom', 'Translation', '["Translation"]', ?, 1048576, 'downloaded', ?, ?)`,
+    );
+    const insertFile = rawDb.prepare(
+      `INSERT INTO catalog_release_files (
+         release_id, remote_url, download_url, remote_path, local_path, filename,
+         display_label, file_role, file_size_bytes, status, discovered_at, downloaded_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ROM', 1048576, 'downloaded', ?, ?)`,
+    );
+
+    const allReleaseIds: number[] = [];
+    const miyooInstalledIds: number[] = [];
+    const seedTx = rawDb.transaction(() => {
+      for (let i = 1; i <= 1050; i += 1) {
+        const remotePath = `snes-rom/game-${i}`;
+        const info = insertRelease.run(
+          `https://retrogametalk.com/repo/${remotePath}/`,
+          remotePath,
+          `${remotePath}.zip`,
+          `SNES Game ${i}`,
+          now,
+          now,
+        );
+        const rid = Number(info.lastInsertRowid);
+        allReleaseIds.push(rid);
+        insertFile.run(
+          rid,
+          `https://retrogametalk.com/repo/${remotePath}/file.zip`,
+          `https://retrogametalk.com/repo/${remotePath}/download`,
+          `${remotePath}.zip`,
+          `${remotePath}.zip`,
+          `SNES Game ${i}.zip`,
+          `SNES Game ${i}.zip`,
+          now,
+          now,
+        );
+        // Install 1,010 of them on MIYOO_256GB (first 1,000 with explicit paths, last 10 legacy without paths)
+        if (i <= 1010) {
+          miyooInstalledIds.push(rid);
+        }
+      }
+    });
+    seedTx();
+
+    // Mark 1,010 installed on MIYOO_256GB
+    const insertInstall = rawDb.prepare(
+      `INSERT INTO catalog_release_device_installs (
+         release_id, device_id, installed_at, installed_filename, installed_paths_json
+       ) VALUES (?, ?, ?, ?, ?)`,
+    );
+    const installTx = rawDb.transaction(() => {
+      for (let idx = 0; idx < miyooInstalledIds.length; idx += 1) {
+        const rid = miyooInstalledIds[idx];
+        const hasPaths = idx < 1000;
+        insertInstall.run(
+          rid,
+          miyoo.id,
+          now,
+          hasPaths ? `SNES Game ${idx + 1}.sfc` : null,
+          hasPaths ? JSON.stringify([`SFC/SNES Game ${idx + 1}.sfc`]) : '[]',
+        );
+      }
+      // Also install the first 5 games on Steam Deck to verify multi-device rollup preservation
+      for (let idx = 0; idx < 5; idx += 1) {
+        insertInstall.run(
+          miyooInstalledIds[idx],
+          deck.id,
+          now,
+          `SNES Game ${idx + 1}.sfc`,
+          JSON.stringify([`snes/SNES Game ${idx + 1}.sfc`]),
+        );
+      }
+    });
+    installTx();
+    db.recomputeReleaseInstallRollups(miyooInstalledIds);
+
+    // 1. queryRepositoryItemIds with mountedDeviceId returns ALL 1,010 installed IDs across pages
+    const idResult = db.queryRepositoryItemIds({
+      system: 'snes-rom',
+      mountedDeviceId: miyoo.id,
+    });
+    assert.equal(idResult.total, 1050);
+    assert.equal(idResult.installedOnMountedIds.length, 1010);
+
+    // Filtered specifically to installed on MIYOO_256GB returns 1,010 matching and 1,010 installedOnMountedIds
+    const installedFilterResult = db.queryRepositoryItemIds({
+      system: 'snes-rom',
+      installed: 'only',
+      deviceId: miyoo.id,
+      mountedDeviceId: miyoo.id,
+    });
+    assert.equal(installedFilterResult.total, 1010);
+    assert.equal(installedFilterResult.installedOnMountedIds.length, 1010);
+
+    // 2. getDeviceUninstallTargets resolves all 1,010 targets cleanly (including fallbackFilename for legacy rows)
+    const targets = db.getDeviceUninstallTargets(miyoo.id, allReleaseIds);
+    assert.equal(targets.length, 1010);
+    assert.equal(targets[0].id, miyooInstalledIds[0]);
+    assert.deepEqual(targets[0].installedPaths, ['SFC/SNES Game 1.sfc']);
+    assert.equal(targets[0].installedFilename, 'SNES Game 1.sfc');
+
+    // Legacy item (idx 1005 -> no installedPaths, no installedFilename) resolves fallbackFilename from catalog_release_files
+    const legacyTarget = targets[1005];
+    assert.deepEqual(legacyTarget.installedPaths, []);
+    assert.equal(legacyTarget.installedFilename, null);
+    assert.equal(legacyTarget.fallbackFilename, 'SNES Game 1006.zip');
+
+    // 3. removeDeviceInstalls deletes all 1,010 device installs cleanly across SQLite chunks
+    const removed = db.removeDeviceInstalls(miyoo.id, miyooInstalledIds);
+    assert.equal(removed.removed, 1010);
+    assert.equal(removed.items.length, 1010);
+
+    // Verify MIYOO_256GB now has 0 installed SNES games, while Steam Deck retains its 5 games
+    const afterMiyoo = db.queryRepositoryItemIds({
+      system: 'snes-rom',
+      mountedDeviceId: miyoo.id,
+    });
+    assert.equal(afterMiyoo.installedOnMountedIds.length, 0);
+
+    const afterDeck = db.queryRepositoryItemIds({
+      system: 'snes-rom',
+      mountedDeviceId: deck.id,
+    });
+    assert.equal(afterDeck.installedOnMountedIds.length, 5);
+
+    // Verify rollup for a dual-installed item switched cleanly to Steam Deck, while single-device item cleared
+    const dualItem = removed.items.find((item: { id: number }) => item.id === miyooInstalledIds[0]);
+    const singleItem = removed.items.find((item: { id: number }) => item.id === miyooInstalledIds[10]);
+    assert.equal(dualItem?.installedDeviceLabel, 'Steam Deck');
+    assert.equal(dualItem?.deviceInstalls.length, 1);
+    assert.equal(singleItem?.installedAt, null);
+    assert.equal(singleItem?.installedDeviceLabel, null);
+    assert.equal(singleItem?.deviceInstalls.length, 0);
+  } finally {
+    if (prevDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prevDataDir;
+    if (prevDownloadDir === undefined) delete process.env.DOWNLOAD_DIR;
+    else process.env.DOWNLOAD_DIR = prevDownloadDir;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+
 

@@ -708,6 +708,9 @@ export function CatalogPanel({
     }
     return map;
   });
+  const [selectedInstalledOnMountedById, setSelectedInstalledOnMountedById] = useState<
+    Map<number, boolean>
+  >(() => new Map());
   const [confirmCatalogBulk, setConfirmCatalogBulk] = useState(false);
 
   // On-demand download queueing & background indexer UI state
@@ -1629,10 +1632,59 @@ export function CatalogPanel({
     return false;
   }, [selectedCatalogIds, items]);
 
+  // Keep cached per-device install flags synced with visible items, resetting whenever the mounted device changes
+  const lastMountedDeviceIdForSelectionRef = useRef<string | null>(null);
+  useEffect(() => {
+    const mountedId = activeDeviceProfile?.id ?? null;
+    const deviceChanged = lastMountedDeviceIdForSelectionRef.current !== mountedId;
+    lastMountedDeviceIdForSelectionRef.current = mountedId;
+
+    if (!mountedId) {
+      setSelectedInstalledOnMountedById((prev) => (prev.size === 0 ? prev : new Map()));
+      return;
+    }
+
+    setSelectedInstalledOnMountedById((prev) => {
+      if (deviceChanged) {
+        const fresh = new Map<number, boolean>();
+        for (const item of items) {
+          fresh.set(
+            item.id,
+            Boolean(findItemInstallForDevice(item, mountedId, effectiveMountedDeviceName)),
+          );
+        }
+        return fresh;
+      }
+      let changed = false;
+      for (const item of items) {
+        const isInst = Boolean(
+          findItemInstallForDevice(item, mountedId, effectiveMountedDeviceName),
+        );
+        if (prev.get(item.id) !== isInst) {
+          changed = true;
+          break;
+        }
+      }
+      if (!changed) return prev;
+      const next = new Map(prev);
+      for (const item of items) {
+        next.set(
+          item.id,
+          Boolean(findItemInstallForDevice(item, mountedId, effectiveMountedDeviceName)),
+        );
+      }
+      return next;
+    });
+  }, [items, activeDeviceProfile?.id, effectiveMountedDeviceName]);
+
   useEffect(() => {
     if (!hasOffPageSelection || viewMode !== 'catalog') return;
     let cancelled = false;
+    const mountedId = activeDeviceProfile?.id || null;
     const qs = buildCatalogSearchParams(1, 0);
+    if (mountedId) {
+      qs.set('mountedDeviceId', mountedId);
+    }
     void fetch(`/api/items/ids?${qs.toString()}`)
       .then(async (res) => {
         if (!res.ok || cancelled) return;
@@ -1641,20 +1693,90 @@ export function CatalogPanel({
           queueableIds?: number[];
           downloadableIds?: number[];
           alreadyQueuedIds?: number[];
+          installedOnMountedIds?: number[];
         };
         if (cancelled) return;
         const derived = deriveStatusMapFromIdsPayload(data);
-        if (derived.size === 0) return;
-        setSelectedStatusById((prev) => {
-          let changed = false;
-          derived.forEach((st, id) => {
-            if (prev.get(id) !== st) changed = true;
+        if (derived.size > 0) {
+          setSelectedStatusById((prev) => {
+            let changed = false;
+            derived.forEach((st, id) => {
+              if (prev.get(id) !== st) changed = true;
+            });
+            if (!changed) return prev;
+            const next = new Map(prev);
+            derived.forEach((st, id) => next.set(id, st));
+            return next;
           });
-          if (!changed) return prev;
-          const next = new Map(prev);
-          derived.forEach((st, id) => next.set(id, st));
-          return next;
-        });
+        }
+        if (mountedId && Array.isArray(data.ids)) {
+          const installedSet = new Set<number>(
+            Array.isArray(data.installedOnMountedIds) ? data.installedOnMountedIds : [],
+          );
+          const filterIdSet = new Set<number>(data.ids);
+          setSelectedInstalledOnMountedById((prev) => {
+            let changed = false;
+            for (const id of data.ids!) {
+              const nextVal = installedSet.has(id);
+              if (prev.get(id) !== nextVal) {
+                changed = true;
+                break;
+              }
+            }
+            if (!changed) return prev;
+            const next = new Map(prev);
+            for (const id of data.ids!) {
+              next.set(id, installedSet.has(id));
+            }
+            return next;
+          });
+
+          // If the user holds selected IDs outside the current filter (cross-filter manual picks),
+          // resolve their installed-on-mounted status accurately via lookup as well.
+          const visibleIdSet = new Set(items.map((item) => item.id));
+          const uncoveredSelectedIds: number[] = [];
+          for (const id of selectedCatalogIds) {
+            if (!visibleIdSet.has(id) && !filterIdSet.has(id)) {
+              uncoveredSelectedIds.push(id);
+            }
+          }
+          if (uncoveredSelectedIds.length > 0 && !cancelled) {
+            const lookupRes = await fetch(
+              `/api/devices/${encodeURIComponent(mountedId)}/installs/lookup`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Requested-With': 'rgt-sync',
+                },
+                body: JSON.stringify({ ids: uncoveredSelectedIds }),
+              },
+            );
+            if (lookupRes.ok && !cancelled) {
+              const lookupData = (await lookupRes.json()) as {
+                items?: Array<{ id: number }>;
+              };
+              const foundSet = new Set<number>(
+                Array.isArray(lookupData.items) ? lookupData.items.map((entry) => entry.id) : [],
+              );
+              setSelectedInstalledOnMountedById((prev) => {
+                let changed = false;
+                for (const id of uncoveredSelectedIds) {
+                  if (prev.get(id) !== foundSet.has(id)) {
+                    changed = true;
+                    break;
+                  }
+                }
+                if (!changed) return prev;
+                const next = new Map(prev);
+                for (const id of uncoveredSelectedIds) {
+                  next.set(id, foundSet.has(id));
+                }
+                return next;
+              });
+            }
+          }
+        }
       })
       .catch(() => {
         // Non-fatal: visible items still stay synchronized via loadCatalog
@@ -1662,7 +1784,13 @@ export function CatalogPanel({
     return () => {
       cancelled = true;
     };
-  }, [catalogRevision, hasOffPageSelection, viewMode, buildCatalogSearchParams]);
+  }, [
+    catalogRevision,
+    hasOffPageSelection,
+    viewMode,
+    buildCatalogSearchParams,
+    activeDeviceProfile?.id,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSelectAllMatching = async () => {
     if (selectingAllMatching || totalItems <= 0) return;
@@ -1675,6 +1803,20 @@ export function CatalogPanel({
         }
         return next;
       });
+      if (activeDeviceProfile?.id) {
+        setSelectedInstalledOnMountedById((prev) => {
+          const next = new Map(prev);
+          for (const item of items) {
+            next.set(
+              item.id,
+              Boolean(
+                findItemInstallForDevice(item, activeDeviceProfile.id, effectiveMountedDeviceName),
+              ),
+            );
+          }
+          return next;
+        });
+      }
       setSelectedCatalogIds(new Set(items.map((i) => i.id)));
       return;
     }
@@ -1682,6 +1824,9 @@ export function CatalogPanel({
     setConfirmCatalogBulk(false);
     try {
       const qs = buildCatalogSearchParams(1, 0);
+      if (activeDeviceProfile?.id) {
+        qs.set('mountedDeviceId', activeDeviceProfile.id);
+      }
       const res = await fetch(`/api/items/ids?${qs.toString()}`);
       if (res.ok) {
         const data = (await res.json()) as {
@@ -1689,6 +1834,7 @@ export function CatalogPanel({
           queueableIds?: number[];
           downloadableIds?: number[];
           alreadyQueuedIds?: number[];
+          installedOnMountedIds?: number[];
         };
         if (Array.isArray(data.ids) && data.ids.length > 0) {
           const derived = deriveStatusMapFromIdsPayload(data);
@@ -1700,6 +1846,30 @@ export function CatalogPanel({
             }
             return next;
           });
+          if (activeDeviceProfile?.id) {
+            const installedSet = new Set<number>(
+              Array.isArray(data.installedOnMountedIds) ? data.installedOnMountedIds : [],
+            );
+            setSelectedInstalledOnMountedById((prev) => {
+              const next = new Map(prev);
+              for (const id of data.ids!) {
+                next.set(id, installedSet.has(id));
+              }
+              for (const item of items) {
+                next.set(
+                  item.id,
+                  Boolean(
+                    findItemInstallForDevice(
+                      item,
+                      activeDeviceProfile.id,
+                      effectiveMountedDeviceName,
+                    ),
+                  ),
+                );
+              }
+              return next;
+            });
+          }
           setSelectedCatalogIds(new Set(data.ids));
         }
       }
@@ -1708,37 +1878,66 @@ export function CatalogPanel({
     }
   };
 
-  const selectedInstalledOnMountedItems = useMemo(() => {
-    if (!sdRootHandle || !activeDeviceProfile) return [];
-    return items.filter(
-      (item) =>
-        selectedCatalogIds.has(item.id) &&
-        Boolean(findItemInstallForDevice(item, activeDeviceProfile.id, effectiveMountedDeviceName)),
-    );
-  }, [items, selectedCatalogIds, sdRootHandle, activeDeviceProfile, effectiveMountedDeviceName]);
+  const selectedInstalledOnMountedIds = useMemo(() => {
+    if (!sdRootHandle || !activeDeviceProfile || selectedCatalogIds.size === 0) return [];
+    const visibleById = new Map<number, RepositoryItemRecord>();
+    for (const item of items) {
+      visibleById.set(item.id, item);
+    }
+    const result: number[] = [];
+    for (const id of selectedCatalogIds) {
+      const visible = visibleById.get(id);
+      if (visible) {
+        if (findItemInstallForDevice(visible, activeDeviceProfile.id, effectiveMountedDeviceName)) {
+          result.push(id);
+        }
+      } else if (selectedInstalledOnMountedById.get(id)) {
+        result.push(id);
+      }
+    }
+    return result;
+  }, [
+    items,
+    selectedCatalogIds,
+    selectedInstalledOnMountedById,
+    sdRootHandle,
+    activeDeviceProfile,
+    effectiveMountedDeviceName,
+  ]);
 
   useEffect(() => {
-    if (selectedInstalledOnMountedItems.length === 0) {
+    if (selectedInstalledOnMountedIds.length === 0) {
       setConfirmBulkUninstall(false);
     }
-  }, [selectedInstalledOnMountedItems.length]);
+  }, [selectedInstalledOnMountedIds.length]);
 
   const handleBulkUninstallFromMounted = async () => {
     if (
       !activeDeviceProfile ||
-      selectedInstalledOnMountedItems.length === 0 ||
+      selectedInstalledOnMountedIds.length === 0 ||
       bulkUninstallBusy
     ) {
       return;
     }
     setBulkUninstallBusy(true);
     try {
-      const res = await installer.uninstallItemsFromMountedDevice(selectedInstalledOnMountedItems);
+      const res = await installer.uninstallIdsFromMountedDevice(selectedInstalledOnMountedIds);
       setConfirmBulkUninstall(false);
       const targetLabel = effectiveMountedDeviceName || 'mounted device';
       if (res.uninstalledCount > 0) {
+        const removedIdSet = new Set(res.uninstalledIds);
+        setSelectedInstalledOnMountedById((prev) => {
+          const next = new Map(prev);
+          for (const id of removedIdSet) next.set(id, false);
+          return next;
+        });
+        setSelectedCatalogIds((prev) => {
+          const next = new Set(prev);
+          for (const id of removedIdSet) next.delete(id);
+          return next;
+        });
         setQueueNotice(
-          `Removed ${res.uninstalledCount} game${res.uninstalledCount === 1 ? '' : 's'} (${res.filesRemovedCount} file${res.filesRemovedCount === 1 ? '' : 's'}) from ${targetLabel}. Local mirror untouched.${res.errors.length > 0 ? ` (${res.errors.length} failed)` : ''}`,
+          `Removed ${res.uninstalledCount.toLocaleString()} game${res.uninstalledCount === 1 ? '' : 's'} (${res.filesRemovedCount.toLocaleString()} file${res.filesRemovedCount === 1 ? '' : 's'}) from ${targetLabel}. Local mirror untouched.${res.errors.length > 0 ? ` (${res.errors.length} failed)` : ''}`,
         );
         await loadCatalog(true);
       } else if (res.errors.length > 0) {
@@ -4164,11 +4363,11 @@ export function CatalogPanel({
                   )}
                   {sdRootHandle &&
                     activeDeviceProfile &&
-                    selectedInstalledOnMountedItems.length > 0 && (
+                    selectedInstalledOnMountedIds.length > 0 && (
                       <button
                         type="button"
                         disabled={installer.isBusy || bulkUninstallBusy}
-                        title={`Delete ROM files for ${selectedInstalledOnMountedItems.length} selected game${selectedInstalledOnMountedItems.length === 1 ? '' : 's'} from ${effectiveMountedDeviceName || 'mounted device'} (local mirror stays untouched)`}
+                        title={`Delete ROM files for ${selectedInstalledOnMountedIds.length.toLocaleString()} selected game${selectedInstalledOnMountedIds.length === 1 ? '' : 's'} from ${effectiveMountedDeviceName || 'mounted device'} (local mirror stays untouched)`}
                         onClick={() => {
                           setConfirmCatalogBulk(false);
                           setConfirmBulkUninstall(true);
@@ -4178,7 +4377,7 @@ export function CatalogPanel({
                         <Trash2 className="h-3.5 w-3.5 shrink-0" />
                         <span>
                           Uninstall from {effectiveMountedDeviceName || 'Device'} (
-                          {selectedInstalledOnMountedItems.length})
+                          {selectedInstalledOnMountedIds.length.toLocaleString()})
                         </span>
                       </button>
                     )}
@@ -4228,8 +4427,8 @@ export function CatalogPanel({
               {confirmBulkUninstall ? (
                 <>
                   <span className="text-xs font-mono text-crt-amber">
-                    Remove {selectedInstalledOnMountedItems.length} game
-                    {selectedInstalledOnMountedItems.length === 1 ? '' : 's'} from{' '}
+                    Remove {selectedInstalledOnMountedIds.length.toLocaleString()} game
+                    {selectedInstalledOnMountedIds.length === 1 ? '' : 's'} from{' '}
                     {effectiveMountedDeviceName || 'Device'}? Local mirror is untouched.
                   </span>
                   <button
@@ -4244,8 +4443,10 @@ export function CatalogPanel({
                       <Trash2 className="h-3.5 w-3.5 shrink-0" />
                     )}
                     {bulkUninstallBusy
-                      ? 'Removing...'
-                      : `Confirm Uninstall (${selectedInstalledOnMountedItems.length})`}
+                      ? installer.uninstallProgress && installer.uninstallProgress.total > 0
+                        ? `Removing ${installer.uninstallProgress.completed.toLocaleString()} / ${installer.uninstallProgress.total.toLocaleString()}...`
+                        : 'Removing...'
+                      : `Confirm Uninstall (${selectedInstalledOnMountedIds.length.toLocaleString()})`}
                   </button>
                   <button
                     type="button"

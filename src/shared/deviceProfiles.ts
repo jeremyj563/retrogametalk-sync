@@ -45,6 +45,16 @@ export interface DeviceMarkerPayload {
   updatedAt?: string;
 }
 
+export interface DeviceUninstallTargetRecord {
+  id: number;
+  title: string;
+  systemName: string;
+  releaseTags: string[];
+  installedFilename: string | null;
+  fallbackFilename: string | null;
+  installedPaths: string[];
+}
+
 export function sanitizeDeviceIconKey(raw: unknown, fallback: DeviceIconKey = 'handheld'): DeviceIconKey {
   if (typeof raw !== 'string') return fallback;
   const trimmed = raw.trim().toLowerCase();
