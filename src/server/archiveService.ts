@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import type { Response } from 'express';
 import yazl from 'yazl';
 import {
@@ -39,8 +40,11 @@ const DEFAULT_TEXT_PREVIEW_READ_BYTES = 128 * 1024;
 
 const ARCHIVE_EXTENSIONS = new Set(['.zip', '.7z', '.rar', '.tar', '.gz', '.tgz', '.xz', '.bz2']);
 
+// Note: `.md` is intentionally NOT in unconditional CLUTTER_EXTENSIONS because Sega Genesis /
+// Mega Drive ROMs use the `.md` extension (No-Intro standard). `.md` entries are disambiguated
+// via `isMarkdownDocEntry()` so README.md / CHANGELOG.md docs are stripped while Genesis ROMs are kept.
 const CLUTTER_EXTENSIONS = new Set([
-  '.txt', '.md', '.markdown', '.nfo', '.diz', '.url', '.webloc', '.lnk',
+  '.txt', '.markdown', '.nfo', '.diz', '.url', '.webloc', '.lnk',
   '.html', '.htm', '.pdf', '.doc', '.docx', '.rtf', '.jpg', '.jpeg', '.png',
   '.gif', '.webp', '.bmp', '.ico', '.xml', '.json', '.ini', '.cfg', '.sfv',
   '.md5', '.sha1', '.sha256', '.log', '.cue~', '.bak',
@@ -64,6 +68,91 @@ const PLAYABLE_ROM_EXTENSIONS = new Set([
   '.mx1', '.mx2', '.rom', '.wad', '.bin',
   ...SINGLE_DISC_EXTENSIONS,
 ]);
+
+const MARKDOWN_DOC_BASENAME_RE =
+  /^(readme|read[\s._-]?me|changelog|change[\s._-]?log|changes|history|license|licence|credits|notes|release[\s._-]?notes|manual|faq|todo|contributing|instructions|guide|howto|how[\s._-]?to|about|info|whatsnew|whats[\s._-]?new|version|patch[\s._-]?notes|install|authors|acknowledgments?)(\b|[._\s-]|$)/i;
+
+const MARKDOWN_DOC_DIR_SEGMENT_RE = /^(docs?|documentation|readme|readmes|info|manual|manuals)$/i;
+
+const SEGA_GENESIS_SYSTEM_RE = /genesis|mega[\s_-]*drive|\bmd\b|\bgen\b/i;
+
+export function isSegaGenesisSystemName(systemName?: string | null): boolean {
+  if (!systemName) return false;
+  return SEGA_GENESIS_SYSTEM_RE.test(systemName);
+}
+
+/**
+ * Disambiguates `.md` archive entries between Sega Mega Drive / Genesis ROMs and Markdown docs.
+ * Retail Mega Drive ROMs are >= 128 KB (tiny homebrews typically >= 32 KB), while Markdown docs
+ * are small text files (< 128 KB) named README/CHANGELOG/NOTES/etc. or sitting in non-Genesis archives.
+ */
+export function isMarkdownDocEntry(
+  entryPath: string,
+  sizeBytes: number,
+  systemName?: string | null,
+): boolean {
+  const normalized = entryPath.replace(/\\/g, '/').replace(/^\/+/, '');
+  const ext = getExtLower(normalized);
+  if (ext !== '.md') return false;
+
+  // Retail Genesis/Mega Drive carts start at 128 KB and go up to 4 MB+
+  if (sizeBytes >= 131_072) return false;
+
+  const base = path.posix.basename(normalized);
+  const stem = base.slice(0, -ext.length).trim();
+  if (MARKDOWN_DOC_BASENAME_RE.test(stem)) {
+    return true;
+  }
+
+  const dirSegments = normalized.split('/').slice(0, -1);
+  if (dirSegments.some((seg) => MARKDOWN_DOC_DIR_SEGMENT_RE.test(seg))) {
+    return true;
+  }
+
+  // In non-Genesis systems (e.g., SNES, GBA, PSX), any small `.md` file is a Markdown document
+  if (systemName && !isSegaGenesisSystemName(systemName) && sizeBytes < 65_536) {
+    return true;
+  }
+
+  // Without system context (e.g., direct filesystem archive browsing), tiny < 16 KB `.md` files are docs
+  if (!systemName && sizeBytes < 16_384) {
+    return true;
+  }
+
+  return false;
+}
+
+export function isClutterEntry(
+  entryPath: string,
+  sizeBytes: number,
+  systemName?: string | null,
+): boolean {
+  const ext = getExtLower(entryPath);
+  if (CLUTTER_EXTENSIONS.has(ext)) return true;
+  if (ext === '.md') return isMarkdownDocEntry(entryPath, sizeBytes, systemName);
+  return false;
+}
+
+export function escapeUnzipGlobPattern(entryPath: string): string {
+  return entryPath.replace(/([\\[\]*?])/g, '\\$1');
+}
+
+export function escapeBsdtarGlobPattern(entryPath: string): string {
+  return entryPath.replace(/([\\[\]*?])/g, '\\$1');
+}
+
+function buildExtractorEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const lang = (env.LANG || '').trim();
+  const lcAll = (env.LC_ALL || '').trim();
+  if (!lang || /^(C|POSIX)$/i.test(lang)) {
+    env.LANG = 'C.UTF-8';
+  }
+  if (!lcAll || /^(C|POSIX)$/i.test(lcAll)) {
+    env.LC_ALL = 'C.UTF-8';
+  }
+  return env;
+}
 
 let cached7zPath: string | null | undefined;
 let cached7zSupportsRar: boolean | undefined;
@@ -351,7 +440,10 @@ function isSafeArchiveEntryPath(entryPath: string): boolean {
 
 function runProcessCapture(bin: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: buildExtractorEnv(),
+    });
     const outChunks: Buffer[] = [];
     const errChunks: Buffer[] = [];
     child.stdout.on('data', (c: Buffer) => outChunks.push(c));
@@ -534,7 +626,7 @@ export async function listArchiveEntries(archivePath: string): Promise<{ format:
     const bin7z = await resolve7zBinary();
     const sevenZipSupportsRar = bin7z ? await check7zSupportsRar(bin7z) : false;
     if (bin7z && sevenZipSupportsRar) {
-      const res = await runProcessCapture(bin7z, ['l', '-slt', '-sccUTF-8', archivePath]);
+      const res = await runProcessCapture(bin7z, ['l', '-slt', '-sccUTF-8', '--', archivePath]);
       if (res.code === 0) {
         const entries = parse7zSltOutput(res.stdout);
         logServer(
@@ -596,7 +688,7 @@ export async function listArchiveEntries(archivePath: string): Promise<{ format:
 
   const bin7z = await resolve7zBinary();
   if (bin7z) {
-    const res = await runProcessCapture(bin7z, ['l', '-slt', '-sccUTF-8', archivePath]);
+    const res = await runProcessCapture(bin7z, ['l', '-slt', '-sccUTF-8', '--', archivePath]);
     if (res.code === 0) {
       const entries = parse7zSltOutput(res.stdout);
       logServer('ARCHIVE', 'debug', `Listed archive via ${path.basename(bin7z)}`, `${path.basename(archivePath)} (${format}, ${entries.length} entries)`);
@@ -622,11 +714,9 @@ export async function listArchiveEntries(archivePath: string): Promise<{ format:
     }
   }
 
-  // Fallback to unzip for .zip if 7z wasn't found or failed
+  // Fallback to unzip -l for .zip if 7z wasn't found or failed
   if (format === 'zip') {
-    const res = await runProcessCapture('unzip', ['-Z', '-T', archivePath]).catch(() =>
-      runProcessCapture('unzip', ['-l', archivePath]),
-    );
+    const res = await runProcessCapture('unzip', ['-l', archivePath]);
     if (res.code !== 0) {
       logServer(
         'ARCHIVE',
@@ -638,8 +728,8 @@ export async function listArchiveEntries(archivePath: string): Promise<{ format:
     }
     const entries: RawArchiveEntry[] = [];
     for (const line of res.stdout.split(/\r?\n/)) {
-      // unzip -l format: "  12345  2024-01-01 12:00   folder/file.nes"
-      const m = line.match(/^\s*(\d+)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+(.+)$/);
+      // unzip -l format: "  12345  2024-01-01 12:00   folder/file.nes" or "  12345  01-01-2024 12:00   folder/file.nes"
+      const m = line.match(/^\s*(\d+)\s+\d{2,4}-\d{2}-\d{2,4}\s+\d{2}:\d{2}\s+(.+)$/);
       if (m) {
         const sizeBytes = Number(m[1]) || 0;
         const entryPath = m[2].replace(/\\/g, '/').trim();
@@ -661,14 +751,21 @@ function getExtLower(filePath: string): string {
   return idx >= 0 ? base.slice(idx).toLowerCase() : '';
 }
 
-export function classifyArchiveEntry(entryPath: string, sizeBytes: number): ArchiveBrowseEntry {
+export function classifyArchiveEntry(
+  entryPath: string,
+  sizeBytes: number,
+  systemName?: string | null,
+): ArchiveBrowseEntry {
   const normalized = entryPath.replace(/\\/g, '/').replace(/^\/+/, '');
   const name = path.posix.basename(normalized);
   const ext = getExtLower(normalized);
+  const markdownDoc = ext === '.md' && isMarkdownDocEntry(normalized, sizeBytes, systemName);
 
   let category: ArchiveEntryCategory = 'other';
   if (DISC_DESCRIPTOR_EXTENSIONS.has(ext) || SINGLE_DISC_EXTENSIONS.has(ext) || DISC_TRACK_EXTENSIONS.has(ext)) {
     category = 'disc';
+  } else if (markdownDoc) {
+    category = 'doc';
   } else if (PLAYABLE_ROM_EXTENSIONS.has(ext)) {
     category = 'rom';
   } else if (PATCH_EXTENSIONS.has(ext)) {
@@ -680,7 +777,8 @@ export function classifyArchiveEntry(entryPath: string, sizeBytes: number): Arch
   }
 
   const previewableText =
-    TEXT_PREVIEW_EXTENSIONS.has(ext) && sizeBytes <= MAX_TEXT_PREVIEW_FILE_BYTES;
+    (ext === '.md' ? markdownDoc : TEXT_PREVIEW_EXTENSIONS.has(ext)) &&
+    sizeBytes <= MAX_TEXT_PREVIEW_FILE_BYTES;
 
   return {
     path: normalized,
@@ -692,12 +790,15 @@ export function classifyArchiveEntry(entryPath: string, sizeBytes: number): Arch
   };
 }
 
-export async function browseArchiveAtPath(archiveAbsPath: string): Promise<ArchiveBrowseListing> {
+export async function browseArchiveAtPath(
+  archiveAbsPath: string,
+  systemName?: string | null,
+): Promise<ArchiveBrowseListing> {
   const st = fs.statSync(archiveAbsPath);
   const { format, entries } = await listArchiveEntries(archiveAbsPath);
 
   const browseEntries = entries
-    .map((entry) => classifyArchiveEntry(entry.entryPath, entry.sizeBytes))
+    .map((entry) => classifyArchiveEntry(entry.entryPath, entry.sizeBytes, systemName))
     .sort((a, b) =>
       a.path.localeCompare(b.path, undefined, { sensitivity: 'base', numeric: true }),
     );
@@ -745,7 +846,7 @@ export async function inspectArchiveForItem(
 
   for (const entry of entries) {
     const ext = getExtLower(entry.entryPath);
-    if (CLUTTER_EXTENSIONS.has(ext) || ARCHIVE_EXTENSIONS.has(ext)) {
+    if (isClutterEntry(entry.entryPath, entry.sizeBytes, item.systemName) || ARCHIVE_EXTENSIONS.has(ext)) {
       ignoredPaths.push(entry.entryPath);
       continue;
     }
@@ -926,6 +1027,30 @@ export async function inspectArchiveForItem(
     notes.push(`Stripped ${ignoredPaths.length} non-game file${ignoredPaths.length === 1 ? '' : 's'} (readmes, links, docs, or patches).`);
   }
 
+  if (playableTargets.length === 0) {
+    const entrySummary = entries
+      .slice(0, 8)
+      .map((e) => `${path.posix.basename(e.entryPath)} (${e.sizeBytes}B)`)
+      .join(', ');
+    logServer(
+      'ARCHIVE',
+      'debug',
+      `No playable ROM found in "${file.filename}" (system=${item.systemName}, format=${format})`,
+      `entries=${entries.length}, ignored=${ignoredPaths.length}, patches=${patchPaths.length}, patchOnly=${patchOnly}, sample=[${entrySummary || 'none'}]`,
+    );
+  } else {
+    const targetSummary = playableTargets
+      .slice(0, 4)
+      .map((t) => `${t.primaryEntry} (${t.sizeBytes}B -> "${t.suggestedFilename}")`)
+      .join(', ');
+    logServer(
+      'ARCHIVE',
+      'debug',
+      `Inspected "${file.filename}" (system=${item.systemName}, format=${format}): ${playableTargets.length} playable target(s), ${ignoredPaths.length} ignored`,
+      targetSummary,
+    );
+  }
+
   return {
     itemId: item.id,
     fileId: file.id,
@@ -1020,6 +1145,132 @@ export function buildContentDispositionAttachment(filename: string): {
   };
 }
 
+function spawnExtractorStream(
+  label: string,
+  bin: string,
+  args: string[],
+  archivePath: string,
+  entryPath: string,
+  describeExitCode?: (code: number) => string,
+): NodeJS.ReadableStream {
+  logServer(
+    'ARCHIVE',
+    'debug',
+    `Spawning ${label} extraction`,
+    `bin="${path.basename(bin)}", archive="${path.basename(archivePath)}", entry="${entryPath}"`,
+  );
+
+  const child = spawn(bin, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: buildExtractorEnv(),
+  });
+
+  const pass = new PassThrough();
+  let errBuf = '';
+  let bytesEmitted = 0;
+  let stdoutEnded = false;
+  let childClosed = false;
+  let exitCode: number | null = null;
+  let exitSignal: NodeJS.Signals | null = null;
+  let failed = false;
+
+  const fail = (err: Error) => {
+    if (failed) return;
+    failed = true;
+    if (!pass.destroyed) {
+      pass.destroy(err);
+    }
+  };
+
+  const maybeComplete = () => {
+    if (failed || !stdoutEnded || !childClosed) return;
+    if (exitCode !== 0) {
+      const fallbackReason =
+        exitSignal
+          ? `killed by signal ${exitSignal}`
+          : describeExitCode
+            ? describeExitCode(exitCode ?? 1)
+            : `exited with code ${exitCode ?? 1}`;
+      const reason = errBuf.trim() || fallbackReason;
+      logServer(
+        'ARCHIVE',
+        'debug',
+        `${label} extraction failed (exit=${exitCode}, bytes=${bytesEmitted}) for "${entryPath}"`,
+        reason,
+      );
+      fail(new Error(`${label} extraction failed: ${reason}`));
+      return;
+    }
+    logServer(
+      'ARCHIVE',
+      'debug',
+      `${label} extraction completed (exit=0, bytes=${bytesEmitted})`,
+      `archive="${path.basename(archivePath)}", entry="${entryPath}"`,
+    );
+    if (!pass.destroyed && !pass.writableEnded) {
+      pass.end();
+    }
+  };
+
+  child.stderr.on('data', (d: Buffer) => {
+    if (errBuf.length < 8192) {
+      errBuf += d.toString('utf8');
+    }
+  });
+
+  child.stdout.on('data', (chunk: Buffer) => {
+    bytesEmitted += chunk.length;
+    if (!pass.destroyed) {
+      if (!pass.write(chunk)) {
+        child.stdout.pause();
+        pass.once('drain', () => {
+          if (!child.stdout.destroyed) {
+            child.stdout.resume();
+          }
+        });
+      }
+    }
+  });
+
+  child.stdout.on('end', () => {
+    stdoutEnded = true;
+    maybeComplete();
+  });
+
+  child.stdout.on('error', (err) => {
+    logServer('ARCHIVE', 'debug', `${label} stdout error for "${entryPath}"`, formatErrorDetails(err));
+    fail(err);
+  });
+
+  child.on('error', (err) => {
+    logServer('ARCHIVE', 'debug', `${label} spawn error for "${entryPath}"`, formatErrorDetails(err));
+    fail(err);
+  });
+
+  child.on('close', (code, signal) => {
+    childClosed = true;
+    exitCode = code;
+    exitSignal = signal;
+    if (child.stdout.destroyed || child.stdout.readableEnded) {
+      stdoutEnded = true;
+    }
+    maybeComplete();
+  });
+
+  // Cleanly terminate subprocess if consumer aborts early (e.g., preview truncation or client abort)
+  pass.on('close', () => {
+    if (!childClosed && child.exitCode === null && !child.killed) {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        // Process already exited
+      }
+    }
+  });
+
+  return pass;
+}
+
 async function openEntryReadableStream(archivePath: string, entryPath: string): Promise<NodeJS.ReadableStream> {
   if (!isSafeArchiveEntryPath(entryPath)) {
     throw new Error('Invalid archive entry path');
@@ -1040,99 +1291,36 @@ async function openEntryReadableStream(archivePath: string, entryPath: string): 
   if (isRarPayload) {
     const unrarBin = await resolveUnrarBinary();
     if (unrarBin) {
-      logServer(
-        'ARCHIVE',
-        'debug',
-        `Spawning ${path.basename(unrarBin)} extraction`,
-        `archive="${path.basename(archivePath)}", entry="${entryPath}"`,
+      return spawnExtractorStream(
+        path.basename(unrarBin),
+        unrarBin,
+        ['p', '-inul', '-p-', '--', archivePath, entryPath],
+        archivePath,
+        entryPath,
+        describeUnrarExitCode,
       );
-      const child = spawn(unrarBin, ['p', '-inul', '-p-', '--', archivePath, entryPath], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let errBuf = '';
-      child.stderr.on('data', (d: Buffer) => {
-        errBuf += d.toString('utf8');
-      });
-      child.on('error', (err) => {
-        logServer('ARCHIVE', 'debug', `unrar spawn error for "${entryPath}"`, formatErrorDetails(err));
-        if (!child.stdout.destroyed) {
-          child.stdout.destroy(err);
-        }
-      });
-      child.on('close', (code) => {
-        if (code !== 0) {
-          const reason = errBuf.trim() || describeUnrarExitCode(code ?? 1);
-          logServer('ARCHIVE', 'debug', `unrar extraction failed (exit=${code}) for "${entryPath}"`, reason);
-          if (!child.stdout.destroyed) {
-            child.stdout.destroy(new Error(`unrar extraction failed: ${reason}`));
-          }
-        }
-      });
-      return child.stdout;
     }
 
     const bin7z = await resolve7zBinary();
     if (bin7z && (await check7zSupportsRar(bin7z))) {
-      logServer(
-        'ARCHIVE',
-        'debug',
-        `Spawning ${path.basename(bin7z)} RAR extraction`,
-        `archive="${path.basename(archivePath)}", entry="${entryPath}"`,
+      return spawnExtractorStream(
+        `${path.basename(bin7z)} (RAR)`,
+        bin7z,
+        ['e', '-so', '-sccUTF-8', '-spd', `-i!${entryPath}`, '--', archivePath],
+        archivePath,
+        entryPath,
       );
-      const child = spawn(bin7z, ['e', '-so', archivePath, entryPath], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let errBuf = '';
-      child.stderr.on('data', (d: Buffer) => {
-        errBuf += d.toString('utf8');
-      });
-      child.on('error', (err) => {
-        logServer('ARCHIVE', 'debug', `7-Zip spawn error for "${entryPath}"`, formatErrorDetails(err));
-        if (!child.stdout.destroyed) {
-          child.stdout.destroy(err);
-        }
-      });
-      child.on('close', (code) => {
-        if (code !== 0) {
-          logServer('ARCHIVE', 'debug', `7-Zip extraction failed (exit=${code}) for "${entryPath}"`, errBuf.trim() || 'no stderr');
-          if (!child.stdout.destroyed) {
-            child.stdout.destroy(new Error(errBuf.trim() || `7-Zip extraction exited with code ${code}`));
-          }
-        }
-      });
-      return child.stdout;
     }
 
     const bsdtarBin = await resolveBsdtarBinary();
     if (bsdtarBin) {
-      logServer(
-        'ARCHIVE',
-        'debug',
-        `Spawning bsdtar RAR extraction fallback`,
-        `archive="${path.basename(archivePath)}", entry="${entryPath}"`,
+      return spawnExtractorStream(
+        'bsdtar (RAR)',
+        bsdtarBin,
+        ['-xOf', archivePath, '--', escapeBsdtarGlobPattern(entryPath)],
+        archivePath,
+        entryPath,
       );
-      const child = spawn(bsdtarBin, ['-xOf', archivePath, entryPath], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let errBuf = '';
-      child.stderr.on('data', (d: Buffer) => {
-        errBuf += d.toString('utf8');
-      });
-      child.on('error', (err) => {
-        logServer('ARCHIVE', 'debug', `bsdtar spawn error for "${entryPath}"`, formatErrorDetails(err));
-        if (!child.stdout.destroyed) {
-          child.stdout.destroy(err);
-        }
-      });
-      child.on('close', (code) => {
-        if (code !== 0) {
-          logServer('ARCHIVE', 'debug', `bsdtar extraction failed (exit=${code}) for "${entryPath}"`, errBuf.trim() || 'no stderr');
-          if (!child.stdout.destroyed) {
-            child.stdout.destroy(new Error(errBuf.trim() || `bsdtar extraction exited with code ${code}`));
-          }
-        }
-      });
-      return child.stdout;
     }
 
     throw new Error('Cannot extract RAR archive: no RAR-capable extractor (unrar) is installed in this runtime.');
@@ -1140,55 +1328,23 @@ async function openEntryReadableStream(archivePath: string, entryPath: string): 
 
   const bin7z = await resolve7zBinary();
   if (bin7z) {
-    logServer('ARCHIVE', 'debug', `Spawning ${path.basename(bin7z)} extraction`, `archive="${path.basename(archivePath)}", entry="${entryPath}"`);
-    const child = spawn(bin7z, ['e', '-so', archivePath, entryPath], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let errBuf = '';
-    child.stderr.on('data', (d: Buffer) => {
-      errBuf += d.toString('utf8');
-    });
-    child.on('error', (err) => {
-      logServer('ARCHIVE', 'debug', `7-Zip spawn error for "${entryPath}"`, formatErrorDetails(err));
-      if (!child.stdout.destroyed) {
-        child.stdout.destroy(err);
-      }
-    });
-    child.on('close', (code) => {
-      if (code !== 0) {
-        logServer('ARCHIVE', 'debug', `7-Zip extraction failed (exit=${code}) for "${entryPath}"`, errBuf.trim() || 'no stderr');
-        if (!child.stdout.destroyed) {
-          child.stdout.destroy(new Error(errBuf.trim() || `7-Zip extraction exited with code ${code}`));
-        }
-      }
-    });
-    return child.stdout;
+    return spawnExtractorStream(
+      path.basename(bin7z),
+      bin7z,
+      ['e', '-so', '-sccUTF-8', '-spd', `-i!${entryPath}`, '--', archivePath],
+      archivePath,
+      entryPath,
+    );
   }
 
   if (format === 'zip') {
-    logServer('ARCHIVE', 'debug', `Spawning unzip extraction`, `archive="${path.basename(archivePath)}", entry="${entryPath}"`);
-    const child = spawn('unzip', ['-p', archivePath, entryPath], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let errBuf = '';
-    child.stderr.on('data', (d: Buffer) => {
-      errBuf += d.toString('utf8');
-    });
-    child.on('error', (err) => {
-      logServer('ARCHIVE', 'debug', `unzip spawn error for "${entryPath}"`, formatErrorDetails(err));
-      if (!child.stdout.destroyed) {
-        child.stdout.destroy(err);
-      }
-    });
-    child.on('close', (code) => {
-      if (code !== 0) {
-        logServer('ARCHIVE', 'debug', `unzip extraction failed (exit=${code}) for "${entryPath}"`, errBuf.trim() || 'no stderr');
-        if (!child.stdout.destroyed) {
-          child.stdout.destroy(new Error(errBuf.trim() || `unzip extraction exited with code ${code}`));
-        }
-      }
-    });
-    return child.stdout;
+    return spawnExtractorStream(
+      'unzip',
+      'unzip',
+      ['-p', archivePath, escapeUnzipGlobPattern(entryPath)],
+      archivePath,
+      entryPath,
+    );
   }
 
   throw new Error(`Cannot extract ${format.toUpperCase()} archive without 7-Zip binary.`);
@@ -1291,16 +1447,20 @@ export async function streamExtractedEntryToResponse(
       `utf8="${disposition.utf8Filename}", ascii="${disposition.asciiFallback}"`,
     );
   }
-  const stream = await openEntryReadableStream(archivePath, entryPath);
+  logServer(
+    'ARCHIVE',
+    'debug',
+    `Starting archive entry stream for "${disposition.asciiFallback}"`,
+    `archive="${path.basename(archivePath)}", entry="${entryPath}", expectedSizeBytes=${expectedSizeBytes ?? 'unknown'}`,
+  );
 
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Disposition', disposition.headerValue);
-  if (expectedSizeBytes && expectedSizeBytes > 0) {
-    res.setHeader('Content-Length', String(expectedSizeBytes));
-  }
+  const stream = await openEntryReadableStream(archivePath, entryPath);
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
+    let headersPrepared = false;
+    let bytesStreamed = 0;
+
     const finish = (err?: unknown) => {
       if (settled) return;
       settled = true;
@@ -1308,11 +1468,87 @@ export async function streamExtractedEntryToResponse(
       else resolve();
     };
 
+    const prepareHeaders = (firstChunkLen: number) => {
+      if (headersPrepared) return;
+      headersPrepared = true;
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', disposition.headerValue);
+      if (
+        expectedSizeBytes &&
+        expectedSizeBytes > 0 &&
+        firstChunkLen <= expectedSizeBytes
+      ) {
+        res.setHeader('Content-Length', String(expectedSizeBytes));
+      }
+    };
+
+    stream.on('data', (rawChunk: Buffer | string) => {
+      if (settled) return;
+      const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+      if (chunk.length === 0) return;
+      prepareHeaders(chunk.length);
+      bytesStreamed += chunk.length;
+      if (!res.write(chunk)) {
+        stream.pause();
+        res.once('drain', () => {
+          if (!settled) {
+            stream.resume();
+          }
+        });
+      }
+    });
+
+    stream.on('end', () => {
+      if (settled) return;
+      if (bytesStreamed === 0 && expectedSizeBytes && expectedSizeBytes > 0) {
+        const err = new Error(
+          `Archive extraction produced 0 bytes for "${path.posix.basename(entryPath)}" (expected ${expectedSizeBytes} bytes).`,
+        );
+        logServer(
+          'ARCHIVE',
+          'debug',
+          `Empty extraction stream for "${entryPath}" (${disposition.asciiFallback})`,
+          `archive="${path.basename(archivePath)}", expectedSizeBytes=${expectedSizeBytes}, bytesStreamed=0`,
+        );
+        if (!res.headersSent) {
+          res.status(500).json({ error: err.message });
+        } else {
+          res.destroy(err);
+        }
+        finish(err);
+        return;
+      }
+
+      if (!headersPrepared) {
+        headersPrepared = true;
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Content-Disposition', disposition.headerValue);
+        res.setHeader('Content-Length', '0');
+      }
+
+      if (expectedSizeBytes && expectedSizeBytes > 0 && bytesStreamed !== expectedSizeBytes) {
+        logServer(
+          'ARCHIVE',
+          'warn',
+          `Extracted byte count mismatch for "${disposition.asciiFallback}"`,
+          `archive="${path.basename(archivePath)}", entry="${entryPath}", streamed=${bytesStreamed}, expected=${expectedSizeBytes}`,
+        );
+      } else {
+        logServer(
+          'ARCHIVE',
+          'debug',
+          `Finished streaming "${disposition.asciiFallback}" (${bytesStreamed} bytes)`,
+          `archive="${path.basename(archivePath)}", entry="${entryPath}"`,
+        );
+      }
+      res.end();
+    });
+
     stream.on('error', (err) => {
       logServer(
         'ARCHIVE',
         'debug',
-        `Extraction stream error for "${entryPath}" (${disposition.asciiFallback})`,
+        `Extraction stream error for "${entryPath}" (${disposition.asciiFallback}) after ${bytesStreamed} bytes`,
         formatErrorDetails(err),
       );
       if (!res.headersSent) {
@@ -1322,13 +1558,31 @@ export async function streamExtractedEntryToResponse(
       }
       finish(err);
     });
+
     res.on('error', (err) => {
       logServer('ARCHIVE', 'debug', `HTTP response stream error for "${disposition.asciiFallback}"`, formatErrorDetails(err));
+      if ('destroy' in stream && typeof stream.destroy === 'function') {
+        stream.destroy();
+      }
       finish(err);
     });
-    res.on('close', () => finish());
+
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        logServer(
+          'ARCHIVE',
+          'debug',
+          `Client disconnected while streaming "${disposition.asciiFallback}" after ${bytesStreamed} bytes`,
+          `archive="${path.basename(archivePath)}", entry="${entryPath}"`,
+        );
+        if ('destroy' in stream && typeof stream.destroy === 'function') {
+          stream.destroy();
+        }
+      }
+      finish();
+    });
+
     res.on('finish', () => finish());
-    stream.pipe(res);
   });
 }
 

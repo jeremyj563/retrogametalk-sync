@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
+import express from 'express';
 import yazl from 'yazl';
 import {
   filterArchiveEntries,
@@ -15,14 +18,27 @@ import {
   classifyArchiveEntry,
   classifyArchiveMagicBytes,
   detect7zRarSupportFromInfoOutput,
+  escapeBsdtarGlobPattern,
+  escapeUnzipGlobPattern,
+  inspectArchiveForItem,
+  isClutterEntry,
+  isMarkdownDocEntry,
   listArchiveEntries,
   parseBsdtarVerboseOutput,
   parseUnrarLtOutput,
   readArchiveTextPreview,
+  resolve7zBinary,
+  streamExtractedEntryToResponse,
 } from '../src/server/archiveService.ts';
+import type { ReleaseFileRecord, RepositoryItemRecord } from '../src/server/types.ts';
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rgt-archive-browse-'));
 const sampleZipPath = path.join(tempRoot, 'Chrono Trigger (USA) [T-En].zip');
+const genesisZipPath = path.join(tempRoot, 'Sonic the Hedgehog (USA, Europe).zip');
+const genesis7zPath = path.join(tempRoot, 'Genesis Edge Cases.7z');
+
+const genesisRomPayload = Buffer.alloc(262_144, 0x53); // 256 KB binary Genesis ROM
+const smallHomebrewPayload = Buffer.alloc(32_768, 0x4d); // 32 KB tiny Genesis homebrew
 
 function createTestZip(outPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -43,8 +59,28 @@ function createTestZip(outPath: string): Promise<void> {
   });
 }
 
+function createGenesisZip(outPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const zip = new yazl.ZipFile();
+    zip.addBuffer(genesisRomPayload, 'Sonic the Hedgehog (USA, Europe) [!].md');
+    zip.addBuffer(Buffer.from('# Sonic Hack\nReadme instructions.\n', 'utf8'), 'README.md');
+    zip.addBuffer(Buffer.from('v1.0 initial\n', 'utf8'), 'CHANGELOG.md');
+    zip.addBuffer(smallHomebrewPayload, 'Pokémon – Mini Demo (World).md');
+    zip.addBuffer(smallHomebrewPayload, '-Leading Dash.md');
+    zip.addBuffer(smallHomebrewPayload, '@AtPrefix.md');
+
+    const out = fs.createWriteStream(outPath);
+    out.on('error', reject);
+    out.on('close', () => resolve());
+    zip.outputStream.on('error', reject);
+    zip.outputStream.pipe(out);
+    zip.end();
+  });
+}
+
 before(async () => {
   await createTestZip(sampleZipPath);
+  await createGenesisZip(genesisZipPath);
 });
 
 after(() => {
@@ -109,6 +145,8 @@ test('browseArchiveAtPath and readArchiveTextPreview inspect real ZIP archives w
   assert.equal(byPath.get('Chrono Trigger.sfc')?.previewableText, false);
   assert.equal(byPath.get('Docs/README.txt')?.category, 'doc');
   assert.equal(byPath.get('Docs/README.txt')?.previewableText, true);
+  assert.equal(byPath.get('Docs/long-notes.md')?.category, 'doc');
+  assert.equal(byPath.get('Docs/long-notes.md')?.previewableText, true);
   assert.equal(byPath.get('Docs/Patches/fix.ips')?.category, 'patch');
   assert.equal(byPath.get('Extras/Disc 1.cue')?.category, 'disc');
   assert.equal(byPath.get('Extras/Disc 1.cue')?.previewableText, true);
@@ -136,6 +174,218 @@ test('browseArchiveAtPath and readArchiveTextPreview inspect real ZIP archives w
     () => readArchiveTextPreview(sampleZipPath, 'Chrono Trigger.sfc'),
     /not supported/i,
   );
+});
+
+test('Sega Genesis / Mega Drive .md ROMs are recognized as playable ROMs while Markdown docs remain stripped', async () => {
+  // Unit checks for disambiguation rules
+  assert.equal(isMarkdownDocEntry('Sonic the Hedgehog (USA).md', 524_288, 'sega_genesis_roms'), false);
+  assert.equal(isMarkdownDocEntry('Sonic the Hedgehog (USA).md', 524_288), false);
+  assert.equal(isMarkdownDocEntry('Tiny Homebrew (PD).md', 32_768, 'sega_genesis_roms'), false);
+  assert.equal(isMarkdownDocEntry('README.md', 4_096, 'sega_genesis_roms'), true);
+  assert.equal(isMarkdownDocEntry('CHANGELOG.md', 2_048, 'sega_genesis_roms'), true);
+  assert.equal(isMarkdownDocEntry('Docs/notes.md', 8_192, 'sega_genesis_roms'), true);
+  assert.equal(isMarkdownDocEntry('HackInfo.md', 6_000, 'snes_roms'), true);
+  assert.equal(isClutterEntry('Sonic the Hedgehog (USA).md', 524_288, 'sega_genesis_roms'), false);
+  assert.equal(isClutterEntry('README.md', 4_096, 'sega_genesis_roms'), true);
+
+  // Archive Explorer classification with systemName context
+  const listing = await browseArchiveAtPath(genesisZipPath, 'sega_genesis_roms');
+  const byPath = new Map(listing.entries.map((e) => [e.path, e]));
+  assert.equal(byPath.get('Sonic the Hedgehog (USA, Europe) [!].md')?.category, 'rom');
+  assert.equal(byPath.get('Sonic the Hedgehog (USA, Europe) [!].md')?.previewableText, false);
+  assert.equal(byPath.get('README.md')?.category, 'doc');
+  assert.equal(byPath.get('README.md')?.previewableText, true);
+  assert.equal(byPath.get('CHANGELOG.md')?.category, 'doc');
+  assert.equal(byPath.get('CHANGELOG.md')?.previewableText, true);
+
+  // Full inspectArchiveForItem on a Sega Genesis release
+  const mockFile: ReleaseFileRecord = {
+    id: 101,
+    releaseId: 501,
+    remoteUrl: 'https://example.invalid/sonic',
+    downloadUrl: 'https://example.invalid/sonic.zip',
+    remotePath: '/sega_genesis_roms/Sonic the Hedgehog (USA, Europe).zip',
+    localPath: genesisZipPath,
+    filename: 'Sonic the Hedgehog (USA, Europe).zip',
+    displayLabel: 'Sonic the Hedgehog (USA, Europe).zip',
+    fileRole: 'ROM',
+    fileSizeBytes: fs.statSync(genesisZipPath).size,
+    status: 'downloaded',
+    errorMessage: null,
+    lastRunId: null,
+    discoveredAt: '2026-11-23T00:00:00.000Z',
+    downloadedAt: '2026-11-23T00:00:00.000Z',
+  };
+  const mockItem: RepositoryItemRecord = {
+    id: 501,
+    wpPostId: null,
+    wpPostType: null,
+    remoteUrl: 'https://example.invalid/sonic',
+    remotePath: '/sega_genesis_roms/sonic',
+    localPath: genesisZipPath,
+    systemName: 'sega_genesis_roms',
+    releaseType: 'Retail',
+    releaseTags: ['Retail'],
+    title: 'Sonic the Hedgehog',
+    fileSizeBytes: mockFile.fileSizeBytes,
+    publishedAt: null,
+    remoteUpdatedAt: null,
+    remoteCheckedAt: null,
+    status: 'downloaded',
+    errorMessage: null,
+    lastRunId: null,
+    discoveredAt: '2026-11-23T00:00:00.000Z',
+    downloadedAt: '2026-11-23T00:00:00.000Z',
+    publisher: null,
+    developer: null,
+    releaseYear: null,
+    genres: ['Platformer'],
+    regions: ['USA', 'Europe'],
+    languages: ['English'],
+    sources: [],
+    coverLocalPath: null,
+    screenshotsCount: 0,
+    hasMetadata: false,
+    metadata: null,
+    installedAt: null,
+    installedDeviceLabel: null,
+    installedFileId: null,
+    installedFilename: null,
+    isFavorite: false,
+    syncOverride: 'default',
+    collectionIds: [],
+    filesCount: 1,
+    files: [mockFile],
+  };
+
+  const inspection = await inspectArchiveForItem(mockItem, mockFile, genesisZipPath, {
+    romNamingTemplate: '{title}{region}{lang}{role}{version}',
+    romSanitizeFat32: true,
+    romMaxFilenameLen: 180,
+  });
+
+  assert.equal(inspection.patchOnly, false);
+  assert.equal(inspection.ignoredEntriesCount, 2); // README.md and CHANGELOG.md stripped
+  assert.equal(inspection.playableTargets.length, 4); // All 4 Genesis .md ROMs detected
+  const targetEntries = inspection.playableTargets.map((t) => t.primaryEntry);
+  assert.ok(targetEntries.includes('Sonic the Hedgehog (USA, Europe) [!].md'));
+  assert.ok(targetEntries.includes('Pokémon – Mini Demo (World).md'));
+  assert.ok(targetEntries.includes('-Leading Dash.md'));
+  assert.ok(targetEntries.includes('@AtPrefix.md'));
+});
+
+test('glob escaping and streamExtractedEntryToResponse handle brackets, UTF-8 under LANG=C, leading -/@, and errors cleanly', async () => {
+  assert.equal(
+    escapeUnzipGlobPattern('Sonic (USA) [!].md'),
+    'Sonic (USA) \\[\\!\\].md'.replace('\\!', '!'),
+  );
+  assert.equal(escapeUnzipGlobPattern('Who? What* [b1].md'), 'Who\\? What\\* \\[b1\\].md');
+  assert.equal(escapeBsdtarGlobPattern('Game [T-En] *.md'), 'Game \\[T-En\\] \\*.md');
+
+  // Create a real .7z archive containing tricky filenames if 7z is available
+  const bin7z = await resolve7zBinary();
+  if (bin7z) {
+    const stageDir = fs.mkdtempSync(path.join(tempRoot, 'stage7z-'));
+    fs.writeFileSync(path.join(stageDir, 'Sonic (USA, Europe) [!].md'), genesisRomPayload);
+    fs.writeFileSync(path.join(stageDir, 'Pokémon – Red.md'), smallHomebrewPayload);
+    const created = spawnSync(
+      bin7z,
+      ['a', '-spd', '-i!Sonic (USA, Europe) [!].md', '-i!Pokémon – Red.md', '--', genesis7zPath],
+      { cwd: stageDir, env: { ...process.env, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' } },
+    );
+    assert.equal(created.status, 0);
+  }
+
+  // Spin up an Express server exposing streamExtractedEntryToResponse
+  const app = express();
+  app.get('/download', async (req, res) => {
+    const archive = String(req.query.archive || '');
+    const entry = String(req.query.entry || '');
+    const expected = req.query.expected ? Number(req.query.expected) : undefined;
+    try {
+      await streamExtractedEntryToResponse(archive, entry, path.posix.basename(entry), res, expected);
+    } catch {
+      // Handled inside streamExtractedEntryToResponse
+    }
+  });
+
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  assert.ok(addr && typeof addr === 'object');
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+  // Simulate Alpine Linux default C locale to verify buildExtractorEnv() enforces C.UTF-8
+  const prevLang = process.env.LANG;
+  const prevLcAll = process.env.LC_ALL;
+  process.env.LANG = 'C';
+  process.env.LC_ALL = 'C';
+
+  try {
+    // 1. Bracketed Genesis .md ROM from .zip
+    const res1 = await fetch(
+      `${baseUrl}/download?archive=${encodeURIComponent(genesisZipPath)}&entry=${encodeURIComponent(
+        'Sonic the Hedgehog (USA, Europe) [!].md',
+      )}&expected=${genesisRomPayload.length}`,
+    );
+    assert.equal(res1.status, 200);
+    assert.equal(res1.headers.get('content-length'), String(genesisRomPayload.length));
+    const buf1 = Buffer.from(await res1.arrayBuffer());
+    assert.equal(buf1.length, genesisRomPayload.length);
+    assert.ok(buf1.equals(genesisRomPayload));
+
+    // 2. Non-ASCII UTF-8 filename under LANG=C
+    const res2 = await fetch(
+      `${baseUrl}/download?archive=${encodeURIComponent(genesisZipPath)}&entry=${encodeURIComponent(
+        'Pokémon – Mini Demo (World).md',
+      )}&expected=${smallHomebrewPayload.length}`,
+    );
+    assert.equal(res2.status, 200);
+    const buf2 = Buffer.from(await res2.arrayBuffer());
+    assert.equal(buf2.length, smallHomebrewPayload.length);
+    assert.ok(buf2.equals(smallHomebrewPayload));
+
+    // 3. Leading '-' and '@' filenames
+    for (const tricky of ['-Leading Dash.md', '@AtPrefix.md']) {
+      const r = await fetch(
+        `${baseUrl}/download?archive=${encodeURIComponent(genesisZipPath)}&entry=${encodeURIComponent(
+          tricky,
+        )}&expected=${smallHomebrewPayload.length}`,
+      );
+      assert.equal(r.status, 200, `Expected 200 for ${tricky}`);
+      const b = Buffer.from(await r.arrayBuffer());
+      assert.equal(b.length, smallHomebrewPayload.length);
+    }
+
+    // 4. Real .7z archive extraction under LANG=C
+    if (bin7z && fs.existsSync(genesis7zPath)) {
+      const r7z = await fetch(
+        `${baseUrl}/download?archive=${encodeURIComponent(genesis7zPath)}&entry=${encodeURIComponent(
+          'Pokémon – Red.md',
+        )}&expected=${smallHomebrewPayload.length}`,
+      );
+      assert.equal(r7z.status, 200);
+      const b7z = Buffer.from(await r7z.arrayBuffer());
+      assert.equal(b7z.length, smallHomebrewPayload.length);
+      assert.ok(b7z.equals(smallHomebrewPayload));
+    }
+
+    // 5. Missing entry with non-zero expectedSizeBytes must return clean HTTP 500 JSON (NOT hung 200 with Content-Length mismatch!)
+    const resMissing = await fetch(
+      `${baseUrl}/download?archive=${encodeURIComponent(genesisZipPath)}&entry=${encodeURIComponent(
+        'Does Not Exist.md',
+      )}&expected=32768`,
+    );
+    assert.equal(resMissing.status, 500);
+    const errJson = (await resMissing.json()) as { error?: string };
+    assert.match(errJson.error || '', /0 bytes|extraction failed/i);
+  } finally {
+    if (prevLang === undefined) delete process.env.LANG;
+    else process.env.LANG = prevLang;
+    if (prevLcAll === undefined) delete process.env.LC_ALL;
+    else process.env.LC_ALL = prevLcAll;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 test('RAR parsers, 7-Zip RAR codec detection, and archive magic-byte sniffing handle RAR4/RAR5 and corrupt files', async () => {

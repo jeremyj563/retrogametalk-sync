@@ -582,14 +582,15 @@ async function bootstrap() {
       res.status(400).json({ error: 'Invalid fileId' });
       return;
     }
-    const entryPath = typeof req.query.entry === 'string' ? req.query.entry.trim() : '';
-    if (!entryPath) {
+    const entryPath = typeof req.query.entry === 'string' ? req.query.entry : '';
+    if (!entryPath.trim()) {
       res.status(400).json({ error: 'Missing entry query parameter' });
       return;
     }
     try {
       const resolved = orchestrator.resolveItemRomFile(itemId, fileId);
       if (!resolved) {
+        logServer('HTTP', 'debug', `Archive entry download failed: mirrored archive missing on disk`, `itemId=${itemId}, fileId=${fileId ?? 'default'}, entry="${entryPath}"`);
         res.status(404).json({ error: 'Mirrored archive not found on disk' });
         return;
       }
@@ -599,6 +600,7 @@ async function bootstrap() {
         (e) => e.entryPath.replace(/\\/g, '/').replace(/^\/+/, '') === normalizedTarget,
       );
       if (!matched) {
+        logServer('HTTP', 'debug', `Archive entry not found for download`, `itemId=${itemId}, fileId=${fileId ?? 'default'}, archive="${resolved.filename}", requested="${entryPath}", entries=${entries.length}`);
         res.status(404).json({ error: 'Entry not found inside archive' });
         return;
       }
@@ -611,6 +613,12 @@ async function bootstrap() {
         matched.sizeBytes,
       );
     } catch (err) {
+      logServer(
+        'HTTP',
+        'debug',
+        `Archive entry download error for itemId=${itemId} fileId=${fileId ?? 'default'} entry="${entryPath}"`,
+        formatErrorDetails(err),
+      );
       if (!res.headersSent) {
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
       }
@@ -714,6 +722,12 @@ async function bootstrap() {
       }
       const inspection = await orchestrator.inspectItemArchive(itemId, fileId);
       if (!inspection || inspection.playableTargets.length === 0) {
+        logServer(
+          'HTTP',
+          'debug',
+          `Prepared ROM download rejected: no playable ROM targets`,
+          `itemId=${itemId}, fileId=${fileId ?? 'default'}, patchOnly=${Boolean(inspection?.patchOnly)}, ignored=${inspection?.ignoredEntriesCount ?? 0}`,
+        );
         res.status(404).json({
           error: inspection?.patchOnly
             ? 'Archive contains patch files only; download the raw archive instead.'
@@ -1169,8 +1183,8 @@ async function bootstrap() {
 
   app.get('/api/fs/archive/entry', async (req, res) => {
     const relPath = typeof req.query.path === 'string' ? req.query.path : '';
-    const entryPath = typeof req.query.entry === 'string' ? req.query.entry.trim() : '';
-    if (!entryPath) {
+    const entryPath = typeof req.query.entry === 'string' ? req.query.entry : '';
+    if (!entryPath.trim()) {
       res.status(400).json({ error: 'Missing entry query parameter' });
       return;
     }
@@ -1182,6 +1196,7 @@ async function bootstrap() {
         (e) => e.entryPath.replace(/\\/g, '/').replace(/^\/+/, '') === normalizedTarget,
       );
       if (!matched) {
+        logServer('HTTP', 'debug', `FS archive entry not found for download`, `path="${relPath}", requested="${entryPath}", entries=${entries.length}`);
         res.status(404).json({ error: 'Entry not found inside archive' });
         return;
       }
@@ -1194,6 +1209,12 @@ async function bootstrap() {
         matched.sizeBytes,
       );
     } catch (err) {
+      logServer(
+        'HTTP',
+        'debug',
+        `FS archive entry download error for path="${relPath}" entry="${entryPath}"`,
+        formatErrorDetails(err),
+      );
       if (!res.headersSent) {
         res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
       }

@@ -1842,7 +1842,8 @@ export class ScraperOrchestrator extends EventEmitter {
 
   async browseFsArchive(relativePath: string): Promise<{ relativePath: string; listing: ArchiveBrowseListing }> {
     const resolved = this.resolveFsArchivePath(relativePath);
-    const listing = await browseArchiveAtPath(resolved.absPath);
+    const systemHint = resolved.relativePath.split('/')[0] || null;
+    const listing = await browseArchiveAtPath(resolved.absPath, systemHint);
     return { relativePath: resolved.relativePath, listing };
   }
 
@@ -1857,7 +1858,7 @@ export class ScraperOrchestrator extends EventEmitter {
   ): Promise<{ itemId: number; fileId: number; listing: ArchiveBrowseListing } | null> {
     const ctx = this.resolveItemFileContext(itemId, fileId);
     if (!ctx) return null;
-    const listing = await browseArchiveAtPath(ctx.absPath);
+    const listing = await browseArchiveAtPath(ctx.absPath, ctx.item.systemName);
     return {
       itemId: ctx.item.id,
       fileId: ctx.file.id,
