@@ -3,8 +3,8 @@ import { composeEffectiveStorageFolderConfig } from '../shared/deviceExportUi';
 import {
   findItemInstallForDevice,
   generateUuidDeviceProfileId,
-  guessDefaultDeviceIcon,
   mergeProfileFolderConfig,
+  resolveSuggestedDeviceIdentity,
   sortDeviceProfilesForFleet,
 } from '../shared/deviceProfiles';
 import { classifyReleaseTagToTypeKey } from '../shared/releaseTypeFilter';
@@ -52,6 +52,7 @@ import {
   isAbortError,
   isFileSystemAccessSupported,
   pickSdCardRootDirectory,
+  probeDeviceIdentityHintsFromSdCard,
   readDeviceMarkerFromSdCard,
   registerWrittenEntryInScan,
   removeRelativePathFromSdCard,
@@ -70,6 +71,9 @@ export interface PendingDeviceIdentification {
   handle: SdDirectoryHandle;
   volumeLabel: string;
   suggestedName: string;
+  detectedHintLabel: string | null;
+  detectedHintSource: string | null;
+  isGenericFolderName: boolean;
   suggestedIconKey: DeviceIconKey;
   suggestedColorKey: DeviceColorKey;
   matchingVolumeProfiles: StorageDeviceProfile[];
@@ -1324,11 +1328,17 @@ export function useBulkStorageInstaller({
         return handle;
       }
 
-      // 3. Unmarked & Unrecognized Folder: Open Identify / Link Storage Device Modal
-      const latestProfiles =
+      // 3. Unmarked & Unrecognized Folder: Probe root for card/firmware label hints & open Identify/Link Modal
+      const [latestProfiles, probeHints] = await Promise.all([
         deviceProfilesRef.current.length > 0
-          ? deviceProfilesRef.current
-          : await refreshDeviceProfiles();
+          ? Promise.resolve(deviceProfilesRef.current)
+          : refreshDeviceProfiles(),
+        probeDeviceIdentityHintsFromSdCard(handle),
+      ]);
+      const resolvedIdentity = resolveSuggestedDeviceIdentity({
+        volumeLabel,
+        probeHints,
+      });
       const lowerVol = volumeLabel.trim().toLowerCase();
       const matchingVolumeProfiles = latestProfiles.filter(
         (p) => p.volumeLabel.trim().toLowerCase() === lowerVol,
@@ -1345,8 +1355,11 @@ export function useBulkStorageInstaller({
         setPendingDeviceIdentification({
           handle,
           volumeLabel,
-          suggestedName: volumeLabel,
-          suggestedIconKey: guessDefaultDeviceIcon(volumeLabel),
+          suggestedName: resolvedIdentity.suggestedName,
+          detectedHintLabel: resolvedIdentity.detectedHintLabel,
+          detectedHintSource: resolvedIdentity.detectedHintSource,
+          isGenericFolderName: resolvedIdentity.isGenericFolderName,
+          suggestedIconKey: resolvedIdentity.suggestedIconKey,
           suggestedColorKey: 'phosphor',
           matchingVolumeProfiles,
           markerReadError:

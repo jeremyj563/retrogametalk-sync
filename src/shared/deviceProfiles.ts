@@ -85,7 +85,9 @@ export function guessDefaultDeviceIcon(
   volumeLabel: string,
   detectedLayoutLabel?: string | null,
 ): DeviceIconKey {
-  const haystack = `${volumeLabel || ''} ${detectedLayoutLabel || ''}`.toLowerCase();
+  const haystack = `${volumeLabel || ''} ${detectedLayoutLabel || ''}`
+    .replace(/[_-]+/g, ' ')
+    .toLowerCase();
   if (/\b(miyoo|pocket|analogue|game\s?boy|gb|gbc|trimui\s*brick|rg35xx\s*plus|rg40xxv|vertical)\b/.test(haystack)) {
     return 'vertical';
   }
@@ -101,10 +103,239 @@ export function guessDefaultDeviceIcon(
   if (/\b(desktop|mac|linux|windows|pc|nas|server|home|documents|retroarch)\b/.test(haystack)) {
     return 'desktop';
   }
-  if (/\b(deck|odin|retroid|anbernic|rg\d|amber|jelos|rocknix|arkos|muos|onion|handheld|psp|vita|switch|ally|legion)\b/.test(haystack)) {
+  if (/\b(deck|odin|retroid|anbernic|rg\d|amber|jelos|rocknix|arkos|muos|onion|handheld|psp|vita|switch|ally|legion|trimui|powkiddy|minui)\b/.test(haystack)) {
     return 'handheld';
   }
   return 'handheld';
+}
+
+const GENERIC_STORAGE_FOLDER_NAMES = new Set<string>([
+  'roms',
+  'rom',
+  'games',
+  'game',
+  'emulation',
+  'easyroms',
+  'sdcard',
+  'sd_card',
+  'sd card',
+  'sd-card',
+  'sd',
+  'microsd',
+  'micro_sd',
+  'micro sd',
+  'tf1',
+  'tf2',
+  'tf1-int',
+  'tf2-ext',
+  'tf1_int',
+  'tf2_ext',
+  'no name',
+  'noname',
+  'no_name',
+  'untitled',
+  'removable',
+  'removable disk',
+  'usb',
+  'usb drive',
+  'flash',
+  'storage',
+  'storage device',
+  'external',
+  'data',
+  'media',
+  'share',
+  'files',
+  'downloads',
+  'retro',
+  'retrogaming',
+  'arcade',
+  'console',
+  'consoles',
+  'systems',
+  'library',
+  'bios',
+]);
+
+/**
+ * Returns true when a browser-reported directory handle name is a generic ROM folder,
+ * unnamed FAT32 volume, or bare Windows drive letter rather than a meaningful device label.
+ */
+export function isGenericStorageFolderName(rawName: string | null | undefined): boolean {
+  const trimmed = (rawName || '').trim();
+  if (!trimmed) return true;
+  // Bare drive letter or root slash (e.g., "E:", "E:\\", "/")
+  if (/^[a-zA-Z]:?[\\/]?$/.test(trimmed) || trimmed === '/') {
+    return true;
+  }
+  const normalized = trimmed.toLowerCase().replace(/\s+/g, ' ');
+  return GENERIC_STORAGE_FOLDER_NAMES.has(normalized);
+}
+
+const MUOS_DEVICE_DISPLAY_MAP: Record<string, string> = {
+  'rg35xx-sp': 'Anbernic RG35XX SP',
+  'rg35xxsp': 'Anbernic RG35XX SP',
+  'rg35xx-h': 'Anbernic RG35XX H',
+  'rg35xxh': 'Anbernic RG35XX H',
+  'rg35xx-plus': 'Anbernic RG35XX Plus',
+  'rg35xxplus': 'Anbernic RG35XX Plus',
+  'rg35xx-2024': 'Anbernic RG35XX (2024)',
+  'rg35xx2024': 'Anbernic RG35XX (2024)',
+  'rg40xx-v': 'Anbernic RG40XX V',
+  'rg40xxv': 'Anbernic RG40XX V',
+  'rg40xx-h': 'Anbernic RG40XX H',
+  'rg40xxh': 'Anbernic RG40XX H',
+  'rg28xx': 'Anbernic RG28XX',
+  'rgcube-xx': 'Anbernic RG CubeXX',
+  'rgcubexx': 'Anbernic RG CubeXX',
+  'rg34xx': 'Anbernic RG34XX',
+  'rg34xx-sp': 'Anbernic RG34XX SP',
+  'trimui-brick': 'Trimui Brick',
+  'trimui-smart-pro': 'Trimui Smart Pro',
+  'tui-brick': 'Trimui Brick',
+  'tui-spoon': 'Trimui Smart Pro',
+  'rgb30': 'Powkiddy RGB30',
+};
+
+export function formatMuosDeviceId(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') return null;
+  const firstLine = raw.split(/\r?\n/)[0]?.trim() || '';
+  if (!firstLine || firstLine.length > 64) return null;
+  const key = firstLine.toLowerCase().replace(/\s+/g, '-');
+  if (MUOS_DEVICE_DISPLAY_MAP[key]) {
+    return MUOS_DEVICE_DISPLAY_MAP[key];
+  }
+  const cleaned = firstLine.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!cleaned || isGenericStorageFolderName(cleaned)) return null;
+  return cleaned
+    .split(' ')
+    .map((part) => (/^(rg\d|rp\d|gba|nds|3ds|psp|psv|gb|gbc|sfc|nes|snes|n64)$/i.test(part)
+      ? part.toUpperCase()
+      : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join(' ')
+    .slice(0, 80);
+}
+
+/**
+ * Extracts a custom Windows/FAT32 `label=...` entry from an `autorun.inf` file if present.
+ */
+export function parseAutorunInfLabel(rawText: string | null | undefined): string | null {
+  if (typeof rawText !== 'string' || !rawText.trim()) return null;
+  const lines = rawText.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith(';') || trimmed.startsWith('#')) continue;
+    const match = /^label\s*=\s*(.+)$/i.exec(trimmed);
+    if (!match) continue;
+    const value = match[1].trim().replace(/^["']|["']$/g, '').trim();
+    if (value && !isGenericStorageFolderName(value)) {
+      return value.slice(0, 80);
+    }
+  }
+  return null;
+}
+
+const DEFAULT_FIRMWARE_HOSTNAMES = new Set([
+  'batocera',
+  'recalbox',
+  'knulli',
+  'rocknix',
+  'jelos',
+  'amberelec',
+  'arkos',
+  'localhost',
+  'retropie',
+]);
+
+/**
+ * Extracts a custom `system.hostname=...` value from `batocera.conf` / `recalbox.conf`.
+ */
+export function parseHostnameFromConf(rawText: string | null | undefined): string | null {
+  if (typeof rawText !== 'string' || !rawText.trim()) return null;
+  const lines = rawText.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith(';')) continue;
+    const match = /^system\.hostname\s*=\s*(.+)$/i.exec(trimmed);
+    if (!match) continue;
+    const value = match[1].trim().replace(/^["']|["']$/g, '').trim();
+    if (
+      value &&
+      !DEFAULT_FIRMWARE_HOSTNAMES.has(value.toLowerCase()) &&
+      !isGenericStorageFolderName(value)
+    ) {
+      return value.slice(0, 80);
+    }
+  }
+  return null;
+}
+
+export interface DeviceIdentityProbeHints {
+  /** Explicit device/volume label read from on-card metadata (autorun.inf, muOS device.txt, hostname). */
+  explicitLabel: string | null;
+  /** Human-friendly source for explicitLabel (e.g. "autorun.inf", "muOS device config"). */
+  explicitLabelSource: string | null;
+  /** Detected firmware or hardware ecosystem signature (e.g. "Miyoo Mini (OnionOS)", "Analogue Pocket"). */
+  firmwareLabel: string | null;
+}
+
+export interface ResolvedSuggestedDeviceIdentity {
+  suggestedName: string;
+  detectedHintLabel: string | null;
+  detectedHintSource: string | null;
+  isGenericFolderName: boolean;
+  suggestedIconKey: DeviceIconKey;
+}
+
+/**
+ * Resolves the best default device name and form-factor icon when mounting an unrecognized folder:
+ * 1. Explicit device/volume label from card metadata (`autorun.inf`, muOS `device.txt`, custom hostname)
+ * 2. Non-generic mounted volume/folder label (e.g., `/Volumes/MIYOO_MINI` -> `MIYOO_MINI`)
+ * 3. Detected firmware/hardware layout signature (e.g., `Miyoo Mini (OnionOS)`, `Analogue Pocket`)
+ * 4. Empty string when only a generic folder name (`Roms`, `SDCARD`, `E:`) was exposed so the user
+ *    can immediately type their device label without erasing `"Roms"`.
+ */
+export function resolveSuggestedDeviceIdentity(input: {
+  volumeLabel: string;
+  probeHints?: DeviceIdentityProbeHints | null;
+}): ResolvedSuggestedDeviceIdentity {
+  const volumeLabel = (input.volumeLabel || '').trim();
+  const isGenericFolderName = isGenericStorageFolderName(volumeLabel);
+  const explicitLabel = input.probeHints?.explicitLabel?.trim() || null;
+  const firmwareLabel = input.probeHints?.firmwareLabel?.trim() || null;
+
+  let suggestedName = '';
+  let detectedHintLabel: string | null = null;
+  let detectedHintSource: string | null = null;
+
+  if (explicitLabel) {
+    suggestedName = explicitLabel;
+    detectedHintLabel = explicitLabel;
+    detectedHintSource = input.probeHints?.explicitLabelSource || 'card metadata';
+  } else if (!isGenericFolderName) {
+    suggestedName = volumeLabel;
+    if (firmwareLabel) {
+      detectedHintLabel = firmwareLabel;
+      detectedHintSource = 'detected layout';
+    }
+  } else if (firmwareLabel) {
+    suggestedName = firmwareLabel;
+    detectedHintLabel = firmwareLabel;
+    detectedHintSource = 'detected layout';
+  }
+
+  const suggestedIconKey = guessDefaultDeviceIcon(
+    suggestedName || volumeLabel,
+    firmwareLabel || explicitLabel,
+  );
+
+  return {
+    suggestedName,
+    detectedHintLabel,
+    detectedHintSource,
+    isGenericFolderName,
+    suggestedIconKey,
+  };
 }
 
 /**
