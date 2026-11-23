@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.38.3] - 2026-11-23
+
+- Fixed bulk **Uninstall from `<Device>`** in the Catalog so cross-page selections count and remove **all** selected games installed on the mounted storage device instead of only the currently visible page:
+  - **Cross-Page Mounted Install Tracking**: Extended `/api/items/ids` with an optional `mountedDeviceId` parameter (`installedOnMountedIds`) and added `POST /api/devices/:id/installs/lookup` so the Catalog bulk action bar accurately counts and resolves uninstall paths across all pages (and even across manually picked multi-filter selections).
+  - **Scalable Large-Batch Uninstalls**: Chunked SQLite `IN (...)` batch queries and `DELETE /api/devices/:id/installs` updates (400 IDs per batch) so uninstalling 1,000+ games never exceeds SQLite variable limits, batched SD folder scan cache updates into a single state update, added live `Removing X / Y...` progress feedback, and cleared uninstalled games from the active selection on completion.
+
 ## [1.38.2] - 2026-11-23
 
 - Eliminated the misleading **`Extracting ROM...`** status flash and unnecessary I/O when installing or reviewing games that are already present on the mounted storage device:

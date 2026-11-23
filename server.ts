@@ -9,6 +9,7 @@ import {
   deleteStorageDeviceProfile,
   deleteUserCollection,
   getCatalogStatsSnapshot,
+  getDeviceUninstallTargets,
   getPublicConfig,
   getRepositoryItemById,
   getSchemaMigrationReport,
@@ -292,6 +293,7 @@ async function bootstrap() {
       downloaded: typeof req.query.downloaded === 'string' ? req.query.downloaded : undefined,
       installed: typeof req.query.installed === 'string' ? req.query.installed : undefined,
       deviceId: sanitizeDeviceProfileId(req.query.deviceId) ?? undefined,
+      mountedDeviceId: sanitizeDeviceProfileId(req.query.mountedDeviceId) ?? undefined,
       syncRules: req.query.syncRules === 'true' || req.query.syncRules === '1',
       favoriteOnly: req.query.favoriteOnly === 'true' || req.query.favoriteOnly === '1',
       collectionId: parseOptionalPositiveInt(req.query.collectionId),
@@ -1119,6 +1121,29 @@ async function bootstrap() {
     res.json({ ok: true, deleted: true, affectedReleases: result.affectedReleaseIds.length });
   });
 
+  app.post('/api/devices/:id/installs/lookup', (req, res) => {
+    const deviceId = sanitizeDeviceProfileId(req.params.id);
+    if (!deviceId) {
+      res.status(400).json({ error: 'Invalid device profile ID' });
+      return;
+    }
+    const rawIds: number[] = Array.isArray(req.body?.ids)
+      ? Array.from(
+          new Set<number>(
+            req.body.ids
+              .map(Number)
+              .filter((id: number) => Number.isInteger(id) && id > 0),
+          ),
+        ).slice(0, 20000)
+      : [];
+    if (rawIds.length === 0) {
+      res.status(400).json({ error: 'Provide one or more valid catalog item IDs' });
+      return;
+    }
+    const items = getDeviceUninstallTargets(deviceId, rawIds);
+    res.json({ deviceId, items, total: items.length });
+  });
+
   app.delete('/api/devices/:id/installs', (req, res) => {
     const deviceId = sanitizeDeviceProfileId(req.params.id);
     if (!deviceId) {
@@ -1132,7 +1157,7 @@ async function bootstrap() {
               .map(Number)
               .filter((id: number) => Number.isInteger(id) && id > 0),
           ),
-        ).slice(0, 5000)
+        ).slice(0, 20000)
       : [];
     if (rawIds.length === 0) {
       res.status(400).json({ error: 'Provide one or more valid catalog item IDs' });
