@@ -1,12 +1,15 @@
 import { useMemo, useState } from 'react';
 import {
   ArrowUpCircle,
+  Check,
   Eye,
   FolderPlus,
   FolderSync,
   HardDrive,
   Loader2,
+  Pencil,
   Power,
+  RotateCcw,
   X,
 } from 'lucide-react';
 import type { BulkStorageInstallerController } from '../hooks/useBulkStorageInstaller';
@@ -104,9 +107,18 @@ export function StorageDeviceSidebarDock({
 }: StorageDeviceSidebarDockProps) {
   const support = useMemo(() => isFileSystemAccessSupported(), []);
   const [showSupportDetails, setShowSupportDetails] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [draftName, setDraftName] = useState('');
+  const [savingName, setSavingName] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   const {
     sdRootHandle,
+    activeDeviceProfile,
+    activeDeviceName,
+    rememberedHandles,
+    lastRememberedHandle,
+    reconnectingDeviceId,
     isBusy,
     mountError,
     autoConfigPhase,
@@ -115,6 +127,14 @@ export function StorageDeviceSidebarDock({
   } = installer;
 
   const isScanningAutoConfig = autoConfigPhase === 'scanning';
+  const displayDeviceName = activeDeviceName || sdRootHandle?.name || 'Storage Device';
+  const otherRememberedHandles = useMemo(
+    () =>
+      rememberedHandles.filter(
+        (h) => !activeDeviceProfile || h.deviceId !== activeDeviceProfile.id,
+      ),
+    [rememberedHandles, activeDeviceProfile],
+  );
 
   const bayInfo = useMemo(
     () =>
@@ -133,13 +153,55 @@ export function StorageDeviceSidebarDock({
       return;
     }
     setShowSupportDetails(false);
+    setEditingName(false);
     void installer.promptMountSdCard();
+  };
+
+  const handleReconnect = (deviceId?: string) => {
+    if (!support.supported) {
+      setShowSupportDetails(true);
+      return;
+    }
+    setShowSupportDetails(false);
+    setEditingName(false);
+    void installer.reconnectStoredDevice(deviceId);
   };
 
   const handleEject = () => {
     if (isBusy) return;
+    setEditingName(false);
     installer.setSdRootHandle(null);
     installer.clearMountError();
+  };
+
+  const handleStartRename = () => {
+    if (!activeDeviceProfile) return;
+    setDraftName(activeDeviceProfile.name);
+    setRenameError(null);
+    setEditingName(true);
+  };
+
+  const handleCommitRename = async () => {
+    if (!activeDeviceProfile) return;
+    const trimmed = draftName.trim();
+    if (!trimmed) {
+      setRenameError('Enter a name');
+      return;
+    }
+    if (trimmed === activeDeviceProfile.name) {
+      setEditingName(false);
+      return;
+    }
+    setSavingName(true);
+    setRenameError(null);
+    try {
+      await installer.renameDeviceProfile(activeDeviceProfile.id, trimmed);
+      setEditingName(false);
+    } catch (err) {
+      setRenameError(err instanceof Error ? err.message : 'Rename failed');
+    } finally {
+      setSavingName(false);
+    }
   };
 
   const statusTextClass =
@@ -220,16 +282,91 @@ export function StorageDeviceSidebarDock({
 
       {sdRootHandle ? (
         <div className="space-y-0.5">
-          {/* Volume & Layout telemetry-style rows */}
-          <div
-            title={`Mounted storage root: ${sdRootHandle.name}`}
-            className="flex items-center justify-between gap-2 px-1.5 py-1 -mx-1 rounded border border-transparent text-xs font-mono text-crt-muted"
-          >
-            <span className="shrink-0">Volume</span>
-            <span className="text-crt-phosphor font-medium truncate min-w-0">
-              {sdRootHandle.name}
-            </span>
-          </div>
+          {/* Active Profile Name + Inline Rename */}
+          {editingName ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleCommitRename();
+              }}
+              className="space-y-1 px-1 py-1 -mx-1 rounded border border-crt-phosphor/40 bg-crt-elevated/60"
+            >
+              <div className="flex items-center gap-1">
+                <input
+                  type="text"
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  maxLength={80}
+                  autoFocus
+                  placeholder="Device nickname"
+                  aria-label="Device profile name"
+                  className="min-w-0 flex-1 bg-crt-void/80 border border-crt-border rounded px-1.5 py-0.5 text-xs font-mono text-crt-text focus:outline-none focus:border-crt-phosphor"
+                />
+                <button
+                  type="submit"
+                  disabled={savingName}
+                  title="Save device name"
+                  className="p-1 rounded text-crt-phosphor hover:bg-crt-phosphor/15 disabled:opacity-50 cursor-pointer"
+                >
+                  {savingName ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Check className="h-3 w-3" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingName(false);
+                    setRenameError(null);
+                  }}
+                  title="Cancel rename"
+                  className="p-1 rounded text-crt-muted hover:text-crt-text cursor-pointer"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+              {renameError && (
+                <p className="text-[10px] font-mono text-crt-crimson">{renameError}</p>
+              )}
+            </form>
+          ) : (
+            <div
+              title={
+                activeDeviceProfile && activeDeviceProfile.name !== activeDeviceProfile.volumeLabel
+                  ? `${activeDeviceProfile.name} (Volume: ${activeDeviceProfile.volumeLabel})`
+                  : `Mounted storage root: ${displayDeviceName}`
+              }
+              className="flex items-center justify-between gap-1.5 px-1.5 py-1 -mx-1 rounded border border-transparent text-xs font-mono text-crt-muted"
+            >
+              <span className="shrink-0">Device</span>
+              <span className="inline-flex items-center gap-1 min-w-0">
+                <span className="text-crt-phosphor font-medium truncate min-w-0">
+                  {displayDeviceName}
+                </span>
+                {activeDeviceProfile && (
+                  <button
+                    type="button"
+                    onClick={handleStartRename}
+                    title="Rename this device profile"
+                    aria-label="Rename device profile"
+                    className="p-0.5 rounded text-crt-muted/75 hover:text-crt-phosphor hover:bg-crt-elevated transition-colors shrink-0 cursor-pointer"
+                  >
+                    <Pencil className="h-2.5 w-2.5" />
+                  </button>
+                )}
+              </span>
+            </div>
+          )}
+
+          {activeDeviceProfile && (
+            <div className="flex items-center justify-between gap-2 px-1.5 py-0.5 -mx-1 text-xs font-mono text-crt-muted">
+              <span className="shrink-0">Installed</span>
+              <span className="text-crt-text tabular-nums">
+                {activeDeviceProfile.installedCount.toLocaleString()}
+              </span>
+            </div>
+          )}
 
           <button
             type="button"
@@ -281,7 +418,7 @@ export function StorageDeviceSidebarDock({
                   type="button"
                   disabled={isBusy}
                   onClick={onUpdateOutdatedOnDevice}
-                  title={`Upgrade ${outdatedLocalReadyCount} outdated ROM${outdatedLocalReadyCount === 1 ? '' : 's'} on ${sdRootHandle.name}`}
+                  title={`Upgrade ${outdatedLocalReadyCount} outdated ROM${outdatedLocalReadyCount === 1 ? '' : 's'} on ${displayDeviceName}`}
                   className="px-1.5 py-0.5 rounded bg-crt-amber/20 hover:bg-crt-amber/30 text-crt-amber font-semibold whitespace-nowrap shrink-0 transition-colors disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
                 >
                   Update All
@@ -290,12 +427,40 @@ export function StorageDeviceSidebarDock({
             </div>
           )}
 
+          {/* Quick-switch to other remembered handles when multiple handhelds are saved */}
+          {otherRememberedHandles.length > 0 && !isBusy && (
+            <div className="pt-1 space-y-0.5">
+              {otherRememberedHandles.slice(0, 2).map((handleRec) => {
+                const isReconnecting = reconnectingDeviceId === handleRec.deviceId;
+                return (
+                  <button
+                    key={handleRec.deviceId}
+                    type="button"
+                    disabled={Boolean(reconnectingDeviceId)}
+                    onClick={() => handleReconnect(handleRec.deviceId)}
+                    title={`Switch mounted device to ${handleRec.profileName}`}
+                    className="w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1 -mx-1 rounded text-[11px] font-mono text-crt-muted hover:text-crt-text hover:bg-crt-elevated/60 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <span className="inline-flex items-center gap-1.5 min-w-0">
+                      {isReconnecting ? (
+                        <Loader2 className="h-3 w-3 animate-spin text-crt-phosphor shrink-0" />
+                      ) : (
+                        <RotateCcw className="h-3 w-3 text-crt-muted/80 shrink-0" />
+                      )}
+                      <span className="truncate">Switch · {handleRec.profileName}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           {/* Quiet inline action strip — zero heavy nested buttons */}
           <div className="flex items-center justify-between gap-2 pt-1 text-[11px] font-mono">
             <button
               type="button"
               onClick={onPreviewDevicePaths}
-              title={`Open Device Export to view Live Export Destination Preview for "${sdRootHandle.name}"`}
+              title={`Open Device Export to view Live Export Destination Preview for "${displayDeviceName}"`}
               className="inline-flex items-center gap-1 px-1.5 py-1 -ml-1.5 rounded text-crt-phosphor/90 hover:text-crt-phosphor hover:bg-crt-elevated/65 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Eye className="h-3 w-3 shrink-0" />
@@ -335,28 +500,81 @@ export function StorageDeviceSidebarDock({
         </div>
       ) : (
         <div className="space-y-1">
-          <button
-            type="button"
-            onClick={handleMountOrSwitch}
-            title={formatMountDeviceTooltip(support)}
-            className={`w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1.5 -mx-1 rounded border text-xs font-mono transition-colors whitespace-nowrap cursor-pointer ${
-              support.supported
-                ? 'border-transparent text-crt-text hover:border-crt-border-strong hover:bg-crt-elevated/70 hover:text-crt-phosphor'
-                : 'border-transparent text-crt-amber hover:border-crt-amber/40 hover:bg-crt-amber/10'
-            }`}
-          >
-            <span className="inline-flex items-center gap-2 min-w-0">
-              <FolderPlus
-                className={`h-3.5 w-3.5 shrink-0 ${
-                  support.supported ? 'text-crt-phosphor' : 'text-crt-amber'
-                }`}
-              />
-              <span className="truncate">{MOUNT_DEVICE_LABEL}</span>
-            </span>
-            <span className="text-[11px] text-crt-muted/85 shrink-0">
-              {support.supported ? 'Auto' : 'Info'}
-            </span>
-          </button>
+          {lastRememberedHandle && support.supported ? (
+            <>
+              <button
+                type="button"
+                disabled={Boolean(reconnectingDeviceId)}
+                onClick={() => handleReconnect(lastRememberedHandle.deviceId)}
+                title={`Reconnect remembered storage device "${lastRememberedHandle.profileName}" without re-browsing folders`}
+                className="w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1.5 -mx-1 rounded border border-crt-phosphor/35 bg-crt-phosphor/8 text-xs font-mono text-crt-phosphor hover:bg-crt-phosphor/15 transition-colors whitespace-nowrap cursor-pointer disabled:opacity-55"
+              >
+                <span className="inline-flex items-center gap-2 min-w-0">
+                  {reconnectingDeviceId === lastRememberedHandle.deviceId ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                  ) : (
+                    <RotateCcw className="h-3.5 w-3.5 shrink-0" />
+                  )}
+                  <span className="truncate">Reconnect {lastRememberedHandle.profileName}</span>
+                </span>
+              </button>
+
+              {rememberedHandles.slice(1, 3).map((handleRec) => (
+                <button
+                  key={handleRec.deviceId}
+                  type="button"
+                  disabled={Boolean(reconnectingDeviceId)}
+                  onClick={() => handleReconnect(handleRec.deviceId)}
+                  title={`Reconnect remembered device "${handleRec.profileName}"`}
+                  className="w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1 -mx-1 rounded border border-transparent text-[11px] font-mono text-crt-muted hover:border-crt-border-strong hover:bg-crt-elevated/65 hover:text-crt-text transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <span className="inline-flex items-center gap-1.5 min-w-0">
+                    {reconnectingDeviceId === handleRec.deviceId ? (
+                      <Loader2 className="h-3 w-3 animate-spin text-crt-phosphor shrink-0" />
+                    ) : (
+                      <RotateCcw className="h-3 w-3 shrink-0" />
+                    )}
+                    <span className="truncate">Reconnect {handleRec.profileName}</span>
+                  </span>
+                </button>
+              ))}
+
+              <button
+                type="button"
+                onClick={handleMountOrSwitch}
+                title={formatMountDeviceTooltip(support)}
+                className="w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1 -mx-1 rounded border border-transparent text-[11px] font-mono text-crt-muted hover:border-crt-border-strong hover:bg-crt-elevated/65 hover:text-crt-text transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <span className="inline-flex items-center gap-1.5 min-w-0">
+                  <FolderPlus className="h-3 w-3 shrink-0" />
+                  <span className="truncate">Mount Another…</span>
+                </span>
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={handleMountOrSwitch}
+              title={formatMountDeviceTooltip(support)}
+              className={`w-[calc(100%+0.5rem)] flex items-center justify-between gap-2 px-1.5 py-1.5 -mx-1 rounded border text-xs font-mono transition-colors whitespace-nowrap cursor-pointer ${
+                support.supported
+                  ? 'border-transparent text-crt-text hover:border-crt-border-strong hover:bg-crt-elevated/70 hover:text-crt-phosphor'
+                  : 'border-transparent text-crt-amber hover:border-crt-amber/40 hover:bg-crt-amber/10'
+              }`}
+            >
+              <span className="inline-flex items-center gap-2 min-w-0">
+                <FolderPlus
+                  className={`h-3.5 w-3.5 shrink-0 ${
+                    support.supported ? 'text-crt-phosphor' : 'text-crt-amber'
+                  }`}
+                />
+                <span className="truncate">{MOUNT_DEVICE_LABEL}</span>
+              </span>
+              <span className="text-[11px] text-crt-muted/85 shrink-0">
+                {support.supported ? 'Auto' : 'Info'}
+              </span>
+            </button>
+          )}
 
           {outdatedInstalledCount > 0 && onViewOutdatedInCatalog && (
             <button
@@ -414,3 +632,4 @@ export function StorageDeviceSidebarDock({
     </section>
   );
 }
+

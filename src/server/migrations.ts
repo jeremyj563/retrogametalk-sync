@@ -1272,6 +1272,130 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 27,
+    name: 'multi_device_profiles_and_installs',
+    description:
+      'Add storage_device_profiles and catalog_release_device_installs tables and backfill existing catalog_releases install history per device.',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS storage_device_profiles (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          volume_label TEXT NOT NULL,
+          folder_config_json TEXT,
+          rom_naming_json TEXT,
+          art_export_json TEXT,
+          last_mounted_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_storage_device_profiles_volume
+        ON storage_device_profiles(LOWER(TRIM(volume_label)));
+
+        CREATE TABLE IF NOT EXISTS catalog_release_device_installs (
+          release_id INTEGER NOT NULL,
+          device_id TEXT NOT NULL,
+          installed_at TEXT NOT NULL,
+          installed_file_id INTEGER,
+          installed_filename TEXT,
+          installed_paths_json TEXT NOT NULL DEFAULT '[]',
+          PRIMARY KEY (release_id, device_id),
+          FOREIGN KEY (release_id) REFERENCES catalog_releases(id) ON DELETE CASCADE,
+          FOREIGN KEY (device_id) REFERENCES storage_device_profiles(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_release_device_installs_device
+        ON catalog_release_device_installs(device_id, installed_at);
+      `);
+
+      // Backfill existing installed releases into storage_device_profiles + catalog_release_device_installs
+      const installedRows = db
+        .prepare(
+          `SELECT id, installed_at, installed_device_label, installed_file_id, installed_filename
+           FROM catalog_releases
+           WHERE installed_at IS NOT NULL AND TRIM(installed_at) != ''`,
+        )
+        .all() as Array<{
+        id: number;
+        installed_at: string;
+        installed_device_label: string | null;
+        installed_file_id: number | null;
+        installed_filename: string | null;
+      }>;
+
+      if (installedRows.length === 0) return;
+
+      const now = new Date().toISOString();
+      const deviceIdByLowerLabel = new Map<string, string>();
+      const usedIds = new Set<string>();
+      const existingProfiles = db
+        .prepare(`SELECT id, volume_label FROM storage_device_profiles`)
+        .all() as Array<{ id: string; volume_label: string }>;
+      for (const p of existingProfiles) {
+        usedIds.add(p.id);
+        deviceIdByLowerLabel.set(p.volume_label.trim().toLowerCase(), p.id);
+      }
+
+      const insertProfileStmt = db.prepare(
+        `INSERT OR IGNORE INTO storage_device_profiles (
+          id, name, volume_label, folder_config_json, rom_naming_json, art_export_json,
+          last_mounted_at, created_at, updated_at
+        ) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?)`,
+      );
+      const updateLastMountedStmt = db.prepare(
+        `UPDATE storage_device_profiles
+         SET last_mounted_at = CASE
+           WHEN last_mounted_at IS NULL OR last_mounted_at < ? THEN ?
+           ELSE last_mounted_at
+         END
+         WHERE id = ?`,
+      );
+      const insertInstallStmt = db.prepare(
+        `INSERT OR IGNORE INTO catalog_release_device_installs (
+          release_id, device_id, installed_at, installed_file_id, installed_filename, installed_paths_json
+        ) VALUES (?, ?, ?, ?, ?, '[]')`,
+      );
+
+      for (const row of installedRows) {
+        const label =
+          row.installed_device_label && row.installed_device_label.trim()
+            ? row.installed_device_label.trim().slice(0, 120)
+            : 'External Device';
+        const lowerKey = label.toLowerCase();
+        let deviceId = deviceIdByLowerLabel.get(lowerKey);
+        if (!deviceId) {
+          const baseSlug = label
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .slice(0, 48);
+          let candidate = `dev-${baseSlug || 'storage'}`;
+          let suffix = 2;
+          while (usedIds.has(candidate)) {
+            candidate = `dev-${baseSlug || 'storage'}-${suffix++}`;
+          }
+          deviceId = candidate;
+          usedIds.add(deviceId);
+          deviceIdByLowerLabel.set(lowerKey, deviceId);
+          insertProfileStmt.run(deviceId, label, label, row.installed_at, now, now);
+        } else {
+          updateLastMountedStmt.run(row.installed_at, row.installed_at, deviceId);
+        }
+
+        insertInstallStmt.run(
+          Number(row.id),
+          deviceId,
+          row.installed_at,
+          row.installed_file_id !== null && row.installed_file_id !== undefined
+            ? Number(row.installed_file_id)
+            : null,
+          row.installed_filename ? String(row.installed_filename) : null,
+        );
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

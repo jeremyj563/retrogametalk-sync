@@ -1590,7 +1590,12 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch('/api/items/outdated');
+      const activeDeviceId = bulkInstaller.activeDeviceProfile?.id;
+      const res = await fetch(
+        activeDeviceId
+          ? `/api/items/outdated?deviceId=${encodeURIComponent(activeDeviceId)}`
+          : '/api/items/outdated',
+      );
       const parsed = await readJsonSafely<OutdatedInstalledSummary>(res);
       if (!parsed.ok || !parsed.data) {
         setErrorBanner(parsed.errorMessage || 'Failed to load outdated installed games.');

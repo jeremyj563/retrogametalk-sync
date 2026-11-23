@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { composeEffectiveStorageFolderConfig } from '../shared/deviceExportUi';
+import {
+  findItemInstallForDevice,
+  mergeProfileFolderConfig,
+} from '../shared/deviceProfiles';
 import { classifyReleaseTagToTypeKey } from '../shared/releaseTypeFilter';
 import { sanitizeFat32Filename } from '../shared/romNaming';
 import {
@@ -19,23 +23,37 @@ import {
 } from '../shared/storageFolderMappings';
 import type {
   ArchiveInspectResult,
+  DeviceRomNamingOverrides,
   PlayableExportTarget,
   RepositoryItemRecord,
   ScraperConfigPublic,
+  StorageDeviceProfile,
 } from '../types';
 import { formatBytes } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
 import { reportAchievementEvent } from '../utils/achievementsClient';
+import {
+  checkHandlePermission,
+  listStoredDeviceHandles,
+  removeStoredDeviceHandle,
+  requestHandlePermission,
+  saveStoredDeviceHandle,
+  updateStoredDeviceHandleName,
+  type StoredDeviceHandleRecord,
+} from '../utils/deviceHandleStore';
 import {
   findUpgradeCandidateOnCard,
   isAbortError,
   isFileSystemAccessSupported,
   pickSdCardRootDirectory,
   registerWrittenEntryInScan,
+  removeRelativePathFromSdCard,
+  removeStemFallbackFromSdCard,
   resolveOrCreateSubdirectory,
   scanStorageDirectoryTree,
   scanTargetFolder,
   streamHttpPayloadToSdFile,
+  unregisterEntryInScan,
   type SdDirectoryHandle,
   type SdScanFolderResult,
 } from '../utils/sdCardFs';
@@ -168,6 +186,15 @@ export interface BulkInstallMetrics {
   canceledItems: number;
   totalBytesWritten: number;
   progressPercent: number;
+}
+
+export interface DeviceUninstallResult {
+  ok: boolean;
+  uninstalledCount: number;
+  filesRemovedCount: number;
+  missingOnDiskCount: number;
+  errors: string[];
+  updatedItems: RepositoryItemRecord[];
 }
 
 interface UseBulkStorageInstallerOptions {
@@ -525,6 +552,13 @@ export function useBulkStorageInstaller({
   const [folderScans, setFolderScans] = useState<Record<string, SdScanFolderResult>>({});
   const [scanningCard, setScanningCard] = useState(false);
 
+  // Multi-device profiles & IndexedDB handle persistence
+  const [deviceProfiles, setDeviceProfiles] = useState<StorageDeviceProfile[]>([]);
+  const [activeDeviceProfile, setActiveDeviceProfile] = useState<StorageDeviceProfile | null>(null);
+  const [rememberedHandles, setRememberedHandles] = useState<StoredDeviceHandleRecord[]>([]);
+  const [reconnectingDeviceId, setReconnectingDeviceId] = useState<string | null>(null);
+  const [uninstallingItemIds, setUninstallingItemIds] = useState<Set<number>>(() => new Set());
+
   // Automatic per-mounted-device Auto-Configure state (session-scoped; clears on eject/switch)
   const [autoConfigPhase, setAutoConfigPhase] = useState<'idle' | 'scanning' | 'ready' | 'error'>(
     'idle',
@@ -538,24 +572,35 @@ export function useBulkStorageInstaller({
   const [autoConfigChosenPaths, setAutoConfigChosenPaths] = useState<Record<string, string>>({});
   const [autoConfigIncludeSubfolders, setAutoConfigIncludeSubfolders] = useState<boolean>(true);
 
-  const effectiveStorageFolderConfig = useMemo(
-    () =>
-      composeEffectiveStorageFolderConfig(config?.storageFolderConfig, autoConfigResult, {
-        chosenPathBySlug: autoConfigChosenPaths,
-        includeTypeSubfolders: autoConfigIncludeSubfolders,
-      }),
-    [
+  const effectiveStorageFolderConfig = useMemo(() => {
+    const autoComposed = composeEffectiveStorageFolderConfig(
       config?.storageFolderConfig,
       autoConfigResult,
-      autoConfigChosenPaths,
-      autoConfigIncludeSubfolders,
-    ],
-  );
+      {
+        chosenPathBySlug: autoConfigChosenPaths,
+        includeTypeSubfolders: autoConfigIncludeSubfolders,
+      },
+    );
+    return activeDeviceProfile?.folderConfig
+      ? mergeProfileFolderConfig(autoComposed, activeDeviceProfile.folderConfig)
+      : autoComposed;
+  }, [
+    config?.storageFolderConfig,
+    autoConfigResult,
+    autoConfigChosenPaths,
+    autoConfigIncludeSubfolders,
+    activeDeviceProfile?.folderConfig,
+  ]);
+
+  const activeDeviceName = activeDeviceProfile?.name || sdRootHandle?.name || null;
+  const lastRememberedHandle = rememberedHandles[0] || null;
 
   const configRef = useRef(config);
   configRef.current = config;
   const effectiveStorageFolderConfigRef = useRef(effectiveStorageFolderConfig);
   effectiveStorageFolderConfigRef.current = effectiveStorageFolderConfig;
+  const activeDeviceProfileRef = useRef(activeDeviceProfile);
+  activeDeviceProfileRef.current = activeDeviceProfile;
   const debugLoggingRef = useRef(debugLogging);
   debugLoggingRef.current = debugLogging;
   const sdRootHandleRef = useRef(sdRootHandle);
@@ -716,12 +761,87 @@ export function useBulkStorageInstaller({
     [emitSdDebug],
   );
 
+  const refreshDeviceProfiles = useCallback(async (): Promise<StorageDeviceProfile[]> => {
+    try {
+      const res = await fetch('/api/devices');
+      const parsed = await readJsonSafely<{ devices?: StorageDeviceProfile[] }>(res);
+      if (parsed.ok && Array.isArray(parsed.data?.devices)) {
+        const list = parsed.data.devices;
+        setDeviceProfiles(list);
+        const currentActive = activeDeviceProfileRef.current;
+        if (currentActive) {
+          const updatedActive = list.find((d) => d.id === currentActive.id) || null;
+          if (updatedActive) {
+            activeDeviceProfileRef.current = updatedActive;
+            setActiveDeviceProfile(updatedActive);
+          }
+        }
+        return list;
+      }
+    } catch {
+      // Non-fatal
+    }
+    return [];
+  }, []);
+
+  const refreshRememberedHandles = useCallback(async (): Promise<StoredDeviceHandleRecord[]> => {
+    const handles = await listStoredDeviceHandles();
+    setRememberedHandles(handles);
+    return handles;
+  }, []);
+
+  const resolveOrRegisterDeviceProfile = useCallback(
+    async (
+      handle: SdDirectoryHandle,
+      preferredDeviceId?: string | null,
+    ): Promise<StorageDeviceProfile | null> => {
+      try {
+        const res = await fetch('/api/devices', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'rgt-sync',
+          },
+          body: JSON.stringify({
+            id: preferredDeviceId || undefined,
+            volumeLabel: handle.name || 'Storage Device',
+          }),
+        });
+        const parsed = await readJsonSafely<{ device?: StorageDeviceProfile }>(res);
+        if (parsed.ok && parsed.data?.device) {
+          const profile = parsed.data.device;
+          activeDeviceProfileRef.current = profile;
+          setActiveDeviceProfile(profile);
+          setDeviceProfiles((prev) => {
+            const others = prev.filter((d) => d.id !== profile.id);
+            return [profile, ...others];
+          });
+          await saveStoredDeviceHandle({
+            deviceId: profile.id,
+            volumeName: handle.name || profile.volumeLabel,
+            profileName: profile.name,
+            handle,
+            lastMountedAt: new Date().toISOString(),
+          });
+          await refreshRememberedHandles();
+          return profile;
+        }
+      } catch {
+        // Non-fatal fallback
+      }
+      return null;
+    },
+    [refreshRememberedHandles],
+  );
+
   const applyMountedHandle = useCallback(
-    (handle: SdDirectoryHandle | null) => {
+    (handle: SdDirectoryHandle | null, preferredDeviceId?: string | null) => {
       sdRootHandleRef.current = handle;
       setSdRootHandle(handle);
       setFolderScans({});
       if (!handle) {
+        activeDeviceProfileRef.current = null;
+        setActiveDeviceProfile(null);
         clearAutoConfigState();
         effectiveStorageFolderConfigRef.current = composeEffectiveStorageFolderConfig(
           configRef.current?.storageFolderConfig,
@@ -729,9 +849,170 @@ export function useBulkStorageInstaller({
         );
         return;
       }
+      void resolveOrRegisterDeviceProfile(handle, preferredDeviceId);
       void runDeviceAutoConfigure(handle);
     },
-    [clearAutoConfigState, runDeviceAutoConfigure],
+    [clearAutoConfigState, resolveOrRegisterDeviceProfile, runDeviceAutoConfigure],
+  );
+
+  // Boot check: fetch saved device profiles and attempt silent reconnect if browser permission is already granted
+  const bootCheckedRef = useRef(false);
+  useEffect(() => {
+    if (bootCheckedRef.current) return;
+    bootCheckedRef.current = true;
+    let cancelled = false;
+    void (async () => {
+      const [profiles, handles] = await Promise.all([
+        refreshDeviceProfiles(),
+        refreshRememberedHandles(),
+      ]);
+      if (cancelled || sdRootHandleRef.current) return;
+
+      // Sync stored handle names with latest server profile names
+      const profileById = new Map(profiles.map((p) => [p.id, p]));
+      const syncedHandles = handles.map((h) => {
+        const p = profileById.get(h.deviceId);
+        return p && p.name !== h.profileName ? { ...h, profileName: p.name } : h;
+      });
+      if (!cancelled) {
+        setRememberedHandles(syncedHandles);
+      }
+
+      const mostRecent = syncedHandles[0];
+      if (!mostRecent) return;
+      const perm = await checkHandlePermission(mostRecent.handle, 'readwrite');
+      if (!cancelled && perm === 'granted' && !sdRootHandleRef.current) {
+        emitSdDebug(`Auto-reconnected remembered device "${mostRecent.profileName}"`);
+        applyMountedHandle(mostRecent.handle, mostRecent.deviceId);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [applyMountedHandle, emitSdDebug, refreshDeviceProfiles, refreshRememberedHandles]);
+
+  const reconnectStoredDevice = useCallback(
+    async (deviceId?: string): Promise<boolean> => {
+      setMountError(null);
+      const target = deviceId
+        ? rememberedHandles.find((h) => h.deviceId === deviceId)
+        : rememberedHandles[0];
+      if (!target) {
+        setMountError('No remembered storage device handle found. Mount the folder again.');
+        return false;
+      }
+      setReconnectingDeviceId(target.deviceId);
+      try {
+        const currentPerm = await checkHandlePermission(target.handle, 'readwrite');
+        const perm =
+          currentPerm === 'granted'
+            ? 'granted'
+            : await requestHandlePermission(target.handle, 'readwrite');
+        if (perm === 'granted') {
+          applyMountedHandle(target.handle, target.deviceId);
+          emitSdDebug(`Reconnected remembered storage device "${target.profileName}"`);
+          return true;
+        }
+        setMountError(
+          `Permission was not granted for "${target.profileName}". Click Mount Storage Device to re-select its folder.`,
+        );
+        return false;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setMountError(
+          `Could not reconnect "${target.profileName}": ${msg}. Click Mount Storage Device to re-select it.`,
+        );
+        return false;
+      } finally {
+        setReconnectingDeviceId(null);
+      }
+    },
+    [applyMountedHandle, emitSdDebug, rememberedHandles],
+  );
+
+  const renameDeviceProfile = useCallback(
+    async (deviceId: string, nextName: string): Promise<StorageDeviceProfile | null> => {
+      const clean = nextName.trim();
+      if (!clean) return null;
+      const res = await fetch(`/api/devices/${encodeURIComponent(deviceId)}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'rgt-sync',
+        },
+        body: JSON.stringify({ name: clean }),
+      });
+      const parsed = await readJsonSafely<{ device?: StorageDeviceProfile; error?: string }>(res);
+      if (!parsed.ok || !parsed.data?.device) {
+        throw new Error(parsed.errorMessage || 'Failed to rename device profile');
+      }
+      const updated = parsed.data.device;
+      setDeviceProfiles((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+      if (activeDeviceProfileRef.current?.id === updated.id) {
+        activeDeviceProfileRef.current = updated;
+        setActiveDeviceProfile(updated);
+      }
+      await updateStoredDeviceHandleName(updated.id, updated.name);
+      await refreshRememberedHandles();
+      return updated;
+    },
+    [refreshRememberedHandles],
+  );
+
+  const saveDeviceProfileSettings = useCallback(
+    async (
+      deviceId: string,
+      patch: {
+        name?: string;
+        folderConfig?: StorageFolderMappingConfig | null;
+        romNaming?: DeviceRomNamingOverrides | null;
+      },
+    ): Promise<StorageDeviceProfile | null> => {
+      const res = await fetch(`/api/devices/${encodeURIComponent(deviceId)}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'rgt-sync',
+        },
+        body: JSON.stringify(patch),
+      });
+      const parsed = await readJsonSafely<{ device?: StorageDeviceProfile; error?: string }>(res);
+      if (!parsed.ok || !parsed.data?.device) {
+        throw new Error(parsed.errorMessage || 'Failed to save device profile settings');
+      }
+      const updated = parsed.data.device;
+      setDeviceProfiles((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+      if (activeDeviceProfileRef.current?.id === updated.id) {
+        activeDeviceProfileRef.current = updated;
+        setActiveDeviceProfile(updated);
+      }
+      if (patch.name) {
+        await updateStoredDeviceHandleName(updated.id, updated.name);
+        await refreshRememberedHandles();
+      }
+      return updated;
+    },
+    [refreshRememberedHandles],
+  );
+
+  const deleteDeviceProfile = useCallback(
+    async (deviceId: string): Promise<boolean> => {
+      const res = await fetch(`/api/devices/${encodeURIComponent(deviceId)}`, {
+        method: 'DELETE',
+        headers: {
+          'X-Requested-With': 'rgt-sync',
+        },
+      });
+      if (!res.ok) return false;
+      await removeStoredDeviceHandle(deviceId);
+      setDeviceProfiles((prev) => prev.filter((d) => d.id !== deviceId));
+      if (activeDeviceProfileRef.current?.id === deviceId) {
+        applyMountedHandle(null);
+      }
+      await refreshRememberedHandles();
+      return true;
+    },
+    [applyMountedHandle, refreshRememberedHandles],
   );
 
   const promptMountSdCard = useCallback(async (): Promise<SdDirectoryHandle | null> => {
@@ -764,9 +1045,11 @@ export function useBulkStorageInstaller({
     async (
       ids: number[],
       deviceLabel: string,
-      itemMeta?: Record<number, { fileId?: number | null; filename?: string | null }>,
+      itemMeta?: Record<number, { fileId?: number | null; filename?: string | null; paths?: string[] }>,
     ) => {
       if (ids.length === 0) return;
+      const activeProfile = activeDeviceProfileRef.current;
+      const effectiveLabel = activeProfile?.name || deviceLabel;
       try {
         const res = await fetch('/api/items/installed', {
           method: 'POST',
@@ -777,7 +1060,8 @@ export function useBulkStorageInstaller({
           body: JSON.stringify({
             ids,
             installed: true,
-            deviceLabel,
+            deviceId: activeProfile?.id ?? undefined,
+            deviceLabel: effectiveLabel,
             ...(itemMeta && Object.keys(itemMeta).length > 0 ? { itemMeta } : {}),
           }),
         });
@@ -785,19 +1069,174 @@ export function useBulkStorageInstaller({
         if (parsed.ok && Array.isArray(parsed.data?.items) && parsed.data.items.length > 0) {
           for (const listener of installedListenersRef.current) {
             try {
-              listener(parsed.data.items, deviceLabel);
+              listener(parsed.data.items, effectiveLabel);
             } catch {
               // Ignore subscriber errors so all listeners & job teardown still run
             }
           }
-          onItemsInstalledRef.current?.(parsed.data.items, deviceLabel);
+          onItemsInstalledRef.current?.(parsed.data.items, effectiveLabel);
           reportAchievementEvent('sd_export_complete', parsed.data.items.length);
+          void refreshDeviceProfiles();
         }
       } catch {
         // Non-fatal if install flag sync fails after file write
       }
     },
-    [],
+    [refreshDeviceProfiles],
+  );
+
+  const uninstallItemsFromMountedDevice = useCallback(
+    async (items: RepositoryItemRecord[]): Promise<DeviceUninstallResult> => {
+      const rootHandle = sdRootHandleRef.current;
+      const activeProfile = activeDeviceProfileRef.current;
+      if (!rootHandle || !activeProfile) {
+        return {
+          ok: false,
+          uninstalledCount: 0,
+          filesRemovedCount: 0,
+          missingOnDiskCount: 0,
+          errors: ['Mount the target storage device first before uninstalling ROMs.'],
+          updatedItems: [],
+        };
+      }
+      if (items.length === 0) {
+        return {
+          ok: true,
+          uninstalledCount: 0,
+          filesRemovedCount: 0,
+          missingOnDiskCount: 0,
+          errors: [],
+          updatedItems: [],
+        };
+      }
+
+      const targetIds = items.map((item) => item.id);
+      setUninstallingItemIds((prev) => {
+        const next = new Set(prev);
+        for (const id of targetIds) next.add(id);
+        return next;
+      });
+
+      const clearedIds: number[] = [];
+      const errors: string[] = [];
+      let filesRemovedCount = 0;
+      let missingOnDiskCount = 0;
+      const storageCfg = effectiveStorageFolderConfigRef.current;
+
+      try {
+        for (const item of items) {
+          const installRec = findItemInstallForDevice(item, activeProfile.id, activeProfile.name);
+          const recordedPaths = installRec?.installedPaths || [];
+          let itemHadError = false;
+
+          if (recordedPaths.length > 0) {
+            for (const relPath of recordedPaths) {
+              const res = await removeRelativePathFromSdCard(rootHandle, relPath, (msg, detail) =>
+                emitSdDebug(msg, detail),
+              );
+              if (res.status === 'removed') {
+                filesRemovedCount += 1;
+                const slashIdx = res.path.lastIndexOf('/');
+                const folderRel = slashIdx > 0 ? res.path.slice(0, slashIdx) : '';
+                const leafName = slashIdx >= 0 ? res.path.slice(slashIdx + 1) : res.path;
+                if (folderRel) {
+                  setFolderScans((prev) => {
+                    const existing = prev[folderRel];
+                    if (!existing) return prev;
+                    const copy: SdScanFolderResult = {
+                      exactNames: new Set(existing.exactNames),
+                      exactNamesLower: new Map(existing.exactNamesLower),
+                      entries: [...existing.entries],
+                    };
+                    unregisterEntryInScan(copy, leafName);
+                    return { ...prev, [folderRel]: copy };
+                  });
+                }
+              } else if (res.status === 'not_found') {
+                missingOnDiskCount += 1;
+              } else {
+                itemHadError = true;
+                errors.push(`${item.title}: ${res.error || `Failed removing ${relPath}`}`);
+              }
+            }
+          } else {
+            const category = classifyStorageRomCategory({
+              systemName: item.systemName,
+              releaseTags: item.releaseTags,
+            });
+            const folderRel = resolveTargetStorageFolder(item.systemName, category, storageCfg);
+            const candidateName =
+              installRec?.installedFilename || item.installedFilename || item.files[0]?.filename || null;
+            const fallbackRes = await removeStemFallbackFromSdCard(
+              rootHandle,
+              folderRel,
+              candidateName,
+              (msg, detail) => emitSdDebug(msg, detail),
+            );
+            filesRemovedCount += fallbackRes.removedPaths.length;
+            if (fallbackRes.removedPaths.length === 0 && fallbackRes.errors.length === 0) {
+              missingOnDiskCount += 1;
+            }
+            if (fallbackRes.errors.length > 0) {
+              itemHadError = true;
+              for (const e of fallbackRes.errors) {
+                errors.push(`${item.title}: ${e}`);
+              }
+            }
+          }
+
+          if (!itemHadError) {
+            clearedIds.push(item.id);
+          }
+        }
+
+        let updatedItems: RepositoryItemRecord[] = [];
+        if (clearedIds.length > 0) {
+          const res = await fetch(
+            `/api/devices/${encodeURIComponent(activeProfile.id)}/installs`,
+            {
+              method: 'DELETE',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'rgt-sync',
+              },
+              body: JSON.stringify({ ids: clearedIds }),
+            },
+          );
+          const parsed = await readJsonSafely<{ items?: RepositoryItemRecord[]; error?: string }>(res);
+          if (!parsed.ok) {
+            errors.push(parsed.errorMessage || 'Removed files on device, but failed updating catalog record.');
+          } else if (Array.isArray(parsed.data?.items)) {
+            updatedItems = parsed.data.items;
+            for (const listener of installedListenersRef.current) {
+              try {
+                listener(updatedItems, activeProfile.name);
+              } catch {
+                // Ignore subscriber error
+              }
+            }
+            onItemsInstalledRef.current?.(updatedItems, activeProfile.name);
+            void refreshDeviceProfiles();
+          }
+        }
+
+        return {
+          ok: errors.length === 0,
+          uninstalledCount: clearedIds.length,
+          filesRemovedCount,
+          missingOnDiskCount,
+          errors,
+          updatedItems,
+        };
+      } finally {
+        setUninstallingItemIds((prev) => {
+          const next = new Set(prev);
+          for (const id of targetIds) next.delete(id);
+          return next;
+        });
+      }
+    },
+    [emitSdDebug, refreshDeviceProfiles],
   );
 
   const rescanMountedSdFolders = useCallback(async (explicitFolders?: string[]) => {
@@ -875,14 +1314,16 @@ export function useBulkStorageInstaller({
       installedSuccess: boolean;
       installedFileId: number | null;
       installedFilename: string | null;
+      installedPaths: string[];
     }> => {
       if (signal.aborted) {
         throw new DOMException('Installation canceled by user.', 'AbortError');
       }
 
       const cfg = configRef.current;
-      const sanitizeFat32 = cfg?.romSanitizeFat32 ?? true;
-      const maxFilenameLen = cfg?.romMaxFilenameLen ?? 0;
+      const activeProfile = activeDeviceProfileRef.current;
+      const sanitizeFat32 = activeProfile?.romNaming?.romSanitizeFat32 ?? cfg?.romSanitizeFat32 ?? true;
+      const maxFilenameLen = activeProfile?.romNaming?.romMaxFilenameLen ?? cfg?.romMaxFilenameLen ?? 0;
       const storageCfg = effectiveStorageFolderConfigRef.current;
 
       const selectedTargets = row.selectedTargetIds
@@ -909,6 +1350,7 @@ export function useBulkStorageInstaller({
       let allSkipped = true;
       let rowFailed: string | null = null;
       const touchedFolders = new Set<string>();
+      const writtenPaths = new Set<string>();
 
       const emitTransferUpdate = (params: {
         stage: DeviceInstallStage;
@@ -990,6 +1432,7 @@ export function useBulkStorageInstaller({
             installedSuccess: false,
             installedFileId: null,
             installedFilename: null,
+            installedPaths: [],
           };
         }
 
@@ -1001,10 +1444,13 @@ export function useBulkStorageInstaller({
               target.kind !== 'disc_set',
             )
           : rawDesiredName;
+        const leafWrittenName =
+          target.kind === 'disc_set' ? finalName.replace(/\.zip$/i, '') : finalName;
 
         const cardStatus = findUpgradeCandidateOnCard(finalName, scan);
         if (cardStatus.exactMatch && !row.overwriteExisting) {
-          lastWrittenFilename = finalName;
+          lastWrittenFilename = leafWrittenName;
+          writtenPaths.add(`${targetFolderRel}/${leafWrittenName}`);
           continue;
         }
         if (cardStatus.exactMatch && row.overwriteExisting) {
@@ -1108,7 +1554,8 @@ export function useBulkStorageInstaller({
             );
           }
 
-          lastWrittenFilename = target.kind === 'disc_set' ? finalName.replace(/\.zip$/i, '') : finalName;
+          lastWrittenFilename = leafWrittenName;
+          writtenPaths.add(`${targetFolderRel}/${leafWrittenName}`);
 
           let olderEntryToRemove: string | null =
             cardStatus.olderEntryName && row.replaceOlderByTargetId[targetId] !== false
@@ -1173,6 +1620,8 @@ export function useBulkStorageInstaller({
       const installedFileId = row.fileId > 0 ? row.fileId : null;
       const installedFilename = lastWrittenFilename || (row.sourceFilename !== '—' ? row.sourceFilename : null);
 
+      const installedPaths = Array.from(writtenPaths);
+
       if (rowFailed) {
         return {
           nextState: 'error',
@@ -1181,6 +1630,7 @@ export function useBulkStorageInstaller({
           installedSuccess: false,
           installedFileId: null,
           installedFilename: null,
+          installedPaths: [],
         };
       }
       if (allSkipped) {
@@ -1191,6 +1641,7 @@ export function useBulkStorageInstaller({
           installedSuccess: true,
           installedFileId,
           installedFilename,
+          installedPaths,
         };
       }
       if (upgradedOldName) {
@@ -1202,6 +1653,7 @@ export function useBulkStorageInstaller({
           installedSuccess: true,
           installedFileId,
           installedFilename,
+          installedPaths,
         };
       }
       if (overwroteExisting) {
@@ -1213,6 +1665,7 @@ export function useBulkStorageInstaller({
           installedSuccess: true,
           installedFileId,
           installedFilename,
+          installedPaths,
         };
       }
       return {
@@ -1222,6 +1675,7 @@ export function useBulkStorageInstaller({
         installedSuccess: true,
         installedFileId,
         installedFilename,
+        installedPaths,
       };
     },
     [emitSdDebug],
@@ -1244,7 +1698,10 @@ export function useBulkStorageInstaller({
       dirCache: Map<string, SdDirectoryHandle>;
       controller: AbortController;
       unsyncedInstalledIds: Set<number>;
-      unsyncedItemMeta: Record<number, { fileId?: number | null; filename?: string | null }>;
+      unsyncedItemMeta: Record<
+        number,
+        { fileId?: number | null; filename?: string | null; paths?: string[] }
+      >;
       flushInstalled: () => Promise<void>;
     }) => {
       const {
@@ -1474,9 +1931,12 @@ export function useBulkStorageInstaller({
 
           if (outcome.installedSuccess) {
             unsyncedInstalledIds.add(row.itemId);
+            const prevPaths = unsyncedItemMeta[row.itemId]?.paths || [];
+            const mergedPaths = Array.from(new Set([...prevPaths, ...outcome.installedPaths]));
             unsyncedItemMeta[row.itemId] = {
               fileId: outcome.installedFileId,
               filename: outcome.installedFilename,
+              paths: mergedPaths.length > 0 ? mergedPaths : undefined,
             };
           }
 
@@ -1686,7 +2146,10 @@ export function useBulkStorageInstaller({
         const scanCache: Record<string, SdScanFolderResult> = {};
         const dirCache = new Map<string, SdDirectoryHandle>();
         const unsyncedInstalledIds = new Set<number>();
-        const unsyncedItemMeta: Record<number, { fileId?: number | null; filename?: string | null }> = {};
+        const unsyncedItemMeta: Record<
+          number,
+          { fileId?: number | null; filename?: string | null; paths?: string[] }
+        > = {};
 
         const flushInstalled = async () => {
           if (unsyncedInstalledIds.size === 0) return;
@@ -2039,7 +2502,10 @@ export function useBulkStorageInstaller({
       const scanCache: Record<string, SdScanFolderResult> = { ...folderScans };
       const dirCache = new Map<string, SdDirectoryHandle>();
       const unsyncedInstalledIds = new Set<number>();
-      const unsyncedItemMeta: Record<number, { fileId?: number | null; filename?: string | null }> = {};
+      const unsyncedItemMeta: Record<
+        number,
+        { fileId?: number | null; filename?: string | null; paths?: string[] }
+      > = {};
 
       const flushInstalled = async () => {
         if (unsyncedInstalledIds.size === 0) return;
@@ -2135,9 +2601,12 @@ export function useBulkStorageInstaller({
 
           if (outcome.installedSuccess) {
             unsyncedInstalledIds.add(row.itemId);
+            const prevPaths = unsyncedItemMeta[row.itemId]?.paths || [];
+            const mergedPaths = Array.from(new Set([...prevPaths, ...outcome.installedPaths]));
             unsyncedItemMeta[row.itemId] = {
               fileId: outcome.installedFileId,
               filename: outcome.installedFilename,
+              paths: mergedPaths.length > 0 ? mergedPaths : undefined,
             };
           }
 
@@ -2623,6 +3092,19 @@ export function useBulkStorageInstaller({
     promptMountSdCard,
     mountError,
     clearMountError: () => setMountError(null),
+    deviceProfiles,
+    activeDeviceProfile,
+    activeDeviceName,
+    rememberedHandles,
+    lastRememberedHandle,
+    reconnectingDeviceId,
+    reconnectStoredDevice,
+    refreshDeviceProfiles,
+    renameDeviceProfile,
+    saveDeviceProfileSettings,
+    deleteDeviceProfile,
+    uninstallingItemIds,
+    uninstallItemsFromMountedDevice,
     autoConfigPhase,
     autoConfigProgress,
     autoConfigResult,

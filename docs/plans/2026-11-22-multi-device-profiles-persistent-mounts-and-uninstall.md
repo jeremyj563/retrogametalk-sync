@@ -1,8 +1,8 @@
 ---
 title: Multi-Device Profiles, Persistent Reconnect Mounts & Device Uninstall
-status: planned
+status: implemented
 created_at: 2026-11-22T20:35:00Z
-implemented_at: null
+implemented_at: 2026-11-23T15:06:00Z
 ---
 
 # Multi-Device Profiles, Persistent Reconnect Mounts & Device Uninstall

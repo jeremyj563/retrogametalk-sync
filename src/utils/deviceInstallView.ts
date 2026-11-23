@@ -16,7 +16,8 @@ import {
   getStorageRomCategoryShortLabel,
   type StorageFolderMappingConfig,
 } from '../shared/storageFolderMappings';
-import type { PlayableExportTarget } from '../types';
+import { findItemInstallForDevice } from '../shared/deviceProfiles';
+import type { PlayableExportTarget, ReleaseDeviceInstallRecord } from '../types';
 import { formatBytes } from './format';
 import { findUpgradeCandidateOnCard, type SdScanFolderResult } from './sdCardFs';
 
@@ -740,17 +741,33 @@ export function resolveItemDeviceInstallState(
  */
 export function isItemInstalledOnMountedDevice(params: {
   mountedDeviceName: string | null | undefined;
+  activeDeviceId?: string | null;
+  deviceInstalls?: ReleaseDeviceInstallRecord[] | null;
   installedAt: string | null | undefined;
   installedDeviceLabel: string | null | undefined;
   liveInstallState?: Pick<ResolvedItemDeviceInstallState, 'isFinished' | 'outcomeKind'> | null;
   installerIsBusy?: boolean;
 }): boolean {
   const mounted = (params.mountedDeviceName || '').trim().toLowerCase();
-  if (!mounted) return false;
+  const activeId = (params.activeDeviceId || '').trim();
+  if (!mounted && !activeId) return false;
 
-  if (params.installedAt) {
+  if (Array.isArray(params.deviceInstalls) && params.deviceInstalls.length > 0) {
+    const match = findItemInstallForDevice(
+      {
+        deviceInstalls: params.deviceInstalls,
+        installedAt: params.installedAt ?? null,
+        installedDeviceLabel: params.installedDeviceLabel ?? null,
+        installedFileId: null,
+        installedFilename: null,
+      },
+      activeId || null,
+      params.mountedDeviceName ?? null,
+    );
+    if (match) return true;
+  } else if (params.installedAt) {
     const installedLabel = (params.installedDeviceLabel || '').trim().toLowerCase();
-    if (!installedLabel || installedLabel === mounted) {
+    if (!installedLabel || (mounted && installedLabel === mounted)) {
       return true;
     }
   }

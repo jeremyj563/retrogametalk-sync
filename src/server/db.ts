@@ -21,7 +21,14 @@ import { normalizeFilenameKey } from './syncFastSkip.ts';
 import {
   createDefaultStorageFolderConfig,
   normalizeStorageFolderConfig,
+  type StorageFolderMappingConfig,
 } from '../shared/storageFolderMappings.ts';
+import {
+  makeStableDeviceProfileId,
+  normalizeDeviceRomNaming,
+  sanitizeDeviceProfileId,
+  sanitizeInstalledPathsList,
+} from '../shared/deviceProfiles.ts';
 import {
   canonicalizeSystemSlug,
   expandSystemAliases,
@@ -53,6 +60,7 @@ import type {
   CompositionStat,
   ConfigUpdateInput,
   DatabaseMigrationReport,
+  DeviceRomNamingOverrides,
   DownloadTrendDailyPoint,
   DownloadTrendRunPoint,
   DryRunConsoleBreakdown,
@@ -63,6 +71,7 @@ import type {
   LogLevel,
   OutdatedInstalledItemSummary,
   OutdatedInstalledSummary,
+  ReleaseDeviceInstallRecord,
   ReleaseFileRecord,
   ReleaseMetadata,
   ReleaseTypeBreakdown,
@@ -73,6 +82,7 @@ import type {
   ScraperConfigInternal,
   ScraperConfigPublic,
   SizeBucketStat,
+  StorageDeviceProfile,
   SyncPreflightSummary,
   SyncRunRecord,
   SyncRunSummarySnapshot,
@@ -941,6 +951,7 @@ function mapReleaseRow(
   row: Record<string, unknown>,
   files: ReleaseFileRecord[],
   collectionIds: number[] = [],
+  deviceInstalls: ReleaseDeviceInstallRecord[] = [],
 ): RepositoryItemRecord {
   let parsedMeta: ReleaseMetadata | null = null;
   if (row.metadata_json) {
@@ -996,6 +1007,7 @@ function mapReleaseRow(
         ? Number(row.installed_file_id)
         : null,
     installedFilename: row.installed_filename ? String(row.installed_filename) : null,
+    deviceInstalls,
     isFavorite: Boolean(row.is_favorite),
     syncOverride: normalizeSyncOverride(row.sync_override),
     collectionIds,
@@ -1037,6 +1049,56 @@ function loadCollectionIdsByReleaseIds(releaseIds: number[]): Map<number, number
     const cid = Number(row.collection_id);
     const list = map.get(rid) || [];
     list.push(cid);
+    map.set(rid, list);
+  }
+  return map;
+}
+
+function loadDeviceInstallsByReleaseIds(releaseIds: number[]): Map<number, ReleaseDeviceInstallRecord[]> {
+  const map = new Map<number, ReleaseDeviceInstallRecord[]>();
+  if (releaseIds.length === 0) return map;
+  const placeholders = releaseIds.map(() => '?').join(',');
+  const rows = getDb()
+    .prepare(
+      `SELECT
+         di.release_id,
+         di.device_id,
+         di.installed_at,
+         di.installed_file_id,
+         di.installed_filename,
+         di.installed_paths_json,
+         COALESCE(dp.name, dp.volume_label, di.device_id) AS device_name,
+         COALESCE(dp.volume_label, dp.name, di.device_id) AS volume_label
+       FROM catalog_release_device_installs di
+       LEFT JOIN storage_device_profiles dp ON dp.id = di.device_id
+       WHERE di.release_id IN (${placeholders})
+       ORDER BY di.installed_at DESC, device_name COLLATE NOCASE ASC`,
+    )
+    .all(...releaseIds) as Record<string, unknown>[];
+  for (const row of rows) {
+    const rid = Number(row.release_id);
+    let parsedPaths: string[] = [];
+    if (row.installed_paths_json) {
+      try {
+        parsedPaths = sanitizeInstalledPathsList(JSON.parse(String(row.installed_paths_json)));
+      } catch {
+        parsedPaths = [];
+      }
+    }
+    const list = map.get(rid) || [];
+    list.push({
+      releaseId: rid,
+      deviceId: String(row.device_id),
+      deviceName: String(row.device_name),
+      volumeLabel: String(row.volume_label),
+      installedAt: String(row.installed_at),
+      installedFileId:
+        row.installed_file_id !== null && row.installed_file_id !== undefined
+          ? Number(row.installed_file_id)
+          : null,
+      installedFilename: row.installed_filename ? String(row.installed_filename) : null,
+      installedPaths: parsedPaths,
+    });
     map.set(rid, list);
   }
   return map;
@@ -2031,7 +2093,13 @@ export function getCatalogReleaseById(id: number): RepositoryItemRecord | null {
   const rid = Number(row.id);
   const filesMap = loadFilesByReleaseIds([rid]);
   const collectionsMap = loadCollectionIdsByReleaseIds([rid]);
-  return mapReleaseRow(row, filesMap.get(rid) || [], collectionsMap.get(rid) || []);
+  const deviceInstallsMap = loadDeviceInstallsByReleaseIds([rid]);
+  return mapReleaseRow(
+    row,
+    filesMap.get(rid) || [],
+    collectionsMap.get(rid) || [],
+    deviceInstallsMap.get(rid) || [],
+  );
 }
 
 export function getRepositoryItemById(id: number): RepositoryItemRecord | null {
@@ -2047,7 +2115,13 @@ export function getCatalogReleaseByRemoteUrl(remoteUrl: string): RepositoryItemR
   const rid = Number(row.id);
   const filesMap = loadFilesByReleaseIds([rid]);
   const collectionsMap = loadCollectionIdsByReleaseIds([rid]);
-  return mapReleaseRow(row, filesMap.get(rid) || [], collectionsMap.get(rid) || []);
+  const deviceInstallsMap = loadDeviceInstallsByReleaseIds([rid]);
+  return mapReleaseRow(
+    row,
+    filesMap.get(rid) || [],
+    collectionsMap.get(rid) || [],
+    deviceInstallsMap.get(rid) || [],
+  );
 }
 
 export function getRepositoryItemByRemoteUrl(remoteUrl: string): RepositoryItemRecord | null {
@@ -2530,16 +2604,35 @@ interface InstalledOutdatedPartition {
  * Sidebar totals, Catalog `Updates (N)` facet, Catalog `installed=outdated` filter,
  * and `GET /api/items/outdated` stay 100% consistent.
  */
-function computeInstalledOutdatedPartition(): InstalledOutdatedPartition {
-  const rows = getDb()
-    .prepare(
-      `SELECT id, status, installed_at, installed_device_label, installed_file_id,
-              installed_filename, downloaded_at, remote_updated_at, remote_checked_at,
-              json_extract(metadata_json, '$.downloadHints') AS download_hints_json
-       FROM catalog_releases
-       WHERE installed_at IS NOT NULL`,
-    )
-    .all() as {
+function computeInstalledOutdatedPartition(deviceId?: string | null): InstalledOutdatedPartition {
+  const scopedDeviceId = sanitizeDeviceProfileId(deviceId);
+  const rows = (
+    scopedDeviceId
+      ? getDb()
+          .prepare(
+            `SELECT r.id, r.status,
+                    di.installed_at AS installed_at,
+                    COALESCE(dp.name, dp.volume_label, di.device_id) AS installed_device_label,
+                    di.installed_file_id AS installed_file_id,
+                    di.installed_filename AS installed_filename,
+                    r.downloaded_at, r.remote_updated_at, r.remote_checked_at,
+                    json_extract(r.metadata_json, '$.downloadHints') AS download_hints_json
+             FROM catalog_release_device_installs di
+             INNER JOIN catalog_releases r ON r.id = di.release_id
+             LEFT JOIN storage_device_profiles dp ON dp.id = di.device_id
+             WHERE di.device_id = ?`,
+          )
+          .all(scopedDeviceId)
+      : getDb()
+          .prepare(
+            `SELECT id, status, installed_at, installed_device_label, installed_file_id,
+                    installed_filename, downloaded_at, remote_updated_at, remote_checked_at,
+                    json_extract(metadata_json, '$.downloadHints') AS download_hints_json
+             FROM catalog_releases
+             WHERE installed_at IS NOT NULL`,
+          )
+          .all()
+  ) as {
     id: number;
     status: string;
     installed_at: string | null;
@@ -2747,17 +2840,27 @@ function listInstalledFacetCounts(
   notInstalled: number;
   outdated: number;
 } {
+  const scopedDeviceId = sanitizeDeviceProfileId(params.deviceId);
   const scopedParams: CatalogQueryFilterParams = {
     ...params,
     installed: undefined,
   };
   const resolvedCfg = cfg ?? (scopedParams.syncRules ? getPublicConfig() : undefined);
   const { where, args } = buildCatalogWhereAndOrder(scopedParams, resolvedCfg);
-  const outdatedPartition = computeInstalledOutdatedPartition();
+  const outdatedPartition = computeInstalledOutdatedPartition(scopedDeviceId);
 
   if (scopedParams.syncRules && resolvedCfg) {
     const indexMap = ruleIndexMap ?? loadAllReleaseRuleIndexMap();
     const allowedTypes = normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes);
+    const deviceInstalledIds = scopedDeviceId
+      ? new Set(
+          (
+            getDb()
+              .prepare('SELECT release_id FROM catalog_release_device_installs WHERE device_id = ?')
+              .all(scopedDeviceId) as { release_id: number }[]
+          ).map((r) => Number(r.release_id)),
+        )
+      : null;
     const candidateRows = getDb()
       .prepare(
         `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, installed_at, sync_override
@@ -2774,9 +2877,11 @@ function listInstalledFacetCounts(
     let notInstalled = 0;
     let outdated = 0;
     for (const row of matched) {
-      if (row.installed_at) {
+      const rid = Number(row.id);
+      const isInstalled = deviceInstalledIds ? deviceInstalledIds.has(rid) : Boolean(row.installed_at);
+      if (isInstalled) {
         installed += 1;
-        if (outdatedPartition.outdatedIdSet.has(Number(row.id))) outdated += 1;
+        if (outdatedPartition.outdatedIdSet.has(rid)) outdated += 1;
       } else {
         notInstalled += 1;
       }
@@ -2785,22 +2890,34 @@ function listInstalledFacetCounts(
   }
 
   const hasOutdatedCandidates = outdatedPartition.outdatedIds.length > 0;
-  const queryArgs = hasOutdatedCandidates
-    ? [JSON.stringify(outdatedPartition.outdatedIds), ...args]
-    : args;
+  const selectArgs: unknown[] = [];
+  const installedPredicate = scopedDeviceId
+    ? 'EXISTS (SELECT 1 FROM catalog_release_device_installs di WHERE di.release_id = catalog_releases.id AND di.device_id = ?)'
+    : 'installed_at IS NOT NULL';
+  const notInstalledPredicate = scopedDeviceId
+    ? 'NOT EXISTS (SELECT 1 FROM catalog_release_device_installs di WHERE di.release_id = catalog_releases.id AND di.device_id = ?)'
+    : 'installed_at IS NULL';
+
+  if (scopedDeviceId) {
+    selectArgs.push(scopedDeviceId, scopedDeviceId);
+  }
+
   const outdatedSelectExpr = hasOutdatedCandidates
     ? 'SUM(CASE WHEN id IN (SELECT value FROM json_each(?)) THEN 1 ELSE 0 END)'
     : '0';
+  if (hasOutdatedCandidates) {
+    selectArgs.push(JSON.stringify(outdatedPartition.outdatedIds));
+  }
 
   const row = getDb()
     .prepare(
       `SELECT
-        SUM(CASE WHEN installed_at IS NOT NULL THEN 1 ELSE 0 END) AS installed_cnt,
-        SUM(CASE WHEN installed_at IS NULL THEN 1 ELSE 0 END) AS not_installed_cnt,
+        SUM(CASE WHEN ${installedPredicate} THEN 1 ELSE 0 END) AS installed_cnt,
+        SUM(CASE WHEN ${notInstalledPredicate} THEN 1 ELSE 0 END) AS not_installed_cnt,
         ${outdatedSelectExpr} AS outdated_cnt
       FROM catalog_releases ${where}`,
     )
-    .get(...queryArgs) as
+    .get(...selectArgs, ...args) as
     | { installed_cnt: number | null; not_installed_cnt: number | null; outdated_cnt: number | null }
     | undefined;
 
@@ -2967,6 +3084,7 @@ export interface CatalogQueryFilterParams {
   status?: string | string[];
   downloaded?: string;
   installed?: string;
+  deviceId?: string;
   syncRules?: boolean;
   favoriteOnly?: boolean;
   collectionId?: number;
@@ -3093,12 +3211,27 @@ function buildCatalogWhereAndOrder(
     }
   }
 
+  const scopedDeviceId = sanitizeDeviceProfileId(params.deviceId);
   if (params.installed === 'only') {
-    conditions.push('installed_at IS NOT NULL');
+    if (scopedDeviceId) {
+      conditions.push(
+        'EXISTS (SELECT 1 FROM catalog_release_device_installs di WHERE di.release_id = catalog_releases.id AND di.device_id = ?)',
+      );
+      args.push(scopedDeviceId);
+    } else {
+      conditions.push('installed_at IS NOT NULL');
+    }
   } else if (params.installed === 'exclude') {
-    conditions.push('installed_at IS NULL');
+    if (scopedDeviceId) {
+      conditions.push(
+        'NOT EXISTS (SELECT 1 FROM catalog_release_device_installs di WHERE di.release_id = catalog_releases.id AND di.device_id = ?)',
+      );
+      args.push(scopedDeviceId);
+    } else {
+      conditions.push('installed_at IS NULL');
+    }
   } else if (params.installed === 'outdated') {
-    const outdatedPartition = computeInstalledOutdatedPartition();
+    const outdatedPartition = computeInstalledOutdatedPartition(scopedDeviceId);
     if (outdatedPartition.outdatedIds.length === 0) {
       conditions.push('1 = 0');
     } else {
@@ -3285,6 +3418,7 @@ export function queryRepositoryItems(
   const releaseIds = rows.map((r) => Number(r.id));
   const filesMap = loadFilesByReleaseIds(releaseIds);
   const collectionsMap = loadCollectionIdsByReleaseIds(releaseIds);
+  const deviceInstallsMap = loadDeviceInstallsByReleaseIds(releaseIds);
 
   const tagsFacet = listDistinctJsonFacetWithCounts('release_tags_json');
   const genresFacet = listDistinctJsonFacetWithCounts('genres_json');
@@ -3323,7 +3457,12 @@ export function queryRepositoryItems(
 
   return {
     items: rows.map((r) =>
-      mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+      mapReleaseRow(
+        r,
+        filesMap.get(Number(r.id)) || [],
+        collectionsMap.get(Number(r.id)) || [],
+        deviceInstallsMap.get(Number(r.id)) || [],
+      ),
     ),
     total,
     facets,
@@ -3367,8 +3506,14 @@ export function listCatalogReleasesForRuleSync(
   const matchedIds = matchedRows.map((r) => Number(r.id));
   const filesMap = loadFilesByReleaseIds(matchedIds);
   const collectionsMap = loadCollectionIdsByReleaseIds(matchedIds);
+  const deviceInstallsMap = loadDeviceInstallsByReleaseIds(matchedIds);
   const matched = matchedRows.map((r) =>
-    mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+    mapReleaseRow(
+      r,
+      filesMap.get(Number(r.id)) || [],
+      collectionsMap.get(Number(r.id)) || [],
+      deviceInstallsMap.get(Number(r.id)) || [],
+    ),
   );
   return {
     matched,
@@ -3388,8 +3533,14 @@ export function listPinnedCatalogReleases(): RepositoryItemRecord[] {
   const releaseIds = rows.map((r) => Number(r.id));
   const filesMap = loadFilesByReleaseIds(releaseIds);
   const collectionsMap = loadCollectionIdsByReleaseIds(releaseIds);
+  const deviceInstallsMap = loadDeviceInstallsByReleaseIds(releaseIds);
   return rows.map((r) =>
-    mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+    mapReleaseRow(
+      r,
+      filesMap.get(Number(r.id)) || [],
+      collectionsMap.get(Number(r.id)) || [],
+      deviceInstallsMap.get(Number(r.id)) || [],
+    ),
   );
 }
 
@@ -3527,14 +3678,345 @@ export function computeSyncPreflightSummary(): SyncPreflightSummary {
   };
 }
 
+function mapStorageDeviceProfileRow(row: Record<string, unknown>): StorageDeviceProfile {
+  let folderConfig: StorageFolderMappingConfig | null = null;
+  if (row.folder_config_json) {
+    try {
+      folderConfig = normalizeStorageFolderConfig(JSON.parse(String(row.folder_config_json)));
+    } catch {
+      folderConfig = null;
+    }
+  }
+  let romNaming: DeviceRomNamingOverrides | null = null;
+  if (row.rom_naming_json) {
+    try {
+      romNaming = normalizeDeviceRomNaming(JSON.parse(String(row.rom_naming_json)));
+    } catch {
+      romNaming = null;
+    }
+  }
+  return {
+    id: String(row.id),
+    name: String(row.name || row.volume_label || row.id),
+    volumeLabel: String(row.volume_label || row.name || row.id),
+    folderConfig,
+    romNaming,
+    lastMountedAt: row.last_mounted_at ? String(row.last_mounted_at) : null,
+    installedCount: Number(row.installed_count || 0),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+const STORAGE_DEVICE_PROFILE_SELECT_SQL = `
+  SELECT
+    p.id,
+    p.name,
+    p.volume_label,
+    p.folder_config_json,
+    p.rom_naming_json,
+    p.last_mounted_at,
+    p.created_at,
+    p.updated_at,
+    COUNT(di.release_id) AS installed_count
+  FROM storage_device_profiles p
+  LEFT JOIN catalog_release_device_installs di ON di.device_id = p.id
+`;
+
+export function listStorageDeviceProfiles(): StorageDeviceProfile[] {
+  const rows = getDb()
+    .prepare(
+      `${STORAGE_DEVICE_PROFILE_SELECT_SQL}
+       GROUP BY p.id
+       ORDER BY COALESCE(p.last_mounted_at, p.updated_at, p.created_at) DESC, p.name COLLATE NOCASE ASC`,
+    )
+    .all() as Record<string, unknown>[];
+  return rows.map(mapStorageDeviceProfileRow);
+}
+
+export function getStorageDeviceProfileById(id: string): StorageDeviceProfile | null {
+  const cleanId = sanitizeDeviceProfileId(id);
+  if (!cleanId) return null;
+  const row = getDb()
+    .prepare(
+      `${STORAGE_DEVICE_PROFILE_SELECT_SQL}
+       WHERE p.id = ?
+       GROUP BY p.id`,
+    )
+    .get(cleanId) as Record<string, unknown> | undefined;
+  return row ? mapStorageDeviceProfileRow(row) : null;
+}
+
+export function recomputeReleaseInstallRollups(releaseIds: number[]): void {
+  const cleanIds = Array.from(
+    new Set(releaseIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
+  );
+  if (cleanIds.length === 0) return;
+
+  const latestStmt = getDb().prepare(
+    `SELECT
+       di.installed_at,
+       COALESCE(dp.name, dp.volume_label, di.device_id) AS device_label,
+       di.installed_file_id,
+       di.installed_filename
+     FROM catalog_release_device_installs di
+     LEFT JOIN storage_device_profiles dp ON dp.id = di.device_id
+     WHERE di.release_id = ?
+     ORDER BY di.installed_at DESC, di.device_id ASC
+     LIMIT 1`,
+  );
+  const setRollupStmt = getDb().prepare(
+    `UPDATE catalog_releases
+     SET installed_at = ?,
+         installed_device_label = ?,
+         installed_file_id = ?,
+         installed_filename = ?
+     WHERE id = ?`,
+  );
+  const clearRollupStmt = getDb().prepare(
+    `UPDATE catalog_releases
+     SET installed_at = NULL,
+         installed_device_label = NULL,
+         installed_file_id = NULL,
+         installed_filename = NULL
+     WHERE id = ?`,
+  );
+
+  const tx = getDb().transaction(() => {
+    for (const rid of cleanIds) {
+      const latest = latestStmt.get(rid) as
+        | {
+            installed_at: string;
+            device_label: string | null;
+            installed_file_id: number | null;
+            installed_filename: string | null;
+          }
+        | undefined;
+      if (latest) {
+        setRollupStmt.run(
+          latest.installed_at,
+          latest.device_label,
+          latest.installed_file_id,
+          latest.installed_filename,
+          rid,
+        );
+      } else {
+        clearRollupStmt.run(rid);
+      }
+    }
+  });
+  tx();
+}
+
+export function upsertStorageDeviceProfileOnMount(options: {
+  id?: string | null;
+  volumeLabel: string;
+  name?: string | null;
+}): StorageDeviceProfile {
+  const volumeLabel = (options.volumeLabel || '').trim().slice(0, 120) || 'Storage Device';
+  const requestedName = options.name?.trim() ? options.name.trim().slice(0, 80) : null;
+  const requestedId = sanitizeDeviceProfileId(options.id);
+  const now = new Date().toISOString();
+
+  // 1. Match by explicit profile ID first
+  if (requestedId) {
+    const existingById = getStorageDeviceProfileById(requestedId);
+    if (existingById) {
+      getDb()
+        .prepare(
+          `UPDATE storage_device_profiles
+           SET volume_label = ?,
+               last_mounted_at = ?,
+               updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(volumeLabel, now, now, existingById.id);
+      return getStorageDeviceProfileById(existingById.id) || existingById;
+    }
+  }
+
+  // 2. If no explicit ID was requested, try matching an existing profile by volume label
+  if (!requestedId) {
+    const existingByVolume = getDb()
+      .prepare(
+        `SELECT id FROM storage_device_profiles
+         WHERE LOWER(TRIM(volume_label)) = LOWER(TRIM(?))
+         ORDER BY COALESCE(last_mounted_at, updated_at, created_at) DESC
+         LIMIT 1`,
+      )
+      .get(volumeLabel) as { id: string } | undefined;
+    if (existingByVolume?.id) {
+      getDb()
+        .prepare(
+          `UPDATE storage_device_profiles
+           SET last_mounted_at = ?,
+               updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(now, now, existingByVolume.id);
+      const found = getStorageDeviceProfileById(existingByVolume.id);
+      if (found) return found;
+    }
+  }
+
+  // 3. Create new profile with deterministic (or requested) ID, avoiding collisions
+  const baseId = requestedId || makeStableDeviceProfileId(volumeLabel);
+  let finalId = baseId;
+  let suffix = 2;
+  while (getDb().prepare('SELECT 1 FROM storage_device_profiles WHERE id = ?').get(finalId)) {
+    finalId = `${baseId.slice(0, 68)}-${suffix}`;
+    suffix += 1;
+  }
+
+  const displayName = requestedName || volumeLabel.slice(0, 80);
+  getDb()
+    .prepare(
+      `INSERT INTO storage_device_profiles (
+         id, name, volume_label, folder_config_json, rom_naming_json,
+         art_export_json, last_mounted_at, created_at, updated_at
+       ) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?)`,
+    )
+    .run(finalId, displayName, volumeLabel, now, now, now);
+
+  const created = getStorageDeviceProfileById(finalId);
+  if (!created) {
+    throw new Error('Failed to load newly created storage device profile');
+  }
+  return created;
+}
+
+export function updateStorageDeviceProfile(
+  id: string,
+  patch: {
+    name?: string;
+    folderConfig?: StorageFolderMappingConfig | null;
+    romNaming?: DeviceRomNamingOverrides | null;
+  },
+): StorageDeviceProfile | null {
+  const existing = getStorageDeviceProfileById(id);
+  if (!existing) return null;
+
+  const nextName =
+    patch.name !== undefined ? patch.name.trim().slice(0, 80) : existing.name;
+  if (!nextName) {
+    throw new Error('Device profile name cannot be empty');
+  }
+
+  const nextFolderConfig =
+    patch.folderConfig !== undefined
+      ? patch.folderConfig === null
+        ? null
+        : normalizeStorageFolderConfig(patch.folderConfig)
+      : existing.folderConfig;
+
+  const nextRomNaming =
+    patch.romNaming !== undefined
+      ? patch.romNaming === null
+        ? null
+        : normalizeDeviceRomNaming(patch.romNaming)
+      : existing.romNaming;
+
+  const now = new Date().toISOString();
+  getDb()
+    .prepare(
+      `UPDATE storage_device_profiles
+       SET name = ?,
+           folder_config_json = ?,
+           rom_naming_json = ?,
+           updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(
+      nextName,
+      nextFolderConfig ? JSON.stringify(nextFolderConfig) : null,
+      nextRomNaming ? JSON.stringify(nextRomNaming) : null,
+      now,
+      existing.id,
+    );
+
+  if (nextName !== existing.name) {
+    const affectedRows = getDb()
+      .prepare('SELECT release_id FROM catalog_release_device_installs WHERE device_id = ?')
+      .all(existing.id) as { release_id: number }[];
+    if (affectedRows.length > 0) {
+      recomputeReleaseInstallRollups(affectedRows.map((r) => Number(r.release_id)));
+    }
+  }
+
+  return getStorageDeviceProfileById(existing.id);
+}
+
+export function deleteStorageDeviceProfile(id: string): {
+  deleted: boolean;
+  affectedReleaseIds: number[];
+} {
+  const cleanId = sanitizeDeviceProfileId(id);
+  if (!cleanId) return { deleted: false, affectedReleaseIds: [] };
+
+  const affectedRows = getDb()
+    .prepare('SELECT release_id FROM catalog_release_device_installs WHERE device_id = ?')
+    .all(cleanId) as { release_id: number }[];
+  const affectedReleaseIds = affectedRows.map((r) => Number(r.release_id));
+
+  const info = getDb().prepare('DELETE FROM storage_device_profiles WHERE id = ?').run(cleanId);
+  if (info.changes > 0 && affectedReleaseIds.length > 0) {
+    recomputeReleaseInstallRollups(affectedReleaseIds);
+  }
+  return { deleted: info.changes > 0, affectedReleaseIds };
+}
+
+export function removeDeviceInstalls(
+  deviceId: string,
+  releaseIds: number[],
+): { removed: number; items: RepositoryItemRecord[] } {
+  const cleanDeviceId = sanitizeDeviceProfileId(deviceId);
+  const cleanIds = Array.from(
+    new Set(releaseIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)),
+  );
+  if (!cleanDeviceId || cleanIds.length === 0) {
+    return { removed: 0, items: [] };
+  }
+
+  const placeholders = cleanIds.map(() => '?').join(', ');
+  const info = getDb()
+    .prepare(
+      `DELETE FROM catalog_release_device_installs
+       WHERE device_id = ? AND release_id IN (${placeholders})`,
+    )
+    .run(cleanDeviceId, ...cleanIds);
+
+  recomputeReleaseInstallRollups(cleanIds);
+
+  const rows = getDb()
+    .prepare(`SELECT * FROM catalog_releases WHERE id IN (${placeholders})`)
+    .all(...cleanIds) as Record<string, unknown>[];
+  const filesMap = loadFilesByReleaseIds(cleanIds);
+  const collectionsMap = loadCollectionIdsByReleaseIds(cleanIds);
+  const deviceInstallsMap = loadDeviceInstallsByReleaseIds(cleanIds);
+
+  return {
+    removed: info.changes,
+    items: rows.map((r) =>
+      mapReleaseRow(
+        r,
+        filesMap.get(Number(r.id)) || [],
+        collectionsMap.get(Number(r.id)) || [],
+        deviceInstallsMap.get(Number(r.id)) || [],
+      ),
+    ),
+  };
+}
+
 export interface InstalledItemFileMeta {
   fileId?: number | null;
   filename?: string | null;
+  paths?: string[];
 }
 
 export function setCatalogItemsInstalled(options: {
   ids: number[];
   installed: boolean;
+  deviceId?: string | null;
   deviceLabel?: string | null;
   installedFileId?: number | null;
   installedFilename?: string | null;
@@ -3548,11 +4030,34 @@ export function setCatalogItemsInstalled(options: {
   }
 
   const placeholders = cleanIds.map(() => '?').join(', ');
+  const existingReleaseRows = getDb()
+    .prepare(`SELECT id FROM catalog_releases WHERE id IN (${placeholders})`)
+    .all(...cleanIds) as { id: number }[];
+  const validIds = existingReleaseRows.map((r) => Number(r.id));
+  if (validIds.length === 0) {
+    return { updated: 0, items: [] };
+  }
+
+  const scopedDeviceId = sanitizeDeviceProfileId(options.deviceId);
   let updated = 0;
 
   if (options.installed) {
     const now = new Date().toISOString();
     const label = options.deviceLabel?.trim() ? options.deviceLabel.trim().slice(0, 120) : null;
+    const profile = scopedDeviceId
+      ? upsertStorageDeviceProfileOnMount({
+          id: scopedDeviceId,
+          volumeLabel: label || scopedDeviceId,
+          name: label || undefined,
+        })
+      : label
+        ? upsertStorageDeviceProfileOnMount({ volumeLabel: label })
+        : upsertStorageDeviceProfileOnMount({
+            id: 'dev-storage',
+            volumeLabel: 'Storage Device',
+            name: 'Storage Device',
+          });
+
     const defaultFileId =
       options.installedFileId !== undefined &&
       options.installedFileId !== null &&
@@ -3563,61 +4068,70 @@ export function setCatalogItemsInstalled(options: {
     const defaultFilename = options.installedFilename?.trim()
       ? options.installedFilename.trim().slice(0, 300)
       : null;
-    const hasPerItemMeta = Boolean(options.itemMeta && Object.keys(options.itemMeta).length > 0);
 
-    if (hasPerItemMeta) {
-      const updateStmt = getDb().prepare(
-        `UPDATE catalog_releases
-         SET installed_at = ?,
-             installed_device_label = COALESCE(?, installed_device_label),
-             installed_file_id = COALESCE(?, installed_file_id),
-             installed_filename = COALESCE(?, installed_filename)
-         WHERE id = ?`,
-      );
-      const tx = getDb().transaction(() => {
-        let count = 0;
-        for (const id of cleanIds) {
-          const meta = options.itemMeta?.[id];
-          const itemFileId =
-            meta?.fileId !== undefined &&
-            meta?.fileId !== null &&
-            Number.isInteger(Number(meta.fileId)) &&
-            Number(meta.fileId) > 0
-              ? Number(meta.fileId)
-              : defaultFileId;
-          const itemFilename = meta?.filename?.trim()
-            ? meta.filename.trim().slice(0, 300)
-            : defaultFilename;
-          count += updateStmt.run(now, label, itemFileId, itemFilename, id).changes;
-        }
-        return count;
-      });
-      updated = tx();
+    const upsertDeviceInstallStmt = getDb().prepare(
+      `INSERT INTO catalog_release_device_installs (
+         release_id, device_id, installed_at, installed_file_id, installed_filename, installed_paths_json
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(release_id, device_id) DO UPDATE SET
+         installed_at = excluded.installed_at,
+         installed_file_id = COALESCE(excluded.installed_file_id, catalog_release_device_installs.installed_file_id),
+         installed_filename = COALESCE(excluded.installed_filename, catalog_release_device_installs.installed_filename),
+         installed_paths_json = CASE
+           WHEN excluded.installed_paths_json != '[]' THEN excluded.installed_paths_json
+           ELSE catalog_release_device_installs.installed_paths_json
+         END`,
+    );
+
+    const tx = getDb().transaction(() => {
+      let count = 0;
+      for (const id of validIds) {
+        const meta = options.itemMeta?.[id];
+        const itemFileId =
+          meta?.fileId !== undefined &&
+          meta?.fileId !== null &&
+          Number.isInteger(Number(meta.fileId)) &&
+          Number(meta.fileId) > 0
+            ? Number(meta.fileId)
+            : defaultFileId;
+        const itemFilename = meta?.filename?.trim()
+          ? meta.filename.trim().slice(0, 300)
+          : defaultFilename;
+        const cleanPaths = meta?.paths ? sanitizeInstalledPathsList(meta.paths) : [];
+        const pathsJson = cleanPaths.length > 0 ? JSON.stringify(cleanPaths) : '[]';
+        count += upsertDeviceInstallStmt.run(
+          id,
+          profile.id,
+          now,
+          itemFileId,
+          itemFilename,
+          pathsJson,
+        ).changes;
+      }
+      return count;
+    });
+    updated = tx();
+    recomputeReleaseInstallRollups(validIds);
+  } else {
+    const validPlaceholders = validIds.map(() => '?').join(', ');
+    if (scopedDeviceId) {
+      const info = getDb()
+        .prepare(
+          `DELETE FROM catalog_release_device_installs
+           WHERE device_id = ? AND release_id IN (${validPlaceholders})`,
+        )
+        .run(scopedDeviceId, ...validIds);
+      updated = info.changes;
     } else {
       const info = getDb()
         .prepare(
-          `UPDATE catalog_releases
-           SET installed_at = ?,
-               installed_device_label = COALESCE(?, installed_device_label),
-               installed_file_id = COALESCE(?, installed_file_id),
-               installed_filename = COALESCE(?, installed_filename)
-           WHERE id IN (${placeholders})`,
+          `DELETE FROM catalog_release_device_installs
+           WHERE release_id IN (${validPlaceholders})`,
         )
-        .run(now, label, defaultFileId, defaultFilename, ...cleanIds);
+        .run(...validIds);
       updated = info.changes;
     }
-  } else {
-    const info = getDb()
-      .prepare(
-        `UPDATE catalog_releases
-         SET installed_at = NULL,
-             installed_device_label = NULL,
-             installed_file_id = NULL,
-             installed_filename = NULL
-         WHERE id IN (${placeholders})`,
-      )
-      .run(...cleanIds);
-    updated = info.changes;
+    recomputeReleaseInstallRollups(validIds);
   }
 
   const rows = getDb()
@@ -3625,11 +4139,17 @@ export function setCatalogItemsInstalled(options: {
     .all(...cleanIds) as Record<string, unknown>[];
   const filesMap = loadFilesByReleaseIds(cleanIds);
   const collectionsMap = loadCollectionIdsByReleaseIds(cleanIds);
+  const deviceInstallsMap = loadDeviceInstallsByReleaseIds(cleanIds);
 
   return {
     updated,
     items: rows.map((r) =>
-      mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+      mapReleaseRow(
+        r,
+        filesMap.get(Number(r.id)) || [],
+        collectionsMap.get(Number(r.id)) || [],
+        deviceInstallsMap.get(Number(r.id)) || [],
+      ),
     ),
   };
 }
@@ -3655,11 +4175,17 @@ export function setCatalogItemsFavorite(options: {
     .all(...cleanIds) as Record<string, unknown>[];
   const filesMap = loadFilesByReleaseIds(cleanIds);
   const collectionsMap = loadCollectionIdsByReleaseIds(cleanIds);
+  const deviceInstallsMap = loadDeviceInstallsByReleaseIds(cleanIds);
 
   return {
     updated: info.changes,
     items: rows.map((r) =>
-      mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+      mapReleaseRow(
+        r,
+        filesMap.get(Number(r.id)) || [],
+        collectionsMap.get(Number(r.id)) || [],
+        deviceInstallsMap.get(Number(r.id)) || [],
+      ),
     ),
   };
 }
@@ -3686,11 +4212,17 @@ export function setCatalogItemsSyncOverride(options: {
     .all(...cleanIds) as Record<string, unknown>[];
   const filesMap = loadFilesByReleaseIds(cleanIds);
   const collectionsMap = loadCollectionIdsByReleaseIds(cleanIds);
+  const deviceInstallsMap = loadDeviceInstallsByReleaseIds(cleanIds);
 
   return {
     updated: info.changes,
     items: rows.map((r) =>
-      mapReleaseRow(r, filesMap.get(Number(r.id)) || [], collectionsMap.get(Number(r.id)) || []),
+      mapReleaseRow(
+        r,
+        filesMap.get(Number(r.id)) || [],
+        collectionsMap.get(Number(r.id)) || [],
+        deviceInstallsMap.get(Number(r.id)) || [],
+      ),
     ),
   };
 }
@@ -3903,9 +4435,11 @@ export function removeItemsFromUserCollection(
 }
 
 export function listOutdatedInstalledItems(options?: {
+  deviceId?: string | null;
   deviceLabel?: string | null;
 }): OutdatedInstalledSummary {
-  const partition = computeInstalledOutdatedPartition();
+  const scopedDeviceId = sanitizeDeviceProfileId(options?.deviceId);
+  const partition = computeInstalledOutdatedPartition(scopedDeviceId);
   if (partition.outdatedIds.length === 0) {
     return {
       total: 0,
@@ -3920,7 +4454,7 @@ export function listOutdatedInstalledItems(options?: {
   const conditions: string[] = ['id IN (SELECT value FROM json_each(?))'];
   const args: unknown[] = [JSON.stringify(partition.outdatedIds)];
 
-  if (options?.deviceLabel && options.deviceLabel.trim()) {
+  if (!scopedDeviceId && options?.deviceLabel && options.deviceLabel.trim()) {
     conditions.push('LOWER(TRIM(installed_device_label)) = LOWER(TRIM(?))');
     args.push(options.deviceLabel.trim());
   }
@@ -3935,15 +4469,33 @@ export function listOutdatedInstalledItems(options?: {
 
   const releaseIds = rows.map((r) => Number(r.id));
   const filesMap = loadFilesByReleaseIds(releaseIds);
+  const deviceInstallsMap = loadDeviceInstallsByReleaseIds(releaseIds);
 
   const localReadyIds: number[] = [];
   const remoteOnlyIds: number[] = [];
   const items: OutdatedInstalledItemSummary[] = [];
 
   for (const row of rows) {
-    const record = mapReleaseRow(row, filesMap.get(Number(row.id)) || []);
-    const info = classifyInstalledUpdateState(record);
-    if (!info.hasUpdate || !record.installedAt) continue;
+    const rid = Number(row.id);
+    const deviceInstalls = deviceInstallsMap.get(rid) || [];
+    const record = mapReleaseRow(row, filesMap.get(rid) || [], [], deviceInstalls);
+    const scopedInstall = scopedDeviceId
+      ? deviceInstalls.find((d) => d.deviceId === scopedDeviceId) || null
+      : null;
+
+    const effectiveInstalledAt = scopedInstall?.installedAt ?? record.installedAt;
+    const effectiveDeviceLabel = scopedInstall?.deviceName ?? record.installedDeviceLabel;
+    const effectiveFileId = scopedInstall ? scopedInstall.installedFileId : record.installedFileId;
+    const effectiveFilename = scopedInstall ? scopedInstall.installedFilename : record.installedFilename;
+
+    const info = classifyInstalledUpdateState({
+      ...record,
+      installedAt: effectiveInstalledAt,
+      installedDeviceLabel: effectiveDeviceLabel,
+      installedFileId: effectiveFileId,
+      installedFilename: effectiveFilename,
+    });
+    if (!info.hasUpdate || !effectiveInstalledAt) continue;
 
     if (info.readyToUpgradeLocal) {
       localReadyIds.push(record.id);
@@ -3956,10 +4508,10 @@ export function listOutdatedInstalledItems(options?: {
       title: record.title,
       systemName: record.systemName,
       updateState: info.readyToUpgradeLocal ? 'update_ready_local' : 'update_available_remote',
-      installedAt: record.installedAt,
-      installedDeviceLabel: record.installedDeviceLabel,
-      installedFileId: record.installedFileId,
-      installedFilename: record.installedFilename,
+      installedAt: effectiveInstalledAt,
+      installedDeviceLabel: effectiveDeviceLabel,
+      installedFileId: effectiveFileId,
+      installedFilename: effectiveFilename,
       latestLocalDownloadedAt: info.latestLocalDownloadedAt,
       remoteUpdatedAt: record.remoteUpdatedAt,
     });

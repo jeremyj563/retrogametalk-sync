@@ -6,24 +6,30 @@ import {
   addItemsToUserCollection,
   computeSyncPreflightSummary,
   createUserCollection,
+  deleteStorageDeviceProfile,
   deleteUserCollection,
   getCatalogStatsSnapshot,
   getPublicConfig,
   getRepositoryItemById,
   getSchemaMigrationReport,
+  getStorageDeviceProfileById,
   getUserCollectionById,
   initDb,
   listActivityLogs,
   listOutdatedInstalledItems,
+  listStorageDeviceProfiles,
   listSyncRuns,
   listUserCollections,
   queryRepositoryItemIds,
   queryRepositoryItems,
+  removeDeviceInstalls,
   removeItemsFromUserCollection,
   setCatalogItemsFavorite,
   setCatalogItemsInstalled,
   setCatalogItemsSyncOverride,
+  updateStorageDeviceProfile,
   updateUserCollection,
+  upsertStorageDeviceProfileOnMount,
 } from './src/server/db.ts';
 import {
   buildContentDispositionAttachment,
@@ -40,6 +46,12 @@ import {
   buildConfigBackupSnapshot,
   parseAndValidateConfigBackup,
 } from './src/shared/configBackup.ts';
+import {
+  normalizeDeviceRomNaming,
+  sanitizeDeviceProfileId,
+  sanitizeInstalledPathsList,
+} from './src/shared/deviceProfiles.ts';
+import { normalizeStorageFolderConfig } from './src/shared/storageFolderMappings.ts';
 import { sanitizeFat32Filename } from './src/shared/romNaming.ts';
 import type { ConfigUpdateInput, RunMode } from './src/server/types.ts';
 
@@ -247,6 +259,7 @@ async function bootstrap() {
       status: parseQueryFilterParam(req.query.status),
       downloaded: typeof req.query.downloaded === 'string' ? req.query.downloaded : undefined,
       installed: typeof req.query.installed === 'string' ? req.query.installed : undefined,
+      deviceId: sanitizeDeviceProfileId(req.query.deviceId) ?? undefined,
       syncRules: req.query.syncRules === 'true' || req.query.syncRules === '1',
       favoriteOnly: req.query.favoriteOnly === 'true' || req.query.favoriteOnly === '1',
       collectionId: parseOptionalPositiveInt(req.query.collectionId),
@@ -275,6 +288,7 @@ async function bootstrap() {
       status: parseQueryFilterParam(req.query.status),
       downloaded: typeof req.query.downloaded === 'string' ? req.query.downloaded : undefined,
       installed: typeof req.query.installed === 'string' ? req.query.installed : undefined,
+      deviceId: sanitizeDeviceProfileId(req.query.deviceId) ?? undefined,
       syncRules: req.query.syncRules === 'true' || req.query.syncRules === '1',
       favoriteOnly: req.query.favoriteOnly === 'true' || req.query.favoriteOnly === '1',
       collectionId: parseOptionalPositiveInt(req.query.collectionId),
@@ -295,11 +309,12 @@ async function bootstrap() {
   });
 
   app.get('/api/items/outdated', (req, res) => {
+    const deviceId = sanitizeDeviceProfileId(req.query.deviceId);
     const deviceLabel =
       typeof req.query.deviceLabel === 'string' && req.query.deviceLabel.trim()
         ? req.query.deviceLabel.trim()
         : null;
-    res.json(listOutdatedInstalledItems({ deviceLabel }));
+    res.json(listOutdatedInstalledItems({ deviceId, deviceLabel }));
   });
 
   app.get('/api/catalog/stats', (_req, res) => {
@@ -909,6 +924,7 @@ async function bootstrap() {
       return;
     }
     const installed = req.body?.installed !== false;
+    const deviceId = sanitizeDeviceProfileId(req.body?.deviceId);
     const deviceLabel =
       typeof req.body?.deviceLabel === 'string' && req.body.deviceLabel.trim()
         ? req.body.deviceLabel.trim()
@@ -920,20 +936,27 @@ async function bootstrap() {
         ? req.body.installedFilename.trim().slice(0, 300)
         : null;
 
-    let itemMeta: Record<number, { fileId?: number | null; filename?: string | null }> | undefined;
+    let itemMeta:
+      | Record<number, { fileId?: number | null; filename?: string | null; paths?: string[] }>
+      | undefined;
     if (req.body?.itemMeta && typeof req.body.itemMeta === 'object' && !Array.isArray(req.body.itemMeta)) {
-      const sanitized: Record<number, { fileId?: number | null; filename?: string | null }> = {};
+      const sanitized: Record<
+        number,
+        { fileId?: number | null; filename?: string | null; paths?: string[] }
+      > = {};
       for (const [key, val] of Object.entries(req.body.itemMeta as Record<string, unknown>)) {
         const idNum = Number(key);
         if (!Number.isInteger(idNum) || idNum <= 0 || !val || typeof val !== 'object') continue;
         const entry = val as Record<string, unknown>;
         const fid = Number(entry.fileId);
+        const paths = sanitizeInstalledPathsList(entry.paths);
         sanitized[idNum] = {
           fileId: Number.isInteger(fid) && fid > 0 ? fid : null,
           filename:
             typeof entry.filename === 'string' && entry.filename.trim()
               ? entry.filename.trim().slice(0, 300)
               : null,
+          paths: paths.length > 0 ? paths : undefined,
         };
       }
       if (Object.keys(sanitized).length > 0) {
@@ -944,11 +967,129 @@ async function bootstrap() {
     const result = setCatalogItemsInstalled({
       ids: rawIds,
       installed,
+      deviceId,
       deviceLabel,
       installedFileId,
       installedFilename,
       itemMeta,
     });
+    orchestrator.notifyInstalledStateChanged();
+    res.json(result);
+  });
+
+  // Multi-Device Storage Profiles & Per-Device Install History
+  app.get('/api/devices', (_req, res) => {
+    res.json({ devices: listStorageDeviceProfiles() });
+  });
+
+  app.post('/api/devices', (req, res) => {
+    const volumeLabel =
+      typeof req.body?.volumeLabel === 'string' ? req.body.volumeLabel.trim().slice(0, 120) : '';
+    if (!volumeLabel) {
+      res.status(400).json({ error: 'volumeLabel is required' });
+      return;
+    }
+    const requestedId = sanitizeDeviceProfileId(req.body?.id);
+    const name =
+      typeof req.body?.name === 'string' && req.body.name.trim()
+        ? req.body.name.trim().slice(0, 80)
+        : null;
+    try {
+      const device = upsertStorageDeviceProfileOnMount({
+        id: requestedId,
+        volumeLabel,
+        name,
+      });
+      res.status(200).json({ device });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.patch('/api/devices/:id', (req, res) => {
+    const deviceId = sanitizeDeviceProfileId(req.params.id);
+    if (!deviceId) {
+      res.status(400).json({ error: 'Invalid device profile ID' });
+      return;
+    }
+    const existing = getStorageDeviceProfileById(deviceId);
+    if (!existing) {
+      res.status(404).json({ error: 'Device profile not found' });
+      return;
+    }
+    const patch: {
+      name?: string;
+      folderConfig?: ReturnType<typeof normalizeStorageFolderConfig> | null;
+      romNaming?: ReturnType<typeof normalizeDeviceRomNaming>;
+    } = {};
+
+    if (req.body?.name !== undefined) {
+      const nextName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+      if (!nextName || nextName.length > 80) {
+        res.status(400).json({ error: 'Device profile name must be between 1 and 80 characters' });
+        return;
+      }
+      patch.name = nextName;
+    }
+    if (req.body?.folderConfig !== undefined) {
+      patch.folderConfig =
+        req.body.folderConfig === null ? null : normalizeStorageFolderConfig(req.body.folderConfig);
+    }
+    if (req.body?.romNaming !== undefined) {
+      patch.romNaming =
+        req.body.romNaming === null ? null : normalizeDeviceRomNaming(req.body.romNaming);
+    }
+
+    try {
+      const device = updateStorageDeviceProfile(deviceId, patch);
+      if (!device) {
+        res.status(404).json({ error: 'Device profile not found' });
+        return;
+      }
+      if (patch.name !== undefined) {
+        orchestrator.notifyInstalledStateChanged();
+      }
+      res.json({ device });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.delete('/api/devices/:id', (req, res) => {
+    const deviceId = sanitizeDeviceProfileId(req.params.id);
+    if (!deviceId) {
+      res.status(400).json({ error: 'Invalid device profile ID' });
+      return;
+    }
+    const result = deleteStorageDeviceProfile(deviceId);
+    if (!result.deleted) {
+      res.status(404).json({ error: 'Device profile not found' });
+      return;
+    }
+    orchestrator.notifyInstalledStateChanged();
+    res.json({ ok: true, deleted: true, affectedReleases: result.affectedReleaseIds.length });
+  });
+
+  app.delete('/api/devices/:id/installs', (req, res) => {
+    const deviceId = sanitizeDeviceProfileId(req.params.id);
+    if (!deviceId) {
+      res.status(400).json({ error: 'Invalid device profile ID' });
+      return;
+    }
+    const rawIds: number[] = Array.isArray(req.body?.ids)
+      ? Array.from(
+          new Set<number>(
+            req.body.ids
+              .map(Number)
+              .filter((id: number) => Number.isInteger(id) && id > 0),
+          ),
+        ).slice(0, 5000)
+      : [];
+    if (rawIds.length === 0) {
+      res.status(400).json({ error: 'Provide one or more valid catalog item IDs' });
+      return;
+    }
+    const result = removeDeviceInstalls(deviceId, rawIds);
     orchestrator.notifyInstalledStateChanged();
     res.json(result);
   });
