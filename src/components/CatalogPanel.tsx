@@ -3898,13 +3898,26 @@ export function CatalogPanel({
                 targetSystems,
                 config.systemIndexState,
               );
+              const staleTargetCount = targetFreshness.stale.length;
+              const unindexedTargetCount = targetFreshness.unindexed.length;
+              const targetAttentionCount = staleTargetCount + unindexedTargetCount;
               const allTargetsIndexed =
-                targetSystems.length > 0 && targetFreshness.unindexed.length === 0;
+                targetSystems.length > 0 && unindexedTargetCount === 0;
               const canUpdateTargets = Boolean(onStartCatalogIndex) && targetSystems.length > 0;
               const isOpen =
                 indexer.active ||
                 indexer.remainingUnindexedSystems > 0 ||
                 canUpdateTargets;
+              const freshnessTooltip = `Fresh = catalog metadata checked against RetroGameTalk within 12h (${targetFreshness.fresh.length}/${targetSystems.length}). Stale = last checked >12h ago (${staleTargetCount}).${
+                targetFreshness.oldestIndexedAt
+                  ? ` Oldest target check: ${new Date(targetFreshness.oldestIndexedAt).toLocaleString()}.`
+                  : ''
+              }`;
+              const updateTargetBadgeParts: string[] = [];
+              if (unindexedTargetCount > 0) updateTargetBadgeParts.push(`${unindexedTargetCount} new`);
+              if (staleTargetCount > 0) updateTargetBadgeParts.push(`${staleTargetCount} stale`);
+              const updateTargetSuffix =
+                updateTargetBadgeParts.length > 0 ? ` (${updateTargetBadgeParts.join(' · ')})` : '';
               return (
                 <div
                   aria-hidden={!isOpen}
@@ -3947,20 +3960,39 @@ export function CatalogPanel({
                                 {indexer.mode === 'delta' ? 'updated' : 'indexed'}
                               </span>
                             </>
-                          ) : indexer.remainingUnindexedSystems > 0 ? (
-                            <span className="text-crt-muted">
-                              {indexer.remainingUnindexedSystems} console
-                              {indexer.remainingUnindexedSystems === 1 ? '' : 's'} remaining outside your current filter
-                            </span>
-                          ) : targetFreshness.stale.length > 0 ? (
-                            <span className="text-crt-amber">
-                              {targetFreshness.stale.length} target console
-                              {targetFreshness.stale.length === 1 ? '' : 's'} stale (&gt;12h)
-                            </span>
                           ) : (
-                            <span className="text-crt-muted">
-                              All consoles indexed &amp; up to date
-                            </span>
+                            <>
+                              {targetAttentionCount > 0 ? (
+                                <span
+                                  className="inline-flex items-center gap-1.5 text-crt-amber"
+                                  title={freshnessTooltip}
+                                >
+                                  <span className="h-1.5 w-1.5 rounded-full bg-crt-amber shrink-0" />
+                                  {unindexedTargetCount > 0 && staleTargetCount > 0
+                                    ? `${unindexedTargetCount} target console${unindexedTargetCount === 1 ? '' : 's'} unindexed · ${staleTargetCount} stale (>12h)`
+                                    : unindexedTargetCount > 0
+                                      ? `${unindexedTargetCount} target console${unindexedTargetCount === 1 ? '' : 's'} unindexed`
+                                      : `${staleTargetCount}/${targetSystems.length} target console${targetSystems.length === 1 ? '' : 's'} stale (>12h)`}
+                                </span>
+                              ) : targetSystems.length > 0 ? (
+                                <span className="text-crt-muted" title={freshnessTooltip}>
+                                  {indexer.remainingUnindexedSystems > 0
+                                    ? `Target consoles fresh (${targetFreshness.fresh.length}/${targetSystems.length})`
+                                    : 'All consoles indexed & fresh (<12h)'}
+                                </span>
+                              ) : null}
+                              {indexer.remainingUnindexedSystems > 0 && (
+                                <>
+                                  {targetSystems.length > 0 && (
+                                    <span aria-hidden="true" className="text-crt-muted">·</span>
+                                  )}
+                                  <span className="text-crt-muted">
+                                    {indexer.remainingUnindexedSystems} console
+                                    {indexer.remainingUnindexedSystems === 1 ? '' : 's'} remaining outside your current filter
+                                  </span>
+                                </>
+                              )}
+                            </>
                           )}
                         </div>
                         {indexer.active && (
@@ -4022,13 +4054,19 @@ export function CatalogPanel({
                             }}
                             title={
                               allTargetsIndexed
-                                ? 'Check RetroGameTalk for new or modified games across your target consoles since each was last indexed (fast delta update; does not download ROMs)'
+                                ? `${staleTargetCount > 0 ? `${staleTargetCount} target console${staleTargetCount === 1 ? '' : 's'} last checked >12h ago. ` : 'All target consoles checked within 12h. '}Check RetroGameTalk for new or modified games since each was last indexed (fast delta update; does not download ROMs)`
                                 : 'Index unindexed target consoles and delta-check any stale ones from RetroGameTalk (does not download ROMs)'
                             }
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-border bg-crt-surface hover:border-crt-phosphor text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
+                              targetAttentionCount > 0
+                                ? 'border-crt-amber/65 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/18'
+                                : 'border-crt-border bg-crt-surface hover:border-crt-phosphor text-crt-text'
+                            }`}
                           >
                             <RefreshCw className={`h-3 w-3 ${indexerBusy ? 'animate-spin' : ''}`} />
-                            {allTargetsIndexed ? 'Update Target Consoles' : 'Index Target Consoles'}
+                            {allTargetsIndexed
+                              ? `Update Target Consoles${updateTargetSuffix}`
+                              : `Index Target Consoles${updateTargetSuffix}`}
                           </button>
                         )}
                         {(!indexer.active || indexer.scope === 'filtered') &&

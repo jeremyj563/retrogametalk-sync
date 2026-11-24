@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.38.7] - 2026-11-24
+
+- Surfaced clear **stale index (`>12h`)** indicators directly on and beside all catalog index update controls across **Sync**, **Catalog**, and **Sync Rules**:
+  - **Unmasked Catalog Freshness Banner**: Fixed the Catalog indexer banner so stale/unindexed target consoles (e.g., `17/17 target consoles stale (>12h)`) are always shown alongside remaining non-target consoles instead of being hidden whenever unindexed consoles exist outside the active filter.
+  - **Amber Stale Attention on Index Buttons & Direct Sync Tab Action**: Highlighted **`Update Target Consoles`** / **`Index Target Consoles`** in amber with inline counts (e.g., `Update Target Consoles (17 stale)`) in both **Catalog** and **Sync Rules**, added a direct **`Update Index (17 stale)`** / **`Pause`** control right next to the Sync tab's `Index X/Y fresh · Z stale (>12h)` readout, and added explanatory tooltips detailing the 12-hour Fresh vs. Stale threshold and oldest target check timestamp.
+
 ## [1.38.6] - 2026-11-24
 
 - Added a custom SVG browser tab favicon based on the sculpted 16-bit ROM cartridge banner emblem:

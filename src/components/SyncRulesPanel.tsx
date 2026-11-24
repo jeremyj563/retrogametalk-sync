@@ -1196,13 +1196,25 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
             const indexer = status.indexer;
             const staleCount = preflight?.staleConsoles.length ?? 0;
             const unindexedCount = preflight?.unindexedConsoles.length ?? 0;
+            const freshCount = preflight?.freshConsoles.length ?? 0;
             const targetSystemsCount = preflight?.targetSystemsCount ?? 0;
+            const targetAttentionCount = staleCount + unindexedCount;
             const allTargetsIndexed = targetSystemsCount > 0 && unindexedCount === 0;
             const hasAnyIndexedTarget = targetSystemsCount > unindexedCount;
             const isDeltaRun = indexer.mode === 'delta';
             const readinessIssues: string[] = [];
             if (unindexedCount > 0) readinessIssues.push(`${unindexedCount} unindexed`);
             if (staleCount > 0) readinessIssues.push(`${staleCount} stale (>12h)`);
+            const buttonBadgeParts: string[] = [];
+            if (unindexedCount > 0) buttonBadgeParts.push(`${unindexedCount} new`);
+            if (staleCount > 0) buttonBadgeParts.push(`${staleCount} stale`);
+            const buttonSuffix =
+              buttonBadgeParts.length > 0 ? ` (${buttonBadgeParts.join(' · ')})` : '';
+            const freshnessTooltip = `Fresh = catalog metadata checked against RetroGameTalk within 12h (${freshCount}/${targetSystemsCount}). Stale = last checked >12h ago (${staleCount}).${
+              preflight?.oldestIndexedAt
+                ? ` Oldest target check: ${new Date(preflight.oldestIndexedAt).toLocaleString()}.`
+                : ''
+            }`;
             return (
               <div className="border border-crt-border bg-crt-bg rounded-md px-4 py-3 flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0 flex-1 space-y-1">
@@ -1223,14 +1235,18 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
                           : ` · ${indexer.indexedCount} cataloged`}
                       </span>
                     ) : readinessIssues.length > 0 ? (
-                      <span className="text-crt-amber">
-                        {readinessIssues.join(' · ')} target console{unindexedCount + staleCount === 1 ? '' : 's'} — auto-refreshed before Full Sync
+                      <span
+                        className="inline-flex items-center gap-1.5 text-crt-amber"
+                        title={freshnessTooltip}
+                      >
+                        <span className="h-1.5 w-1.5 rounded-full bg-crt-amber shrink-0" />
+                        {readinessIssues.join(' · ')} target console{targetAttentionCount === 1 ? '' : 's'} — auto-refreshed before Full Sync
                       </span>
                     ) : (
-                      <span className="text-crt-muted">
+                      <span className="text-crt-muted" title={freshnessTooltip}>
                         {indexer.remainingUnindexedSystems > 0
-                          ? `All target consoles fresh · ${indexer.remainingUnindexedSystems} extra console(s) unindexed`
-                          : 'All target consoles indexed & fresh'}
+                          ? `All target consoles fresh (<12h) · ${indexer.remainingUnindexedSystems} extra console(s) unindexed`
+                          : 'All target consoles indexed & fresh (<12h)'}
                       </span>
                     )}
                   </div>
@@ -1285,7 +1301,7 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
                         disabled={indexerBusy || !onStartCatalogIndex}
                         title={
                           allTargetsIndexed
-                            ? 'Check RetroGameTalk for new or modified games across your target consoles since each was last indexed (fast delta update; does not download ROMs)'
+                            ? `${staleCount > 0 ? `${staleCount} target console${staleCount === 1 ? '' : 's'} last checked >12h ago. ` : 'All target consoles checked within 12h. '}Check RetroGameTalk for new or modified games across your target consoles since each was last indexed (fast delta update; does not download ROMs)`
                             : 'Index unindexed target consoles and delta-check any stale ones from RetroGameTalk (does not download ROMs)'
                         }
                         onClick={async () => {
@@ -1297,10 +1313,16 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
                             setIndexerBusy(false);
                           }
                         }}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border border-crt-border bg-crt-surface hover:border-crt-phosphor text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
+                          targetAttentionCount > 0
+                            ? 'border-crt-amber/65 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/18'
+                            : 'border-crt-border bg-crt-surface hover:border-crt-phosphor text-crt-text'
+                        }`}
                       >
                         <RefreshCw className={`h-3.5 w-3.5 ${indexerBusy ? 'animate-spin' : ''}`} />
-                        {allTargetsIndexed ? 'Update Target Consoles' : 'Index Target Consoles'}
+                        {allTargetsIndexed
+                          ? `Update Target Consoles${buttonSuffix}`
+                          : `Index Target Consoles${buttonSuffix}`}
                       </button>
                       {hasAnyIndexedTarget && (
                         <button

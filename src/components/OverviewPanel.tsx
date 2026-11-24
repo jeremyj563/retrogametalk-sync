@@ -12,6 +12,7 @@ import {
   Gamepad2,
   Loader2,
   Pause,
+  RefreshCw,
   Trash2,
   XCircle,
 } from 'lucide-react';
@@ -78,6 +79,8 @@ interface OverviewPanelProps {
   onQueueDownload?: (ids: number[]) => Promise<unknown>;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onRetryAllFailed: (options?: { system?: string; ids?: number[]; dryRun?: boolean }) => Promise<void>;
+  onStartCatalogIndex?: (scope: 'filtered' | 'full', options?: { forceFull?: boolean }) => Promise<void>;
+  onStopCatalogIndex?: () => Promise<void>;
   onRefreshStatus: () => Promise<void>;
 }
 
@@ -515,6 +518,8 @@ export function OverviewPanel({
   onQueueDownload,
   onRetryItem,
   onRetryAllFailed,
+  onStartCatalogIndex,
+  onStopCatalogIndex,
   onRefreshStatus,
 }: OverviewPanelProps) {
   const [logFilter, setLogFilter] = useState<'all' | LogLevel>('all');
@@ -534,6 +539,7 @@ export function OverviewPanel({
   const [queueingRuleMatches, setQueueingRuleMatches] = useState(false);
   const [confirmQueueRuleMatches, setConfirmQueueRuleMatches] = useState(false);
   const [monitorQueueNotice, setMonitorQueueNotice] = useState<string | null>(null);
+  const [indexerBusy, setIndexerBusy] = useState(false);
   const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
   const [slowLoadingDetailId, setSlowLoadingDetailId] = useState<number | null>(null);
   const [heroInspectHover, setHeroInspectHover] = useState(false);
@@ -1873,15 +1879,24 @@ export function OverviewPanel({
                   <span> · {preflight.excludedByRulesCount.toLocaleString()} excluded</span>
                 )}
                 {' · '}
-                <span>
-                  Index {preflight.freshConsoles.length}/{preflight.targetSystemsCount} fresh
+                <span
+                  className="cursor-help"
+                  title={`Fresh = catalog metadata checked against RetroGameTalk within 12h (${preflight.freshConsoles.length}/${preflight.targetSystemsCount}). Stale = last checked >12h ago (${preflight.staleConsoles.length}).${
+                    preflight.oldestIndexedAt
+                      ? ` Oldest target check: ${formatDateTime(preflight.oldestIndexedAt)}.`
+                      : ''
+                  }`}
+                >
+                  <span>
+                    Index {preflight.freshConsoles.length}/{preflight.targetSystemsCount} fresh
+                  </span>
+                  {preflight.unindexedConsoles.length > 0 && (
+                    <span className="text-crt-amber"> · {preflight.unindexedConsoles.length} unindexed</span>
+                  )}
+                  {preflight.staleConsoles.length > 0 && (
+                    <span className="text-crt-amber"> · {preflight.staleConsoles.length} stale (&gt;12h)</span>
+                  )}
                 </span>
-                {preflight.unindexedConsoles.length > 0 && (
-                  <span className="text-crt-amber"> · {preflight.unindexedConsoles.length} unindexed</span>
-                )}
-                {preflight.staleConsoles.length > 0 && (
-                  <span className="text-crt-amber"> · {preflight.staleConsoles.length} stale</span>
-                )}
               </p>
               {monitorQueueNotice && (
                 <p className="text-[11px] font-mono text-crt-phosphor">{monitorQueueNotice}</p>
@@ -1889,6 +1904,56 @@ export function OverviewPanel({
             </div>
 
             <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {status.auth.hasCompletedLogin && status.indexer?.active && onStopCatalogIndex ? (
+                <button
+                  type="button"
+                  disabled={indexerBusy}
+                  onClick={async () => {
+                    setIndexerBusy(true);
+                    try {
+                      await onStopCatalogIndex();
+                    } finally {
+                      setIndexerBusy(false);
+                    }
+                  }}
+                  title="Pause background catalog indexing (already indexed games stay saved)"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                >
+                  <Pause className="h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    Indexing {status.indexer.systemsCompleted + (status.indexer.currentSystem ? 1 : 0)}/
+                    {Math.max(1, status.indexer.systemsTotal)} · Pause
+                  </span>
+                </button>
+              ) : (
+                status.auth.hasCompletedLogin &&
+                onStartCatalogIndex &&
+                (preflight.staleConsoles.length > 0 || preflight.unindexedConsoles.length > 0) && (
+                  <button
+                    type="button"
+                    disabled={indexerBusy}
+                    onClick={async () => {
+                      setIndexerBusy(true);
+                      try {
+                        await onStartCatalogIndex('filtered');
+                      } finally {
+                        setIndexerBusy(false);
+                      }
+                    }}
+                    title="Check RetroGameTalk for new or modified games across your stale/unindexed target consoles (metadata delta check; does not download ROMs)"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono border border-crt-amber/65 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/18 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${indexerBusy ? 'animate-spin' : ''}`} />
+                    <span>
+                      {preflight.unindexedConsoles.length > 0 && preflight.staleConsoles.length > 0
+                        ? `Update Index (${preflight.unindexedConsoles.length} new · ${preflight.staleConsoles.length} stale)`
+                        : preflight.unindexedConsoles.length > 0
+                          ? `Index Consoles (${preflight.unindexedConsoles.length} new)`
+                          : `Update Index (${preflight.staleConsoles.length} stale)`}
+                    </span>
+                  </button>
+                )
+              )}
               {onPreviewRuleMatchesInCatalog && (
                 <button
                   type="button"
