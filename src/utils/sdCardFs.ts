@@ -1,4 +1,8 @@
-import { buildUpgradeMatchStem } from '../shared/romNaming';
+import {
+  buildUpgradeMatchStem,
+  sanitizeFat32Filename,
+  stripKnownFileExtension,
+} from '../shared/romNaming';
 import {
   DEVICE_MARKER_FILENAME,
   DEVICE_MARKER_MAX_BYTES,
@@ -135,6 +139,13 @@ export async function pickSdCardRootDirectory(): Promise<SdDirectoryHandle> {
   return win.showDirectoryPicker({ mode: 'readwrite', id: 'rgt-sync-sd-card' });
 }
 
+function isNotFoundError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof DOMException && err.name === 'NotFoundError') return true;
+  const errName = (err as { name?: string } | null)?.name;
+  return errName === 'NotFoundError';
+}
+
 export async function resolveOrCreateSubdirectory(
   rootHandle: SdDirectoryHandle,
   relativePath: string,
@@ -151,6 +162,25 @@ export async function resolveOrCreateSubdirectory(
     try {
       current = await current.getDirectoryHandle(seg, { create });
     } catch (err) {
+      if (!create && isNotFoundError(err)) {
+        // Case-insensitive directory lookup fallback for case-sensitive mounts (e.g. Linux / FAT casing variance)
+        const segLower = seg.toLowerCase();
+        let matchedDir: SdDirectoryHandle | null = null;
+        try {
+          for await (const entry of current.values()) {
+            if (entry.kind === 'directory' && entry.name.toLowerCase() === segLower) {
+              matchedDir = entry;
+              break;
+            }
+          }
+        } catch {
+          matchedDir = null;
+        }
+        if (matchedDir) {
+          current = matchedDir;
+          continue;
+        }
+      }
       const detail =
         err instanceof DOMException
           ? `${err.name}: ${err.message}`
@@ -653,11 +683,35 @@ export async function removeRelativePathFromSdCard(
     onDebug?.(`Removed "${clean}" from mounted device`);
     return { status: 'removed', path: clean };
   } catch (err) {
-    if (err instanceof DOMException && err.name === 'NotFoundError') {
-      return { status: 'not_found', path: clean };
-    }
-    const errName = (err as { name?: string } | null)?.name;
-    if (errName === 'NotFoundError') {
+    if (isNotFoundError(err)) {
+      // Case-insensitive leaf lookup fallback on case-sensitive filesystems
+      const leafLower = leafName.toLowerCase();
+      let actualEntryName: string | null = null;
+      try {
+        for await (const entry of parentDir.values()) {
+          if (entry.name.toLowerCase() === leafLower) {
+            actualEntryName = entry.name;
+            break;
+          }
+        }
+      } catch {
+        actualEntryName = null;
+      }
+      if (actualEntryName && actualEntryName !== leafName) {
+        try {
+          await parentDir.removeEntry(actualEntryName, { recursive: true });
+          const actualPath = parentRel ? `${parentRel}/${actualEntryName}` : actualEntryName;
+          onDebug?.(`Removed "${actualPath}" (case-insensitive match for "${clean}") from mounted device`);
+          return { status: 'removed', path: actualPath };
+        } catch (retryErr) {
+          if (isNotFoundError(retryErr)) {
+            return { status: 'not_found', path: clean };
+          }
+          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          onDebug?.(`Failed removing "${clean}" from mounted device`, retryMsg);
+          return { status: 'error', path: clean, error: retryMsg };
+        }
+      }
       return { status: 'not_found', path: clean };
     }
     const msg = err instanceof Error ? err.message : String(err);
@@ -666,53 +720,210 @@ export async function removeRelativePathFromSdCard(
   }
 }
 
+function normalizeLooseRomStem(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[:_\-\u2013\u2014.,!'"/\\()[\]&+]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractLeadingTitleCore(filename: string): string {
+  const withoutExt = stripKnownFileExtension(filename.trim());
+  const beforeDecorators = withoutExt.split(/[([\]]/)[0] || withoutExt;
+  return normalizeLooseRomStem(beforeDecorators);
+}
+
 /**
- * Fallback removal for legacy installs that predate `installedPaths` tracking:
- * scans the resolved target folder and removes exact filename or stem+role match(es).
+ * Matches on-disk ROM entries inside a pre-scanned folder against one or more candidate names
+ * (recorded filename, archive filename, FAT32-sanitized variants, and optional title fallback).
+ * Uses strict priority tiers so unambiguous matches are found without risking collateral deletions.
+ */
+export function findMatchingRomEntriesInScan(
+  scan: SdScanFolderResult,
+  candidateNames: Array<string | null | undefined>,
+  options?: { titleFallback?: string | null },
+): string[] {
+  if (!scan || scan.entries.length === 0) {
+    return [];
+  }
+
+  const expandedCandidates: string[] = [];
+  const seenCandidates = new Set<string>();
+  const addCandidate = (raw: string | null | undefined) => {
+    const trimmed = (raw || '').trim();
+    if (!trimmed) return;
+    const variants = [
+      trimmed,
+      sanitizeFat32Filename(trimmed, 0, true),
+      sanitizeFat32Filename(trimmed, 0, false),
+    ];
+    for (const variant of variants) {
+      const clean = variant.trim();
+      if (!clean) continue;
+      const key = clean.toLowerCase();
+      if (!seenCandidates.has(key)) {
+        seenCandidates.add(key);
+        expandedCandidates.push(clean);
+      }
+    }
+  };
+
+  for (const name of candidateNames) {
+    addCandidate(name);
+  }
+
+  // Tier 1: Case-insensitive exact filename match (raw or FAT32-sanitized)
+  const tier1 = new Set<string>();
+  for (const cand of expandedCandidates) {
+    const exact = scan.exactNamesLower.get(cand.toLowerCase());
+    if (exact) tier1.add(exact);
+  }
+  if (tier1.size > 0) {
+    return Array.from(tier1);
+  }
+
+  // Tier 2: Case-insensitive exact base-name match ignoring known ROM/archive extension (.zip vs .sfc)
+  const desiredBaseNames = new Set<string>();
+  for (const cand of expandedCandidates) {
+    const base = stripKnownFileExtension(cand).trim().toLowerCase();
+    if (base) desiredBaseNames.add(base);
+  }
+  if (desiredBaseNames.size > 0) {
+    const tier2 = new Set<string>();
+    for (const entry of scan.entries) {
+      const entryBase = stripKnownFileExtension(entry.name).trim().toLowerCase();
+      if (entryBase && desiredBaseNames.has(entryBase)) {
+        tier2.add(entry.name);
+      }
+    }
+    if (tier2.size > 0) {
+      return Array.from(tier2);
+    }
+  }
+
+  // Tier 3: Structured upgrade stem + role match (with unique-match relaxation when candidate role is null)
+  const desiredStems = expandedCandidates
+    .map((cand) => buildUpgradeMatchStem(cand))
+    .filter((info) => Boolean(info.stem));
+
+  const tier3ExactRole = new Set<string>();
+  for (const desired of desiredStems) {
+    for (const entry of scan.entries) {
+      if (entry.stemInfo.stem !== desired.stem) continue;
+      if ((entry.stemInfo.role || null) !== (desired.role || null)) continue;
+      tier3ExactRole.add(entry.name);
+    }
+  }
+  if (tier3ExactRole.size > 0) {
+    return Array.from(tier3ExactRole);
+  }
+
+  const tier3RoleAgnostic = new Set<string>();
+  for (const desired of desiredStems) {
+    if (desired.role !== null) continue;
+    const matches = scan.entries.filter((entry) => entry.stemInfo.stem === desired.stem);
+    if (matches.length === 1) {
+      tier3RoleAgnostic.add(matches[0].name);
+    }
+  }
+  if (tier3RoleAgnostic.size > 0) {
+    return Array.from(tier3RoleAgnostic);
+  }
+
+  // Tier 4: Loose punctuation-normalized stem match (handles ":" -> " - ", "_" vs spaces, etc.)
+  const tier4ExactRole = new Set<string>();
+  const tier4RoleAgnostic = new Set<string>();
+  for (const desired of desiredStems) {
+    const desiredLoose = normalizeLooseRomStem(desired.stem);
+    if (desiredLoose.length < 4) continue;
+    const exactRoleMatches: string[] = [];
+    const anyRoleMatches: string[] = [];
+    for (const entry of scan.entries) {
+      const entryLoose = normalizeLooseRomStem(entry.stemInfo.stem);
+      if (entryLoose !== desiredLoose) continue;
+      anyRoleMatches.push(entry.name);
+      if ((entry.stemInfo.role || null) === (desired.role || null)) {
+        exactRoleMatches.push(entry.name);
+      }
+    }
+    for (const name of exactRoleMatches) {
+      tier4ExactRole.add(name);
+    }
+    if (desired.role === null && anyRoleMatches.length === 1) {
+      tier4RoleAgnostic.add(anyRoleMatches[0]);
+    }
+  }
+  if (tier4ExactRole.size > 0) {
+    return Array.from(tier4ExactRole);
+  }
+  if (tier4RoleAgnostic.size > 0) {
+    return Array.from(tier4RoleAgnostic);
+  }
+
+  // Tier 5: Title-core unique match for legacy installs whose archive name differed from the templated ROM filename
+  const cleanTitle = (options?.titleFallback || '').trim();
+  if (cleanTitle) {
+    const desiredTitleCore = extractLeadingTitleCore(sanitizeFat32Filename(cleanTitle, 0, false));
+    if (desiredTitleCore.length >= 4) {
+      const titleMatches = scan.entries.filter(
+        (entry) => extractLeadingTitleCore(entry.name) === desiredTitleCore,
+      );
+      if (titleMatches.length === 1) {
+        return [titleMatches[0].name];
+      }
+    }
+  }
+
+  return [];
+}
+
+/**
+ * Fallback removal for legacy installs that predate `installedPaths` tracking or moved folders:
+ * scans (or reuses a cached scan of) the resolved target folder and removes matching ROM(s).
  */
 export async function removeStemFallbackFromSdCard(
   rootHandle: SdDirectoryHandle,
   folderRel: string,
   installedFilename: string | null | undefined,
   onDebug?: (message: string, detail?: string) => void,
-): Promise<{ removedPaths: string[]; errors: string[] }> {
+  options?: {
+    additionalCandidateNames?: Array<string | null | undefined>;
+    titleFallback?: string | null;
+    cachedScan?: SdScanFolderResult;
+  },
+): Promise<{ removedPaths: string[]; errors: string[]; scan?: SdScanFolderResult }> {
   const removedPaths: string[] = [];
   const errors: string[] = [];
   const cleanFolder = sanitizeInstalledRelativePath(folderRel);
-  const candidateName = (installedFilename || '').trim();
-  if (!cleanFolder || !candidateName) {
-    return { removedPaths, errors };
+  const candidates = [installedFilename, ...(options?.additionalCandidateNames || [])].filter(
+    (v): v is string => Boolean(v && v.trim()),
+  );
+  if (!cleanFolder || (candidates.length === 0 && !(options?.titleFallback || '').trim())) {
+    return { removedPaths, errors, scan: options?.cachedScan };
   }
 
-  const scan = await scanTargetFolder(rootHandle, cleanFolder);
-  const lowerTarget = candidateName.toLowerCase();
-  const exact = scan.exactNamesLower.get(lowerTarget);
-  const matchedNames = new Set<string>();
-
-  if (exact) {
-    matchedNames.add(exact);
-  } else {
-    const desired = buildUpgradeMatchStem(candidateName);
-    if (desired.stem) {
-      for (const entry of scan.entries) {
-        if (entry.stemInfo.stem !== desired.stem) continue;
-        if ((entry.stemInfo.role || null) !== (desired.role || null)) continue;
-        matchedNames.add(entry.name);
-      }
-    }
-  }
+  const scan = options?.cachedScan ?? (await scanTargetFolder(rootHandle, cleanFolder));
+  const matchedNames = findMatchingRomEntriesInScan(scan, candidates, {
+    titleFallback: options?.titleFallback,
+  });
 
   for (const name of matchedNames) {
     const relPath = `${cleanFolder}/${name}`;
     const res = await removeRelativePathFromSdCard(rootHandle, relPath, onDebug);
     if (res.status === 'removed') {
       removedPaths.push(res.path);
+      unregisterEntryInScan(scan, name);
+      const removedLeaf = res.path.split('/').pop();
+      if (removedLeaf && removedLeaf !== name) {
+        unregisterEntryInScan(scan, removedLeaf);
+      }
     } else if (res.status === 'error' && res.error) {
       errors.push(`${relPath}: ${res.error}`);
     }
   }
 
-  return { removedPaths, errors };
+  return { removedPaths, errors, scan };
 }
 
 export function findUpgradeCandidateOnCard(

@@ -1319,6 +1319,212 @@ test('executeDeviceUninstallBatch honors AbortSignal mid-run and preserves all r
   assert.equal(typeof progressCancelSeen, 'boolean');
 });
 
+test('executeDeviceUninstallBatch reliably removes ROMs across sibling subfolders, FAT32 punctuation, casing variance, and mount-depth shifts', async () => {
+  const sdRoot = createMockDirectoryHandle('MIYOO_256GB', {
+    sfc: {
+      Trans: {
+        'Chrono Trigger (Japan) [T-En v1.2].SFC': 'chrono-rom',
+        'Bahamut Lagoon (Japan) [T-En v1.3].sfc': 'bahamut-rom',
+        'Keep Untouched.sfc': 'keep-me',
+      },
+      hacks: {
+        'Zelda - A Link to the Past (USA).sfc': 'zelda-rom',
+      },
+      'Super Mario World (USA).sfc': 'smw-rom',
+    },
+  });
+
+  const storageCfg: StorageFolderMappingConfig = {
+    typeSubfoldersEnabled: true,
+    globalTypeSubfolders: {
+      ...DEFAULT_ROM_TYPE_SUBFOLDERS,
+      translations: 'trans',
+      hack: 'hacks',
+    },
+    systemFolders: { 'snes-rom': 'SFC' },
+    systemTypeOverrides: {},
+  };
+
+  const outcome = await executeDeviceUninstallBatch({
+    rootHandle: sdRoot,
+    storageCfg,
+    targets: [
+      {
+        id: 1,
+        title: 'Chrono Trigger',
+        systemName: 'snes-rom',
+        releaseTags: ['Retail'],
+        installedFilename: null,
+        fallbackFilename: 'Chrono Trigger (Japan).zip',
+        installedPaths: [],
+      },
+      {
+        id: 2,
+        title: 'Zelda: A Link to the Past',
+        systemName: 'snes-rom',
+        releaseTags: ['Retail'],
+        installedFilename: null,
+        fallbackFilename: 'Zelda: A Link to the Past (USA).zip',
+        installedPaths: [],
+      },
+      {
+        id: 3,
+        title: 'Bahamut Lagoon',
+        systemName: 'snes-rom',
+        releaseTags: ['Translation'],
+        installedFilename: null,
+        fallbackFilename: 'bahamut_en_patch_v13.zip',
+        installedPaths: [],
+      },
+      {
+        id: 4,
+        title: 'Super Mario World',
+        systemName: 'snes-rom',
+        releaseTags: ['Retail'],
+        installedFilename: 'Super Mario World (USA).sfc',
+        fallbackFilename: 'Super Mario World (USA).zip',
+        installedPaths: ['Roms/SFC/Super Mario World (USA).sfc'],
+      },
+    ],
+  });
+
+  assert.equal(outcome.errors.length, 0);
+  assert.equal(outcome.filesRemovedCount, 4);
+  assert.equal(outcome.missingOnDiskCount, 0);
+  assert.deepEqual(outcome.clearedIds, [1, 2, 3, 4]);
+
+  const transScan = await scanTargetFolder(sdRoot, 'SFC/trans');
+  assert.deepEqual(Array.from(transScan.exactNames), ['Keep Untouched.sfc']);
+  const hacksScan = await scanTargetFolder(sdRoot, 'SFC/hacks');
+  assert.equal(hacksScan.exactNames.size, 0);
+  const baseScan = await scanTargetFolder(sdRoot, 'SFC');
+  assert.equal(baseScan.exactNames.has('Super Mario World (USA).sfc'), false);
+
+  const cardRootWithRoms = createMockDirectoryHandle('MIYOO_256GB', {
+    Roms: {
+      SFC: {
+        trans: {
+          'Secret of Mana 2 (Japan) [T-En].sfc': 'som2-rom',
+        },
+      },
+    },
+  });
+  const nestedOutcome = await executeDeviceUninstallBatch({
+    rootHandle: cardRootWithRoms,
+    storageCfg,
+    targets: [
+      {
+        id: 10,
+        title: 'Secret of Mana 2',
+        systemName: 'snes-rom',
+        releaseTags: ['Translation'],
+        installedFilename: 'Secret of Mana 2 (Japan) [T-En].sfc',
+        fallbackFilename: 'som2.zip',
+        installedPaths: ['SFC/trans/Secret of Mana 2 (Japan) [T-En].sfc'],
+      },
+    ],
+  });
+  assert.equal(nestedOutcome.errors.length, 0);
+  assert.equal(nestedOutcome.filesRemovedCount, 1);
+  assert.deepEqual(nestedOutcome.clearedIds, [10]);
+  const nestedScan = await scanTargetFolder(cardRootWithRoms, 'Roms/SFC/trans');
+  assert.equal(nestedScan.exactNames.size, 0);
+});
+
+test('executeDeviceUninstallBatch refuses to silently wipe bulk DB records when 0 files are found on disk and caches folder scans', async () => {
+  const emptyCard = createMockDirectoryHandle('WRONG_CARD', {
+    SFC: {
+      trans: {
+        'Unrelated Game.sfc': 'keep',
+      },
+    },
+  });
+  const storageCfg: StorageFolderMappingConfig = {
+    typeSubfoldersEnabled: true,
+    globalTypeSubfolders: { ...DEFAULT_ROM_TYPE_SUBFOLDERS, translations: 'trans' },
+    systemFolders: { 'snes-rom': 'SFC' },
+    systemTypeOverrides: {},
+  };
+
+  const bulkMiss = await executeDeviceUninstallBatch({
+    rootHandle: emptyCard,
+    storageCfg,
+    targets: [1, 2, 3, 4, 5].map((id) => ({
+      id,
+      title: `Missing Game ${id}`,
+      systemName: 'snes-rom',
+      releaseTags: ['Translation'],
+      installedFilename: `Missing Game ${id}.sfc`,
+      fallbackFilename: `Missing Game ${id}.zip`,
+      installedPaths: [`SFC/trans/Missing Game ${id}.sfc`],
+    })),
+  });
+
+  assert.equal(bulkMiss.filesRemovedCount, 0);
+  assert.equal(bulkMiss.missingOnDiskCount, 5);
+  assert.deepEqual(bulkMiss.clearedIds, []);
+  assert.equal(bulkMiss.errors.length, 1);
+  assert.match(bulkMiss.errors[0], /No matching ROM files were found on disk/i);
+  assert.ok(bulkMiss.checkedFolders.some((f) => f.toLowerCase() === 'sfc/trans'));
+
+  const singleMiss = await executeDeviceUninstallBatch({
+    rootHandle: emptyCard,
+    storageCfg,
+    targets: [
+      {
+        id: 99,
+        title: 'Already Deleted Game',
+        systemName: 'snes-rom',
+        releaseTags: ['Translation'],
+        installedFilename: 'Already Deleted Game.sfc',
+        fallbackFilename: 'Already Deleted Game.zip',
+        installedPaths: ['SFC/trans/Already Deleted Game.sfc'],
+      },
+    ],
+  });
+  assert.equal(singleMiss.errors.length, 0);
+  assert.equal(singleMiss.filesRemovedCount, 0);
+  assert.equal(singleMiss.missingOnDiskCount, 1);
+  assert.deepEqual(singleMiss.clearedIds, [99]);
+
+  let transValuesCalls = 0;
+  const filesMap: Record<string, string> = {};
+  const legacyTargets = [];
+  for (let i = 1; i <= 40; i += 1) {
+    filesMap[`Legacy ROM ${i}.sfc`] = `rom-${i}`;
+    legacyTargets.push({
+      id: 200 + i,
+      title: `Legacy ROM ${i}`,
+      systemName: 'snes-rom',
+      releaseTags: ['Translation'],
+      installedFilename: null,
+      fallbackFilename: `Legacy ROM ${i}.zip`,
+      installedPaths: [],
+    });
+  }
+  const transHandle = createMockDirectoryHandle('trans', filesMap);
+  const origValues = transHandle.values.bind(transHandle);
+  transHandle.values = async function* () {
+    transValuesCalls += 1;
+    yield* origValues();
+  };
+  const cachedCard = createMockDirectoryHandle('MIYOO_256GB', {
+    SFC: {
+      trans: transHandle,
+    },
+  });
+
+  const cachedOutcome = await executeDeviceUninstallBatch({
+    rootHandle: cachedCard,
+    storageCfg,
+    targets: legacyTargets,
+  });
+  assert.equal(cachedOutcome.errors.length, 0);
+  assert.equal(cachedOutcome.filesRemovedCount, 40);
+  assert.equal(cachedOutcome.clearedIds.length, 40);
+  assert.equal(transValuesCalls, 1, `Expected SFC/trans to be scanned once, scanned ${transValuesCalls} times`);
+});
+
 
 
 

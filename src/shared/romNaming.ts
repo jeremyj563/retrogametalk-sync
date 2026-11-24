@@ -210,7 +210,7 @@ function normalizeVersionMatch(raw: string): string | null {
 const KNOWN_FILE_EXT_RE =
   /\.(?:tar\.(?:gz|bz2|xz)|zip|7z|rar|tar|gz|tgz|xz|bz2|nes|fds|unf|unif|sfc|smc|fig|swc|bs|gb|gbc|gba|srl|nds|dsi|3ds|cia|vb|vboy|n64|z64|v64|ndd|gen|md|smd|32x|sms|gg|sg|pce|hes|ngp|ngc|ws|wsc|col|int|vec|a26|a52|a78|j64|jag|lnx|lyx|min|p8|tic|d64|t64|prg|crt|adf|ipf|tzx|tap|dsk|mx1|mx2|rom|wad|bin|iso|chd|cso|pbp|rvz|gcz|wia|wbfs|xiso|cci|cue|gdi|ccd|m3u|ips|bps|ups|xdelta|vcdiff|ppf|txt|nfo|pdf|url|html|htm)$/i;
 
-function stripKnownFileExtension(text: string): string {
+export function stripKnownFileExtension(text: string): string {
   return text.replace(KNOWN_FILE_EXT_RE, '');
 }
 

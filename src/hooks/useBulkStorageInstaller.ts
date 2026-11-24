@@ -227,6 +227,7 @@ export interface DeviceUninstallResult {
   errors: string[];
   updatedItems: RepositoryItemRecord[];
   uninstalledIds: number[];
+  checkedFolders?: string[];
 }
 
 interface UseBulkStorageInstallerOptions {
@@ -1462,6 +1463,44 @@ export function useBulkStorageInstaller({
           errors: [],
           updatedItems: [],
           uninstalledIds: [],
+          checkedFolders: [],
+        };
+      }
+
+      // Verify write permission on the mounted handle before deleting files or touching DB state
+      const existingPerm = await checkHandlePermission(rootHandle, 'readwrite');
+      if (existingPerm === 'prompt') {
+        const grantedPerm = await requestHandlePermission(rootHandle, 'readwrite');
+        if (grantedPerm !== 'granted') {
+          return {
+            ok: false,
+            canceled: false,
+            totalRequested: targets.length,
+            uninstalledCount: 0,
+            filesRemovedCount: 0,
+            missingOnDiskCount: 0,
+            errors: [
+              `Write permission was not granted for ${activeProfile.name}. Re-mount the device and allow edit access before uninstalling ROMs.`,
+            ],
+            updatedItems: [],
+            uninstalledIds: [],
+            checkedFolders: [],
+          };
+        }
+      } else if (existingPerm === 'denied') {
+        return {
+          ok: false,
+          canceled: false,
+          totalRequested: targets.length,
+          uninstalledCount: 0,
+          filesRemovedCount: 0,
+          missingOnDiskCount: 0,
+          errors: [
+            `Write permission is denied for ${activeProfile.name}. Re-mount the device and allow edit access before uninstalling ROMs.`,
+          ],
+          updatedItems: [],
+          uninstalledIds: [],
+          checkedFolders: [],
         };
       }
 
@@ -1577,6 +1616,7 @@ export function useBulkStorageInstaller({
           errors,
           updatedItems,
           uninstalledIds: clearedIds,
+          checkedFolders: batch.checkedFolders,
         };
       } finally {
         if (ownsController && uninstallAbortRef.current === abortController) {
