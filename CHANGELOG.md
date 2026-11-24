@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.38.6] - 2026-11-24
+
+- Added a custom SVG browser tab favicon based on the sculpted 16-bit ROM cartridge banner emblem:
+  - **Crisp Tab-Optimized Cartridge Icon (`/favicon.svg`)**: Features the chamfered cartridge shell, side/top grip ribs, glowing inner CRT bezel with bold centered `>>>` sync chevrons tuned for 16×16 and 32×32 readability, lit 7-pin PCB edge bus, and dual-ring power LED.
+  - **Live CRT Palette & Dry-Run Sync**: Dynamically tints the browser tab cartridge icon and browser `theme-color` to match the user's active CRT phosphor palette (Green, Amber, Cyan, Game Boy, Synthwave, Virtual Boy, Trinitron) as well as Dry Run mode.
+
 ## [1.38.5] - 2026-11-24
 
 - Fixed **Uninstall from `<Device>`** reliability so ROM files on mounted storage devices are consistently located and physically deleted instead of silently skipped while clearing catalog badges:

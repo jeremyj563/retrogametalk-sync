@@ -62,6 +62,7 @@ import {
   isSemverTagRef,
   resolveGitRefDestination,
 } from './shared/gitUrl';
+import { syncDocumentFavicon } from './utils/favicon';
 import type {
   ActivityLogRecord,
   ActiveTransferState,
@@ -1839,6 +1840,13 @@ export default function App() {
     (effectiveCrtSettings.vignette > 0 || effectiveCrtSettings.gaussGlow > 0 || isUltraMotion);
   const showHumBar = effectiveCrtSettings.enabled && isHighOrUltraMotion;
   const showDegauss = effectiveCrtSettings.enabled && isUltraMotion;
+  const isDryRunActive = status?.activeRun
+    ? Boolean(status.activeRun.dryRun || status.activeRun.mode === 'dry_run')
+    : dryRunEnabled;
+
+  useEffect(() => {
+    syncDocumentFavicon(effectiveCrtSettings.palette, isDryRunActive);
+  }, [effectiveCrtSettings.palette, isDryRunActive]);
 
   return (
     <div
