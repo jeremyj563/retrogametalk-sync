@@ -55,6 +55,7 @@ import {
   type SdFileHandle,
   type SdFileWritableStream,
 } from '../src/utils/sdCardFs.ts';
+import { executeDeviceUninstallBatch } from '../src/utils/deviceUninstall.ts';
 
 function makeMockFileHandle(
   fileName: string,
@@ -1242,6 +1243,82 @@ test('cross-page bulk uninstall queries and deletes >1,000 installed items safel
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('executeDeviceUninstallBatch honors AbortSignal mid-run and preserves all remaining SD files', async () => {
+  const sfcFiles: Record<string, string> = {};
+  const targets = [];
+  for (let i = 1; i <= 899; i += 1) {
+    const filename = `SNES Game ${i}.sfc`;
+    sfcFiles[filename] = `rom-bytes-${i}`;
+    targets.push({
+      id: i,
+      title: `SNES Game ${i}`,
+      systemName: 'snes-rom',
+      releaseTags: ['Translation'],
+      installedFilename: filename,
+      fallbackFilename: `SNES Game ${i}.zip`,
+      installedPaths: [`SFC/${filename}`],
+    });
+  }
+
+  const sdRoot = createMockDirectoryHandle('MIYOO_256GB', {
+    SFC: sfcFiles,
+  });
+
+  const abortController = new AbortController();
+  const storageCfg: StorageFolderMappingConfig = {
+    typeSubfoldersEnabled: false,
+    globalTypeSubfolders: { ...DEFAULT_ROM_TYPE_SUBFOLDERS },
+    systemFolders: { 'snes-rom': 'SFC' },
+    systemTypeOverrides: {},
+  };
+
+  let progressCancelSeen = false;
+  const outcome = await executeDeviceUninstallBatch({
+    targets,
+    rootHandle: sdRoot,
+    storageCfg,
+    signal: abortController.signal,
+    onProgress: (p) => {
+      if (p.completed >= 100 && !abortController.signal.aborted) {
+        abortController.abort();
+      }
+      if (p.canceling) {
+        progressCancelSeen = true;
+      }
+    },
+  });
+
+  assert.equal(outcome.canceled, true);
+  assert.equal(outcome.totalRequested, 899);
+  assert.ok(
+    outcome.clearedIds.length >= 100 && outcome.clearedIds.length < 250,
+    `Expected uninstall to halt shortly after 100 items, got ${outcome.clearedIds.length}`,
+  );
+  assert.equal(outcome.filesRemovedCount, outcome.clearedIds.length);
+  assert.equal(outcome.errors.length, 0);
+
+  // Verify the untouched files are still physically present on the mock SD card
+  const remainingScan = await scanTargetFolder(sdRoot, 'SFC');
+  assert.equal(remainingScan.exactNames.size, 899 - outcome.clearedIds.length);
+  assert.equal(remainingScan.exactNames.has('SNES Game 1.sfc'), false);
+  assert.equal(remainingScan.exactNames.has('SNES Game 899.sfc'), true);
+
+  // Pre-aborted signal removes zero files
+  const preAborted = new AbortController();
+  preAborted.abort();
+  const zeroOutcome = await executeDeviceUninstallBatch({
+    targets: targets.slice(-5),
+    rootHandle: sdRoot,
+    storageCfg,
+    signal: preAborted.signal,
+  });
+  assert.equal(zeroOutcome.canceled, true);
+  assert.equal(zeroOutcome.clearedIds.length, 0);
+  assert.equal(zeroOutcome.filesRemovedCount, 0);
+  assert.equal(typeof progressCancelSeen, 'boolean');
+});
+
 
 
 

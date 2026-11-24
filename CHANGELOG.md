@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.38.4] - 2026-11-24
+
+- Fixed the **Cancel** button during bulk **Uninstall from `<Device>`** so long-running uninstalls can be stopped cleanly mid-run:
+  - **Responsive Mid-Run Cancellation**: Replaced the disabled `Cancel` button during active uninstalls with a live **`Cancel Uninstall`** button wired to an `AbortController` (`cancelUninstall()`), periodically yielding to the browser event loop so clicks register immediately even during large 800+ game batches.
+  - **Accurate Partial-Run Sync**: Stops immediately before deleting any further games, flushes catalog install removals strictly for the games already removed from the SD card prior to cancellation, preserves all remaining games untouched on disk and in the Catalog, and reports the exact canceled summary (e.g., `Uninstall canceled after removing 104 of 899 games...`).
+
 ## [1.38.3] - 2026-11-23
 
 - Fixed bulk **Uninstall from `<Device>`** in the Catalog so cross-page selections count and remove **all** selected games installed on the mounted storage device instead of only the currently visible page:
