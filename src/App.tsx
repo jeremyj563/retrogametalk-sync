@@ -2264,6 +2264,8 @@ export default function App() {
                   onQueueDownload={(ids) => handleQueueDownload({ ids })}
                   onRetryItem={handleRetryItem}
                   onRetryAllFailed={handleRetryAllFailed}
+                  onStartCatalogIndex={handleStartCatalogIndex}
+                  onStopCatalogIndex={handleStopCatalogIndex}
                   onRefreshStatus={loadInitialData}
                 />
               )}
