@@ -1936,10 +1936,19 @@ export function CatalogPanel({
           for (const id of removedIdSet) next.delete(id);
           return next;
         });
-        setQueueNotice(
-          `Removed ${res.uninstalledCount.toLocaleString()} game${res.uninstalledCount === 1 ? '' : 's'} (${res.filesRemovedCount.toLocaleString()} file${res.filesRemovedCount === 1 ? '' : 's'}) from ${targetLabel}. Local mirror untouched.${res.errors.length > 0 ? ` (${res.errors.length} failed)` : ''}`,
-        );
+        if (res.canceled) {
+          const remaining = Math.max(0, res.totalRequested - res.uninstalledCount);
+          setQueueNotice(
+            `Uninstall canceled after removing ${res.uninstalledCount.toLocaleString()} of ${res.totalRequested.toLocaleString()} game${res.totalRequested === 1 ? '' : 's'} (${res.filesRemovedCount.toLocaleString()} file${res.filesRemovedCount === 1 ? '' : 's'}) from ${targetLabel}. Remaining ${remaining.toLocaleString()} game${remaining === 1 ? '' : 's'} untouched.`,
+          );
+        } else {
+          setQueueNotice(
+            `Removed ${res.uninstalledCount.toLocaleString()} game${res.uninstalledCount === 1 ? '' : 's'} (${res.filesRemovedCount.toLocaleString()} file${res.filesRemovedCount === 1 ? '' : 's'}) from ${targetLabel}. Local mirror untouched.${res.errors.length > 0 ? ` (${res.errors.length} failed)` : ''}`,
+          );
+        }
         await loadCatalog(true);
+      } else if (res.canceled) {
+        setQueueNotice(`Uninstall canceled. No files were removed from ${targetLabel}.`);
       } else if (res.errors.length > 0) {
         setQueueNotice(`Uninstall error: ${res.errors[0]}`);
       }
@@ -4443,18 +4452,34 @@ export function CatalogPanel({
                       <Trash2 className="h-3.5 w-3.5 shrink-0" />
                     )}
                     {bulkUninstallBusy
-                      ? installer.uninstallProgress && installer.uninstallProgress.total > 0
-                        ? `Removing ${installer.uninstallProgress.completed.toLocaleString()} / ${installer.uninstallProgress.total.toLocaleString()}...`
-                        : 'Removing...'
+                      ? installer.uninstallProgress?.canceling
+                        ? `Stopping (${installer.uninstallProgress.completed.toLocaleString()} / ${installer.uninstallProgress.total.toLocaleString()})...`
+                        : installer.uninstallProgress && installer.uninstallProgress.total > 0
+                          ? `Removing ${installer.uninstallProgress.completed.toLocaleString()} / ${installer.uninstallProgress.total.toLocaleString()}...`
+                          : 'Removing...'
                       : `Confirm Uninstall (${selectedInstalledOnMountedIds.length.toLocaleString()})`}
                   </button>
                   <button
                     type="button"
-                    disabled={bulkUninstallBusy}
-                    onClick={() => setConfirmBulkUninstall(false)}
-                    className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    disabled={Boolean(bulkUninstallBusy && installer.uninstallProgress?.canceling)}
+                    onClick={() => {
+                      if (bulkUninstallBusy) {
+                        installer.cancelUninstall();
+                      } else {
+                        setConfirmBulkUninstall(false);
+                      }
+                    }}
+                    className={`px-3 py-1.5 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                      bulkUninstallBusy
+                        ? 'border border-crt-crimson/70 bg-crt-crimson/10 text-crt-crimson hover:bg-crt-crimson/20 font-medium'
+                        : 'border border-crt-border text-crt-muted hover:text-crt-text'
+                    }`}
                   >
-                    Cancel
+                    {bulkUninstallBusy && installer.uninstallProgress?.canceling
+                      ? 'Canceling...'
+                      : bulkUninstallBusy
+                        ? 'Cancel Uninstall'
+                        : 'Cancel'}
                   </button>
                 </>
               ) : confirmCatalogBulk ? (

@@ -56,8 +56,6 @@ import {
   probeDeviceIdentityHintsFromSdCard,
   readDeviceMarkerFromSdCard,
   registerWrittenEntryInScan,
-  removeRelativePathFromSdCard,
-  removeStemFallbackFromSdCard,
   resolveOrCreateSubdirectory,
   scanStorageDirectoryTree,
   scanTargetFolder,
@@ -67,6 +65,7 @@ import {
   type SdDirectoryHandle,
   type SdScanFolderResult,
 } from '../utils/sdCardFs';
+import { executeDeviceUninstallBatch } from '../utils/deviceUninstall';
 
 export interface PendingDeviceIdentification {
   handle: SdDirectoryHandle;
@@ -215,10 +214,13 @@ export interface DeviceUninstallProgress {
   completed: number;
   total: number;
   filesRemoved: number;
+  canceling?: boolean;
 }
 
 export interface DeviceUninstallResult {
   ok: boolean;
+  canceled: boolean;
+  totalRequested: number;
   uninstalledCount: number;
   filesRemovedCount: number;
   missingOnDiskCount: number;
@@ -589,6 +591,7 @@ export function useBulkStorageInstaller({
   const [reconnectingDeviceId, setReconnectingDeviceId] = useState<string | null>(null);
   const [uninstallingItemIds, setUninstallingItemIds] = useState<Set<number>>(() => new Set());
   const [uninstallProgress, setUninstallProgress] = useState<DeviceUninstallProgress | null>(null);
+  const uninstallAbortRef = useRef<AbortController | null>(null);
   const [pendingDeviceIdentification, setPendingDeviceIdentification] =
     useState<PendingDeviceIdentification | null>(null);
   const [identifyingDeviceBusy, setIdentifyingDeviceBusy] = useState(false);
@@ -1434,15 +1437,25 @@ export function useBulkStorageInstaller({
     [refreshDeviceProfiles],
   );
 
+  const cancelUninstall = useCallback(() => {
+    const controller = uninstallAbortRef.current;
+    if (!controller || controller.signal.aborted) return;
+    controller.abort();
+    setUninstallProgress((prev) => (prev ? { ...prev, canceling: true } : prev));
+  }, []);
+
   const executeUninstallTargets = useCallback(
     async (
       targets: DeviceUninstallTargetRecord[],
       rootHandle: SdDirectoryHandle,
       activeProfile: StorageDeviceProfile,
+      existingAbortController?: AbortController,
     ): Promise<DeviceUninstallResult> => {
       if (targets.length === 0) {
         return {
           ok: true,
+          canceled: Boolean(existingAbortController?.signal.aborted),
+          totalRequested: 0,
           uninstalledCount: 0,
           filesRemovedCount: 0,
           missingOnDiskCount: 0,
@@ -1452,96 +1465,46 @@ export function useBulkStorageInstaller({
         };
       }
 
+      const abortController = existingAbortController ?? new AbortController();
+      const ownsController = !existingAbortController;
+      if (ownsController) {
+        uninstallAbortRef.current = abortController;
+      }
+
       const targetIds = targets.map((t) => t.id);
       setUninstallingItemIds((prev) => {
         const next = new Set(prev);
         for (const id of targetIds) next.add(id);
         return next;
       });
-      setUninstallProgress({ completed: 0, total: targets.length, filesRemoved: 0 });
+      setUninstallProgress({
+        completed: 0,
+        total: targets.length,
+        filesRemoved: 0,
+        canceling: abortController.signal.aborted,
+      });
 
-      const clearedIds: number[] = [];
-      const errors: string[] = [];
-      const removedScanEntries: Array<{ folderRel: string; leafName: string }> = [];
-      let filesRemovedCount = 0;
-      let missingOnDiskCount = 0;
       const storageCfg = effectiveStorageFolderConfigRef.current;
-      let lastProgressEmitMs = 0;
 
       try {
-        for (let idx = 0; idx < targets.length; idx += 1) {
-          const target = targets[idx];
-          const recordedPaths = target.installedPaths || [];
-          let itemHadError = false;
+        const batch = await executeDeviceUninstallBatch({
+          targets,
+          rootHandle,
+          storageCfg,
+          signal: abortController.signal,
+          onProgress: (progress) => setUninstallProgress(progress),
+          onDebug: (msg, detail) => emitSdDebug(msg, detail),
+        });
 
-          if (recordedPaths.length > 0) {
-            for (const relPath of recordedPaths) {
-              const res = await removeRelativePathFromSdCard(rootHandle, relPath, (msg, detail) =>
-                emitSdDebug(msg, detail),
-              );
-              if (res.status === 'removed') {
-                filesRemovedCount += 1;
-                const slashIdx = res.path.lastIndexOf('/');
-                const folderRel = slashIdx > 0 ? res.path.slice(0, slashIdx) : '';
-                const leafName = slashIdx >= 0 ? res.path.slice(slashIdx + 1) : res.path;
-                if (folderRel && leafName) {
-                  removedScanEntries.push({ folderRel, leafName });
-                }
-              } else if (res.status === 'not_found') {
-                missingOnDiskCount += 1;
-              } else {
-                itemHadError = true;
-                errors.push(`${target.title}: ${res.error || `Failed removing ${relPath}`}`);
-              }
-            }
-          } else {
-            const category = classifyStorageRomCategory({
-              systemName: target.systemName,
-              releaseTags: target.releaseTags,
-            });
-            const folderRel = resolveTargetStorageFolder(target.systemName, category, storageCfg);
-            const candidateName = target.installedFilename || target.fallbackFilename || null;
-            const fallbackRes = await removeStemFallbackFromSdCard(
-              rootHandle,
-              folderRel,
-              candidateName,
-              (msg, detail) => emitSdDebug(msg, detail),
-            );
-            filesRemovedCount += fallbackRes.removedPaths.length;
-            for (const removedPath of fallbackRes.removedPaths) {
-              const slashIdx = removedPath.lastIndexOf('/');
-              const removedFolder = slashIdx > 0 ? removedPath.slice(0, slashIdx) : '';
-              const leafName = slashIdx >= 0 ? removedPath.slice(slashIdx + 1) : removedPath;
-              if (removedFolder && leafName) {
-                removedScanEntries.push({ folderRel: removedFolder, leafName });
-              }
-            }
-            if (fallbackRes.removedPaths.length === 0 && fallbackRes.errors.length === 0) {
-              missingOnDiskCount += 1;
-            }
-            if (fallbackRes.errors.length > 0) {
-              itemHadError = true;
-              for (const e of fallbackRes.errors) {
-                errors.push(`${target.title}: ${e}`);
-              }
-            }
-          }
-
-          if (!itemHadError) {
-            clearedIds.push(target.id);
-          }
-
-          const completed = idx + 1;
-          const nowMs = Date.now();
-          if (completed === targets.length || targets.length <= 20 || nowMs - lastProgressEmitMs >= 80) {
-            lastProgressEmitMs = nowMs;
-            setUninstallProgress({
-              completed,
-              total: targets.length,
-              filesRemoved: filesRemovedCount,
-            });
-          }
-        }
+        const {
+          clearedIds,
+          filesRemovedCount,
+          missingOnDiskCount,
+          errors,
+          removedScanEntries,
+          canceled,
+          totalRequested,
+        } = batch;
 
         // Apply all scan-cache removals in one batched state update (avoids 899+ React renders)
         if (removedScanEntries.length > 0) {
@@ -1564,6 +1527,7 @@ export function useBulkStorageInstaller({
           });
         }
 
+        // Flush DB install removals for every game already deleted on disk (including prior to Cancel)
         const updatedItems: RepositoryItemRecord[] = [];
         const DB_DELETE_CHUNK_SIZE = 400;
         if (clearedIds.length > 0) {
@@ -1605,6 +1569,8 @@ export function useBulkStorageInstaller({
 
         return {
           ok: errors.length === 0,
+          canceled,
+          totalRequested,
           uninstalledCount: clearedIds.length,
           filesRemovedCount,
           missingOnDiskCount,
@@ -1613,6 +1579,9 @@ export function useBulkStorageInstaller({
           uninstalledIds: clearedIds,
         };
       } finally {
+        if (ownsController && uninstallAbortRef.current === abortController) {
+          uninstallAbortRef.current = null;
+        }
         setUninstallProgress(null);
         setUninstallingItemIds((prev) => {
           const next = new Set(prev);
@@ -1631,6 +1600,8 @@ export function useBulkStorageInstaller({
       if (!rootHandle || !activeProfile) {
         return {
           ok: false,
+          canceled: false,
+          totalRequested: items.length,
           uninstalledCount: 0,
           filesRemovedCount: 0,
           missingOnDiskCount: 0,
@@ -1663,6 +1634,8 @@ export function useBulkStorageInstaller({
       if (!rootHandle || !activeProfile) {
         return {
           ok: false,
+          canceled: false,
+          totalRequested: ids.length,
           uninstalledCount: 0,
           filesRemovedCount: 0,
           missingOnDiskCount: 0,
@@ -1677,6 +1650,8 @@ export function useBulkStorageInstaller({
       if (cleanIds.length === 0) {
         return {
           ok: true,
+          canceled: false,
+          totalRequested: 0,
           uninstalledCount: 0,
           filesRemovedCount: 0,
           missingOnDiskCount: 0,
@@ -1686,42 +1661,106 @@ export function useBulkStorageInstaller({
         };
       }
 
-      const targets: DeviceUninstallTargetRecord[] = [];
-      const LOOKUP_CHUNK_SIZE = 4000;
-      for (let offset = 0; offset < cleanIds.length; offset += LOOKUP_CHUNK_SIZE) {
-        const chunk = cleanIds.slice(offset, offset + LOOKUP_CHUNK_SIZE);
-        const res = await fetch(
-          `/api/devices/${encodeURIComponent(activeProfile.id)}/installs/lookup`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Requested-With': 'rgt-sync',
-            },
-            body: JSON.stringify({ ids: chunk }),
-          },
-        );
-        const parsed = await readJsonSafely<{
-          items?: DeviceUninstallTargetRecord[];
-          error?: string;
-        }>(res);
-        if (!parsed.ok) {
+      const abortController = new AbortController();
+      uninstallAbortRef.current = abortController;
+      setUninstallProgress({
+        completed: 0,
+        total: cleanIds.length,
+        filesRemoved: 0,
+        canceling: false,
+      });
+
+      try {
+        const targets: DeviceUninstallTargetRecord[] = [];
+        const LOOKUP_CHUNK_SIZE = 4000;
+        for (let offset = 0; offset < cleanIds.length; offset += LOOKUP_CHUNK_SIZE) {
+          if (abortController.signal.aborted) {
+            return {
+              ok: true,
+              canceled: true,
+              totalRequested: cleanIds.length,
+              uninstalledCount: 0,
+              filesRemovedCount: 0,
+              missingOnDiskCount: 0,
+              errors: [],
+              updatedItems: [],
+              uninstalledIds: [],
+            };
+          }
+          const chunk = cleanIds.slice(offset, offset + LOOKUP_CHUNK_SIZE);
+          let res: Response;
+          try {
+            res = await fetch(
+              `/api/devices/${encodeURIComponent(activeProfile.id)}/installs/lookup`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Requested-With': 'rgt-sync',
+                },
+                body: JSON.stringify({ ids: chunk }),
+                signal: abortController.signal,
+              },
+            );
+          } catch (err) {
+            if (isAbortError(err) || abortController.signal.aborted) {
+              return {
+                ok: true,
+                canceled: true,
+                totalRequested: cleanIds.length,
+                uninstalledCount: 0,
+                filesRemovedCount: 0,
+                missingOnDiskCount: 0,
+                errors: [],
+                updatedItems: [],
+                uninstalledIds: [],
+              };
+            }
+            throw err;
+          }
+          const parsed = await readJsonSafely<{
+            items?: DeviceUninstallTargetRecord[];
+            error?: string;
+          }>(res);
+          if (!parsed.ok) {
+            return {
+              ok: false,
+              canceled: false,
+              totalRequested: cleanIds.length,
+              uninstalledCount: 0,
+              filesRemovedCount: 0,
+              missingOnDiskCount: 0,
+              errors: [parsed.errorMessage || 'Failed looking up installed ROM paths for uninstall.'],
+              updatedItems: [],
+              uninstalledIds: [],
+            };
+          }
+          if (Array.isArray(parsed.data?.items)) {
+            targets.push(...parsed.data.items);
+          }
+        }
+
+        if (abortController.signal.aborted) {
           return {
-            ok: false,
+            ok: true,
+            canceled: true,
+            totalRequested: targets.length || cleanIds.length,
             uninstalledCount: 0,
             filesRemovedCount: 0,
             missingOnDiskCount: 0,
-            errors: [parsed.errorMessage || 'Failed looking up installed ROM paths for uninstall.'],
+            errors: [],
             updatedItems: [],
             uninstalledIds: [],
           };
         }
-        if (Array.isArray(parsed.data?.items)) {
-          targets.push(...parsed.data.items);
-        }
-      }
 
-      return executeUninstallTargets(targets, rootHandle, activeProfile);
+        return await executeUninstallTargets(targets, rootHandle, activeProfile, abortController);
+      } finally {
+        if (uninstallAbortRef.current === abortController) {
+          uninstallAbortRef.current = null;
+        }
+        setUninstallProgress(null);
+      }
     },
     [executeUninstallTargets],
   );
@@ -3569,6 +3608,7 @@ export function useBulkStorageInstaller({
     uninstallProgress,
     uninstallItemsFromMountedDevice,
     uninstallIdsFromMountedDevice,
+    cancelUninstall,
     autoConfigPhase,
     autoConfigProgress,
     autoConfigResult,
