@@ -1188,10 +1188,14 @@ export function GameDetailDrawer({
         if (result.updatedItems[0]) {
           onItemUpdated(result.updatedItems[0]);
         }
+        const checkedNote =
+          result.checkedFolders && result.checkedFolders.length > 0
+            ? ` (checked /${result.checkedFolders.slice(0, 3).join(', /')})`
+            : '';
         const msg =
           result.filesRemovedCount > 0
             ? `Removed from ${mountedDeviceName || 'device'} (${result.filesRemovedCount} file${result.filesRemovedCount === 1 ? '' : 's'}). Local mirror untouched.`
-            : `Cleared install flag for ${mountedDeviceName || 'device'} (file already removed on device).`;
+            : `No matching ROM file found on ${mountedDeviceName || 'device'}${checkedNote}; cleared install flag.`;
         setUninstallMessage({ kind: 'ok', text: msg });
       }
     } catch (err) {

@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.38.5] - 2026-11-24
+
+- Fixed **Uninstall from `<Device>`** reliability so ROM files on mounted storage devices are consistently located and physically deleted instead of silently skipped while clearing catalog badges:
+  - **Multi-Subfolder, Mount-Depth & Case-Insensitive Resolution**: Added automatic fallback when recorded paths are missing (legacy installs or shifted mount roots such as card root vs. `Roms/`), discovering real console folders and sibling type subfolders (e.g., `/SFC`, `/SFC/trans`, `/SFC/hacks`) with case-insensitive directory/file lookup and per-batch folder scan caching (scanning each folder once instead of per game).
+  - **FAT32 & Archive-to-ROM Matching**: Upgraded fallback ROM matching to handle FAT32-sanitized punctuation (e.g., `:` → ` - `), archive-vs-extracted extensions (`.zip` vs. `.sfc`), role-tag differences (`[T-En v1.x]`), and unambiguous title matches for legacy installs.
+  - **Pre-Flight Write Permission Check & Bulk Silent-Wipe Guard**: Verifies/requests `readwrite` folder permission before deleting, refuses to silently wipe bulk catalog install records if zero files were found on disk (reporting the exact folders checked instead), and explicitly surfaces deleted-file vs. missing-on-disk counts in uninstall notices.
+
 ## [1.38.4] - 2026-11-24
 
 - Fixed the **Cancel** button during bulk **Uninstall from `<Device>`** so long-running uninstalls can be stopped cleanly mid-run:

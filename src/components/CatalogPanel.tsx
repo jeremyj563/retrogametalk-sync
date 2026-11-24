@@ -1938,19 +1938,35 @@ export function CatalogPanel({
         });
         if (res.canceled) {
           const remaining = Math.max(0, res.totalRequested - res.uninstalledCount);
+          const missingNote =
+            res.missingOnDiskCount > 0
+              ? `, ${res.missingOnDiskCount.toLocaleString()} already missing on disk`
+              : '';
           setQueueNotice(
-            `Uninstall canceled after removing ${res.uninstalledCount.toLocaleString()} of ${res.totalRequested.toLocaleString()} game${res.totalRequested === 1 ? '' : 's'} (${res.filesRemovedCount.toLocaleString()} file${res.filesRemovedCount === 1 ? '' : 's'}) from ${targetLabel}. Remaining ${remaining.toLocaleString()} game${remaining === 1 ? '' : 's'} untouched.`,
+            `Uninstall canceled after processing ${res.uninstalledCount.toLocaleString()} of ${res.totalRequested.toLocaleString()} game${res.totalRequested === 1 ? '' : 's'} (${res.filesRemovedCount.toLocaleString()} file${res.filesRemovedCount === 1 ? '' : 's'} deleted${missingNote}) from ${targetLabel}. Remaining ${remaining.toLocaleString()} game${remaining === 1 ? '' : 's'} untouched.`,
+          );
+        } else if (res.filesRemovedCount === 0 && res.missingOnDiskCount > 0) {
+          const checkedNote =
+            res.checkedFolders && res.checkedFolders.length > 0
+              ? ` (checked /${res.checkedFolders.slice(0, 3).join(', /')})`
+              : '';
+          setQueueNotice(
+            `No matching ROM file found on ${targetLabel}${checkedNote}; cleared ${res.uninstalledCount.toLocaleString()} stale catalog install badge${res.uninstalledCount === 1 ? '' : 's'}.`,
           );
         } else {
+          const missingNote =
+            res.missingOnDiskCount > 0
+              ? `, ${res.missingOnDiskCount.toLocaleString()} already missing on disk`
+              : '';
           setQueueNotice(
-            `Removed ${res.uninstalledCount.toLocaleString()} game${res.uninstalledCount === 1 ? '' : 's'} (${res.filesRemovedCount.toLocaleString()} file${res.filesRemovedCount === 1 ? '' : 's'}) from ${targetLabel}. Local mirror untouched.${res.errors.length > 0 ? ` (${res.errors.length} failed)` : ''}`,
+            `Removed ${res.uninstalledCount.toLocaleString()} game${res.uninstalledCount === 1 ? '' : 's'} (${res.filesRemovedCount.toLocaleString()} file${res.filesRemovedCount === 1 ? '' : 's'} deleted${missingNote}) from ${targetLabel}. Local mirror untouched.${res.errors.length > 0 ? ` (${res.errors.length} failed)` : ''}`,
           );
         }
         await loadCatalog(true);
+      } else if (res.errors.length > 0) {
+        setQueueNotice(`Uninstall notice: ${res.errors[0]}`);
       } else if (res.canceled) {
         setQueueNotice(`Uninstall canceled. No files were removed from ${targetLabel}.`);
-      } else if (res.errors.length > 0) {
-        setQueueNotice(`Uninstall error: ${res.errors[0]}`);
       }
     } finally {
       setBulkUninstallBusy(false);
