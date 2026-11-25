@@ -429,3 +429,31 @@ test('scanStorageDirectoryTree walks handles, prunes ignored dirs, samples ROM e
     (err: unknown) => err instanceof DOMException && err.name === 'AbortError',
   );
 });
+
+test('discoverStorageFolderMappings recognizes OnionOS / Miyoo Mini spelled-out console folders out of the box', () => {
+  const onionTree: ScannedDirNode[] = [
+    {
+      relativePath: '',
+      name: 'MIYOO_256GB',
+      depth: 0,
+      childDirs: ['FIFTYTWOHUNDRED', 'SEGASGONE', 'SEVENTYEIGHTHUNDRED', 'THIRTYTWOX', 'SFC', 'MY_CUSTOM_DIR'],
+      sampleExtensions: [],
+      fileCount: 0,
+    },
+    { relativePath: 'FIFTYTWOHUNDRED', name: 'FIFTYTWOHUNDRED', depth: 1, childDirs: [], sampleExtensions: ['a52'], fileCount: 3 },
+    { relativePath: 'SEGASGONE', name: 'SEGASGONE', depth: 1, childDirs: [], sampleExtensions: ['sg'], fileCount: 2 },
+    { relativePath: 'SEVENTYEIGHTHUNDRED', name: 'SEVENTYEIGHTHUNDRED', depth: 1, childDirs: [], sampleExtensions: ['a78'], fileCount: 4 },
+    { relativePath: 'THIRTYTWOX', name: 'THIRTYTWOX', depth: 1, childDirs: [], sampleExtensions: ['32x'], fileCount: 5 },
+    { relativePath: 'SFC', name: 'SFC', depth: 1, childDirs: [], sampleExtensions: ['sfc'], fileCount: 10 },
+    { relativePath: 'MY_CUSTOM_DIR', name: 'MY_CUSTOM_DIR', depth: 1, childDirs: [], sampleExtensions: [], fileCount: 1 },
+  ];
+
+  const result = discoverStorageFolderMappings(onionTree, { rootLabel: 'MIYOO_256GB' });
+  const byPath = new Map(result.matches.map((m) => [m.recommendedPath, m.canonicalSlug]));
+
+  assert.equal(byPath.get('FIFTYTWOHUNDRED'), 'atari-5200-roms');
+  assert.equal(byPath.get('SEGASGONE'), 'sg-1000');
+  assert.equal(byPath.get('SEVENTYEIGHTHUNDRED'), 'atari-7800-roms');
+  assert.equal(byPath.get('THIRTYTWOX'), '32x-roms');
+  assert.deepEqual(result.unmatchedFolders, ['MY_CUSTOM_DIR']);
+});

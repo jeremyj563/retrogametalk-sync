@@ -964,3 +964,48 @@ export function findEvaluatedScanMatch(
   const displayName = resolveSystemDisplayInfo(lower).displayName;
   return summary.byDisplayName.get(displayName) ?? null;
 }
+
+/**
+ * Excludes any scanned folders that the user has explicitly mapped via manual console overrides
+ * (global or per-device profile), accounting for case differences and optional ROM root prefixes.
+ */
+export function filterUnmatchedDeviceFolders(
+  unmatchedFolders: readonly string[] | null | undefined,
+  folderConfig: StorageFolderMappingConfig | null | undefined,
+  detectedRomRoot?: string | null,
+): string[] {
+  if (!unmatchedFolders || unmatchedFolders.length === 0) return [];
+  if (!folderConfig?.systemFolders) return [...unmatchedFolders];
+
+  const mappedLower = new Set<string>();
+  const romRoot = sanitizeRelativeStoragePath(
+    detectedRomRoot || folderConfig.runtimeBaseRomRoot || '',
+  );
+  const romRootLowerPrefix = romRoot ? `${romRoot.toLowerCase()}/` : '';
+
+  for (const rawPath of Object.values(folderConfig.systemFolders)) {
+    const clean = sanitizeRelativeStoragePath(rawPath || '');
+    if (!clean) continue;
+    const lower = clean.toLowerCase();
+    mappedLower.add(lower);
+
+    // If user typed "THIRTYTWOX" while device nests under "Roms/THIRTYTWOX", recognize both
+    if (romRoot && !lower.startsWith(romRootLowerPrefix)) {
+      mappedLower.add(`${romRoot.toLowerCase()}/${lower}`);
+    }
+    // Conversely, if user typed "Roms/THIRTYTWOX" while mounted directly inside Roms/ ("THIRTYTWOX")
+    if (romRootLowerPrefix && lower.startsWith(romRootLowerPrefix)) {
+      const stripped = lower.slice(romRootLowerPrefix.length);
+      if (stripped) mappedLower.add(stripped);
+    } else if (lower.startsWith('roms/')) {
+      const stripped = lower.slice('roms/'.length);
+      if (stripped) mappedLower.add(stripped);
+    }
+  }
+
+  return unmatchedFolders.filter((folder) => {
+    const clean = sanitizeRelativeStoragePath(folder);
+    if (!clean) return false;
+    return !mappedLower.has(clean.toLowerCase());
+  });
+}
