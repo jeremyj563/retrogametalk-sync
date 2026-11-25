@@ -6,9 +6,29 @@ on:
       - main
     tags:
       - "[0-9]*.*.*"
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE*"
+      - ".gitignore"
+      - ".env.example"
+      - "scripts/capture-screenshots/**"
+      - ".github/workflows/update-screenshots.yml"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE*"
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE*"
+      - ".gitignore"
+      - ".env.example"
+      - "scripts/capture-screenshots/**"
+      - ".github/workflows/update-screenshots.yml"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE*"
   workflow_dispatch:
     inputs:
       allow_major_bump:

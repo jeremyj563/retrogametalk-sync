@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.39.1] - 2026-11-24
+
+- Updated the **Release & Publish Container Image** GitHub Actions workflow (`docker-publish.yml`) to skip running on non-code commits and PRs—including merges from **`chore/update-readme-screenshots`**, documentation/Markdown edits (`docs/**`, `**/*.md`), screenshot capture tooling (`scripts/capture-screenshots/**`, `update-screenshots.yml`), and repo metadata files (`LICENSE*`, `.gitignore`, `.env.example`, GitHub templates)—while adding `[skip ci]` to automated screenshot refresh commits.
+
 ## [1.39.0] - 2026-11-24
 
 - Redesigned the **Catalog** toolbar and filter controls for a cleaner, calmer, and more approachable browsing experience, and added a **`Sort: Recently Installed`** ordering option:
