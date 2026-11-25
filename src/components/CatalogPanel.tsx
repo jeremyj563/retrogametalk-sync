@@ -66,6 +66,7 @@ import {
 import type { SmartRomFilterContext } from '../shared/smartRomPicker';
 import {
   classifySystemIndexFreshness,
+  DEFAULT_INDEX_STALE_MS,
   formatSyncRuleScopeSummary,
   resolveTargetConsoleScope,
 } from '../shared/syncRuleMatcher';
@@ -3894,9 +3895,18 @@ export function CatalogPanel({
                 config.systemFilter,
                 config.discoveredSystems,
               );
+              const catalogCountsBySystem: Record<string, number> = {};
+              for (const sys of status.systems || []) {
+                if (sys?.systemName) {
+                  catalogCountsBySystem[sys.systemName] = Number(sys.totalItems || 0);
+                }
+              }
               const targetFreshness = classifySystemIndexFreshness(
                 targetSystems,
                 config.systemIndexState,
+                Date.now(),
+                DEFAULT_INDEX_STALE_MS,
+                catalogCountsBySystem,
               );
               const staleTargetCount = targetFreshness.stale.length;
               const unindexedTargetCount = targetFreshness.unindexed.length;
@@ -4055,7 +4065,7 @@ export function CatalogPanel({
                             title={
                               allTargetsIndexed
                                 ? `${staleTargetCount > 0 ? `${staleTargetCount} target console${staleTargetCount === 1 ? '' : 's'} last checked >12h ago. ` : 'All target consoles checked within 12h. '}Check RetroGameTalk for new or modified games since each was last indexed (fast delta update; does not download ROMs)`
-                                : 'Index unindexed target consoles and delta-check any stale ones from RetroGameTalk (does not download ROMs)'
+                                : 'Index unindexed or incomplete target consoles and delta-check any stale ones from RetroGameTalk (does not download ROMs)'
                             }
                             className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
                               targetAttentionCount > 0
@@ -4067,6 +4077,25 @@ export function CatalogPanel({
                             {allTargetsIndexed
                               ? `Update Target Consoles${updateTargetSuffix}`
                               : `Index Target Consoles${updateTargetSuffix}`}
+                          </button>
+                        )}
+                        {!indexer.active && canUpdateTargets && allTargetsIndexed && onStartCatalogIndex && (
+                          <button
+                            type="button"
+                            disabled={indexerBusy}
+                            onClick={async () => {
+                              setIndexerBusy(true);
+                              try {
+                                await onStartCatalogIndex('filtered', { forceFull: true });
+                              } finally {
+                                setIndexerBusy(false);
+                              }
+                            }}
+                            title="Re-scan every page of all target consoles from scratch to rebuild local catalog metadata (slower; does not download ROMs)"
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                          >
+                            <RotateCcw className="h-3 w-3 shrink-0" />
+                            Full Re-index
                           </button>
                         )}
                         {(!indexer.active || indexer.scope === 'filtered') &&

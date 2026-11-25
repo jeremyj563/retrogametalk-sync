@@ -13,6 +13,7 @@ import {
   createSyncRun,
   deleteRepositoryItemsByIds,
   deleteRepositoryItemsByLocalPaths,
+  getCatalogReleaseCountsBySystem,
   getCatalogTotalsAndSystems,
   getDataDir,
   getExistingReleaseLocalPaths,
@@ -75,10 +76,12 @@ import {
 } from '../shared/releaseTypeFilter.ts';
 import {
   buildUpdatedSystemIndexCursor,
+  computeCatalogDeltaCutoffIso,
   planCatalogIndexTargets,
 } from '../shared/catalogIndexerPlan.ts';
 import {
   classifySystemIndexFreshness,
+  DEFAULT_INDEX_STALE_MS,
   diffRuntimeSyncSettings,
   diffSyncRules,
   doesCatalogReleaseMatchSyncRules,
@@ -2422,17 +2425,14 @@ export class ScraperOrchestrator extends EventEmitter {
     const valid = filterValidSystemSlugs(cfg.discoveredSystems);
     if (valid.length === 0) return 0;
     const state = getSystemIndexState();
-    const seen = new Set<string>();
-    let remaining = 0;
-    for (const rawSlug of valid) {
-      const canonical = (canonicalizeSystemSlug(rawSlug) || rawSlug).toLowerCase();
-      if (seen.has(canonical)) continue;
-      seen.add(canonical);
-      if (!state[canonical]?.fullyIndexed) {
-        remaining += 1;
-      }
-    }
-    return remaining;
+    const countsBySystem = getCatalogReleaseCountsBySystem();
+    return classifySystemIndexFreshness(
+      valid,
+      state,
+      Date.now(),
+      DEFAULT_INDEX_STALE_MS,
+      countsBySystem,
+    ).unindexed.length;
   }
 
   private notifyActiveRunFinished(): void {
@@ -2559,6 +2559,7 @@ export class ScraperOrchestrator extends EventEmitter {
       scope,
       auto: options.auto,
       forceFull: options.forceFull,
+      catalogCountsBySystem: getCatalogReleaseCountsBySystem(),
     });
     const plannedTargets = plan.targets;
     const targetSlugs = plannedTargets.map((t) => t.slug);
@@ -2691,20 +2692,33 @@ export class ScraperOrchestrator extends EventEmitter {
             },
           });
 
-          if (!signal.aborted && !this.shuttingDown && (res.supported || planned.strategy === 'full')) {
-            updateSystemIndexCursor(
-              systemSlug,
-              buildUpdatedSystemIndexCursor({
+          if (!signal.aborted && !this.shuttingDown) {
+            if (res.supported) {
+              const updatedCursor = buildUpdatedSystemIndexCursor({
                 existingCursor: planned.existingCursor,
                 strategy: planned.strategy,
                 scope,
                 scanStartedAtIso,
                 totalPostsFetched: postsForSystem,
                 newPostsDiscovered: newPostsForSystem,
-                totalPagesFetched: res.totalPages || pagesForSystem,
-                pagesIndexed: pagesForSystem,
-              }),
-            );
+                totalPagesFetched: res.totalPages || res.pagesFetched || pagesForSystem,
+                pagesIndexed: res.pagesFetched || pagesForSystem,
+                completed: res.completed,
+                headerTotalPosts: res.totalWpPosts,
+              });
+              updateSystemIndexCursor(systemSlug, updatedCursor);
+              if (!res.completed) {
+                this.log(
+                  'warn',
+                  `Catalog index incomplete for ${systemSlug} (fetched ${res.pagesFetched}/${res.totalPages} pages${res.truncatedReason ? ` · ${res.truncatedReason}` : ''}); will auto-resume full index on next update`,
+                );
+              }
+            } else {
+              this.log(
+                'warn',
+                `Catalog index could not query WP REST for ${systemSlug}${res.truncatedReason ? ` (${res.truncatedReason})` : ''}; leaving console marked unindexed for retry`,
+              );
+            }
           }
 
           this.indexerState.systemsCompleted = i + 1;
@@ -5096,7 +5110,13 @@ export class ScraperOrchestrator extends EventEmitter {
           }
         };
 
-        const initialFreshness = classifySystemIndexFreshness(liveTargetSystems, getSystemIndexState());
+        const initialFreshness = classifySystemIndexFreshness(
+          liveTargetSystems,
+          getSystemIndexState(),
+          Date.now(),
+          DEFAULT_INDEX_STALE_MS,
+          getCatalogReleaseCountsBySystem(),
+        );
         runLogger(
           'info',
           `${isDryRun ? '[Dry Run · Index-First Full] ' : ''}Index-first mirror across ${liveTargetSystems.length} target console(s)`,
@@ -5134,10 +5154,20 @@ export class ScraperOrchestrator extends EventEmitter {
               refreshedConsolesSet.add(canonicalSlug);
 
               const systemIndexState = getSystemIndexState();
-              const freshness = classifySystemIndexFreshness([canonicalSlug], systemIndexState);
+              const countsBySystem = getCatalogReleaseCountsBySystem();
+              const freshness = classifySystemIndexFreshness(
+                [canonicalSlug],
+                systemIndexState,
+                Date.now(),
+                DEFAULT_INDEX_STALE_MS,
+                countsBySystem,
+              );
               const needsFullIndex = freshness.unindexed.length > 0 || freshness.stale.length > 0;
               const existingCursor = systemIndexState[canonicalSlug] ?? systemIndexState[systemSlug];
-              const deltaCutoffIso = !needsFullIndex && existingCursor?.lastIndexedAt ? existingCursor.lastIndexedAt : null;
+              const deltaCutoffIso =
+                !needsFullIndex && existingCursor?.lastIndexedAt
+                  ? computeCatalogDeltaCutoffIso(existingCursor.lastIndexedAt)
+                  : null;
 
               const resolvedRestBase = await this.client.resolveWpRestBaseForSystem(systemSlug, liveCfg, signal, runLogger);
               if (resolvedRestBase) {
@@ -5157,7 +5187,9 @@ export class ScraperOrchestrator extends EventEmitter {
                 : `${isDryRun ? 'Dry Run · ' : ''}Delta check ${systemSlug} (${completedCount}/${totalActiveConsoles})`;
               this.emitStatus();
 
+              const phase1ScanStartedAtIso = new Date().toISOString();
               let upsertedForConsole = 0;
+              let postsWithLinkForConsole = 0;
               const wpRes = await this.client.listConsoleReleasesViaWpRest(systemSlug, liveCfg, {
                 modifiedAfterIso: deltaCutoffIso,
                 signal,
@@ -5180,6 +5212,7 @@ export class ScraperOrchestrator extends EventEmitter {
                         if (!post.link) continue;
                         const existingItem = getRepositoryItemByRemoteUrl(post.link.split('#')[0]);
                         upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, liveCfg, run.id));
+                        postsWithLinkForConsole += 1;
                         if (!existingItem) {
                           upsertedForConsole += 1;
                           pageUpserted += 1;
@@ -5213,16 +5246,28 @@ export class ScraperOrchestrator extends EventEmitter {
                     if (upsertedForConsole > 0) {
                       newDeltaDiscoveredCount += upsertedForConsole;
                     }
-                    const nowIso = new Date().toISOString();
                     const hasExplicitFilterNow = liveCfg.systemFilter.trim().length > 0;
-                    updateSystemIndexCursor(canonicalSlug, {
-                      lastIndexedAt: nowIso,
-                      totalWpPosts: needsFullIndex ? wpRes.posts.length : (existingCursor?.totalWpPosts ?? 0) + upsertedForConsole,
-                      totalPages: needsFullIndex ? wpRes.totalPages : (existingCursor?.totalPages ?? wpRes.totalPages),
-                      pagesIndexed: needsFullIndex ? wpRes.totalPages : (existingCursor?.pagesIndexed ?? wpRes.totalPages),
-                      fullyIndexed: true,
-                      scope: hasExplicitFilterNow ? 'filtered' : 'full',
-                    });
+                    updateSystemIndexCursor(
+                      canonicalSlug,
+                      buildUpdatedSystemIndexCursor({
+                        existingCursor,
+                        strategy: needsFullIndex ? 'full' : 'delta',
+                        scope: hasExplicitFilterNow ? 'filtered' : 'full',
+                        scanStartedAtIso: phase1ScanStartedAtIso,
+                        totalPostsFetched: postsWithLinkForConsole || wpRes.posts.length,
+                        newPostsDiscovered: upsertedForConsole,
+                        totalPagesFetched: wpRes.totalPages,
+                        pagesIndexed: wpRes.pagesFetched,
+                        completed: wpRes.completed,
+                        headerTotalPosts: wpRes.totalWpPosts,
+                      }),
+                    );
+                    if (!wpRes.completed) {
+                      runLogger(
+                        'warn',
+                        `Catalog index incomplete for ${systemSlug} (fetched ${wpRes.pagesFetched}/${wpRes.totalPages} pages${wpRes.truncatedReason ? ` · ${wpRes.truncatedReason}` : ''}); will auto-resume full index on next run`,
+                      );
+                    }
                     if (needsFullIndex || wpRes.posts.length > 0) {
                       refreshedConsoles.push(canonicalSlug);
                     }
@@ -5792,6 +5837,7 @@ export class ScraperOrchestrator extends EventEmitter {
               : `${isDryRun ? 'Dry Run (Full)' : 'Full Sync'} (${scopeLabel}): enumerating ${systemSlug}`;
             this.emitStatus();
 
+            const deltaScanStartedAtIso = new Date().toISOString();
             const wpRes = await this.client.listConsoleReleasesViaWpRest(systemSlug, liveCfg, {
               modifiedAfterIso: effectiveCutoffIso,
               signal,
@@ -5809,7 +5855,7 @@ export class ScraperOrchestrator extends EventEmitter {
             runLogger(
               'debug',
               `[Crawl] System "${systemSlug}" WP REST scan`,
-              `supported=${wpRes.supported}, posts=${wpRes.posts.length}`,
+              `supported=${wpRes.supported}, posts=${wpRes.posts.length}, completed=${wpRes.completed}`,
             );
 
             let fastSkippedReleasesCount = 0;
@@ -5829,12 +5875,14 @@ export class ScraperOrchestrator extends EventEmitter {
                 }
               }
 
+              let consoleNewDiscovered = 0;
               if (!isDryRun && wpRes.posts.length > 0) {
                 for (const post of wpRes.posts) {
                   if (!post.link) continue;
                   const canonicalLink = post.link.split('#')[0];
                   if (!preUpsertExistingByUrl.get(canonicalLink)) {
                     deltaNewDiscoveredCount += 1;
+                    consoleNewDiscovered += 1;
                   }
                   upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, liveCfg, run.id));
                 }
@@ -5851,11 +5899,21 @@ export class ScraperOrchestrator extends EventEmitter {
               if (!isDryRun) {
                 const prevCursor = existingIndexState[canonicalSlug] ?? existingIndexState[systemSlug];
                 if (prevCursor?.fullyIndexed) {
-                  updateSystemIndexCursor(canonicalSlug, {
-                    ...prevCursor,
-                    lastIndexedAt: new Date().toISOString(),
-                    totalWpPosts: (prevCursor.totalWpPosts ?? 0) + (wpRes.posts.length > 0 ? wpRes.posts.length : 0),
-                  });
+                  updateSystemIndexCursor(
+                    canonicalSlug,
+                    buildUpdatedSystemIndexCursor({
+                      existingCursor: prevCursor,
+                      strategy: 'delta',
+                      scope: prevCursor.scope ?? (liveCfg.systemFilter.trim().length > 0 ? 'filtered' : 'full'),
+                      scanStartedAtIso: deltaScanStartedAtIso,
+                      totalPostsFetched: wpRes.posts.length,
+                      newPostsDiscovered: consoleNewDiscovered,
+                      totalPagesFetched: wpRes.totalPages,
+                      pagesIndexed: wpRes.pagesFetched,
+                      completed: wpRes.completed,
+                      headerTotalPosts: wpRes.totalWpPosts,
+                    }),
+                  );
                 }
                 if (wpRes.posts.length > 0) {
                   refreshedDeltaConsoles.push(canonicalSlug);

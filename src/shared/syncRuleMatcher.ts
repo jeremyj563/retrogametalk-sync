@@ -16,6 +16,9 @@ export const DEFAULT_INDEX_STALE_MS = DEFAULT_INDEX_STALE_HOURS * 60 * 60 * 1000
 export interface SystemIndexCursorLike {
   lastIndexedAt?: string;
   fullyIndexed?: boolean;
+  totalWpPosts?: number;
+  totalPages?: number;
+  pagesIndexed?: number;
 }
 
 export interface SystemIndexFreshnessSummary {
@@ -23,6 +26,64 @@ export interface SystemIndexFreshnessSummary {
   stale: string[];
   unindexed: string[];
   oldestIndexedAt: string | null;
+}
+
+export function findLocalCatalogCountForSystem(
+  catalogCountsBySystem: Record<string, number> | undefined,
+  canonicalSlug: string,
+): number | undefined {
+  if (!catalogCountsBySystem) return undefined;
+  let total = 0;
+  let matched = false;
+  for (const [key, count] of Object.entries(catalogCountsBySystem)) {
+    if (canonicalizeSystemSlug(key).toLowerCase() === canonicalSlug) {
+      total += Math.max(0, Number(count) || 0);
+      matched = true;
+    }
+  }
+  return matched ? total : 0;
+}
+
+export function isSystemIndexCursorComplete(
+  cursor: SystemIndexCursorLike | undefined,
+  localCatalogCount?: number,
+): boolean {
+  if (!cursor || !cursor.fullyIndexed || !cursor.lastIndexedAt) {
+    return false;
+  }
+  const indexedMs = Date.parse(cursor.lastIndexedAt);
+  if (!Number.isFinite(indexedMs)) {
+    return false;
+  }
+  if (
+    typeof cursor.totalPages === 'number' &&
+    cursor.totalPages > 0 &&
+    typeof cursor.pagesIndexed === 'number' &&
+    cursor.pagesIndexed < cursor.totalPages
+  ) {
+    return false;
+  }
+  // Legacy poisoned cursor written when WP REST page 1 failed/returned unsupported with 0 posts & 0 pages
+  if (
+    typeof cursor.totalWpPosts === 'number' &&
+    cursor.totalWpPosts <= 0 &&
+    (cursor.totalPages ?? 0) <= 0
+  ) {
+    return false;
+  }
+  if (typeof localCatalogCount === 'number') {
+    if (localCatalogCount <= 0 && (cursor.totalWpPosts ?? 1) > 0) {
+      return false;
+    }
+    if (
+      typeof cursor.totalWpPosts === 'number' &&
+      cursor.totalWpPosts > 0 &&
+      localCatalogCount < cursor.totalWpPosts
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 export type SyncOverrideMode = 'default' | 'pin' | 'ignore';
@@ -70,6 +131,7 @@ export function classifySystemIndexFreshness(
   systemIndexState: Record<string, SystemIndexCursorLike> | undefined,
   nowMs = Date.now(),
   staleMs = DEFAULT_INDEX_STALE_MS,
+  catalogCountsBySystem?: Record<string, number>,
 ): SystemIndexFreshnessSummary {
   const state = systemIndexState || {};
   const fresh: string[] = [];
@@ -95,20 +157,16 @@ export function classifySystemIndexFreshness(
     seen.add(slug);
 
     const cursor = findCursor(slug);
-    if (!cursor || !cursor.fullyIndexed || !cursor.lastIndexedAt) {
+    const localCount = findLocalCatalogCountForSystem(catalogCountsBySystem, slug);
+    if (!isSystemIndexCursorComplete(cursor, localCount)) {
       unindexed.push(slug);
       continue;
     }
 
-    const indexedMs = Date.parse(cursor.lastIndexedAt);
-    if (!Number.isFinite(indexedMs)) {
-      unindexed.push(slug);
-      continue;
-    }
-
+    const indexedMs = Date.parse(cursor!.lastIndexedAt!);
     if (indexedMs < oldestMs) {
       oldestMs = indexedMs;
-      oldestIndexedAt = cursor.lastIndexedAt;
+      oldestIndexedAt = cursor!.lastIndexedAt!;
     }
 
     if (nowMs - indexedMs > staleMs) {
