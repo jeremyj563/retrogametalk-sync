@@ -1370,6 +1370,31 @@ async function bootstrap() {
     }
   });
 
+  app.get('/api/fs/download', (req, res) => {
+    const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+    try {
+      const resolved = orchestrator.resolveFsFilePath(relPath);
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', String(resolved.sizeBytes));
+      res.setHeader(
+        'Content-Disposition',
+        buildContentDispositionAttachment(resolved.filename).headerValue,
+      );
+      const stream = fs.createReadStream(resolved.absPath);
+      stream.on('error', () => {
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to stream file from disk' });
+        } else {
+          res.end();
+        }
+      });
+      stream.pipe(res);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   app.get('/api/fs/archive', async (req, res) => {
     const relPath = typeof req.query.path === 'string' ? req.query.path : '';
     try {

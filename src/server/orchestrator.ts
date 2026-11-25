@@ -1819,6 +1819,55 @@ export class ScraperOrchestrator extends EventEmitter {
     }
   }
 
+  resolveFsFilePath(relativePath: string): {
+    absPath: string;
+    relativePath: string;
+    filename: string;
+    sizeBytes: number;
+  } {
+    const cfg = getInternalConfig();
+    const root = path.resolve(cfg.downloadDir);
+    const cleaned = relativePath.replace(/^\/+/, '');
+    if (!cleaned) {
+      throw new Error('File relative path is required');
+    }
+    const target = path.resolve(root, cleaned);
+    if (!target.startsWith(root + path.sep)) {
+      throw new Error('Path traversal outside DOWNLOAD_DIR is not allowed');
+    }
+    const rel = path.relative(root, target).split(path.sep).join('/');
+    const segments = rel.split('/');
+    const leaf = segments[segments.length - 1] || '';
+    if (
+      segments.some((seg) => !seg || seg.startsWith('.')) ||
+      isEphemeralPartFile(leaf) ||
+      leaf === 'scraper.db' ||
+      leaf === 'scraper.db-wal' ||
+      leaf === 'scraper.db-shm' ||
+      leaf === 'cookies.json'
+    ) {
+      throw new Error('Selected file is not downloadable');
+    }
+    if (!fs.existsSync(target)) {
+      throw new Error('File not found on disk');
+    }
+    const realRoot = fs.realpathSync(root);
+    const realTarget = fs.realpathSync(target);
+    if (!realTarget.startsWith(realRoot + path.sep)) {
+      throw new Error('Path traversal outside DOWNLOAD_DIR is not allowed');
+    }
+    const st = fs.statSync(realTarget);
+    if (!st.isFile()) {
+      throw new Error('Selected path is not a file');
+    }
+    return {
+      absPath: realTarget,
+      relativePath: rel,
+      filename: leaf,
+      sizeBytes: st.size,
+    };
+  }
+
   resolveFsArchivePath(relativePath: string): { absPath: string; relativePath: string } {
     const cfg = getInternalConfig();
     const root = path.resolve(cfg.downloadDir);

@@ -14,8 +14,6 @@ import {
   Cloud,
   Download,
   FileArchive,
-  Folder,
-  FolderOpen,
   Gamepad2,
   HardDrive,
   Layers,
@@ -41,10 +39,6 @@ import type {
   BulkInstallKnownItemMeta,
   BulkStorageInstallerController,
 } from '../hooks/useBulkStorageInstaller';
-import {
-  isBrowsableArchiveName,
-  listArchiveDirectoryAtPath,
-} from '../shared/archiveTree';
 import {
   CATALOG_SORT_OPTIONS,
   DEFAULT_CATALOG_SORT,
@@ -92,8 +86,8 @@ import type {
   SyncOverrideMode,
   UserCollectionRecord,
 } from '../types';
-import { ArchiveExplorer } from './ArchiveExplorer';
 import { CollectionPickerPopover } from './CollectionPickerPopover';
+import { LocalDiskTreePanel } from './LocalDiskTreePanel';
 import {
   isItemInstalledOnMountedDevice,
   resolveItemDeviceInstallState,
@@ -2607,13 +2601,14 @@ export function CatalogPanel({
     });
   };
 
-  const allFsSelected = filteredFsNodes.length > 0 && filteredFsNodes.every((n) => selectedFsPaths.has(n.relativePath));
-  const toggleAllFs = () => {
+  const toggleAllFsVisible = (visibleNodes: FsTreeNode[]) => {
     setConfirmFsBulk(false);
-    if (allFsSelected) {
+    const allSelected =
+      visibleNodes.length > 0 && visibleNodes.every((n) => selectedFsPaths.has(n.relativePath));
+    if (allSelected) {
       setSelectedFsPaths(new Set());
     } else {
-      setSelectedFsPaths(new Set(filteredFsNodes.map((n) => n.relativePath)));
+      setSelectedFsPaths(new Set(visibleNodes.map((n) => n.relativePath)));
     }
   };
 
@@ -3234,8 +3229,6 @@ export function CatalogPanel({
     setConfirmDeleteCollection(false);
   };
 
-  const breadcrumbs = fsPath ? fsPath.split('/').filter(Boolean) : [];
-
   return (
     <div className="space-y-5">
       {/* Toolbar */}
@@ -3389,34 +3382,10 @@ export function CatalogPanel({
               </button>
             </div>
           ) : viewMode === 'filesystem' ? (
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="relative">
-                <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  type="text"
-                  value={fsSearch}
-                  onChange={(e) => setFsSearch(e.target.value)}
-                  placeholder={fsArchivePath ? 'Filter archive contents...' : 'Filter current folder...'}
-                  className={`pl-8 ${fsSearch ? 'pr-7' : 'pr-3'} py-1.5 text-xs bg-crt-bg border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-56 ${
-                    fsSearch.trim() ? 'border-crt-phosphor/60' : 'border-crt-border'
-                  }`}
-                />
-                {fsSearch && (
-                  <button
-                    type="button"
-                    onClick={() => setFsSearch('')}
-                    aria-label={fsArchivePath ? 'Clear archive filter' : 'Clear folder filter'}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-crt-muted hover:text-crt-text p-0.5 rounded"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
-              </div>
-              <span className="text-xs font-mono text-crt-muted truncate max-w-xs">
-                Root: {status.storage.downloadDir}
-              </span>
+            <div className="flex items-center gap-2 self-start lg:self-auto">
               <button
                 type="button"
+                disabled={fsLoading || fsArchiveLoading}
                 onClick={() => {
                   if (fsArchivePath) {
                     void openFsArchive(fsArchivePath);
@@ -3429,10 +3398,12 @@ export function CatalogPanel({
                     ? 'Re-read this archive from local disk'
                     : 'Re-scan this folder on local disk for file changes'
                 }
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-sans border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-border bg-crt-bg hover:bg-crt-elevated hover:border-crt-border-strong text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-55"
               >
-                <RefreshCw className="h-3.5 w-3.5" />
-                Rescan
+                <RefreshCw
+                  className={`h-3.5 w-3.5 shrink-0 ${fsLoading || fsArchiveLoading ? 'animate-spin' : ''}`}
+                />
+                <span>Rescan Disk</span>
               </button>
             </div>
           ) : (
@@ -4934,55 +4905,6 @@ export function CatalogPanel({
             </div>
           </div>
         )}
-
-        {/* Contextual Bulk Selection Bar (Local Disk Tree) */}
-        {viewMode === 'filesystem' && !fsArchivePath && selectedFsPaths.size > 0 && (
-          <div className="pt-3 border-t border-crt-border flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
-            <span className="text-crt-phosphor tabular-nums">
-              {selectedFsPaths.size} disk entr{selectedFsPaths.size === 1 ? 'y' : 'ies'} selected
-            </span>
-            <div className="flex items-center gap-2">
-              {confirmFsBulk ? (
-                <>
-                  <button
-                    type="button"
-                    disabled={deletingKey === 'fs-bulk'}
-                    onClick={() => void handleDeleteFsPaths(Array.from(selectedFsPaths))}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-crt-bg bg-crt-crimson hover:brightness-110 rounded transition-colors disabled:opacity-50"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                    {deletingKey === 'fs-bulk' ? 'Deleting...' : `Confirm Delete (${selectedFsPaths.size})`}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmFsBulk(false)}
-                    className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors"
-                  >
-                    Cancel
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmFsBulk(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-crimson/60 text-crt-crimson hover:bg-crt-crimson/10 rounded transition-colors"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                    Delete Selected ({selectedFsPaths.size})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedFsPaths(new Set())}
-                    className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors"
-                  >
-                    Clear Selection
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Main Content View */}
@@ -6192,280 +6114,34 @@ export function CatalogPanel({
           }}
         />
       ) : (
-        <div className="relative crt-panel-living border border-crt-border bg-crt-surface rounded-md overflow-hidden">
-          <div aria-hidden="true" className="crt-edge-beam">
-            <span />
-          </div>
-          {/* Breadcrumbs + Select All Header */}
-          {(() => {
-            const archiveDirView =
-              fsArchivePath && fsArchiveListing
-                ? listArchiveDirectoryAtPath(fsArchiveListing.entries, fsArchiveSubpath)
-                : null;
-            const archiveLeafName = fsArchivePath
-              ? fsArchivePath.split('/').filter(Boolean).pop() || fsArchivePath
-              : null;
-
-            return (
-              <>
-                <div className="px-4 py-2.5 border-b border-crt-border bg-crt-bg flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {!fsArchivePath && filteredFsNodes.length > 0 && (
-                      <input
-                        type="checkbox"
-                        checked={allFsSelected}
-                        onChange={toggleAllFs}
-                        aria-label="Select all visible filesystem entries"
-                        className="accent-crt-phosphor cursor-pointer mr-1"
-                      />
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (fsArchivePath) {
-                          exitFsArchive('');
-                        } else {
-                          setFsPath('');
-                        }
-                      }}
-                      className="text-crt-phosphor hover:underline cursor-pointer"
-                    >
-                      repository
-                    </button>
-                    {breadcrumbs.map((seg, i) => {
-                      const target = breadcrumbs.slice(0, i + 1).join('/');
-                      return (
-                        <span key={target} className="inline-flex items-center gap-1.5">
-                          <ChevronRight className="h-3 w-3 text-crt-muted" />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (fsArchivePath) {
-                                exitFsArchive(target);
-                              } else {
-                                setFsPath(target);
-                              }
-                            }}
-                            className="text-crt-text hover:text-crt-phosphor hover:underline cursor-pointer"
-                          >
-                            {seg}
-                          </button>
-                        </span>
-                      );
-                    })}
-                    {fsArchivePath && archiveLeafName && (
-                      <span className="inline-flex items-center gap-1.5">
-                        <ChevronRight className="h-3 w-3 text-crt-muted" />
-                        <button
-                          type="button"
-                          onClick={() => setFsArchiveSubpath('')}
-                          className="inline-flex items-center gap-1.5 text-crt-phosphor hover:underline cursor-pointer"
-                          title="Jump to archive root"
-                        >
-                          <FileArchive className="h-3.5 w-3.5 shrink-0" />
-                          <span>{archiveLeafName}</span>
-                        </button>
-                      </span>
-                    )}
-                    {archiveDirView?.breadcrumbs.map((crumb) => (
-                      <span key={crumb.path} className="inline-flex items-center gap-1.5">
-                        <ChevronRight className="h-3 w-3 text-crt-muted" />
-                        <button
-                          type="button"
-                          onClick={() => setFsArchiveSubpath(crumb.path)}
-                          className="text-crt-text hover:text-crt-phosphor hover:underline cursor-pointer"
-                        >
-                          {crumb.label}
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                  <span className="text-crt-muted tabular-nums">
-                    {fsArchivePath
-                      ? archiveDirView
-                        ? `${archiveDirView.folders.length + archiveDirView.files.length} in folder`
-                        : 'inspecting...'
-                      : `${filteredFsNodes.length} visible`}
-                  </span>
-                </div>
-
-                {fsArchivePath ? (
-                  fsArchiveLoading ? (
-                    <div className="p-6 space-y-2">
-                      {[0, 1, 2].map((i) => (
-                        <div
-                          key={i}
-                          className="h-9 bg-crt-bg border border-crt-border rounded animate-pulse"
-                        />
-                      ))}
-                    </div>
-                  ) : fsArchiveError ? (
-                    <div className="p-8 text-center space-y-3 text-xs font-mono">
-                      <AlertCircle className="h-6 w-6 text-crt-crimson mx-auto" />
-                      <p className="text-crt-crimson">{fsArchiveError}</p>
-                      <button
-                        type="button"
-                        onClick={() => exitFsArchive()}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border text-crt-text hover:border-crt-phosphor rounded transition-colors cursor-pointer"
-                      >
-                        Back to Disk Folder
-                      </button>
-                    </div>
-                  ) : fsArchiveListing ? (
-                    <ArchiveExplorer
-                      mode="inline"
-                      listing={fsArchiveListing}
-                      subpath={fsArchiveSubpath}
-                      onSubpathChange={setFsArchiveSubpath}
-                      externalSearch={fsSearch}
-                      onClearExternalSearch={() => setFsSearch('')}
-                      buildEntryDownloadUrl={(entryPath) =>
-                        `/api/fs/archive/entry?path=${encodeURIComponent(
-                          fsArchivePath,
-                        )}&entry=${encodeURIComponent(entryPath)}`
-                      }
-                      buildEntryPreviewUrl={(entryPath) =>
-                        `/api/fs/archive/preview?path=${encodeURIComponent(
-                          fsArchivePath,
-                        )}&entry=${encodeURIComponent(entryPath)}`
-                      }
-                      onExitArchive={() => exitFsArchive()}
-                    />
-                  ) : null
-                ) : fsLoading ? (
-                  <div className="p-6 space-y-2">
-                    {[0, 1, 2].map((i) => (
-                      <div key={i} className="h-9 bg-crt-bg border border-crt-border rounded animate-pulse" />
-                    ))}
-                  </div>
-                ) : filteredFsNodes.length === 0 ? (
-                  <div className="p-12 text-center space-y-3">
-                    <Folder className="h-6 w-6 text-crt-muted mx-auto" />
-                    <p className="text-sm font-medium text-crt-text">
-                      {fsNodes.length === 0 ? 'Directory is empty' : 'No files or folders match your filter'}
-                    </p>
-                    <p className="text-xs text-crt-muted">
-                      {fsNodes.length === 0
-                        ? 'Downloaded ROMs, hacks, translations, and ports will appear here mirroring the exact remote hierarchy.'
-                        : 'Clear the folder filter input to view all entries in this directory.'}
-                    </p>
-                    {fsNodes.length > 0 && fsSearch && (
-                      <div className="pt-1">
-                        <button
-                          type="button"
-                          onClick={() => setFsSearch('')}
-                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                          Clear Folder Filter
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="divide-y divide-crt-border">
-                    {filteredFsNodes.map((node) => {
-                      const checked = selectedFsPaths.has(node.relativePath);
-                      const isDeletingThis = deletingKey === `fs-${node.relativePath}`;
-                      const browsableArchive =
-                        node.type === 'file' &&
-                        (Boolean(node.isArchive) || isBrowsableArchiveName(node.name));
-                      const formatLabel =
-                        node.archiveFormat && node.archiveFormat !== 'raw'
-                          ? node.archiveFormat.toUpperCase()
-                          : null;
-
-                      return (
-                        <div
-                          key={node.relativePath}
-                          className={`crt-table-row h-10 px-4 flex items-center justify-between gap-4 transition-colors text-xs font-mono ${
-                            checked ? 'bg-crt-phosphor/5' : 'hover:bg-crt-elevated'
-                          }`}
-                        >
-                          <div className="flex items-center gap-3 min-w-0">
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => toggleFsNode(node.relativePath)}
-                              aria-label={`Select ${node.name}`}
-                              className="accent-crt-phosphor cursor-pointer shrink-0"
-                            />
-                            {node.type === 'directory' ? (
-                              <button
-                                type="button"
-                                onClick={() => setFsPath(node.relativePath)}
-                                className="flex items-center gap-2.5 text-crt-text hover:text-crt-phosphor text-left min-w-0 cursor-pointer"
-                              >
-                                <Folder className="h-4 w-4 text-crt-amber shrink-0" />
-                                <span className="truncate">{node.name}/</span>
-                              </button>
-                            ) : browsableArchive ? (
-                              <button
-                                type="button"
-                                onClick={() => void openFsArchive(node.relativePath)}
-                                title={`Browse contents of ${node.name} without unpacking to disk`}
-                                className="flex items-center gap-2.5 text-crt-text hover:text-crt-phosphor text-left min-w-0 cursor-pointer group"
-                              >
-                                <FileArchive className="h-4 w-4 text-crt-phosphor shrink-0" />
-                                <span className="truncate group-hover:underline">{node.name}</span>
-                                {formatLabel && (
-                                  <span className="px-1.5 py-0.5 text-[10px] leading-none border border-crt-phosphor/40 bg-crt-phosphor/10 text-crt-phosphor rounded shrink-0">
-                                    {formatLabel}
-                                  </span>
-                                )}
-                              </button>
-                            ) : (
-                              <div className="flex items-center gap-2.5 text-crt-text min-w-0">
-                                <FileArchive className="h-4 w-4 text-crt-muted shrink-0" />
-                                <span className="truncate">{node.name}</span>
-                              </div>
-                            )}
-                          </div>
-
-                          <div className="flex items-center gap-3 sm:gap-5 text-crt-muted tabular-nums shrink-0">
-                            <span>
-                              {node.type === 'directory'
-                                ? `${node.childrenCount ?? 0} entries`
-                                : formatBytes(node.sizeBytes)}
-                            </span>
-                            <span className="hidden sm:inline">{formatDateTime(node.modifiedAt)}</span>
-                            <div className="flex items-center gap-1.5">
-                              {browsableArchive && (
-                                <button
-                                  type="button"
-                                  onClick={() => void openFsArchive(node.relativePath)}
-                                  title={`Inspect contents of ${node.name} without unpacking`}
-                                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] border border-crt-border hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors cursor-pointer whitespace-nowrap"
-                                >
-                                  <FolderOpen className="h-3 w-3 shrink-0" />
-                                  <span className="hidden sm:inline">Inspect</span>
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                disabled={isDeletingThis}
-                                onClick={() => void handleDeleteFsPaths([node.relativePath])}
-                                aria-label={`Delete ${node.name}`}
-                                title={
-                                  node.type === 'directory'
-                                    ? 'Delete directory and all contents'
-                                    : 'Delete file'
-                                }
-                                className="p-1.5 border border-crt-border hover:border-crt-crimson text-crt-muted hover:text-crt-crimson rounded transition-colors disabled:opacity-50 cursor-pointer"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            );
-          })()}
-        </div>
+        <LocalDiskTreePanel
+          downloadDir={status.storage.downloadDir}
+          fsPath={fsPath}
+          fsSearch={fsSearch}
+          fsNodes={fsNodes}
+          fsLoading={fsLoading}
+          selectedFsPaths={selectedFsPaths}
+          confirmFsBulk={confirmFsBulk}
+          deletingKey={deletingKey}
+          fsArchivePath={fsArchivePath}
+          fsArchiveListing={fsArchiveListing}
+          fsArchiveSubpath={fsArchiveSubpath}
+          fsArchiveLoading={fsArchiveLoading}
+          fsArchiveError={fsArchiveError}
+          onPathChange={setFsPath}
+          onSearchChange={setFsSearch}
+          onToggleNode={toggleFsNode}
+          onToggleAllVisible={toggleAllFsVisible}
+          onClearSelection={() => {
+            setSelectedFsPaths(new Set());
+            setConfirmFsBulk(false);
+          }}
+          onConfirmBulkChange={setConfirmFsBulk}
+          onDeletePaths={handleDeleteFsPaths}
+          onOpenArchive={openFsArchive}
+          onExitArchive={exitFsArchive}
+          onArchiveSubpathChange={setFsArchiveSubpath}
+        />
       )}
 
       {/* Slide-Over Game Detail Drawer */}
