@@ -11,7 +11,6 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
-  FileText,
   FolderPlus,
   FolderSync,
   HardDrive,
@@ -23,7 +22,6 @@ import {
   RefreshCw,
   Save,
   ShieldCheck,
-  SlidersHorizontal,
   Trash2,
   X,
 } from 'lucide-react';
@@ -31,18 +29,18 @@ import type { BulkStorageInstallerController } from '../hooks/useBulkStorageInst
 import { useSectionSpotlight } from '../hooks/useSectionSpotlight';
 import { formatDateTime } from '../utils/format';
 import {
-  appendNamingToken,
   buildLiveExportDestinations,
   composeEffectiveStorageFolderConfig,
   filterUnmatchedDeviceFolders,
-  findActiveNamingPreset,
   resolveConsolePathSource,
-  ROM_NAMING_TOKEN_HELPERS,
   shouldAutoExpandAdvancedNaming,
   summarizeDeviceInferredConventions,
-  summarizeNamingOptions,
 } from '../shared/deviceExportUi';
-import { ROM_NAMING_PRESETS } from '../shared/romNaming';
+import {
+  canonicalRomNamingTypeOverridesJson,
+  normalizeRomNamingTypeOverrides,
+  type RomNamingTypeOverrides,
+} from '../shared/romNaming';
 import {
   canonicalStorageFolderConfigJson,
   getStorageRomCategoryShortLabel,
@@ -69,6 +67,7 @@ import {
 } from '../utils/storageActionCopy';
 import { ConfigSaveBar } from './ConfigSaveBar';
 import { DeviceEmblem } from './DeviceBadge';
+import { RomFilenameFormattingSection } from './RomFilenameFormattingSection';
 import { StorageFolderMappingsSection } from './StorageFolderMappingsSection';
 import { sortDeviceProfilesForFleet } from '../shared/deviceProfiles';
 
@@ -96,6 +95,9 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
     ref,
   ) {
     const [romNamingTemplate, setRomNamingTemplate] = useState(config.romNamingTemplate);
+    const [romNamingTypeOverrides, setRomNamingTypeOverrides] = useState<RomNamingTypeOverrides>(
+      () => normalizeRomNamingTypeOverrides(config.romNamingTypeOverrides),
+    );
     const [romSanitizeFat32, setRomSanitizeFat32] = useState(config.romSanitizeFat32);
     const [romMaxFilenameLen, setRomMaxFilenameLen] = useState(config.romMaxFilenameLen);
     const [storageFolderConfig, setStorageFolderConfig] = useState<StorageFolderMappingConfig>(
@@ -104,6 +106,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
     const [showAdvancedNaming, setShowAdvancedNaming] = useState<boolean>(() =>
       shouldAutoExpandAdvancedNaming({
         romNamingTemplate: config.romNamingTemplate,
+        romNamingTypeOverrides: normalizeRomNamingTypeOverrides(config.romNamingTypeOverrides),
         romSanitizeFat32: config.romSanitizeFat32,
         romMaxFilenameLen: config.romMaxFilenameLen,
       }),
@@ -141,6 +144,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
 
     const resetFormToConfig = useCallback((target: ScraperConfigPublic) => {
       setRomNamingTemplate(target.romNamingTemplate);
+      setRomNamingTypeOverrides(normalizeRomNamingTypeOverrides(target.romNamingTypeOverrides));
       setRomSanitizeFat32(target.romSanitizeFat32);
       setRomMaxFilenameLen(target.romMaxFilenameLen);
       setStorageFolderConfig(normalizeStorageFolderConfig(target.storageFolderConfig));
@@ -224,6 +228,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
           effectiveDraftFolderConfig,
           {
             romNamingTemplate,
+            romNamingTypeOverrides,
             romSanitizeFat32,
             romMaxFilenameLen,
           },
@@ -237,6 +242,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
       [
         effectiveDraftFolderConfig,
         romNamingTemplate,
+        romNamingTypeOverrides,
         romSanitizeFat32,
         romMaxFilenameLen,
         storageFolderConfig,
@@ -256,21 +262,6 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
       [autoConfigResult, effectiveDraftFolderConfig],
     );
 
-    const activeNamingPreset = useMemo(
-      () => findActiveNamingPreset(romNamingTemplate),
-      [romNamingTemplate],
-    );
-
-    const namingOptionsSummary = useMemo(
-      () =>
-        summarizeNamingOptions({
-          romNamingTemplate,
-          romSanitizeFat32,
-          romMaxFilenameLen,
-        }),
-      [romNamingTemplate, romSanitizeFat32, romMaxFilenameLen],
-    );
-
     const dirtyState = useMemo<ConfigDirtyState>(() => {
       const changedSections: string[] = [];
 
@@ -281,6 +272,8 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
 
       const namingChanged =
         romNamingTemplate !== config.romNamingTemplate ||
+        canonicalRomNamingTypeOverridesJson(romNamingTypeOverrides) !==
+          canonicalRomNamingTypeOverridesJson(config.romNamingTypeOverrides) ||
         romSanitizeFat32 !== config.romSanitizeFat32 ||
         romMaxFilenameLen !== config.romMaxFilenameLen;
       if (namingChanged) changedSections.push('ROM Filename Formatting');
@@ -292,6 +285,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
     }, [
       config,
       romNamingTemplate,
+      romNamingTypeOverrides,
       romSanitizeFat32,
       romMaxFilenameLen,
       storageFolderConfig,
@@ -329,6 +323,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
       try {
         await onSaveConfig({
           romNamingTemplate,
+          romNamingTypeOverrides: normalizeRomNamingTypeOverrides(romNamingTypeOverrides),
           romSanitizeFat32,
           romMaxFilenameLen,
           storageFolderConfig: normalizeStorageFolderConfig(storageFolderConfig),
@@ -349,6 +344,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
     }, [
       onSaveConfig,
       romNamingTemplate,
+      romNamingTypeOverrides,
       romSanitizeFat32,
       romMaxFilenameLen,
       storageFolderConfig,
@@ -389,10 +385,14 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
       setProfileNotice(null);
       setProfileError(null);
       try {
+        const normalizedOverrides = normalizeRomNamingTypeOverrides(romNamingTypeOverrides);
         const updated = await installer.saveDeviceProfileSettings(activeProfile.id, {
           folderConfig: normalizeStorageFolderConfig(storageFolderConfig),
           romNaming: {
             romNamingTemplate,
+            ...(Object.keys(normalizedOverrides).length > 0
+              ? { romNamingTypeOverrides: normalizedOverrides }
+              : {}),
             romSanitizeFat32,
             romMaxFilenameLen,
           },
@@ -436,6 +436,9 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
         if (typeof activeProfile.romNaming.romNamingTemplate === 'string') {
           setRomNamingTemplate(activeProfile.romNaming.romNamingTemplate);
         }
+        setRomNamingTypeOverrides(
+          normalizeRomNamingTypeOverrides(activeProfile.romNaming.romNamingTypeOverrides),
+        );
         if (typeof activeProfile.romNaming.romSanitizeFat32 === 'boolean') {
           setRomSanitizeFat32(activeProfile.romNaming.romSanitizeFat32);
         }
@@ -1021,170 +1024,22 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
           onPinOverrideHandled={() => setPinOverrideRequest(null)}
         />
 
-        {/* Step 02: ROM Filename Formatting (Clean Presets Upfront, Advanced Disclosed) */}
-        <section
-          ref={romNamingSectionRef}
-          className="relative crt-panel-living scroll-mt-24 border border-crt-border bg-crt-surface rounded-md p-6 space-y-5"
-        >
-          <div aria-hidden="true" className="crt-edge-beam">
-            <span />
-          </div>
-          {spotlight?.target === 'romNaming' && (
-            <div
-              key={`romNaming-${spotlight.nonce}`}
-              aria-hidden="true"
-              className="pointer-events-none absolute -inset-px rounded-md crt-section-spotlight"
-            />
-          )}
-
-          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-crt-border pb-4">
-            <div className="flex items-start gap-3 min-w-0">
-              <FileText className="h-5 w-5 text-crt-phosphor crt-section-icon mt-0.5 shrink-0" />
-              <div className="space-y-1 min-w-0">
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                  <h2 className="font-display text-lg font-semibold text-crt-text">
-                    02. ROM Filename Formatting
-                  </h2>
-                  <span className="text-xs font-mono text-crt-muted">
-                    · {activeNamingPreset ? activeNamingPreset.label : 'Custom Pattern'} ·{' '}
-                    {namingOptionsSummary}
-                  </span>
-                </div>
-                <p className="text-xs text-crt-muted max-w-2xl leading-relaxed">
-                  Choose how extracted ROM files are named when downloaded or installed to your storage device. Raw mirrored archives on disk remain untouched.
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* 4-Preset Selector Grid Upfront */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-            {ROM_NAMING_PRESETS.map((preset) => {
-              const active = romNamingTemplate === preset.template;
-              return (
-                <button
-                  key={preset.id}
-                  type="button"
-                  onClick={() => setRomNamingTemplate(preset.template)}
-                  className={`p-3 text-left border rounded transition-colors space-y-1 cursor-pointer ${
-                    active
-                      ? 'border-crt-phosphor bg-crt-phosphor/10'
-                      : 'border-crt-border bg-crt-bg hover:border-crt-border-strong'
-                  }`}
-                >
-                  <div
-                    className={`text-xs font-medium ${
-                      active ? 'text-crt-phosphor' : 'text-crt-text'
-                    }`}
-                  >
-                    {preset.label}
-                  </div>
-                  <div className="font-mono text-[11px] text-crt-muted truncate">
-                    {preset.exampleHack}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Progressive Disclosure: Advanced Naming & FAT32 Rules */}
-          <div className="border-t border-crt-border pt-4 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <button
-                type="button"
-                aria-expanded={showAdvancedNaming}
-                onClick={() => setShowAdvancedNaming((prev) => !prev)}
-                className={`inline-flex items-center gap-1.5 text-xs font-mono transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                  showAdvancedNaming || !activeNamingPreset
-                    ? 'text-crt-phosphor'
-                    : 'text-crt-muted hover:text-crt-text'
-                }`}
-              >
-                <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" />
-                <span>Advanced Naming &amp; FAT32 Rules</span>
-                {showAdvancedNaming ? (
-                  <ChevronUp className="h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <ChevronDown className="h-3.5 w-3.5 shrink-0" />
-                )}
-              </button>
-
-              {!showAdvancedNaming && (
-                <span className="text-[11px] font-mono text-crt-muted">
-                  {namingOptionsSummary}
-                </span>
-              )}
-            </div>
-
-            {showAdvancedNaming && (
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-5 items-start pt-1">
-                <div className="md:col-span-8 space-y-2">
-                  <label
-                    htmlFor="device-export-naming-template"
-                    className="block text-xs font-medium text-crt-text"
-                  >
-                    Filename Pattern Template
-                  </label>
-                  <input
-                    id="device-export-naming-template"
-                    type="text"
-                    value={romNamingTemplate}
-                    onChange={(e) => setRomNamingTemplate(e.target.value)}
-                    placeholder="{title}{regionParen}{tagBracket}"
-                    className="w-full px-3 py-2 text-xs font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
-                  />
-                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                    <span className="text-[11px] font-mono text-crt-muted mr-1">
-                      Insert token:
-                    </span>
-                    {ROM_NAMING_TOKEN_HELPERS.map((helper) => (
-                      <button
-                        key={helper.token}
-                        type="button"
-                        title={`Append ${helper.token} (${helper.label})`}
-                        onClick={() =>
-                          setRomNamingTemplate((prev) => appendNamingToken(prev, helper.token))
-                        }
-                        className="px-2 py-0.5 text-[11px] font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-phosphor hover:border-crt-phosphor/60 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                      >
-                        {helper.token}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="md:col-span-4 space-y-2">
-                  <label
-                    htmlFor="device-export-max-filename-len"
-                    className="block text-xs font-medium text-crt-text"
-                  >
-                    Max Filename Length (0 = unlimited)
-                  </label>
-                  <input
-                    id="device-export-max-filename-len"
-                    type="number"
-                    min={0}
-                    max={255}
-                    value={romMaxFilenameLen}
-                    onChange={(e) =>
-                      setRomMaxFilenameLen(Math.max(0, Number(e.target.value) || 0))
-                    }
-                    className="w-full px-3 py-2 text-xs font-mono tabular-nums bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor"
-                  />
-                  <label className="inline-flex items-center gap-2 pt-1 text-xs text-crt-muted cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={romSanitizeFat32}
-                      onChange={(e) => setRomSanitizeFat32(e.target.checked)}
-                      className="accent-crt-phosphor"
-                    />
-                    <span>FAT32 / device-safe characters</span>
-                  </label>
-                </div>
-              </div>
-            )}
-          </div>
-        </section>
+        {/* Step 02: ROM Filename Formatting (No-Intro + T-En Hybrid Presets, Live 10-Type Preview Matrix & Pattern Builder) */}
+        <RomFilenameFormattingSection
+          sectionRef={romNamingSectionRef}
+          spotlightNonce={spotlight?.target === 'romNaming' ? spotlight.nonce : null}
+          romNamingTemplate={romNamingTemplate}
+          romNamingTypeOverrides={romNamingTypeOverrides}
+          romSanitizeFat32={romSanitizeFat32}
+          romMaxFilenameLen={romMaxFilenameLen}
+          showAdvancedNaming={showAdvancedNaming}
+          onToggleAdvancedNaming={() => setShowAdvancedNaming((prev) => !prev)}
+          onOpenAdvancedNaming={() => setShowAdvancedNaming(true)}
+          onChangeTemplate={setRomNamingTemplate}
+          onChangeTypeOverrides={setRomNamingTypeOverrides}
+          onChangeSanitizeFat32={setRomSanitizeFat32}
+          onChangeMaxFilenameLen={setRomMaxFilenameLen}
+        />
 
         {/* Step 03: Saved Storage Device Profiles */}
         {installer && deviceProfiles.length > 0 && (() => {

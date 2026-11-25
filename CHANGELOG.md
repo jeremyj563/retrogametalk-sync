@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.42.0] - 2026-11-25
+
+- Reworked **Device Export → 02. ROM Filename Formatting** around modern **No-Intro + T-En** naming standards with an embedded all-type live preview matrix and cursor-aware pattern builder:
+  - **Type-Aware Hybrid Naming Engine (`{statusParen}` + `{modBracket}`)**: Separated origin/development status tags in parentheses (`(Proto)`, `(Demo)`, `(Homebrew)`, `(Port)`, `(Unl)`, `(Rev A)`) from post-release fan modifications in square brackets (`[T-En v1.3]`, `[T-Es v2.0]`, `[Hack v1.42]`, `[Undub v1.1]`), added language-aware machine-translation tags (`[T-En MTL v1.0]`), and defaulted fresh installs to **No-Intro + T-En Hybrid** while keeping existing saved templates untouched and upgrading `buildUpgradeMatchStem` to match seamlessly across legacy and hybrid conventions.
+  - **Live All-Type Preview Matrix & Real Catalog Sampling (`GET /api/device-export/naming-samples`)**: Added an always-visible 10-type preview table inside Step 02 with syntax-tinted filename segments, tabular character counts, explicit FAT32 sanitization/truncation badges, a **`Built-in Examples` / `Real Catalog Games`** toggle, and a **`Shuffle`** button to test real indexed titles from your library.
+  - **Cursor-Aware Pattern Builder & Optional Per-Type Overrides (SQLite v29)**: Upgraded template editing with caret-position token insertion, live hover token value inspection, inline syntax validation (unknown tokens & unbalanced delimiters), quick max-length presets (`Unlimited`, `64`, `128`, `255`), and optional per-ROM-type template overrides persisted across global config, per-device profiles, and configuration backups.
+
 ## [1.41.0] - 2026-11-24
 
 - Added full **interrupted & stopped download queue recovery** so queues halted by `SIGTERM` (e.g., pod upgrades/restarts) or manual **Stop** can always be resumed, re-queued, or cleared without getting stuck in `queued` state:

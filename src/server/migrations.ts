@@ -1433,6 +1433,19 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `);
     },
   },
+  {
+    version: 29,
+    name: 'rom_naming_type_overrides',
+    description:
+      'Add rom_naming_type_overrides_json column to scraper_config for optional per-ROM-type filename template overrides',
+    up: (db) => {
+      if (!tableHasColumn(db, 'scraper_config', 'rom_naming_type_overrides_json')) {
+        db.exec(
+          `ALTER TABLE scraper_config ADD COLUMN rom_naming_type_overrides_json TEXT NOT NULL DEFAULT '{}';`,
+        );
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

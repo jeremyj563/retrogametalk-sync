@@ -1,5 +1,10 @@
 import type { ConfigUpdateInput, ScraperConfigPublic } from '../server/types.ts';
 import {
+  canonicalRomNamingTypeOverridesJson,
+  normalizeRomNamingTypeOverrides,
+  type RomNamingTypeOverrides,
+} from './romNaming.ts';
+import {
   canonicalStorageFolderConfigJson,
   normalizeStorageFolderConfig,
   type StorageFolderMappingConfig,
@@ -37,6 +42,7 @@ export interface ConfigBackupSnapshot {
     };
     deviceExport: {
       romNamingTemplate: string;
+      romNamingTypeOverrides?: RomNamingTypeOverrides;
       romSanitizeFat32: boolean;
       romMaxFilenameLen: number;
       storageFolderConfig: StorageFolderMappingConfig;
@@ -178,6 +184,7 @@ export function buildConfigBackupSnapshot(
       },
       deviceExport: {
         romNamingTemplate: config.romNamingTemplate,
+        romNamingTypeOverrides: normalizeRomNamingTypeOverrides(config.romNamingTypeOverrides),
         romSanitizeFat32: Boolean(config.romSanitizeFat32),
         romMaxFilenameLen: config.romMaxFilenameLen,
         storageFolderConfig: normalizeStorageFolderConfig(config.storageFolderConfig),
@@ -384,6 +391,14 @@ export function parseAndValidateConfigBackup(
                     throw new Error('deviceExport.romNamingTemplate must be a non-empty string.');
                   })()
               : currentConfig.romNamingTemplate,
+          romNamingTypeOverrides:
+            deviceRaw.romNamingTypeOverrides !== undefined
+              ? isPlainObject(deviceRaw.romNamingTypeOverrides)
+                ? normalizeRomNamingTypeOverrides(deviceRaw.romNamingTypeOverrides)
+                : (() => {
+                    throw new Error('deviceExport.romNamingTypeOverrides must be an object.');
+                  })()
+              : normalizeRomNamingTypeOverrides(currentConfig.romNamingTypeOverrides),
           romSanitizeFat32:
             deviceRaw.romSanitizeFat32 !== undefined
               ? typeof deviceRaw.romSanitizeFat32 === 'boolean'
@@ -689,6 +704,21 @@ export function parseAndValidateConfigBackup(
       changed: s.deviceExport.romNamingTemplate !== currentConfig.romNamingTemplate,
       fromDisplay: currentConfig.romNamingTemplate,
       toDisplay: s.deviceExport.romNamingTemplate,
+    });
+
+    const curTypeOverrides = normalizeRomNamingTypeOverrides(currentConfig.romNamingTypeOverrides);
+    const nextTypeOverrides = normalizeRomNamingTypeOverrides(s.deviceExport.romNamingTypeOverrides);
+    maybeApply({
+      field: 'romNamingTypeOverrides',
+      section: 'Device Export',
+      label: 'Per-Type ROM Naming Overrides',
+      presentInBackup: deviceRaw.romNamingTypeOverrides !== undefined,
+      nextValue: nextTypeOverrides,
+      changed:
+        canonicalRomNamingTypeOverridesJson(curTypeOverrides) !==
+        canonicalRomNamingTypeOverridesJson(nextTypeOverrides),
+      fromDisplay: `${Object.keys(curTypeOverrides).length} type override(s)`,
+      toDisplay: `${Object.keys(nextTypeOverrides).length} type override(s)`,
     });
 
     maybeApply({

@@ -31,19 +31,32 @@ import {
 } from './storageFolderMappings.ts';
 import { canonicalizeSystemSlug, resolveSystemDisplayInfo } from './systemCatalog.ts';
 
+export type NamingTokenGroup = 'core' | 'hybrid' | 'legacy';
+
 export interface NamingTokenHelper {
   token: string;
   label: string;
+  group: NamingTokenGroup;
+  description: string;
 }
 
 export const ROM_NAMING_TOKEN_HELPERS: readonly NamingTokenHelper[] = [
-  { token: '{title}', label: 'Game title' },
-  { token: '{regionParen}', label: '(Region)' },
-  { token: '{tagBracket}', label: '[Role Version]' },
-  { token: '{roleDash}', label: '- Role Version' },
-  { token: '{role}', label: 'Role only' },
-  { token: '{version}', label: 'Version only' },
-  { token: '{origName}', label: 'Original inner filename' },
+  // Core identity tokens
+  { token: '{title}', label: 'Game title', group: 'core', description: 'Clean game title' },
+  { token: '{regionParen}', label: '(Region)', group: 'core', description: 'Region in parentheses when available' },
+  { token: '{region}', label: 'Region only', group: 'core', description: 'Raw region name without parentheses' },
+  { token: '{system}', label: 'System slug', group: 'core', description: 'Canonical console slug (e.g. snes-roms)' },
+  { token: '{origName}', label: 'Original inner filename', group: 'core', description: 'Clean inner ROM filename without extension' },
+  // Type-aware hybrid tokens (No-Intro + T-En)
+  { token: '{statusParen}', label: '(Status / Rev)', group: 'hybrid', description: 'Origin/dev status or revision in ( ) — e.g. (Proto), (Homebrew), (Unl)' },
+  { token: '{modBracket}', label: '[Patch Version]', group: 'hybrid', description: 'Fan patch & version in [ ] — e.g. [T-En v1.3], [T-En MTL v1.0], [Hack v1.42]' },
+  { token: '{status}', label: 'Status only', group: 'hybrid', description: 'Raw status tag without parentheses' },
+  { token: '{mod}', label: 'Patch tag only', group: 'hybrid', description: 'Raw patch tag without brackets or version' },
+  { token: '{version}', label: 'Version only', group: 'hybrid', description: 'Normalized patch or revision version (v1.42, Rev A)' },
+  // Legacy / alternate tokens
+  { token: '{tagBracket}', label: '[Role Version]', group: 'legacy', description: 'Legacy combined role + version in brackets' },
+  { token: '{roleDash}', label: '- Role Version', group: 'legacy', description: 'Dash-separated role + version' },
+  { token: '{role}', label: 'Role only', group: 'legacy', description: 'Combined legacy role label' },
 ];
 
 export type ConsolePathSource = 'manual' | 'auto' | 'inferred' | 'default';
@@ -832,8 +845,12 @@ export function findActiveNamingPreset(template: string): NamingPresetOption | n
 
 export function shouldAutoExpandAdvancedNaming(namingConfig: RomNamingConfig): boolean {
   const activePreset = findActiveNamingPreset(namingConfig.romNamingTemplate);
+  const overrideCount = Object.values(namingConfig.romNamingTypeOverrides || {}).filter(
+    (v) => typeof v === 'string' && v.trim().length > 0,
+  ).length;
   return (
     activePreset === null ||
+    overrideCount > 0 ||
     !namingConfig.romSanitizeFat32 ||
     namingConfig.romMaxFilenameLen > 0
   );
@@ -841,12 +858,18 @@ export function shouldAutoExpandAdvancedNaming(namingConfig: RomNamingConfig): b
 
 export function summarizeNamingOptions(namingConfig: RomNamingConfig): string {
   const parts: string[] = [];
+  const overrideCount = Object.values(namingConfig.romNamingTypeOverrides || {}).filter(
+    (v) => typeof v === 'string' && v.trim().length > 0,
+  ).length;
   parts.push(namingConfig.romSanitizeFat32 ? 'FAT32 safe' : 'Raw characters');
   parts.push(
     namingConfig.romMaxFilenameLen > 0
       ? `Max ${namingConfig.romMaxFilenameLen} chars`
       : 'Unlimited length',
   );
+  if (overrideCount > 0) {
+    parts.push(`${overrideCount} type override${overrideCount === 1 ? '' : 's'}`);
+  }
   return parts.join(' · ');
 }
 
@@ -854,6 +877,27 @@ export function appendNamingToken(currentTemplate: string, token: string): strin
   const trimmed = currentTemplate;
   if (!trimmed) return token;
   return `${trimmed}${token}`;
+}
+
+export function insertNamingTokenAtSelection(
+  currentTemplate: string,
+  token: string,
+  selectionStart?: number | null,
+  selectionEnd?: number | null,
+): { value: string; caret: number } {
+  const safeStart =
+    typeof selectionStart === 'number' && Number.isFinite(selectionStart)
+      ? Math.max(0, Math.min(currentTemplate.length, selectionStart))
+      : currentTemplate.length;
+  const safeEnd =
+    typeof selectionEnd === 'number' && Number.isFinite(selectionEnd)
+      ? Math.max(safeStart, Math.min(currentTemplate.length, selectionEnd))
+      : safeStart;
+  const nextValue = `${currentTemplate.slice(0, safeStart)}${token}${currentTemplate.slice(safeEnd)}`;
+  return {
+    value: nextValue,
+    caret: safeStart + token.length,
+  };
 }
 
 export interface EvaluatedScanMatch {

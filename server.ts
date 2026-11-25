@@ -8,6 +8,7 @@ import {
   createUserCollection,
   deleteStorageDeviceProfile,
   deleteUserCollection,
+  getCatalogNamingPreviewSamples,
   getCatalogStatsSnapshot,
   getDeviceUninstallTargets,
   getPublicConfig,
@@ -1538,6 +1539,23 @@ async function bootstrap() {
   app.get('/api/config', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.json({ config: getPublicConfig() });
+  });
+
+  app.get('/api/device-export/naming-samples', (req, res) => {
+    try {
+      const rawSeed = Number(req.query.seed ?? 0);
+      const seed = Number.isFinite(rawSeed) ? Math.max(0, Math.min(10000, Math.floor(rawSeed))) : 0;
+      const { samples, candidateCounts } = getCatalogNamingPreviewSamples(seed);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        seed,
+        samples,
+        candidateCounts,
+        matchedCount: Object.keys(samples).length,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   app.put('/api/config', (req, res) => {

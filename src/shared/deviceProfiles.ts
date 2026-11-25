@@ -1,3 +1,4 @@
+import { normalizeRomNamingTypeOverrides } from './romNaming.ts';
 import {
   normalizeStorageFolderConfig,
   type StorageFolderMappingConfig,
@@ -526,6 +527,13 @@ export function normalizeDeviceRomNaming(raw: unknown): DeviceRomNamingOverrides
   if (typeof obj.romNamingTemplate === 'string' && obj.romNamingTemplate.trim()) {
     out.romNamingTemplate = obj.romNamingTemplate.trim().slice(0, 200);
     hasAny = true;
+  }
+  if (obj.romNamingTypeOverrides && typeof obj.romNamingTypeOverrides === 'object' && !Array.isArray(obj.romNamingTypeOverrides)) {
+    const normalizedOverrides = normalizeRomNamingTypeOverrides(obj.romNamingTypeOverrides);
+    if (Object.keys(normalizedOverrides).length > 0) {
+      out.romNamingTypeOverrides = normalizedOverrides;
+      hasAny = true;
+    }
   }
   if (typeof obj.romSanitizeFat32 === 'boolean') {
     out.romSanitizeFat32 = obj.romSanitizeFat32;
