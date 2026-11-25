@@ -19,6 +19,7 @@ interface CatalogDeviceScopeDropdownProps {
   selectedDeviceId: string | 'any';
   onSelectDevice: (deviceId: string | 'any') => void;
   onManageDevices: () => void;
+  embedded?: boolean;
 }
 
 export function CatalogDeviceScopeDropdown({
@@ -27,6 +28,7 @@ export function CatalogDeviceScopeDropdown({
   selectedDeviceId,
   onSelectDevice,
   onManageDevices,
+  embedded = false,
 }: CatalogDeviceScopeDropdownProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -165,13 +167,23 @@ export function CatalogDeviceScopeDropdown({
             ? `Scoping Installed / Not Installed / Updates filters to ${selectedProfile.name}${isSelectedMounted ? ' (Mounted)' : ' (Offline)'}`
             : 'Scoping Installed / Not Installed / Updates filters across all saved devices'
         }
-        className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-          selectedProfile
-            ? isSelectedMounted
-              ? 'bg-crt-phosphor/12 text-crt-phosphor border-crt-phosphor/55 font-medium'
-              : 'bg-crt-elevated/85 text-crt-text border-crt-border-strong font-medium'
-            : 'bg-crt-bg text-crt-muted border-crt-border hover:border-crt-border-strong hover:text-crt-text'
-        }`}
+        className={
+          embedded
+            ? `inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                selectedProfile
+                  ? isSelectedMounted
+                    ? 'bg-crt-phosphor/12 text-crt-phosphor font-medium hover:bg-crt-phosphor/18'
+                    : 'bg-crt-elevated/80 text-crt-text font-medium hover:bg-crt-elevated'
+                  : 'text-crt-muted hover:text-crt-text hover:bg-crt-elevated/50'
+              }`
+            : `inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                selectedProfile
+                  ? isSelectedMounted
+                    ? 'bg-crt-phosphor/12 text-crt-phosphor border-crt-phosphor/55 font-medium'
+                    : 'bg-crt-elevated/85 text-crt-text border-crt-border-strong font-medium'
+                  : 'bg-crt-bg text-crt-muted border-crt-border hover:border-crt-border-strong hover:text-crt-text'
+              }`
+        }
       >
         {selectedProfile ? (
           <DeviceIconGlyph
@@ -198,7 +210,9 @@ export function CatalogDeviceScopeDropdown({
         <div
           role="listbox"
           aria-label="Filter catalog by storage device"
-          className="absolute left-0 sm:right-0 sm:left-auto top-full mt-1.5 z-50 w-72 border border-crt-border-strong bg-crt-surface rounded-md shadow-2xl overflow-hidden flex flex-col"
+          className={`absolute ${
+            embedded ? 'left-0' : 'left-0 sm:right-0 sm:left-auto'
+          } top-full mt-1.5 z-50 w-72 border border-crt-border-strong bg-crt-surface rounded-md shadow-2xl overflow-hidden flex flex-col`}
         >
           {devices.length >= 5 && (
             <div className="p-2 border-b border-crt-border bg-crt-bg/60">

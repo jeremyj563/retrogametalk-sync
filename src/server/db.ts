@@ -3155,6 +3155,7 @@ const CATALOG_SORT_ORDER_BY: Record<CatalogSortOption, string> = {
   size_desc: 'file_size_bytes DESC, title COLLATE NOCASE ASC, id DESC',
   size_asc: 'file_size_bytes ASC, title COLLATE NOCASE ASC, id DESC',
   downloaded_desc: 'COALESCE(downloaded_at, discovered_at) DESC, id DESC',
+  installed_desc: 'CASE WHEN installed_at IS NOT NULL THEN 0 ELSE 1 END ASC, installed_at DESC, COALESCE(downloaded_at, discovered_at) DESC, id DESC',
   discovered_desc: 'discovered_at DESC, id DESC',
   year_desc: "CASE WHEN release_year GLOB '[0-9][0-9][0-9][0-9]*' THEN 0 ELSE 1 END ASC, CAST(substr(release_year, 1, 4) AS INTEGER) DESC, title COLLATE NOCASE ASC, id DESC",
   year_asc: "CASE WHEN release_year GLOB '[0-9][0-9][0-9][0-9]*' THEN 0 ELSE 1 END ASC, CAST(substr(release_year, 1, 4) AS INTEGER) ASC, title COLLATE NOCASE ASC, id DESC",
@@ -3194,6 +3195,7 @@ function buildCatalogWhereAndOrder(
   where: string;
   args: unknown[];
   orderBy: string;
+  orderArgs: unknown[];
 } {
   const conditions: string[] = [];
   const args: unknown[] = [];
@@ -3327,8 +3329,14 @@ function buildCatalogWhereAndOrder(
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const sortKey = normalizeCatalogSort(params.sort);
-  const orderBy = CATALOG_SORT_ORDER_BY[sortKey];
-  return { where, args, orderBy };
+  const orderArgs: unknown[] = [];
+  let orderBy = CATALOG_SORT_ORDER_BY[sortKey];
+  if (sortKey === 'installed_desc' && scopedDeviceId) {
+    orderBy =
+      'CASE WHEN (SELECT di.installed_at FROM catalog_release_device_installs di WHERE di.release_id = catalog_releases.id AND di.device_id = ?) IS NOT NULL THEN 0 ELSE 1 END ASC, (SELECT di.installed_at FROM catalog_release_device_installs di WHERE di.release_id = catalog_releases.id AND di.device_id = ?) DESC, COALESCE(downloaded_at, discovered_at) DESC, id DESC';
+    orderArgs.push(scopedDeviceId, scopedDeviceId);
+  }
+  return { where, args, orderBy, orderArgs };
 }
 
 export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
@@ -3345,13 +3353,13 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   const cfg = params.syncRules ? getPublicConfig() : undefined;
   const allowedTypes = cfg ? normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes) : [];
   const ruleIndexMap = params.syncRules ? loadAllReleaseRuleIndexMap() : undefined;
-  const { where, args, orderBy } = buildCatalogWhereAndOrder(params, cfg);
+  const { where, args, orderBy, orderArgs } = buildCatalogWhereAndOrder(params, cfg);
   let rows = getDb()
     .prepare(
       `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, sync_override
        FROM catalog_releases ${where} ORDER BY ${orderBy}`,
     )
-    .all(...args) as RuleFilterRow[];
+    .all(...args, ...orderArgs) as RuleFilterRow[];
 
   if (params.syncRules && cfg && ruleIndexMap) {
     rows = filterRuleMatchedRowsByDownloadedState(
@@ -3458,7 +3466,7 @@ export function queryRepositoryItems(
   );
   const ruleIndexMap = needsRuleIndex ? loadAllReleaseRuleIndexMap() : undefined;
 
-  const { where, args, orderBy } = buildCatalogWhereAndOrder(params, cfg);
+  const { where, args, orderBy, orderArgs } = buildCatalogWhereAndOrder(params, cfg);
   const limit = Math.min(200, Math.max(1, params.limit ?? 50));
   const offset = Math.max(0, params.offset ?? 0);
 
@@ -3472,7 +3480,7 @@ export function queryRepositoryItems(
         `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, sync_override
          FROM catalog_releases ${where} ORDER BY ${orderBy}`,
       )
-      .all(...args) as RuleFilterRow[];
+      .all(...args, ...orderArgs) as RuleFilterRow[];
     const matched = filterRuleMatchedRowsByDownloadedState(
       filterCandidateRowsBySyncRules(candidates, cfg, ruleIndexMap),
       params.downloaded,
@@ -3519,7 +3527,7 @@ export function queryRepositoryItems(
     queueableFiltered = Number(queueableRow.count);
     rows = getDb()
       .prepare(`SELECT * FROM catalog_releases ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
-      .all(...args, limit, offset) as Record<string, unknown>[];
+      .all(...args, ...orderArgs, limit, offset) as Record<string, unknown>[];
   }
 
   const releaseIds = rows.map((r) => Number(r.id));

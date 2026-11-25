@@ -6,6 +6,7 @@ export type CatalogSortOption =
   | 'size_desc'
   | 'size_asc'
   | 'downloaded_desc'
+  | 'installed_desc'
   | 'discovered_desc'
   | 'year_desc'
   | 'year_asc'
@@ -27,6 +28,7 @@ export const CATALOG_SORT_OPTIONS: readonly CatalogSortChoice[] = [
   { value: 'size_desc', label: 'Sort: File Size (Largest)' },
   { value: 'size_asc', label: 'Sort: File Size (Smallest)' },
   { value: 'downloaded_desc', label: 'Sort: Recently Downloaded' },
+  { value: 'installed_desc', label: 'Sort: Recently Installed' },
   { value: 'discovered_desc', label: 'Sort: Recently Discovered' },
   { value: 'year_desc', label: 'Sort: Release Year (Newest)' },
   { value: 'year_asc', label: 'Sort: Release Year (Oldest)' },
