@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.39.2] - 2026-11-24
+
+- Fixed the **Game Detail Drawer** when opened from the **Sync** page (and its **Failed Queue** drawer) so mounted-device **`Install to <Device>`**, **`Upgrade on <Device>`**, **`Reinstall`**, and **`Uninstall`** actions appear automatically as soon as a release finishes downloading to local storage:
+  - **Connected Storage Device Installer to Sync View**: Passed the app-wide storage device installer into `OverviewPanel` and `FailedQueueDrawer` so their `GameDetailDrawer` instances receive the mounted device profile, live install/queue state, and direct install/upgrade/export/uninstall callbacks—matching **Catalog**.
+  - **Immediate Post-Transfer Refresh**: Re-fetched the open release record the moment its active download transfer finishes (in addition to SSE catalog revision updates) and subscribed to synchronous device install updates so the footer transitions straight into **`Install to <Device>`** / **`Reinstall`** without closing and reopening the drawer.
+
 ## [1.39.1] - 2026-11-24
 
 - Updated the **Release & Publish Container Image** GitHub Actions workflow (`docker-publish.yml`) to skip running on non-code commits and PRs—including merges from **`chore/update-readme-screenshots`**, documentation/Markdown edits (`docs/**`, `**/*.md`), screenshot capture tooling (`scripts/capture-screenshots/**`, `update-screenshots.yml`), and repo metadata files (`LICENSE*`, `.gitignore`, `.env.example`, GitHub templates).

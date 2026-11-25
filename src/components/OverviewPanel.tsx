@@ -16,6 +16,10 @@ import {
   Trash2,
   XCircle,
 } from 'lucide-react';
+import type {
+  BulkInstallKnownItemMeta,
+  BulkStorageInstallerController,
+} from '../hooks/useBulkStorageInstaller';
 import {
   computeSyncSpeedWaveParams,
   type CrtPalette,
@@ -25,6 +29,7 @@ import {
   formatAllowedReleaseTypesSummary,
   normalizeAllowedReleaseTypes,
 } from '../shared/releaseTypeFilter';
+import type { SmartRomFilterContext } from '../shared/smartRomPicker';
 import type {
   ActiveTransferState,
   ActivityLogRecord,
@@ -36,6 +41,7 @@ import type {
   SyncPreflightSummary,
   SyncRunRecord,
 } from '../types';
+import { resolveItemDeviceInstallState } from '../utils/deviceInstallView';
 import {
   formatBytes,
   formatCountdown,
@@ -43,6 +49,7 @@ import {
   formatRunDuration,
   formatTimeShort,
 } from '../utils/format';
+import { isFileSystemAccessSupported } from '../utils/sdCardFs';
 import {
   type ActiveSyncTargetCover,
   HERO_DETAIL_LOADING_DELAY_MS,
@@ -61,6 +68,7 @@ import { TelemetryDeck } from './TelemetryDeck';
 interface OverviewPanelProps {
   config: ScraperConfigPublic;
   status: ServiceStatusSnapshot;
+  installer: BulkStorageInstallerController;
   runs: SyncRunRecord[];
   logs: ActivityLogRecord[];
   preflight?: SyncPreflightSummary | null;
@@ -500,6 +508,7 @@ function toLocalDateTimeInputValue(date: Date): string {
 export function OverviewPanel({
   config,
   status,
+  installer,
   runs,
   logs,
   preflight = null,
@@ -611,7 +620,7 @@ export function OverviewPanel({
         if (!res.ok || cancelled) return;
         const data = (await res.json()) as { item?: RepositoryItemRecord };
         if (!cancelled && data.item) {
-          setActiveDetailItem(data.item);
+          setActiveDetailItem((current) => (current?.id === targetId ? data.item! : current));
         }
       } catch {
         // Ignore transient poll errors
@@ -621,6 +630,15 @@ export function OverviewPanel({
       cancelled = true;
     };
   }, [catalogRevision, activeDetailItem?.id]);
+
+  // Patch installed metadata synchronously when a mounted-device install/upgrade finishes
+  useEffect(() => {
+    return installer.subscribeItemsInstalled((updatedItems) => {
+      if (updatedItems.length === 0) return;
+      const byId = new Map(updatedItems.map((row) => [row.id, row]));
+      setActiveDetailItem((current) => (current ? (byId.get(current.id) ?? current) : current));
+    });
+  }, [installer]);
 
   const handleDeleteDetailItem = useCallback(
     async (id: number) => {
@@ -1016,6 +1034,132 @@ export function OverviewPanel({
       (status.activeTransfer?.itemId === activeDetailItem.id ? status.activeTransfer : null)
     );
   }, [activeDetailItem, parallelTransfers, status.activeTransfer]);
+
+  // Immediately re-fetch the open detail item when its live transfer finishes so
+  // status, downloaded files, and mounted-device install actions appear without waiting
+  const prevDetailTransferItemIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    const prevTransferItemId = prevDetailTransferItemIdRef.current;
+    const nextTransferItemId = activeDetailTransfer?.itemId ?? null;
+    prevDetailTransferItemIdRef.current = nextTransferItemId;
+
+    if (
+      prevTransferItemId === null ||
+      nextTransferItemId === prevTransferItemId ||
+      !activeDetailItem ||
+      activeDetailItem.id !== prevTransferItemId
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const targetId = activeDetailItem.id;
+    void (async () => {
+      try {
+        const res = await fetch(`/api/items/${targetId}`);
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { item?: RepositoryItemRecord };
+        if (!cancelled && data.item) {
+          setActiveDetailItem((current) => (current?.id === targetId ? data.item! : current));
+        }
+      } catch {
+        // Ignore transient fetch errors after transfer completion
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDetailTransfer?.itemId, activeDetailItem]);
+
+  const { sdRootHandle, activeDeviceProfile, activeDeviceName } = installer;
+  const effectiveMountedDeviceName = activeDeviceName || sdRootHandle?.name || null;
+  const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
+  const syncSmartFilterContext = useMemo<SmartRomFilterContext>(
+    () => ({
+      syncIncludeTags: config.allowedReleaseTypes,
+    }),
+    [config.allowedReleaseTypes],
+  );
+  const detailKnownItemMetaMap = useMemo(() => {
+    const map = new Map<number, BulkInstallKnownItemMeta>();
+    if (activeDetailItem) {
+      map.set(activeDetailItem.id, {
+        title: activeDetailItem.title,
+        systemName: activeDetailItem.systemName,
+        previousInstalledFilename: activeDetailItem.installedFilename,
+      });
+    }
+    return map;
+  }, [activeDetailItem]);
+
+  const activeDetailInstallState = useMemo(
+    () =>
+      activeDetailItem
+        ? resolveItemDeviceInstallState(
+            activeDetailItem.id,
+            installer.job,
+            installer.metrics,
+            effectiveMountedDeviceName,
+          )
+        : null,
+    [activeDetailItem, installer.job, installer.metrics, effectiveMountedDeviceName],
+  );
+
+  const handleExpressInstallDetail = useCallback(
+    (id: number) => {
+      if (installer.isBusy && !installer.canAppendToQueue) {
+        if (installer.job?.itemIds.includes(id)) {
+          installer.openModal();
+        }
+        return;
+      }
+      if (sdRootHandle || fsSupport.supported) {
+        void installer.startExpressInstall([id], syncSmartFilterContext, detailKnownItemMetaMap);
+      } else {
+        void installer.openReviewQueue([id], syncSmartFilterContext, detailKnownItemMetaMap);
+      }
+    },
+    [installer, sdRootHandle, fsSupport.supported, syncSmartFilterContext, detailKnownItemMetaMap],
+  );
+
+  const handleUpgradeDetail = useCallback(
+    (id: number) => {
+      if (installer.isBusy && !installer.canAppendToQueue) {
+        if (installer.job?.itemIds.includes(id)) {
+          installer.openModal();
+        }
+        return;
+      }
+      if (sdRootHandle || fsSupport.supported) {
+        void installer.upgradeOutdatedItems([id], syncSmartFilterContext, detailKnownItemMetaMap);
+      } else {
+        void installer.openReviewQueue([id], syncSmartFilterContext, detailKnownItemMetaMap);
+      }
+    },
+    [installer, sdRootHandle, fsSupport.supported, syncSmartFilterContext, detailKnownItemMetaMap],
+  );
+
+  const handleExportDetailToSdCard = useCallback(
+    (id: number) => {
+      void installer.openReviewQueue([id], syncSmartFilterContext, detailKnownItemMetaMap);
+    },
+    [installer, syncSmartFilterContext, detailKnownItemMetaMap],
+  );
+
+  const handleUninstallDetailFromDevice = useCallback(
+    async (targetItem: RepositoryItemRecord) => {
+      const res = await installer.uninstallItemsFromMountedDevice([targetItem]);
+      if (res.uninstalledCount > 0) {
+        const updated = res.updatedItems.find((row) => row.id === targetItem.id);
+        if (updated) {
+          setActiveDetailItem((current) => (current?.id === targetItem.id ? updated : current));
+        }
+        await onRefreshStatus();
+      }
+      return res;
+    },
+    [installer, onRefreshStatus],
+  );
 
   const activeWatermakVal = status.lastWatermarkAt ?? config.lastWatermarkAt;
   const activeWatermark = activeWatermakVal;
@@ -2253,6 +2397,8 @@ export function OverviewPanel({
         <FailedQueueDrawer
           open={failedQueueOpen}
           status={status}
+          installer={installer}
+          allowedReleaseTypes={config.allowedReleaseTypes}
           catalogRevision={catalogRevision}
           activeRetryItemId={activeRetryItemId}
           onClose={() => setFailedQueueOpen(false)}
@@ -2507,10 +2653,30 @@ export function OverviewPanel({
         activeTransfer={activeDetailTransfer}
         canSync={Boolean(status.auth.hasCompletedLogin)}
         retryingItem={activeRetryItemId === activeDetailItem?.id}
+        mountedDeviceName={effectiveMountedDeviceName}
+        mountedDeviceId={activeDeviceProfile?.id ?? null}
+        isInstallingToDevice={Boolean(activeDetailInstallState?.isActive)}
+        isAnotherDeviceInstallBusy={Boolean(
+          installer.isBusy && !installer.canAppendToQueue && !activeDetailInstallState?.isActive,
+        )}
+        canQueueDeviceInstall={Boolean(
+          installer.canAppendToQueue && !activeDetailInstallState?.isActive,
+        )}
+        deviceInstallState={activeDetailInstallState}
+        uninstallingFromDevice={Boolean(
+          activeDetailItem && installer.uninstallingItemIds.has(activeDetailItem.id),
+        )}
         onClose={closeSyncItemDetail}
         onItemUpdated={(updated) => setActiveDetailItem(updated)}
         onRetryItem={onRetryItem}
         onQueueDownload={onQueueDownload}
+        onExpressInstallToDevice={handleExpressInstallDetail}
+        onUpgradeOnDevice={handleUpgradeDetail}
+        onExportToSdCard={handleExportDetailToSdCard}
+        onUninstallFromDevice={handleUninstallDetailFromDevice}
+        onCancelDeviceInstall={installer.cancelInstall}
+        onDismissDeviceInstall={installer.dismissJob}
+        onViewDeviceInstallQueue={installer.openModal}
         onDeleteItem={handleDeleteDetailItem}
       />
     </div>

@@ -11,13 +11,22 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
+import type {
+  BulkInstallKnownItemMeta,
+  BulkStorageInstallerController,
+} from '../hooks/useBulkStorageInstaller';
+import type { SmartRomFilterContext } from '../shared/smartRomPicker';
 import type { RepositoryItemRecord, ServiceStatusSnapshot } from '../types';
+import { resolveItemDeviceInstallState } from '../utils/deviceInstallView';
 import { readJsonSafely } from '../utils/http';
+import { isFileSystemAccessSupported } from '../utils/sdCardFs';
 import { GameDetailDrawer, type GameDetailNavigation } from './GameDetailDrawer';
 
 interface FailedQueueDrawerProps {
   open: boolean;
   status: ServiceStatusSnapshot;
+  installer?: BulkStorageInstallerController;
+  allowedReleaseTypes?: string[];
   catalogRevision: number;
   activeRetryItemId?: number | null;
   onClose: () => void;
@@ -29,6 +38,8 @@ interface FailedQueueDrawerProps {
 export function FailedQueueDrawer({
   open,
   status,
+  installer,
+  allowedReleaseTypes,
   catalogRevision,
   activeRetryItemId = null,
   onClose,
@@ -63,6 +74,119 @@ export function FailedQueueDrawer({
   useEffect(() => {
     activeDetailIdRef.current = activeDetailItem?.id ?? null;
   }, [activeDetailItem?.id]);
+
+  useEffect(() => {
+    if (!installer) return;
+    return installer.subscribeItemsInstalled((updatedItems) => {
+      if (updatedItems.length === 0) return;
+      const byId = new Map(updatedItems.map((row) => [row.id, row]));
+      setActiveDetailItem((current) => (current ? (byId.get(current.id) ?? current) : current));
+    });
+  }, [installer]);
+
+  const effectiveMountedDeviceName =
+    installer ? installer.activeDeviceName || installer.sdRootHandle?.name || null : null;
+  const activeDeviceProfile = installer?.activeDeviceProfile ?? null;
+  const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
+  const smartFilterContext = useMemo<SmartRomFilterContext>(
+    () => ({
+      syncIncludeTags: allowedReleaseTypes,
+    }),
+    [allowedReleaseTypes],
+  );
+  const detailKnownItemMetaMap = useMemo(() => {
+    const map = new Map<number, BulkInstallKnownItemMeta>();
+    if (activeDetailItem) {
+      map.set(activeDetailItem.id, {
+        title: activeDetailItem.title,
+        systemName: activeDetailItem.systemName,
+        previousInstalledFilename: activeDetailItem.installedFilename,
+      });
+    }
+    return map;
+  }, [activeDetailItem]);
+
+  const activeDetailInstallState = useMemo(
+    () =>
+      activeDetailItem && installer
+        ? resolveItemDeviceInstallState(
+            activeDetailItem.id,
+            installer.job,
+            installer.metrics,
+            effectiveMountedDeviceName,
+          )
+        : null,
+    [activeDetailItem, installer, effectiveMountedDeviceName],
+  );
+
+  const activeDetailTransfer = useMemo(() => {
+    if (!activeDetailItem) return null;
+    const parallel = status.activeTransfers ?? [];
+    return (
+      parallel.find((t) => t.itemId === activeDetailItem.id) ??
+      (status.activeTransfer?.itemId === activeDetailItem.id ? status.activeTransfer : null)
+    );
+  }, [activeDetailItem, status.activeTransfers, status.activeTransfer]);
+
+  const handleExpressInstallDetail = useCallback(
+    (id: number) => {
+      if (!installer) return;
+      if (installer.isBusy && !installer.canAppendToQueue) {
+        if (installer.job?.itemIds.includes(id)) {
+          installer.openModal();
+        }
+        return;
+      }
+      if (installer.sdRootHandle || fsSupport.supported) {
+        void installer.startExpressInstall([id], smartFilterContext, detailKnownItemMetaMap);
+      } else {
+        void installer.openReviewQueue([id], smartFilterContext, detailKnownItemMetaMap);
+      }
+    },
+    [installer, fsSupport.supported, smartFilterContext, detailKnownItemMetaMap],
+  );
+
+  const handleUpgradeDetail = useCallback(
+    (id: number) => {
+      if (!installer) return;
+      if (installer.isBusy && !installer.canAppendToQueue) {
+        if (installer.job?.itemIds.includes(id)) {
+          installer.openModal();
+        }
+        return;
+      }
+      if (installer.sdRootHandle || fsSupport.supported) {
+        void installer.upgradeOutdatedItems([id], smartFilterContext, detailKnownItemMetaMap);
+      } else {
+        void installer.openReviewQueue([id], smartFilterContext, detailKnownItemMetaMap);
+      }
+    },
+    [installer, fsSupport.supported, smartFilterContext, detailKnownItemMetaMap],
+  );
+
+  const handleExportDetailToSdCard = useCallback(
+    (id: number) => {
+      if (!installer) return;
+      void installer.openReviewQueue([id], smartFilterContext, detailKnownItemMetaMap);
+    },
+    [installer, smartFilterContext, detailKnownItemMetaMap],
+  );
+
+  const handleUninstallDetailFromDevice = useCallback(
+    async (targetItem: RepositoryItemRecord) => {
+      if (!installer) return;
+      const res = await installer.uninstallItemsFromMountedDevice([targetItem]);
+      if (res.uninstalledCount > 0) {
+        const updated = res.updatedItems.find((row) => row.id === targetItem.id);
+        if (updated) {
+          setActiveDetailItem((current) => (current?.id === targetItem.id ? updated : current));
+        }
+        await onRefreshStatus();
+      }
+      return res;
+    },
+    [installer, onRefreshStatus],
+  );
 
   const effectiveRetryingId =
     retryingId ??
@@ -844,8 +968,22 @@ export function FailedQueueDrawer({
       <GameDetailDrawer
         item={activeDetailItem}
         activeRun={Boolean(status.activeRun)}
+        activeTransfer={activeDetailTransfer}
         canSync={Boolean(status.auth.hasCompletedLogin)}
         retryingItem={effectiveRetryingId === activeDetailItem?.id}
+        mountedDeviceName={effectiveMountedDeviceName}
+        mountedDeviceId={activeDeviceProfile?.id ?? null}
+        isInstallingToDevice={Boolean(activeDetailInstallState?.isActive)}
+        isAnotherDeviceInstallBusy={Boolean(
+          installer && installer.isBusy && !installer.canAppendToQueue && !activeDetailInstallState?.isActive,
+        )}
+        canQueueDeviceInstall={Boolean(
+          installer && installer.canAppendToQueue && !activeDetailInstallState?.isActive,
+        )}
+        deviceInstallState={activeDetailInstallState}
+        uninstallingFromDevice={Boolean(
+          installer && activeDetailItem && installer.uninstallingItemIds.has(activeDetailItem.id),
+        )}
         navigation={detailNavigation}
         onClose={closeDetailDrawer}
         onItemUpdated={(updated) => {
@@ -854,6 +992,13 @@ export function FailedQueueDrawer({
           void loadFailedQueue(true);
         }}
         onRetryItem={handleRetry}
+        onExpressInstallToDevice={installer ? handleExpressInstallDetail : undefined}
+        onUpgradeOnDevice={installer ? handleUpgradeDetail : undefined}
+        onExportToSdCard={installer ? handleExportDetailToSdCard : undefined}
+        onUninstallFromDevice={installer ? handleUninstallDetailFromDevice : undefined}
+        onCancelDeviceInstall={installer?.cancelInstall}
+        onDismissDeviceInstall={installer?.dismissJob}
+        onViewDeviceInstallQueue={installer?.openModal}
         onDeleteItem={async (id) => {
           await handleDeleteItems([id]);
         }}
