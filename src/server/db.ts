@@ -271,34 +271,7 @@ export function initDb(): Database.Database {
     `).run(lastMigrationReport.rollbackWarning, now);
   }
 
-  // Recover any stale running jobs left behind by an abrupt container kill
-  db.prepare(`
-    UPDATE sync_runs
-    SET status = 'stopped', finished_at = ?, error_summary = COALESCE(error_summary, 'Interrupted by process restart')
-    WHERE status = 'running'
-  `).run(now);
-
-  const interruptedReleaseRows = db.prepare(`
-    SELECT id FROM catalog_releases WHERE status = 'downloading'
-    UNION
-    SELECT DISTINCT release_id AS id FROM catalog_release_files WHERE status = 'downloading'
-  `).all() as { id: number }[];
-
-  db.prepare(`
-    UPDATE catalog_release_files
-    SET status = 'failed', error_message = COALESCE(error_message, 'Interrupted by process restart')
-    WHERE status = 'downloading'
-  `).run();
-
-  db.prepare(`
-    UPDATE catalog_releases
-    SET status = 'failed', error_message = COALESCE(error_message, 'Interrupted by process restart')
-    WHERE status = 'downloading'
-  `).run();
-
-  for (const relRow of interruptedReleaseRows) {
-    recomputeReleaseRollup(Number(relRow.id));
-  }
+  recoverInterruptedRunsOnStartup(db, now);
 
   const remainingRuns = db.prepare('SELECT COUNT(*) as count FROM sync_runs').get() as { count: number };
   if (remainingRuns.count === 0) {
@@ -307,6 +280,65 @@ export function initDb(): Database.Database {
 
   invalidateReleaseFileRolesCache();
   return db;
+}
+
+export function recoverInterruptedRunsOnStartup(
+  targetDb: Database.Database = getDb(),
+  now: string = new Date().toISOString(),
+): void {
+  // Recover any stale running jobs left behind by an abrupt container kill
+  const interruptedDownloadRuns = targetDb.prepare(`
+    SELECT COUNT(*) as count FROM sync_runs
+    WHERE status = 'running' AND trigger_type = 'download'
+  `).get() as { count: number };
+  const existingQueuedReleases = targetDb.prepare(`
+    SELECT COUNT(*) as count FROM catalog_releases
+    WHERE status = 'queued'
+  `).get() as { count: number };
+  const restoreDownloadingToQueued =
+    Number(interruptedDownloadRuns.count || 0) > 0 || Number(existingQueuedReleases.count || 0) > 0;
+
+  targetDb.prepare(`
+    UPDATE sync_runs
+    SET status = 'stopped', finished_at = ?, error_summary = COALESCE(error_summary, 'Interrupted by process restart')
+    WHERE status = 'running'
+  `).run(now);
+
+  const interruptedReleaseRows = targetDb.prepare(`
+    SELECT id FROM catalog_releases WHERE status = 'downloading'
+    UNION
+    SELECT DISTINCT release_id AS id FROM catalog_release_files WHERE status = 'downloading'
+  `).all() as { id: number }[];
+
+  if (restoreDownloadingToQueued) {
+    targetDb.prepare(`
+      UPDATE catalog_release_files
+      SET status = 'queued', error_message = NULL
+      WHERE status = 'downloading'
+    `).run();
+
+    targetDb.prepare(`
+      UPDATE catalog_releases
+      SET status = 'queued', error_message = NULL
+      WHERE status = 'downloading'
+    `).run();
+  } else {
+    targetDb.prepare(`
+      UPDATE catalog_release_files
+      SET status = 'failed', error_message = COALESCE(error_message, 'Interrupted by process restart')
+      WHERE status = 'downloading'
+    `).run();
+
+    targetDb.prepare(`
+      UPDATE catalog_releases
+      SET status = 'failed', error_message = COALESCE(error_message, 'Interrupted by process restart')
+      WHERE status = 'downloading'
+    `).run();
+  }
+
+  for (const relRow of interruptedReleaseRows) {
+    recomputeReleaseRollup(Number(relRow.id));
+  }
 }
 
 export function getSchemaMigrationReport(): DatabaseMigrationReport {
@@ -1727,6 +1759,66 @@ export function markCatalogItemsQueued(
   runId?: number | null,
 ): number[] {
   return markCatalogItemsQueuedDetailed(ids, runId).queuedIds;
+}
+
+/**
+ * Returns all catalog release IDs currently waiting in `queued` state (either at
+ * the release level or via individual queued files) so an interrupted or stopped
+ * download queue can be cleanly resumed.
+ */
+export function listPausedQueuedReleaseIds(): number[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT id FROM catalog_releases WHERE status = 'queued'
+       UNION
+       SELECT DISTINCT release_id AS id FROM catalog_release_files WHERE status = 'queued'
+       ORDER BY id ASC`,
+    )
+    .all() as { id: number }[];
+  return rows.map((row) => Number(row.id));
+}
+
+/**
+ * Clears any paused `queued` download state back to `available` (or `partial`
+ * via rollup if some files in a multi-file release are already downloaded).
+ */
+export function clearPausedQueuedReleases(): { clearedCount: number } {
+  const tx = getDb().transaction(() => {
+    const affectedRows = getDb()
+      .prepare(
+        `SELECT id FROM catalog_releases WHERE status = 'queued'
+         UNION
+         SELECT DISTINCT release_id AS id FROM catalog_release_files WHERE status = 'queued'`,
+      )
+      .all() as { id: number }[];
+    if (affectedRows.length === 0) {
+      return { clearedCount: 0 };
+    }
+
+    getDb()
+      .prepare(
+        `UPDATE catalog_release_files
+         SET status = 'available', error_message = NULL
+         WHERE status = 'queued'`,
+      )
+      .run();
+
+    getDb()
+      .prepare(
+        `UPDATE catalog_releases
+         SET status = 'available', error_message = NULL
+         WHERE status = 'queued'`,
+      )
+      .run();
+
+    for (const row of affectedRows) {
+      recomputeReleaseRollup(Number(row.id));
+    }
+
+    return { clearedCount: affectedRows.length };
+  });
+
+  return tx();
 }
 
 export function markCatalogReleaseFailed(
@@ -3186,6 +3278,11 @@ export interface CatalogQueryFilterParams {
   source?: string | string[];
   sourceMode?: string;
   sort?: string;
+  /**
+   * When true (no active download queue worker is running), paused `queued`
+   * releases are counted as queueable/resumable rather than actively queued.
+   */
+  includePausedQueued?: boolean;
 }
 
 function buildCatalogWhereAndOrder(
@@ -3378,6 +3475,8 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
   let alreadyDownloadedCount = 0;
   let alreadyQueuedCount = 0;
 
+  const queueabilityOpts = { includePausedQueued: Boolean(params.includePausedQueued) };
+
   for (const row of rows) {
     const numId = Number(row.id);
     ids.push(numId);
@@ -3394,10 +3493,10 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
       );
       if (coverage.fullyMirrored) {
         alreadyDownloadedCount += 1;
-      } else if (isCatalogStatusAlreadyQueued(row.status)) {
+      } else if (isCatalogStatusAlreadyQueued(row.status, queueabilityOpts)) {
         alreadyQueuedIds.push(numId);
         alreadyQueuedCount += 1;
-      } else if (isCatalogStatusQueueable(row.status) || row.status === 'downloaded') {
+      } else if (isCatalogStatusQueueable(row.status, queueabilityOpts) || row.status === 'downloaded') {
         queueableIds.push(numId);
         const estBytes =
           row.status === 'downloaded' && coverage.unmirroredEstimatedBytes > 0
@@ -3410,10 +3509,10 @@ export function queryRepositoryItemIds(params: CatalogQueryFilterParams): {
 
     if (isCatalogStatusAlreadyDownloaded(row.status)) {
       alreadyDownloadedCount += 1;
-    } else if (isCatalogStatusAlreadyQueued(row.status)) {
+    } else if (isCatalogStatusAlreadyQueued(row.status, queueabilityOpts)) {
       alreadyQueuedIds.push(numId);
       alreadyQueuedCount += 1;
-    } else if (isCatalogStatusQueueable(row.status)) {
+    } else if (isCatalogStatusQueueable(row.status, queueabilityOpts)) {
       queueableIds.push(numId);
       estimatedQueueBytes += Number(row.file_size_bytes || 0);
     }
@@ -3474,6 +3573,8 @@ export function queryRepositoryItems(
   let queueableFiltered = 0;
   let rows: Record<string, unknown>[] = [];
 
+  const queueabilityOpts = { includePausedQueued: Boolean(params.includePausedQueued) };
+
   if (params.syncRules && ruleIndexMap) {
     const candidates = getDb()
       .prepare(
@@ -3496,7 +3597,7 @@ export function queryRepositoryItems(
         effectiveTypes,
       );
       if (coverage.fullyMirrored) return acc;
-      if (isCatalogStatusQueueable(r.status) || r.status === 'downloaded') return acc + 1;
+      if (isCatalogStatusQueueable(r.status, queueabilityOpts) || r.status === 'downloaded') return acc + 1;
       return acc;
     }, 0);
     const pageIds = matched.slice(offset, offset + limit).map((r) => Number(r.id));
@@ -3518,9 +3619,12 @@ export function queryRepositoryItems(
       count: number;
     };
     total = Number(countRow.count);
+    const queueableStatusSql = params.includePausedQueued
+      ? "status IN ('available', 'failed', 'partial', 'queued')"
+      : "status IN ('available', 'failed', 'partial')";
     const queueableWhere = where
-      ? `${where} AND status IN ('available', 'failed', 'partial')`
-      : `WHERE status IN ('available', 'failed', 'partial')`;
+      ? `${where} AND ${queueableStatusSql}`
+      : `WHERE ${queueableStatusSql}`;
     const queueableRow = getDb()
       .prepare(`SELECT COUNT(*) as count FROM catalog_releases ${queueableWhere}`)
       .get(...args) as { count: number };

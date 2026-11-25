@@ -1074,7 +1074,10 @@ export function GameDetailDrawer({
   const canQueueRelease =
     Boolean(onQueueDownload) &&
     !primaryDownloadFile &&
-    (item.status === 'available' || item.status === 'failed' || item.status === 'partial');
+    (item.status === 'available' ||
+      item.status === 'failed' ||
+      item.status === 'partial' ||
+      (item.status === 'queued' && !activeRun));
 
   const handleFetchMetadata = async () => {
     if (!activeItem) return;
@@ -3000,13 +3003,19 @@ export function GameDetailDrawer({
                     title={
                       !canSync
                         ? 'Verify login in System Settings before downloading'
-                        : 'Queue this release and mirror its files to local storage'
+                        : item.status === 'queued'
+                          ? 'Resume downloading this paused queued release'
+                          : 'Queue this release and mirror its files to local storage'
                     }
                     onClick={() => void handleQueueReleaseDownload()}
                     className="crt-cta-beam inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                   >
                     <Download className="h-3.5 w-3.5 shrink-0" />
-                    {queueingDownload ? 'Queueing...' : 'Download Release'}
+                    {queueingDownload
+                      ? 'Queueing...'
+                      : item.status === 'queued'
+                        ? 'Resume Download'
+                        : 'Download Release'}
                   </button>
                 )}
 

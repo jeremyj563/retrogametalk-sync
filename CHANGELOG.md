@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.41.0] - 2026-11-24
+
+- Added full **interrupted & stopped download queue recovery** so queues halted by `SIGTERM` (e.g., pod upgrades/restarts) or manual **Stop** can always be resumed, re-queued, or cleared without getting stuck in `queued` state:
+  - **One-Click Resume & Clear Queue (`POST /api/queue/resume`, `POST /api/queue/clear`)**: Added a **Paused Download Queue** recovery strip on both the **Sync** page and the **Catalog** toolbar whenever releases are left waiting with no active worker—offering **`Resume Queue (N)`**, **`View Queued`**, and 2-step **`Clear Queue`** controls.
+  - **Restored `Download Filtered (n)` & Single-Item Resume**: Updated catalog queries (`/api/items`, `/api/items/ids`, and `queueCatalogDownloads`) plus Catalog selection summaries, row/card buttons, and the **Game Detail Drawer** to treat paused `queued` releases as queueable/resumable whenever no download queue worker is actively running.
+  - **Clean Restart Preservation**: Updated abort teardown and SQLite startup recovery (`initDb`) so in-flight files interrupted during a download queue run return cleanly to `queued` rather than turning into spurious `failed` entries or disappearing from the resumable queue.
+
 ## [1.40.0] - 2026-11-24
 
 - Redesigned **Catalog → Local Disk Tree** into a modern, self-contained CRT file explorer and fixed the empty-viewport scroll bug when drilling into deeply scrolled subdirectories:

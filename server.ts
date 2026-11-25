@@ -279,6 +279,7 @@ async function bootstrap() {
       source: parseQueryFilterParam(req.query.source),
       sourceMode: typeof req.query.sourceMode === 'string' ? req.query.sourceMode : undefined,
       sort: typeof req.query.sort === 'string' ? req.query.sort : undefined,
+      includePausedQueued: !orchestrator.hasActiveDownloadQueue(),
       limit: Number(req.query.limit || 50),
       offset: Number(req.query.offset || 0),
     });
@@ -309,6 +310,7 @@ async function bootstrap() {
       source: parseQueryFilterParam(req.query.source),
       sourceMode: typeof req.query.sourceMode === 'string' ? req.query.sourceMode : undefined,
       sort: typeof req.query.sort === 'string' ? req.query.sort : undefined,
+      includePausedQueued: !orchestrator.hasActiveDownloadQueue(),
     });
     res.json(result);
   });
@@ -417,6 +419,33 @@ async function bootstrap() {
       const msg = err instanceof Error ? err.message : String(err);
       const statusCode = /No downloadable|already downloaded|already queued|Provide/i.test(msg) ? 400 : 409;
       res.status(statusCode).json({ error: msg });
+    }
+  });
+
+  app.post('/api/queue/resume', async (_req, res) => {
+    try {
+      const result = await orchestrator.resumeDownloadQueue();
+      res.status(202).json({
+        ...result,
+        skippedCount: result.alreadyQueuedCount + result.alreadyDownloadedCount,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const statusCode = /No paused queued|Login required/i.test(msg) ? 400 : 409;
+      res.status(statusCode).json({ error: msg });
+    }
+  });
+
+  app.post('/api/queue/clear', (_req, res) => {
+    try {
+      const result = orchestrator.clearDownloadQueue();
+      res.json({
+        ok: true,
+        ...result,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(409).json({ error: msg });
     }
   });
 
