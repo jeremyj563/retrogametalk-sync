@@ -1,5 +1,10 @@
 export type { CatalogSortOption } from './shared/catalogSort';
 export type {
+  RomNamingPreviewSample,
+  RomNamingTypeKey,
+  RomNamingTypeOverrides,
+} from './shared/romNaming';
+export type {
   StorageFolderMappingConfig,
   StorageRomCategoryKey,
   SystemTypeFolderOverride,
@@ -96,6 +101,7 @@ export interface ScraperConfigPublic {
   discoveredSystems: string[];
   lastWatermarkAt: string | null;
   romNamingTemplate: string;
+  romNamingTypeOverrides?: import('./shared/romNaming').RomNamingTypeOverrides;
   romSanitizeFat32: boolean;
   romMaxFilenameLen: number;
   storageFolderConfig: import('./shared/storageFolderMappings').StorageFolderMappingConfig;
@@ -298,6 +304,7 @@ export interface ReleaseFileRecord {
 
 export interface DeviceRomNamingOverrides {
   romNamingTemplate?: string | null;
+  romNamingTypeOverrides?: import('./shared/romNaming').RomNamingTypeOverrides | null;
   romSanitizeFat32?: boolean | null;
   romMaxFilenameLen?: number | null;
 }

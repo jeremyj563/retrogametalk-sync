@@ -1807,6 +1807,7 @@ export class ScraperOrchestrator extends EventEmitter {
     try {
       return await inspectArchiveForItem(ctx.item, ctx.file, ctx.absPath, {
         romNamingTemplate: ctx.cfg.romNamingTemplate,
+        romNamingTypeOverrides: ctx.cfg.romNamingTypeOverrides,
         romSanitizeFat32: ctx.cfg.romSanitizeFat32,
         romMaxFilenameLen: ctx.cfg.romMaxFilenameLen,
       });

@@ -1,4 +1,9 @@
 export type { CatalogSortOption } from '../shared/catalogSort.ts';
+export type {
+  RomNamingPreviewSample,
+  RomNamingTypeKey,
+  RomNamingTypeOverrides,
+} from '../shared/romNaming.ts';
 export type { SyncOverrideMode } from '../shared/syncRuleMatcher.ts';
 export type {
   StorageFolderMappingConfig,
@@ -62,6 +67,7 @@ export interface ScraperConfigPublic {
   discoveredSystems: string[];
   lastWatermarkAt: string | null;
   romNamingTemplate: string;
+  romNamingTypeOverrides?: import('../shared/romNaming.ts').RomNamingTypeOverrides;
   romSanitizeFat32: boolean;
   romMaxFilenameLen: number;
   storageFolderConfig: import('../shared/storageFolderMappings.ts').StorageFolderMappingConfig;
@@ -96,6 +102,7 @@ export interface ConfigUpdateInput {
   allowedReleaseTypes?: string[];
   lastWatermarkAt?: string | null;
   romNamingTemplate?: string;
+  romNamingTypeOverrides?: import('../shared/romNaming.ts').RomNamingTypeOverrides;
   romSanitizeFat32?: boolean;
   romMaxFilenameLen?: number;
   storageFolderConfig?: import('../shared/storageFolderMappings.ts').StorageFolderMappingConfig;
@@ -278,6 +285,7 @@ export interface ReleaseFileRecord {
 
 export interface DeviceRomNamingOverrides {
   romNamingTemplate?: string | null;
+  romNamingTypeOverrides?: import('../shared/romNaming.ts').RomNamingTypeOverrides | null;
   romSanitizeFat32?: boolean | null;
   romMaxFilenameLen?: number | null;
 }

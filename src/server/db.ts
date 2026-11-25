@@ -35,9 +35,18 @@ import {
   type DeviceUninstallTargetRecord,
 } from '../shared/deviceProfiles.ts';
 import {
+  classifyRomNamingType,
+  DEFAULT_ROM_NAMING_TEMPLATE,
+  normalizeRomNamingTypeOverrides,
+  ROM_NAMING_PREVIEW_TYPE_KEYS,
+  type RomNamingPreviewSample,
+  type RomNamingTypeKey,
+} from '../shared/romNaming.ts';
+import {
   canonicalizeSystemSlug,
   expandSystemAliases,
   filterValidSystemSlugs,
+  resolveSystemDisplayInfo,
   sanitizeSystemFilterString,
 } from '../shared/systemCatalog.ts';
 import {
@@ -235,9 +244,10 @@ export function initDb(): Database.Database {
         id, base_url, login_url, username, password_enc, download_dir,
         cron_schedule, schedule_enabled, base_delay_ms, min_delay_ms, max_delay_ms,
         backoff_multiplier, max_retries, max_concurrency, request_timeout_ms,
-        user_agent, system_filter, allowed_release_types_json, last_watermark_at, updated_at
+        user_agent, system_filter, allowed_release_types_json, last_watermark_at,
+        rom_naming_template, rom_naming_type_overrides_json, updated_at
       ) VALUES (
-        1, ?, ?, ?, ?, ?, ?, 0, 1500, 750, 45000, 1.8, 4, 1, 30000, ?, ?, ?, NULL, ?
+        1, ?, ?, ?, ?, ?, ?, 0, 1500, 750, 45000, 1.8, 4, 1, 30000, ?, ?, ?, NULL, ?, '{}', ?
       )
     `).run(
       process.env.RGT_BASE_URL || 'https://retrogametalk.com/repo/',
@@ -249,6 +259,7 @@ export function initDb(): Database.Database {
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
       process.env.SCRAPER_SYSTEM_FILTER || '',
       JSON.stringify(envTypes),
+      DEFAULT_ROM_NAMING_TEMPLATE,
       now,
     );
   }
@@ -557,7 +568,16 @@ export function getInternalConfig(): ScraperConfigInternal {
     allowedReleaseTypes,
     discoveredSystems,
     lastWatermarkAt: row.last_watermark_at ? String(row.last_watermark_at) : null,
-    romNamingTemplate: String(row.rom_naming_template || '{title}{regionParen}{tagBracket}'),
+    romNamingTemplate: String(row.rom_naming_template || DEFAULT_ROM_NAMING_TEMPLATE),
+    romNamingTypeOverrides: (() => {
+      try {
+        return normalizeRomNamingTypeOverrides(
+          JSON.parse(String(row.rom_naming_type_overrides_json || '{}')),
+        );
+      } catch {
+        return {};
+      }
+    })(),
     romSanitizeFat32: row.rom_sanitize_fat32 !== undefined ? Boolean(row.rom_sanitize_fat32) : true,
     romMaxFilenameLen: Math.max(0, Number(row.rom_max_filename_len || 0)),
     storageFolderConfig,
@@ -763,8 +783,14 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
 
   const nextRomNamingTemplate =
     input.romNamingTemplate !== undefined
-      ? (input.romNamingTemplate.trim() || '{title}{regionParen}{tagBracket}')
-      : String(current.rom_naming_template || '{title}{regionParen}{tagBracket}');
+      ? (input.romNamingTemplate.trim().slice(0, 200) || DEFAULT_ROM_NAMING_TEMPLATE)
+      : String(current.rom_naming_template || DEFAULT_ROM_NAMING_TEMPLATE);
+  let nextRomNamingTypeOverridesJson = String(current.rom_naming_type_overrides_json || '{}');
+  if (input.romNamingTypeOverrides !== undefined) {
+    nextRomNamingTypeOverridesJson = JSON.stringify(
+      normalizeRomNamingTypeOverrides(input.romNamingTypeOverrides),
+    );
+  }
   const nextRomSanitizeFat32 =
     input.romSanitizeFat32 !== undefined
       ? (input.romSanitizeFat32 ? 1 : 0)
@@ -809,6 +835,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       allowed_release_types_json = ?,
       last_watermark_at = ?,
       rom_naming_template = ?,
+      rom_naming_type_overrides_json = ?,
       rom_sanitize_fat32 = ?,
       rom_max_filename_len = ?,
       storage_folder_config_json = ?,
@@ -844,6 +871,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     nextAllowedReleaseTypesJson,
     nextWatermarkAt,
     nextRomNamingTemplate,
+    nextRomNamingTypeOverridesJson,
     nextRomSanitizeFat32,
     nextRomMaxFilenameLen,
     nextStorageFolderConfigJson,
@@ -5660,3 +5688,187 @@ export function acquireDistributedLock(lockName: string, holderId: string, ttlSe
 export function releaseDistributedLock(lockName: string, holderId: string): void {
   getDb().prepare('DELETE FROM distributed_locks WHERE lock_name = ? AND holder_id = ?').run(lockName, holderId);
 }
+
+const SYSTEM_DEFAULT_ROM_EXT: Record<string, string> = {
+  'nes-roms': '.nes',
+  'famicom-disk-system': '.fds',
+  'snes-roms': '.sfc',
+  'n64-roms': '.z64',
+  'gb-roms': '.gb',
+  'gbc-roms': '.gbc',
+  'gba-roms': '.gba',
+  'nds-roms': '.nds',
+  '3ds-roms': '.3ds',
+  'genesis-roms': '.md',
+  'sms-roms': '.sms',
+  'game-gear': '.gg',
+  'sega-32x-roms': '.32x',
+  'sega-cd-isos': '.chd',
+  'saturn-isos': '.chd',
+  'dreamcast-isos': '.chd',
+  'psx-iso': '.chd',
+  'ps2-isos': '.chd',
+  'psp-isos': '.iso',
+  'gamecube-isos': '.rvz',
+  'wii-isos': '.rvz',
+  'turbografx-16': '.pce',
+  'turbografx-cd': '.chd',
+  'wonderswan': '.wsc',
+  'neo-geo-pocket': '.ngc',
+  'atari-2600-roms': '.a26',
+  'atari-7800-roms': '.a78',
+  'atari-lynx': '.lnx',
+  'msx-roms': '.rom',
+};
+
+function guessRomExtensionForSample(systemSlug: string, filename?: string | null): string {
+  const lower = (filename || '').trim().toLowerCase();
+  const romExtMatch = lower.match(
+    /\.(nes|fds|sfc|smc|gb|gbc|gba|nds|3ds|cia|z64|n64|v64|md|gen|32x|sms|gg|pce|ngc|ngp|ws|wsc|chd|iso|rvz|cso|pbp|a26|a52|a78|lnx|rom|bin)$/i,
+  );
+  if (romExtMatch?.[1]) {
+    return `.${romExtMatch[1].toLowerCase()}`;
+  }
+  const canonical = canonicalizeSystemSlug(systemSlug).toLowerCase();
+  return SYSTEM_DEFAULT_ROM_EXT[canonical] || '.rom';
+}
+
+function safeParseJsonStringArray(raw: unknown): string[] {
+  if (typeof raw !== 'string' || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.map((v) => String(v || '').trim()).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Picks up to one representative real indexed catalog release per ROM type for
+ * Step 02's live preview matrix ("Real Catalog Games" mode). Accepts a rotation seed
+ * so clicking Shuffle cycles cleanly across available candidates per type.
+ */
+export function getCatalogNamingPreviewSamples(seed = 0): {
+  samples: Partial<Record<RomNamingTypeKey, RomNamingPreviewSample>>;
+  candidateCounts: Partial<Record<RomNamingTypeKey, number>>;
+} {
+  const safeSeed = Number.isFinite(seed) ? Math.max(0, Math.floor(seed)) : 0;
+
+  const rows = getDb()
+    .prepare(`
+      SELECT
+        r.id,
+        r.title,
+        r.system_name,
+        r.release_type,
+        r.release_tags_json,
+        r.regions_json,
+        r.languages_json,
+        r.status,
+        (
+          SELECT f.filename
+          FROM catalog_release_files f
+          WHERE f.release_id = r.id
+          ORDER BY CASE WHEN f.status = 'downloaded' THEN 0 ELSE 1 END, f.id ASC
+          LIMIT 1
+        ) AS primary_filename,
+        (
+          SELECT f.display_label
+          FROM catalog_release_files f
+          WHERE f.release_id = r.id
+          ORDER BY CASE WHEN f.status = 'downloaded' THEN 0 ELSE 1 END, f.id ASC
+          LIMIT 1
+        ) AS primary_label,
+        (
+          SELECT f.file_role
+          FROM catalog_release_files f
+          WHERE f.release_id = r.id
+          ORDER BY CASE WHEN f.status = 'downloaded' THEN 0 ELSE 1 END, f.id ASC
+          LIMIT 1
+        ) AS primary_role
+      FROM catalog_releases r
+      WHERE r.title IS NOT NULL AND TRIM(r.title) != ''
+      ORDER BY
+        CASE WHEN r.status = 'downloaded' THEN 0 ELSE 1 END,
+        COALESCE(r.downloaded_at, r.discovered_at) DESC,
+        r.id DESC
+      LIMIT 1200
+    `)
+    .all() as Array<{
+    id: number;
+    title: string;
+    system_name: string;
+    release_type: string;
+    release_tags_json: string;
+    regions_json: string;
+    languages_json: string;
+    status: string;
+    primary_filename: string | null;
+    primary_label: string | null;
+    primary_role: string | null;
+  }>;
+
+  const buckets = new Map<RomNamingTypeKey, RomNamingPreviewSample[]>();
+  const previewSet = new Set<RomNamingTypeKey>(ROM_NAMING_PREVIEW_TYPE_KEYS);
+
+  for (const row of rows) {
+    const releaseTags = safeParseJsonStringArray(row.release_tags_json);
+    const regions = safeParseJsonStringArray(row.regions_json);
+    const languages = safeParseJsonStringArray(row.languages_json);
+    const fileRole = (row.primary_role || row.release_type || '').trim();
+    const archiveFilename = (row.primary_filename || '').trim();
+    const displayLabel = (row.primary_label || '').trim();
+
+    const context = {
+      title: String(row.title).trim(),
+      systemName: String(row.system_name || '').trim(),
+      regions,
+      languages,
+      releaseTags,
+      fileRole,
+      archiveFilename: archiveFilename || undefined,
+      displayLabel: displayLabel || undefined,
+      innerFilename: archiveFilename || undefined,
+    };
+
+    const typeKey = classifyRomNamingType(context);
+    if (!previewSet.has(typeKey)) continue;
+
+    let list = buckets.get(typeKey);
+    if (!list) {
+      list = [];
+      buckets.set(typeKey, list);
+    }
+    if (list.length >= 20) continue;
+
+    const sysInfo = resolveSystemDisplayInfo(context.systemName);
+    const shortParenMatch = sysInfo.displayName.match(/\(([^)]+)\)$/);
+    const conciseSystemLabel = shortParenMatch?.[1] || sysInfo.displayName;
+    list.push({
+      typeKey,
+      source: 'catalog',
+      itemId: Number(row.id),
+      systemLabel: conciseSystemLabel,
+      extension: guessRomExtensionForSample(context.systemName, archiveFilename),
+      context,
+    });
+  }
+
+  const samples: Partial<Record<RomNamingTypeKey, RomNamingPreviewSample>> = {};
+  const candidateCounts: Partial<Record<RomNamingTypeKey, number>> = {};
+
+  for (const typeKey of ROM_NAMING_PREVIEW_TYPE_KEYS) {
+    const list = buckets.get(typeKey);
+    if (list && list.length > 0) {
+      candidateCounts[typeKey] = list.length;
+      samples[typeKey] = list[safeSeed % list.length]!;
+    } else {
+      candidateCounts[typeKey] = 0;
+    }
+  }
+
+  return { samples, candidateCounts };
+}
+
