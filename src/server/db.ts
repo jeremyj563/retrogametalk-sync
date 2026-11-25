@@ -42,6 +42,7 @@ import {
 } from '../shared/systemCatalog.ts';
 import {
   classifySystemIndexFreshness,
+  DEFAULT_INDEX_STALE_MS,
   doesCatalogReleaseMatchSyncRules,
   formatSyncRuleScopeSummary,
   normalizeSyncOverride,
@@ -570,6 +571,49 @@ export function updateSystemIndexCursor(systemSlug: string, cursor: SystemIndexC
     return current;
   });
   return tx();
+}
+
+export function invalidateSystemIndexCursors(systemSlugs: readonly string[]): Record<string, SystemIndexCursor> {
+  const targetSet = new Set(
+    systemSlugs
+      .map((s) => (canonicalizeSystemSlug(s) || s.trim()).toLowerCase())
+      .filter(Boolean),
+  );
+  if (targetSet.size === 0) return getSystemIndexState();
+  const tx = getDb().transaction(() => {
+    const current = getSystemIndexState();
+    let changed = false;
+    for (const [key, cursor] of Object.entries(current)) {
+      const canonical = (canonicalizeSystemSlug(key) || key).toLowerCase();
+      if (targetSet.has(canonical) && cursor?.fullyIndexed) {
+        current[key] = {
+          ...cursor,
+          fullyIndexed: false,
+        };
+        changed = true;
+      }
+    }
+    if (changed) {
+      getDb()
+        .prepare('UPDATE scraper_config SET system_index_state_json = ?, updated_at = ? WHERE id = 1')
+        .run(JSON.stringify(current), new Date().toISOString());
+    }
+    return current;
+  });
+  return tx();
+}
+
+export function getCatalogReleaseCountsBySystem(): Record<string, number> {
+  const rows = getDb()
+    .prepare('SELECT system_name, COUNT(*) as count FROM catalog_releases GROUP BY system_name')
+    .all() as { system_name: string; count: number }[];
+  const counts: Record<string, number> = {};
+  for (const row of rows) {
+    const canonical = (canonicalizeSystemSlug(String(row.system_name || '')) || String(row.system_name || '')).toLowerCase();
+    if (!canonical) continue;
+    counts[canonical] = (counts[canonical] ?? 0) + Number(row.count || 0);
+  }
+  return counts;
 }
 
 export function saveDiscoveredSystems(systems: string[]): string[] {
@@ -1279,10 +1323,10 @@ export function upsertCatalogRelease(input: {
   const publisher = meta?.publisher ?? null;
   const developer = meta?.developer ?? null;
   const releaseYear = meta?.releaseYear ?? null;
-  const genresJson = meta ? JSON.stringify(genres) : null;
-  const regionsJson = meta ? JSON.stringify(regions) : null;
-  const languagesJson = meta ? JSON.stringify(languages) : null;
-  const sourcesJson = meta ? JSON.stringify(sources) : null;
+  const genresJson = meta && genres.length > 0 ? JSON.stringify(genres) : null;
+  const regionsJson = meta && regions.length > 0 ? JSON.stringify(regions) : null;
+  const languagesJson = meta && languages.length > 0 ? JSON.stringify(languages) : null;
+  const sourcesJson = meta && sources.length > 0 ? JSON.stringify(sources) : null;
   const tagsJson = JSON.stringify(releaseTags);
   const coverLocalPath = input.coverLocalPath ?? null;
   const screenshotsJson = input.screenshotLocalPaths ? JSON.stringify(input.screenshotLocalPaths) : null;
@@ -1842,10 +1886,17 @@ export function updateCatalogReleaseMetadata(
   const existing = getCatalogReleaseById(id);
   if (!existing) return null;
 
-  const genres = metadata.genres || [];
-  const regions = metadata.regions || [];
-  const languages = metadata.languages || [];
-  const sources = metadata.sources || [];
+  const genres = metadata.genres && metadata.genres.length > 0 ? metadata.genres : existing.genres;
+  const regions = metadata.regions && metadata.regions.length > 0 ? metadata.regions : existing.regions;
+  const languages = metadata.languages && metadata.languages.length > 0 ? metadata.languages : existing.languages;
+  const sources = metadata.sources && metadata.sources.length > 0 ? metadata.sources : existing.sources;
+  const mergedMetadata: ReleaseMetadata = {
+    ...metadata,
+    genres,
+    regions,
+    languages,
+    sources,
+  };
 
   const tx = getDb().transaction(() => {
     getDb().prepare(`
@@ -1867,21 +1918,21 @@ export function updateCatalogReleaseMetadata(
         metadata_json = ?
       WHERE id = ?
     `).run(
-      metadata.wpPostId ?? null,
-      metadata.wpPostType ?? null,
-      metadata.title,
-      metadata.publishedAt ?? null,
-      metadata.remoteUpdatedAt ?? null,
-      metadata.publisher ?? null,
-      metadata.developer ?? null,
-      metadata.releaseYear ?? null,
+      mergedMetadata.wpPostId ?? null,
+      mergedMetadata.wpPostType ?? null,
+      mergedMetadata.title,
+      mergedMetadata.publishedAt ?? null,
+      mergedMetadata.remoteUpdatedAt ?? null,
+      mergedMetadata.publisher ?? null,
+      mergedMetadata.developer ?? null,
+      mergedMetadata.releaseYear ?? null,
       JSON.stringify(genres),
       JSON.stringify(regions),
       JSON.stringify(languages),
       JSON.stringify(sources),
       coverLocalPath,
       JSON.stringify(screenshotLocalPaths),
-      JSON.stringify(metadata),
+      JSON.stringify(mergedMetadata),
       id,
     );
 
@@ -1919,10 +1970,17 @@ export function mergeCatalogReleaseDetailMetadata(
   const existing = getCatalogReleaseById(id);
   if (!existing) return null;
 
-  const genres = metadata.genres || [];
-  const regions = metadata.regions || [];
-  const languages = metadata.languages || [];
-  const sources = metadata.sources || [];
+  const genres = metadata.genres && metadata.genres.length > 0 ? metadata.genres : existing.genres;
+  const regions = metadata.regions && metadata.regions.length > 0 ? metadata.regions : existing.regions;
+  const languages = metadata.languages && metadata.languages.length > 0 ? metadata.languages : existing.languages;
+  const sources = metadata.sources && metadata.sources.length > 0 ? metadata.sources : existing.sources;
+  const mergedMetadata: ReleaseMetadata = {
+    ...metadata,
+    genres,
+    regions,
+    languages,
+    sources,
+  };
 
   const tx = getDb().transaction(() => {
     getDb().prepare(`
@@ -1942,19 +2000,19 @@ export function mergeCatalogReleaseDetailMetadata(
         metadata_json = ?
       WHERE id = ?
     `).run(
-      metadata.wpPostId ?? null,
-      metadata.wpPostType ?? null,
-      metadata.title,
-      metadata.publishedAt ?? null,
-      metadata.remoteUpdatedAt ?? null,
-      metadata.publisher ?? null,
-      metadata.developer ?? null,
-      metadata.releaseYear ?? null,
+      mergedMetadata.wpPostId ?? null,
+      mergedMetadata.wpPostType ?? null,
+      mergedMetadata.title,
+      mergedMetadata.publishedAt ?? null,
+      mergedMetadata.remoteUpdatedAt ?? null,
+      mergedMetadata.publisher ?? null,
+      mergedMetadata.developer ?? null,
+      mergedMetadata.releaseYear ?? null,
       JSON.stringify(genres),
       JSON.stringify(regions),
       JSON.stringify(languages),
       JSON.stringify(sources),
-      JSON.stringify(metadata),
+      JSON.stringify(mergedMetadata),
       id,
     );
 
@@ -3598,7 +3656,13 @@ export function computeSyncPreflightSummary(): SyncPreflightSummary {
   const explicitConsoles = normalizeTargetConsoleSlugs(cfg.systemFilter);
   const allowedTypes = normalizeAllowedReleaseTypes(cfg.allowedReleaseTypes);
   const targetSystems = resolveTargetConsoleScope(cfg.systemFilter, cfg.discoveredSystems);
-  const freshness = classifySystemIndexFreshness(targetSystems, cfg.systemIndexState);
+  const freshness = classifySystemIndexFreshness(
+    targetSystems,
+    cfg.systemIndexState,
+    Date.now(),
+    DEFAULT_INDEX_STALE_MS,
+    getCatalogReleaseCountsBySystem(),
+  );
 
   const rows = getDb()
     .prepare(
@@ -5381,12 +5445,16 @@ export function deleteRepositoryItemsByIds(ids: number[]): RepositoryItemRecord[
       releaseRuleIndexCache.delete(id);
     }
   }
+  if (items.length > 0) {
+    invalidateSystemIndexCursors(items.map((item) => item.systemName));
+  }
   return items;
 }
 
 export function deleteRepositoryItemsByLocalPaths(absPaths: string[]): number {
   let deleted = 0;
   const affectedReleaseIds = new Set<number>();
+  const affectedSystemNames = new Set<string>();
 
   const tx = getDb().transaction(() => {
     for (const target of absPaths) {
@@ -5399,6 +5467,13 @@ export function deleteRepositoryItemsByLocalPaths(absPaths: string[]): number {
 
       for (const fr of fileRows) {
         affectedReleaseIds.add(Number(fr.release_id));
+      }
+
+      const relRows = getDb()
+        .prepare('SELECT system_name FROM catalog_releases WHERE local_path = ? OR local_path LIKE ?')
+        .all(normalized, `${prefix}%`) as { system_name: string }[];
+      for (const rr of relRows) {
+        if (rr.system_name) affectedSystemNames.add(String(rr.system_name));
       }
 
       const fileInfo = getDb()
@@ -5417,6 +5492,12 @@ export function deleteRepositoryItemsByLocalPaths(absPaths: string[]): number {
         .prepare('SELECT COUNT(*) as count FROM catalog_release_files WHERE release_id = ?')
         .get(releaseId) as { count: number };
       if (remaining.count === 0) {
+        const deletedRelease = getDb()
+          .prepare('SELECT system_name FROM catalog_releases WHERE id = ?')
+          .get(releaseId) as { system_name?: string } | undefined;
+        if (deletedRelease?.system_name) {
+          affectedSystemNames.add(String(deletedRelease.system_name));
+        }
         getDb().prepare('DELETE FROM catalog_releases WHERE id = ?').run(releaseId);
       } else {
         recomputeReleaseRollup(releaseId);
@@ -5426,6 +5507,9 @@ export function deleteRepositoryItemsByLocalPaths(absPaths: string[]): number {
 
   tx();
   invalidateReleaseFileRolesCache();
+  if (affectedSystemNames.size > 0) {
+    invalidateSystemIndexCursors(Array.from(affectedSystemNames));
+  }
   return deleted;
 }
 

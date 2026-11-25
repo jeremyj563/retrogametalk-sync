@@ -266,3 +266,121 @@ test('buildUpdatedSystemIndexCursor preserves totals in delta mode and replaces 
     scope: 'filtered',
   });
 });
+
+test('buildUpdatedSystemIndexCursor refuses to mark incomplete full scans as fullyIndexed and preserves lastIndexedAt on truncated deltas', () => {
+  // Full scan stopped at page 2 of 24 (e.g., mid-pagination HTTP error or non-JSON hiccup)
+  const partialFull = buildUpdatedSystemIndexCursor({
+    existingCursor: null,
+    strategy: 'full',
+    scope: 'filtered',
+    scanStartedAtIso: NOW_ISO,
+    totalPostsFetched: 200,
+    newPostsDiscovered: 200,
+    totalPagesFetched: 24,
+    pagesIndexed: 2,
+    completed: false,
+    headerTotalPosts: 2325,
+  });
+  assert.equal(partialFull.fullyIndexed, false);
+  assert.equal(partialFull.totalWpPosts, 2325);
+  assert.equal(partialFull.totalPages, 24);
+  assert.equal(partialFull.pagesIndexed, 2);
+
+  // Even if completed flag was omitted, pagesIndexed < totalPagesFetched marks incomplete
+  const pageMismatch = buildUpdatedSystemIndexCursor({
+    existingCursor: null,
+    strategy: 'full',
+    scope: 'filtered',
+    scanStartedAtIso: NOW_ISO,
+    totalPostsFetched: 100,
+    newPostsDiscovered: 100,
+    totalPagesFetched: 24,
+    pagesIndexed: 1,
+  });
+  assert.equal(pageMismatch.fullyIndexed, false);
+
+  // Truncated delta scan does NOT advance lastIndexedAt so missed delta window is retried
+  const existingComplete: CatalogIndexCursorRecord = {
+    lastIndexedAt: STALE_ISO,
+    totalWpPosts: 2325,
+    totalPages: 24,
+    pagesIndexed: 24,
+    fullyIndexed: true,
+    scope: 'filtered',
+  };
+  const truncatedDelta = buildUpdatedSystemIndexCursor({
+    existingCursor: existingComplete,
+    strategy: 'delta',
+    scope: 'filtered',
+    scanStartedAtIso: NOW_ISO,
+    totalPostsFetched: 10,
+    newPostsDiscovered: 3,
+    totalPagesFetched: 2,
+    pagesIndexed: 1,
+    completed: false,
+  });
+  assert.equal(truncatedDelta.lastIndexedAt, STALE_ISO);
+  assert.equal(truncatedDelta.totalWpPosts, 2328);
+  assert.equal(truncatedDelta.fullyIndexed, true);
+});
+
+test('planCatalogIndexTargets auto-heals depleted, partial-page, and poisoned zero-post consoles back to full index', () => {
+  const indexState: Record<string, CatalogIndexCursorRecord> = {
+    // Looks "fresh" in cursor, but local DB only has 10 rows instead of 2325
+    'snes-rom': {
+      lastIndexedAt: FRESH_ISO,
+      fullyIndexed: true,
+      totalWpPosts: 2325,
+      totalPages: 24,
+      pagesIndexed: 24,
+    },
+    // Poisoned legacy cursor from a failed/unsupported page-1 scan
+    gba: {
+      lastIndexedAt: FRESH_ISO,
+      fullyIndexed: true,
+      totalWpPosts: 0,
+      totalPages: 0,
+      pagesIndexed: 0,
+    },
+    // Partial pagination cursor from an interrupted scan
+    nes: {
+      lastIndexedAt: FRESH_ISO,
+      fullyIndexed: true,
+      totalWpPosts: 900,
+      totalPages: 9,
+      pagesIndexed: 2,
+    },
+    // Healthy fresh console matching local SQLite count
+    psx: {
+      lastIndexedAt: FRESH_ISO,
+      fullyIndexed: true,
+      totalWpPosts: 500,
+      totalPages: 5,
+      pagesIndexed: 5,
+    },
+  };
+
+  const plan = planCatalogIndexTargets({
+    candidateTargets: ['snes-rom', 'gba', 'nes', 'psx'],
+    indexState,
+    scope: 'filtered',
+    nowMs: NOW_MS,
+    catalogCountsBySystem: {
+      'snes-rom': 10,
+      gba: 0,
+      nes: 200,
+      psx: 500,
+    },
+  });
+
+  assert.equal(plan.mode, 'full');
+  assert.deepEqual(
+    plan.targets.map((t) => ({ slug: t.slug, strategy: t.strategy, modifiedAfterIso: t.modifiedAfterIso })),
+    [
+      { slug: 'snes-rom', strategy: 'full', modifiedAfterIso: null },
+      { slug: 'gba', strategy: 'full', modifiedAfterIso: null },
+      { slug: 'nes', strategy: 'full', modifiedAfterIso: null },
+    ],
+  );
+});
+

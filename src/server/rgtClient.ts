@@ -1328,7 +1328,7 @@ export class RetroGameTalkClient {
         continue;
       }
 
-      if (res.status >= 500) {
+      if (res.status >= 500 || res.status === 408) {
         await res.body?.cancel().catch(() => undefined);
         this.rateLimiter.recordError(latency);
         const retryCfg = this.resolveLiveRuntimeConfig(config);
@@ -4569,16 +4569,42 @@ export class RetroGameTalkClient {
       onPageFetched?: (page: number, totalPages: number) => void;
       onPostsPage?: (posts: WpPostMetadata[], page: number, totalPages: number) => void | Promise<void>;
     } = {},
-  ): Promise<{ supported: boolean; posts: WpPostMetadata[]; totalPages: number }> {
+  ): Promise<{
+    supported: boolean;
+    posts: WpPostMetadata[];
+    totalPages: number;
+    pagesFetched: number;
+    totalWpPosts: number | null;
+    completed: boolean;
+    truncatedReason?: string | null;
+  }> {
     const { modifiedAfterIso, signal, log, onPageFetched, onPostsPage } = options;
     const cleanSlug = systemSlug.trim().toLowerCase();
-    if (!cleanSlug) return { supported: false, posts: [], totalPages: 0 };
+    if (!cleanSlug) {
+      return {
+        supported: false,
+        posts: [],
+        totalPages: 0,
+        pagesFetched: 0,
+        totalWpPosts: null,
+        completed: false,
+        truncatedReason: 'empty_slug',
+      };
+    }
 
     const restBase = await this.resolveWpRestBaseForSystem(cleanSlug, config, signal, log);
 
     // Built-in core types ('posts', 'pages', 'media') are not console CPTs unless explicitly requested
     if (!restBase || restBase === 'pages' || restBase === 'media' || restBase === 'blocks') {
-      return { supported: false, posts: [], totalPages: 0 };
+      return {
+        supported: false,
+        posts: [],
+        totalPages: 0,
+        pagesFetched: 0,
+        totalWpPosts: null,
+        completed: false,
+        truncatedReason: 'unsupported_rest_base',
+      };
     }
 
     if (restBase.toLowerCase() !== cleanSlug) {
@@ -4602,9 +4628,20 @@ export class RetroGameTalkClient {
     const seenIds = new Set<number>();
     let page = 1;
     let totalPages = 1;
+    let pagesFetched = 0;
+    let headerTotalPosts: number | null = null;
+    let hasTotalPagesHeader = false;
+    let completed = true;
+    let truncatedReason: string | null = null;
+    let stoppedByClientCutoff = false;
+    let pageNonJsonRetries = 0;
 
     while (page <= totalPages) {
-      if (signal?.aborted) break;
+      if (signal?.aborted) {
+        completed = false;
+        truncatedReason = 'aborted';
+        break;
+      }
 
       const params = new URLSearchParams({
         per_page: '100',
@@ -4663,7 +4700,13 @@ export class RetroGameTalkClient {
 
       if (response.status === 400 && page > 1) {
         await response.body?.cancel().catch(() => undefined);
-        log?.('debug', `[WP REST] "${restBase}" reached pagination end at page ${page} (HTTP 400)`);
+        if (hasTotalPagesHeader && page <= totalPages) {
+          completed = false;
+          truncatedReason = `HTTP 400 at page ${page}/${totalPages}`;
+          log?.('warn', `WP REST pagination for ${restBase} stopped early at page ${page}/${totalPages} (HTTP 400)`);
+        } else {
+          log?.('debug', `[WP REST] "${restBase}" reached pagination end at page ${page} (HTTP 400)`);
+        }
         break;
       }
 
@@ -4671,8 +4714,18 @@ export class RetroGameTalkClient {
         await response.body?.cancel().catch(() => undefined);
         if (page === 1) {
           log?.('debug', `[WP REST] "${restBase}" endpoint returned HTTP 404 on page 1; marking unsupported`);
-          return { supported: false, posts: [], totalPages: 0 };
+          return {
+            supported: false,
+            posts: [],
+            totalPages: 0,
+            pagesFetched: 0,
+            totalWpPosts: null,
+            completed: false,
+            truncatedReason: 'HTTP 404 on page 1',
+          };
         }
+        completed = false;
+        truncatedReason = `HTTP 404 at page ${page}/${totalPages}`;
         log?.('warn', `WP REST pagination for ${restBase} stopped early at page ${page}/${totalPages} (HTTP 404)`);
         break;
       }
@@ -4684,8 +4737,18 @@ export class RetroGameTalkClient {
         }
         if (page === 1) {
           log?.('debug', `[WP REST] "${restBase}" returned HTTP ${response.status} on page 1; marking unsupported`, errBody.replace(/\s+/g, ' ').trim().slice(0, 140));
-          return { supported: false, posts: [], totalPages: 0 };
+          return {
+            supported: false,
+            posts: [],
+            totalPages: 0,
+            pagesFetched: 0,
+            totalWpPosts: null,
+            completed: false,
+            truncatedReason: `HTTP ${response.status} on page 1`,
+          };
         }
+        completed = false;
+        truncatedReason = `HTTP ${response.status} at page ${page}/${totalPages}`;
         log?.('warn', `WP REST pagination for ${restBase} stopped early at page ${page}/${totalPages} (HTTP ${response.status})`);
         break;
       }
@@ -4695,21 +4758,59 @@ export class RetroGameTalkClient {
         await response.body?.cancel().catch(() => undefined);
         if (page === 1) {
           log?.('debug', `[WP REST] "${restBase}" returned non-JSON content-type "${contentType}" on page 1`);
-          return { supported: false, posts: [], totalPages: 0 };
+          return {
+            supported: false,
+            posts: [],
+            totalPages: 0,
+            pagesFetched: 0,
+            totalWpPosts: null,
+            completed: false,
+            truncatedReason: `non-JSON (${contentType || 'unknown'}) on page 1`,
+          };
         }
+        if (pageNonJsonRetries < 2 && !signal?.aborted) {
+          pageNonJsonRetries += 1;
+          log?.(
+            'warn',
+            `WP REST pagination for ${restBase} returned non-JSON at page ${page}/${totalPages}; retrying (${pageNonJsonRetries}/2)`,
+          );
+          await sleepWithAbort(1500 * pageNonJsonRetries, signal);
+          continue;
+        }
+        completed = false;
+        truncatedReason = `non-JSON at page ${page}/${totalPages}`;
         log?.('warn', `WP REST pagination for ${restBase} returned non-JSON at page ${page}/${totalPages}`);
         break;
       }
+      pageNonJsonRetries = 0;
 
-      const headerTotalPages = Number(response.headers.get('x-wp-totalpages') || '0');
-      if (Number.isFinite(headerTotalPages) && headerTotalPages >= 1) {
-        totalPages = headerTotalPages;
+      const rawTotalPagesHeader = response.headers.get('x-wp-totalpages');
+      if (rawTotalPagesHeader !== null && rawTotalPagesHeader.trim() !== '') {
+        const headerTotalPages = Number(rawTotalPagesHeader);
+        if (Number.isFinite(headerTotalPages) && headerTotalPages >= 0) {
+          hasTotalPagesHeader = true;
+          totalPages = headerTotalPages;
+        }
+      }
+
+      const rawTotalHeader = response.headers.get('x-wp-total');
+      if (headerTotalPosts === null && rawTotalHeader !== null && rawTotalHeader.trim() !== '') {
+        const parsedTotal = Number(rawTotalHeader);
+        if (Number.isFinite(parsedTotal) && parsedTotal >= 0) {
+          headerTotalPosts = parsedTotal;
+        }
       }
 
       const rawList = (await response.json()) as unknown;
-      onPageFetched?.(page, totalPages);
+      pagesFetched = page;
+      onPageFetched?.(page, Math.max(totalPages, page));
 
       if (!Array.isArray(rawList) || rawList.length === 0) {
+        if (hasTotalPagesHeader && totalPages > 0 && page < totalPages) {
+          completed = false;
+          truncatedReason = `empty JSON array at page ${page}/${totalPages}`;
+          log?.('warn', `WP REST pagination for ${restBase} returned empty array at page ${page}/${totalPages}`);
+        }
         break;
       }
 
@@ -4739,15 +4840,17 @@ export class RetroGameTalkClient {
       }
 
       if (onPostsPage && pagePosts.length > 0 && !signal?.aborted) {
-        await onPostsPage(pagePosts, page, totalPages);
+        await onPostsPage(pagePosts, page, Math.max(totalPages, page));
       }
 
       if (fallbackClientCutoffMode && cutoffMs !== null && fallbackOrderBy === 'modified' && !anyNewerOnThisPage) {
+        stoppedByClientCutoff = true;
         break;
       }
 
-      if (!response.headers.get('x-wp-totalpages')) {
+      if (!hasTotalPagesHeader) {
         if (rawList.length < 100) {
+          totalPages = page;
           break;
         }
         totalPages = page + 1;
@@ -4756,7 +4859,26 @@ export class RetroGameTalkClient {
       page += 1;
     }
 
-    return { supported: true, posts: collected, totalPages };
+    if (
+      completed &&
+      !stoppedByClientCutoff &&
+      hasTotalPagesHeader &&
+      totalPages > 0 &&
+      pagesFetched < totalPages
+    ) {
+      completed = false;
+      truncatedReason = truncatedReason || `fetched ${pagesFetched}/${totalPages} pages`;
+    }
+
+    return {
+      supported: true,
+      posts: collected,
+      totalPages,
+      pagesFetched,
+      totalWpPosts: headerTotalPosts,
+      completed,
+      truncatedReason,
+    };
   }
 
   /**

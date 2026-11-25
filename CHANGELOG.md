@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.38.9] - 2026-11-24
+
+- Hardened **Catalog Indexing & Discovery** so interrupted, partial, or depleted console indexes can no longer get stuck as **"Fresh"** in delta-only mode and silently miss releases:
+  - **WP REST Pagination Completeness & Retries**: Added HTTP `408` timeout retries, per-page non-JSON retry backoff, `X-WP-Total` tracking, and explicit `completed` / `pagesFetched` verification in `listConsoleReleasesViaWpRest` so mid-crawl pagination failures never silently masquerade as finished full scans.
+  - **Poisoned Cursor Prevention & Automatic Self-Healing Backfill**: Stopped `startCatalogIndex`, Full Sync Phase 1, and Incremental Sync from marking incomplete or unsupported scans as `fullyIndexed: true`, invalidated affected console cursors whenever catalog rows are deleted, and updated index planning & freshness checks to automatically detect depleted, zero-post, or partial-page consoles and upgrade them from delta mode back to a full backfill.
+  - **Non-Destructive Taxonomy Preservation & Catalog Full Re-index Action**: Preserved existing WordPress taxonomies (such as `English Patched` → `English Translation`) whenever subsequent HTML-only or disk-reconciliation metadata upserts supply empty taxonomy arrays, and added a direct **`Full Re-index`** action right next to **`Update Target Consoles`** in the Catalog banner.
+
 ## [1.38.8] - 2026-11-24
 
 - Fixed **Device Export → Mounted Device** so manually overridden console folders are no longer reported under **`unrecognized folders ignored`**, and added built-in recognition for standard OnionOS / Miyoo Mini spelled-out ROM folders:

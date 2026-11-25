@@ -1,6 +1,8 @@
 import {
   classifySystemIndexFreshness,
   DEFAULT_INDEX_STALE_MS,
+  findLocalCatalogCountForSystem,
+  isSystemIndexCursorComplete,
   type SystemIndexCursorLike,
 } from './syncRuleMatcher.ts';
 import { canonicalizeSystemSlug } from './systemCatalog.ts';
@@ -72,6 +74,7 @@ export function planCatalogIndexTargets(params: {
   nowMs?: number;
   staleMs?: number;
   overlapMs?: number;
+  catalogCountsBySystem?: Record<string, number>;
 }): CatalogIndexPlan {
   const {
     candidateTargets,
@@ -82,6 +85,7 @@ export function planCatalogIndexTargets(params: {
     nowMs = Date.now(),
     staleMs = DEFAULT_INDEX_STALE_MS,
     overlapMs = CATALOG_DELTA_OVERLAP_MS,
+    catalogCountsBySystem,
   } = params;
 
   const dedupedTargets: string[] = [];
@@ -106,10 +110,10 @@ export function planCatalogIndexTargets(params: {
 
   const makeDeltaOrFullTarget = (slug: string): PlannedCatalogIndexTarget => {
     const existingCursor = findSystemIndexCursor(indexState, slug);
-    const cutoffIso =
-      existingCursor?.fullyIndexed
-        ? computeCatalogDeltaCutoffIso(existingCursor.lastIndexedAt, overlapMs)
-        : null;
+    const localCount = findLocalCatalogCountForSystem(catalogCountsBySystem, slug);
+    const cutoffIso = isSystemIndexCursorComplete(existingCursor ?? undefined, localCount)
+      ? computeCatalogDeltaCutoffIso(existingCursor?.lastIndexedAt, overlapMs)
+      : null;
     if (cutoffIso) {
       return {
         slug,
@@ -131,7 +135,13 @@ export function planCatalogIndexTargets(params: {
   if (forceFull) {
     targets = dedupedTargets.map(makeFullTarget);
   } else {
-    const freshness = classifySystemIndexFreshness(dedupedTargets, indexState, nowMs, staleMs);
+    const freshness = classifySystemIndexFreshness(
+      dedupedTargets,
+      indexState,
+      nowMs,
+      staleMs,
+      catalogCountsBySystem,
+    );
 
     if (auto) {
       targets = freshness.unindexed.map(makeFullTarget);
@@ -143,7 +153,7 @@ export function planCatalogIndexTargets(params: {
       }
     } else {
       // Manual target-console indexing:
-      // - If unindexed consoles exist, full-index them and delta-check any stale ones (skip fresh).
+      // - If unindexed/incomplete consoles exist, full-index them and delta-check any stale ones (skip fresh).
       // - If all target consoles are already indexed, fast delta-check all of them (stale first, then fresh).
       if (freshness.unindexed.length > 0) {
         targets = [
@@ -176,6 +186,8 @@ export function buildUpdatedSystemIndexCursor(params: {
   newPostsDiscovered: number;
   totalPagesFetched: number;
   pagesIndexed: number;
+  completed?: boolean;
+  headerTotalPosts?: number | null;
 }): {
   lastIndexedAt: string;
   totalWpPosts: number;
@@ -193,11 +205,16 @@ export function buildUpdatedSystemIndexCursor(params: {
     newPostsDiscovered,
     totalPagesFetched,
     pagesIndexed,
+    completed = true,
+    headerTotalPosts = null,
   } = params;
 
   if (strategy === 'delta' && existingCursor?.fullyIndexed) {
+    // If a delta pagination scan stopped early, keep the previous timestamp so missed pages are retried next time
+    const nextIndexedAt =
+      completed ? scanStartedAtIso : (existingCursor.lastIndexedAt || scanStartedAtIso);
     return {
-      lastIndexedAt: scanStartedAtIso,
+      lastIndexedAt: nextIndexedAt,
       totalWpPosts: Math.max(0, (existingCursor.totalWpPosts ?? 0) + Math.max(0, newPostsDiscovered)),
       totalPages: existingCursor.totalPages ?? (totalPagesFetched || pagesIndexed),
       pagesIndexed: existingCursor.pagesIndexed ?? pagesIndexed,
@@ -206,12 +223,30 @@ export function buildUpdatedSystemIndexCursor(params: {
     };
   }
 
+  const resolvedTotalPages = Math.max(0, totalPagesFetched || 0, pagesIndexed || 0);
+  const resolvedPagesIndexed = Math.max(0, pagesIndexed || 0);
+  const hasHeaderZero = typeof headerTotalPosts === 'number' && headerTotalPosts === 0;
+  const reachedAllPages = resolvedTotalPages === 0 || resolvedPagesIndexed >= resolvedTotalPages;
+  const isComplete =
+    completed &&
+    reachedAllPages &&
+    (totalPostsFetched > 0 || resolvedPagesIndexed > 0 || hasHeaderZero);
+
+  const resolvedTotalPosts = isComplete
+    ? Math.max(0, totalPostsFetched)
+    : Math.max(
+        0,
+        totalPostsFetched,
+        typeof headerTotalPosts === 'number' && Number.isFinite(headerTotalPosts) ? headerTotalPosts : 0,
+        existingCursor?.totalWpPosts ?? 0,
+      );
+
   return {
     lastIndexedAt: scanStartedAtIso,
-    totalWpPosts: Math.max(0, totalPostsFetched),
-    totalPages: totalPagesFetched || pagesIndexed,
-    pagesIndexed,
-    fullyIndexed: true,
+    totalWpPosts: resolvedTotalPosts,
+    totalPages: resolvedTotalPages,
+    pagesIndexed: resolvedPagesIndexed,
+    fullyIndexed: isComplete,
     scope,
   };
 }

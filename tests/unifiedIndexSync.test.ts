@@ -560,4 +560,82 @@ test('Sync Rule Readiness, Catalog syncRules queries, and rule queueing detect u
   );
 });
 
+test('deleteRepositoryItemsByIds invalidates console index cursor and metadata upserts preserve existing English Patched taxonomies', () => {
+  const nowIso = new Date().toISOString();
+  dbMod.saveDiscoveredSystems(['snes']);
+  dbMod.updateConfig({
+    systemFilter: 'snes',
+    allowedReleaseTypes: ['translation_en'],
+  });
 
+  const transRel = dbMod.upsertIndexedWpRelease({
+    remoteUrl: 'https://retrogametalk.com/repo/snes-rom/bahamut-lagoon-en/',
+    remotePath: 'snes/bahamut-lagoon-en',
+    localPath: path.join(tempDownloadDir, 'snes', 'bahamut-lagoon-en'),
+    systemName: 'snes',
+    title: 'Bahamut Lagoon',
+    estimatedBytes: 3 * 1024 * 1024,
+    metadata: {
+      ...makeMetadata('Bahamut Lagoon', 'snes', ['English Translation'], { wpPostId: 9001 }),
+      languages: ['English Patched'],
+      genres: ['Role-Playing'],
+      regions: ['Japan'],
+    },
+  });
+  assert.ok(transRel.languages.includes('English Patched'));
+  assert.ok(transRel.releaseTags.includes('English Translation'));
+
+  // Subsequent HTML-only/disk-reconcile upsert with empty taxonomy arrays MUST preserve existing WP taxonomies
+  const afterUpsert = dbMod.upsertCatalogRelease({
+    remoteUrl: transRel.remoteUrl,
+    remotePath: transRel.remotePath,
+    localPath: transRel.localPath,
+    systemName: 'snes',
+    title: 'Bahamut Lagoon',
+    status: 'downloaded',
+    metadata: {
+      ...makeMetadata('Bahamut Lagoon', 'snes', ['Retail ROM'], { wpPostId: 9001 }),
+      languages: [],
+      genres: [],
+      regions: [],
+      sources: [],
+    },
+  });
+  assert.deepEqual(afterUpsert.languages, ['English Patched']);
+  assert.ok(afterUpsert.releaseTags.includes('English Translation'));
+
+  // updateCatalogReleaseMetadata with empty taxonomy arrays also preserves existing taxonomies
+  const afterMetaUpdate = dbMod.updateCatalogReleaseMetadata(
+    transRel.id,
+    {
+      ...makeMetadata('Bahamut Lagoon', 'snes', ['Retail ROM'], { wpPostId: 9001 }),
+      languages: [],
+      genres: [],
+      regions: [],
+      sources: [],
+    },
+    null,
+    [],
+  );
+  assert.ok(afterMetaUpdate);
+  assert.deepEqual(afterMetaUpdate.languages, ['English Patched']);
+  assert.ok(afterMetaUpdate.releaseTags.includes('English Translation'));
+
+  // Mark SNES cursor fresh matching current DB row count
+  const snesCount = dbMod.getCatalogReleaseCountsBySystem().snes ?? 0;
+  dbMod.updateSystemIndexCursor('snes', {
+    lastIndexedAt: nowIso,
+    totalWpPosts: snesCount,
+    totalPages: 1,
+    pagesIndexed: 1,
+    fullyIndexed: true,
+    scope: 'filtered',
+  });
+  assert.equal(dbMod.getSystemIndexState().snes?.fullyIndexed, true);
+
+  // Deleting a catalog entry must invalidate the SNES cursor so next update backfills instead of delta-only skipping
+  dbMod.deleteRepositoryItemsByIds([transRel.id]);
+  assert.equal(dbMod.getSystemIndexState().snes?.fullyIndexed, false);
+  const preflightAfterDelete = dbMod.computeSyncPreflightSummary();
+  assert.ok(preflightAfterDelete.unindexedConsoles.includes('snes'));
+});
