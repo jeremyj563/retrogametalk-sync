@@ -483,6 +483,7 @@ export default function App() {
     syncRulesOnly?: boolean;
     downloadedFilter?: CatalogDownloadedFilter;
     installedFilter?: CatalogInstalledFilter;
+    statuses?: string[];
     deviceId?: string | 'any' | null;
     nonce: number;
   } | null>(null);
@@ -1422,6 +1423,49 @@ export default function App() {
     };
   };
 
+  const handleResumeDownloadQueue = async (): Promise<{
+    queuedCount?: number;
+    skippedCount?: number;
+  } | void> => {
+    setErrorBanner(null);
+    const res = await fetch('/api/queue/resume', { method: 'POST' });
+    const parsed = await readJsonSafely<{
+      run?: SyncRunRecord;
+      queuedCount?: number;
+      skippedCount?: number;
+      error?: string;
+    }>(res);
+    if (!parsed.ok) {
+      const msg = parsed.errorMessage || `Failed to resume download queue (HTTP ${res.status})`;
+      setErrorBanner(msg);
+      throw new Error(msg);
+    }
+    await loadInitialData();
+    return {
+      queuedCount: parsed.data?.queuedCount,
+      skippedCount: parsed.data?.skippedCount,
+    };
+  };
+
+  const handleClearDownloadQueue = async (): Promise<{ clearedCount?: number } | void> => {
+    setErrorBanner(null);
+    const res = await fetch('/api/queue/clear', { method: 'POST' });
+    const parsed = await readJsonSafely<{
+      ok?: boolean;
+      clearedCount?: number;
+      error?: string;
+    }>(res);
+    if (!parsed.ok) {
+      const msg = parsed.errorMessage || `Failed to clear paused queue (HTTP ${res.status})`;
+      setErrorBanner(msg);
+      throw new Error(msg);
+    }
+    await loadInitialData();
+    return {
+      clearedCount: parsed.data?.clearedCount,
+    };
+  };
+
   const handleStartCatalogIndex = async (
     scope: 'filtered' | 'full' = 'filtered',
     options?: { forceFull?: boolean },
@@ -1584,6 +1628,18 @@ export default function App() {
       syncRulesOnly: false,
       downloadedFilter: 'all',
       installedFilter: 'outdated',
+      statuses: [],
+      nonce: (prev?.nonce ?? 0) + 1,
+    }));
+    requestSectionChange('catalog');
+  }, [requestSectionChange]);
+
+  const handleViewQueuedInCatalog = useCallback(() => {
+    setCatalogPresetIntent((prev) => ({
+      syncRulesOnly: false,
+      downloadedFilter: 'all',
+      installedFilter: 'all',
+      statuses: ['queued'],
       nonce: (prev?.nonce ?? 0) + 1,
     }));
     requestSectionChange('catalog');
@@ -2263,6 +2319,9 @@ export default function App() {
                   }}
                   onPreviewRuleMatchesInCatalog={handleOpenRuleMatchesInCatalog}
                   onQueueDownload={(ids) => handleQueueDownload({ ids })}
+                  onResumeDownloadQueue={handleResumeDownloadQueue}
+                  onClearDownloadQueue={handleClearDownloadQueue}
+                  onViewQueuedInCatalog={handleViewQueuedInCatalog}
                   onRetryItem={handleRetryItem}
                   onRetryAllFailed={handleRetryAllFailed}
                   onStartCatalogIndex={handleStartCatalogIndex}
@@ -2281,6 +2340,8 @@ export default function App() {
                   onOpenDevicesDrawer={() => setDevicesDrawerOpen(true)}
                   onRetryItem={handleRetryItem}
                   onQueueDownload={handleQueueDownload}
+                  onResumeDownloadQueue={handleResumeDownloadQueue}
+                  onClearDownloadQueue={handleClearDownloadQueue}
                   onStartCatalogIndex={handleStartCatalogIndex}
                   onStopCatalogIndex={handleStopCatalogIndex}
                   onRefreshStatus={loadInitialData}

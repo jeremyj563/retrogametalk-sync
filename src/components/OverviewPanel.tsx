@@ -12,6 +12,7 @@ import {
   Gamepad2,
   Loader2,
   Pause,
+  Play,
   RefreshCw,
   Trash2,
   XCircle,
@@ -85,6 +86,9 @@ interface OverviewPanelProps {
   onQueueRuleMatches?: () => Promise<void>;
   onPreviewRuleMatchesInCatalog?: (onlyNotDownloaded?: boolean) => void;
   onQueueDownload?: (ids: number[]) => Promise<unknown>;
+  onResumeDownloadQueue?: () => Promise<{ queuedCount?: number; skippedCount?: number } | void>;
+  onClearDownloadQueue?: () => Promise<{ clearedCount?: number } | void>;
+  onViewQueuedInCatalog?: () => void;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onRetryAllFailed: (options?: { system?: string; ids?: number[]; dryRun?: boolean }) => Promise<void>;
   onStartCatalogIndex?: (scope: 'filtered' | 'full', options?: { forceFull?: boolean }) => Promise<void>;
@@ -525,6 +529,9 @@ export function OverviewPanel({
   onQueueRuleMatches,
   onPreviewRuleMatchesInCatalog,
   onQueueDownload,
+  onResumeDownloadQueue,
+  onClearDownloadQueue,
+  onViewQueuedInCatalog,
   onRetryItem,
   onRetryAllFailed,
   onStartCatalogIndex,
@@ -548,6 +555,10 @@ export function OverviewPanel({
   const [queueingRuleMatches, setQueueingRuleMatches] = useState(false);
   const [confirmQueueRuleMatches, setConfirmQueueRuleMatches] = useState(false);
   const [monitorQueueNotice, setMonitorQueueNotice] = useState<string | null>(null);
+  const [resumingQueue, setResumingQueue] = useState(false);
+  const [clearingQueue, setClearingQueue] = useState(false);
+  const [confirmClearQueue, setConfirmClearQueue] = useState(false);
+  const [pausedQueueNotice, setPausedQueueNotice] = useState<string | null>(null);
   const [indexerBusy, setIndexerBusy] = useState(false);
   const [activeDetailItem, setActiveDetailItem] = useState<RepositoryItemRecord | null>(null);
   const [slowLoadingDetailId, setSlowLoadingDetailId] = useState<number | null>(null);
@@ -675,6 +686,38 @@ export function OverviewPanel({
       setMonitorQueueNotice(err instanceof Error ? err.message : String(err));
     } finally {
       setQueueingRuleMatches(false);
+    }
+  };
+
+  const handleResumePausedQueueAction = async () => {
+    if (!onResumeDownloadQueue || resumingQueue || clearingQueue) return;
+    setResumingQueue(true);
+    setConfirmClearQueue(false);
+    setPausedQueueNotice(null);
+    try {
+      await onResumeDownloadQueue();
+    } catch (err) {
+      setPausedQueueNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setResumingQueue(false);
+    }
+  };
+
+  const handleClearPausedQueueAction = async () => {
+    if (!onClearDownloadQueue || clearingQueue || resumingQueue) return;
+    setClearingQueue(true);
+    setConfirmClearQueue(false);
+    setPausedQueueNotice(null);
+    try {
+      const res = await onClearDownloadQueue();
+      const cleared = res?.clearedCount ?? 0;
+      if (cleared > 0) {
+        setPausedQueueNotice(`Cleared ${cleared.toLocaleString()} paused queued release${cleared === 1 ? '' : 's'}.`);
+      }
+    } catch (err) {
+      setPausedQueueNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setClearingQueue(false);
     }
   };
 
@@ -1999,6 +2042,101 @@ export function OverviewPanel({
             </div>
           </div>
         </div>
+
+        {/* Zone 3.4: Paused / Interrupted Download Queue Recovery Strip */}
+        {!status.activeRun && status.totals.queuedItems > 0 && (onResumeDownloadQueue || onClearDownloadQueue) && (
+          <div className="mt-3.5 pt-3 border-t border-crt-amber/40 flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0 space-y-0.5">
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-crt-amber">
+                  <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-crt-amber" />
+                  Paused Download Queue
+                </span>
+                <span className="font-mono text-crt-text tabular-nums">
+                  · {status.totals.queuedItems.toLocaleString()} release
+                  {status.totals.queuedItems === 1 ? '' : 's'} waiting
+                </span>
+              </div>
+              <p className="text-xs font-mono text-crt-muted">
+                Left pending after a stop or container restart — resume where it left off or clear back to available.
+              </p>
+              {pausedQueueNotice && (
+                <p className="text-[11px] font-mono text-crt-amber">{pausedQueueNotice}</p>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {onResumeDownloadQueue && (
+                <button
+                  type="button"
+                  disabled={!status.auth.hasCompletedLogin || resumingQueue || clearingQueue}
+                  onClick={() => void handleResumePausedQueueAction()}
+                  title={
+                    !status.auth.hasCompletedLogin
+                      ? 'Verify login in System Settings before resuming downloads'
+                      : `Resume downloading ${status.totals.queuedItems.toLocaleString()} paused queued release${status.totals.queuedItems === 1 ? '' : 's'}`
+                  }
+                  className="crt-cta-beam inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer tabular-nums"
+                >
+                  {resumingQueue ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                  ) : (
+                    <Play className="h-3.5 w-3.5 shrink-0" />
+                  )}
+                  <span>
+                    {resumingQueue
+                      ? 'Resuming...'
+                      : `Resume Queue (${status.totals.queuedItems.toLocaleString()})`}
+                  </span>
+                </button>
+              )}
+              {onViewQueuedInCatalog && (
+                <button
+                  type="button"
+                  onClick={onViewQueuedInCatalog}
+                  className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  View Queued
+                </button>
+              )}
+              {onClearDownloadQueue && (
+                confirmClearQueue ? (
+                  <div className="inline-flex items-center gap-1.5 shrink-0">
+                    <span className="text-[11px] font-mono text-crt-amber tabular-nums">
+                      Clear {status.totals.queuedItems.toLocaleString()}?
+                    </span>
+                    <button
+                      type="button"
+                      disabled={clearingQueue}
+                      onClick={() => void handleClearPausedQueueAction()}
+                      className="px-2.5 py-1.5 text-xs font-semibold border border-crt-crimson/70 bg-crt-crimson/15 text-crt-crimson hover:bg-crt-crimson/25 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+                    >
+                      {clearingQueue ? 'Clearing...' : 'Confirm Clear'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmClearQueue(false)}
+                      className="px-2 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={resumingQueue || clearingQueue}
+                    onClick={() => setConfirmClearQueue(true)}
+                    title="Reset paused queued releases back to available without deleting already downloaded files"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-crimson/60 text-crt-muted hover:text-crt-crimson rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 cursor-pointer"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 shrink-0" />
+                    <span>Clear Queue</span>
+                  </button>
+                )
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Zone 3.5: Catalog Index Readiness & Direct Rule Queue Strip */}
         {preflight && (

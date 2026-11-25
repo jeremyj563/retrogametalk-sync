@@ -17,12 +17,27 @@ export interface CatalogSelectionSummary {
   unknownStatusCount: number;
 }
 
+export interface CatalogQueueabilityOptions {
+  /**
+   * When true (no active download queue worker is running), releases left in
+   * `queued` state after a Stop or process restart (e.g., SIGTERM) are treated
+   * as queueable/resumable rather than actively queued.
+   */
+  includePausedQueued?: boolean;
+}
+
 /**
  * Releases that can be newly queued into the background downloader.
  * Matches backend queryRepositoryItemIds eligibility 1-to-1.
  */
-export function isCatalogStatusQueueable(status: string | null | undefined): boolean {
-  return status === 'available' || status === 'failed' || status === 'partial';
+export function isCatalogStatusQueueable(
+  status: string | null | undefined,
+  options?: CatalogQueueabilityOptions,
+): boolean {
+  if (status === 'available' || status === 'failed' || status === 'partial') {
+    return true;
+  }
+  return Boolean(options?.includePausedQueued) && status === 'queued';
 }
 
 /**
@@ -37,7 +52,13 @@ export function isCatalogStatusAlreadyDownloaded(status: string | null | undefin
   return status === 'downloaded' || status === 'skipped';
 }
 
-export function isCatalogStatusAlreadyQueued(status: string | null | undefined): boolean {
+export function isCatalogStatusAlreadyQueued(
+  status: string | null | undefined,
+  options?: CatalogQueueabilityOptions,
+): boolean {
+  if (options?.includePausedQueued) {
+    return status === 'downloading';
+  }
   return status === 'queued' || status === 'downloading';
 }
 
@@ -83,6 +104,7 @@ export function deriveStatusMapFromIdsPayload(
 export function summarizeCatalogSelection(
   selectedIds: Iterable<number>,
   statusById: ReadonlyMap<number, ItemStatus>,
+  options?: CatalogQueueabilityOptions,
 ): CatalogSelectionSummary {
   const queueableIds: number[] = [];
   const installableIds: number[] = [];
@@ -102,7 +124,7 @@ export function summarizeCatalogSelection(
       continue;
     }
 
-    if (isCatalogStatusQueueable(status)) {
+    if (isCatalogStatusQueueable(status, options)) {
       queueableIds.push(id);
     }
     if (isCatalogStatusInstallable(status)) {
@@ -111,7 +133,7 @@ export function summarizeCatalogSelection(
 
     if (isCatalogStatusAlreadyDownloaded(status)) {
       alreadyDownloadedCount += 1;
-    } else if (isCatalogStatusAlreadyQueued(status)) {
+    } else if (isCatalogStatusAlreadyQueued(status, options)) {
       alreadyQueuedCount += 1;
       notYetDownloadedCount += 1;
     } else if (!isCatalogStatusInstallable(status)) {

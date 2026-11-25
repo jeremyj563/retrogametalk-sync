@@ -23,6 +23,7 @@ import {
   Pause,
   Pencil,
   Pin,
+  Play,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -120,6 +121,7 @@ interface CatalogPanelProps {
     syncRulesOnly?: boolean;
     downloadedFilter?: CatalogDownloadedFilter;
     installedFilter?: CatalogInstalledFilter;
+    statuses?: string[];
     deviceId?: string | 'any' | null;
     nonce: number;
   } | null;
@@ -134,6 +136,8 @@ interface CatalogPanelProps {
     alreadyQueuedCount?: number;
     alreadyDownloadedCount?: number;
   } | void>;
+  onResumeDownloadQueue?: () => Promise<{ queuedCount?: number; skippedCount?: number } | void>;
+  onClearDownloadQueue?: () => Promise<{ clearedCount?: number } | void>;
   onStartCatalogIndex?: (
     scope: 'filtered' | 'full',
     options?: { forceFull?: boolean },
@@ -542,6 +546,8 @@ export function CatalogPanel({
   onOpenDevicesDrawer,
   onRetryItem,
   onQueueDownload,
+  onResumeDownloadQueue,
+  onClearDownloadQueue,
   onStartCatalogIndex,
   onStopCatalogIndex,
   onRefreshStatus,
@@ -665,6 +671,9 @@ export function CatalogPanel({
       if (filterPreset.installedFilter === 'outdated') {
         setStatuses([]);
       }
+    }
+    if (Array.isArray(filterPreset.statuses)) {
+      setStatuses(filterPreset.statuses);
     }
     if (filterPreset.deviceId !== undefined) {
       if (filterPreset.deviceId === null || filterPreset.deviceId === 'any') {
@@ -1513,9 +1522,14 @@ export function CatalogPanel({
     return map;
   }, [selectedStatusById, items, activeDetailItem, status.activeTransfers, status.activeTransfer]);
 
+  const includePausedQueued = !(status.activeRun && status.activeRun.triggerType === 'download');
+  const [resumingPausedQueue, setResumingPausedQueue] = useState(false);
+  const [clearingPausedQueue, setClearingPausedQueue] = useState(false);
+  const [confirmClearPausedQueue, setConfirmClearPausedQueue] = useState(false);
+
   const selectionSummary = useMemo(
-    () => summarizeCatalogSelection(selectedCatalogIds, effectiveStatusById),
-    [selectedCatalogIds, effectiveStatusById],
+    () => summarizeCatalogSelection(selectedCatalogIds, effectiveStatusById, { includePausedQueued }),
+    [selectedCatalogIds, effectiveStatusById, includePausedQueued],
   );
 
   const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
@@ -1609,8 +1623,8 @@ export function CatalogPanel({
     if (typeof facets.counts?.queueableFiltered === 'number') {
       return facets.counts.queueableFiltered;
     }
-    return items.filter((item) => isCatalogStatusQueueable(item.status)).length;
-  }, [facets.counts?.queueableFiltered, items]);
+    return items.filter((item) => isCatalogStatusQueueable(item.status, { includePausedQueued })).length;
+  }, [facets.counts?.queueableFiltered, items, includePausedQueued]);
 
   // Auto-collapse the Download Filtered preview strip if live sync finishes all matching items
   useEffect(() => {
@@ -4096,6 +4110,119 @@ export function CatalogPanel({
                 </button>
               </div>
             )}
+            {/* Paused / Interrupted Download Queue Inline Banner */}
+            {!status.activeRun && status.totals.queuedItems > 0 && (onResumeDownloadQueue || onClearDownloadQueue) && (
+              <div className="pt-2 border-t border-crt-amber/40 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex flex-wrap items-center gap-2 min-w-0 font-mono">
+                  <span className="inline-flex items-center gap-1.5 text-crt-amber font-semibold whitespace-nowrap">
+                    <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-crt-amber" />
+                    Paused Queue
+                  </span>
+                  <span className="text-crt-text tabular-nums">
+                    {status.totals.queuedItems.toLocaleString()} release
+                    {status.totals.queuedItems === 1 ? '' : 's'} waiting
+                  </span>
+                  <span className="text-crt-muted hidden md:inline">
+                    · Interrupted or stopped — resume all, clear, or re-queue filtered games
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                  {onResumeDownloadQueue && (
+                    <button
+                      type="button"
+                      disabled={!status.auth.hasCompletedLogin || resumingPausedQueue || clearingPausedQueue}
+                      onClick={async () => {
+                        setResumingPausedQueue(true);
+                        setConfirmClearPausedQueue(false);
+                        try {
+                          await onResumeDownloadQueue();
+                          await loadCatalog(false, { softRefresh: true });
+                        } finally {
+                          setResumingPausedQueue(false);
+                        }
+                      }}
+                      title={
+                        !status.auth.hasCompletedLogin
+                          ? 'Verify login in System Settings before resuming downloads'
+                          : `Resume downloading ${status.totals.queuedItems.toLocaleString()} paused queued release${status.totals.queuedItems === 1 ? '' : 's'}`
+                      }
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer tabular-nums"
+                    >
+                      {resumingPausedQueue ? (
+                        <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                      ) : (
+                        <Play className="h-3 w-3 shrink-0" />
+                      )}
+                      <span>
+                        {resumingPausedQueue
+                          ? 'Resuming...'
+                          : `Resume Queue (${status.totals.queuedItems.toLocaleString()})`}
+                      </span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const viewingQueuedOnly = statuses.length === 1 && statuses[0] === 'queued';
+                      if (viewingQueuedOnly) {
+                        setStatuses([]);
+                      } else {
+                        setDownloadedFilter('all');
+                        setStatuses(['queued']);
+                      }
+                    }}
+                    className={`px-2 py-1 text-[11px] font-mono border rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      statuses.length === 1 && statuses[0] === 'queued'
+                        ? 'border-crt-amber/70 bg-crt-amber/12 text-crt-amber'
+                        : 'border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong'
+                    }`}
+                  >
+                    {statuses.length === 1 && statuses[0] === 'queued' ? 'Showing Queued' : 'View Queued'}
+                  </button>
+                  {onClearDownloadQueue && (
+                    confirmClearPausedQueue ? (
+                      <div className="inline-flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          disabled={clearingPausedQueue}
+                          onClick={async () => {
+                            setClearingPausedQueue(true);
+                            setConfirmClearPausedQueue(false);
+                            try {
+                              await onClearDownloadQueue();
+                              await loadCatalog(false, { softRefresh: true });
+                            } finally {
+                              setClearingPausedQueue(false);
+                            }
+                          }}
+                          className="px-2 py-1 text-[11px] font-semibold border border-crt-crimson/70 bg-crt-crimson/15 text-crt-crimson hover:bg-crt-crimson/25 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+                        >
+                          {clearingPausedQueue ? 'Clearing...' : 'Confirm Clear'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmClearPausedQueue(false)}
+                          className="px-2 py-1 text-[11px] font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={resumingPausedQueue || clearingPausedQueue}
+                        onClick={() => setConfirmClearPausedQueue(true)}
+                        title="Reset paused queued releases back to available"
+                        className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-crimson hover:border-crt-crimson/60 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 cursor-pointer"
+                      >
+                        <Trash2 className="h-3 w-3 shrink-0" />
+                        <span>Clear Queue</span>
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
+            )}
             {/* Mellow Smooth Accordion: Download Filtered Confirmation Strip */}
             <div
               aria-hidden={!filteredDownloadConfirm.open}
@@ -5400,20 +5527,26 @@ export function CatalogPanel({
                           onClick={(e) => e.stopPropagation()}
                         >
                           <div className="inline-flex items-center justify-end gap-2">
-                            {item.status === 'available' && onQueueDownload ? (
+                            {(item.status === 'available' || (item.status === 'queued' && includePausedQueued)) && onQueueDownload ? (
                               <button
                                 type="button"
                                 disabled={queueingIds.has(item.id) || !status.auth.hasCompletedLogin}
                                 title={
                                   !status.auth.hasCompletedLogin
                                     ? 'Verify login in System Settings before downloading'
-                                    : 'Queue this release for download'
+                                    : item.status === 'queued'
+                                      ? 'Resume downloading this paused queued release'
+                                      : 'Queue this release for download'
                                 }
                                 onClick={() => void handleQueueIds([item.id])}
                                 className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                               >
                                 <Download className="h-3 w-3" />
-                                {queueingIds.has(item.id) ? 'Queueing...' : 'Download'}
+                                {queueingIds.has(item.id)
+                                  ? 'Queueing...'
+                                  : item.status === 'queued'
+                                    ? 'Resume'
+                                    : 'Download'}
                               </button>
                             ) : (
                               <>
@@ -6001,14 +6134,16 @@ export function CatalogPanel({
                                 <Download className="h-3 w-3 shrink-0" />
                                 {queueingIds.has(item.id) ? 'Queueing' : 'Download Update'}
                               </button>
-                            ) : item.status === 'available' && onQueueDownload ? (
+                            ) : (item.status === 'available' || (item.status === 'queued' && includePausedQueued)) && onQueueDownload ? (
                               <button
                                 type="button"
                                 disabled={queueingIds.has(item.id) || !status.auth.hasCompletedLogin}
                                 title={
                                   !status.auth.hasCompletedLogin
                                     ? 'Verify login in System Settings before downloading'
-                                    : 'Queue this release for download'
+                                    : item.status === 'queued'
+                                      ? 'Resume downloading this paused queued release'
+                                      : 'Queue this release for download'
                                 }
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -6017,7 +6152,11 @@ export function CatalogPanel({
                                 className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium border border-crt-phosphor/60 text-crt-phosphor hover:bg-crt-phosphor/10 rounded transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                               >
                                 <Download className="h-3 w-3" />
-                                {queueingIds.has(item.id) ? 'Queueing' : 'Download'}
+                                {queueingIds.has(item.id)
+                                  ? 'Queueing'
+                                  : item.status === 'queued'
+                                    ? 'Resume'
+                                    : 'Download'}
                               </button>
                             ) : canQuickInstall ? (
                               <button

@@ -8,6 +8,7 @@ import {
   acquireDistributedLock,
   appendActivityLog,
   clearActivityLogs,
+  clearPausedQueuedReleases,
   clearSyncRuns,
   countSiblingItemsInDir,
   createSyncRun,
@@ -25,6 +26,7 @@ import {
   getSchemaMigrationReport,
   getSystemIndexState,
   listCatalogReleasesForRuleSync,
+  listPausedQueuedReleaseIds,
   listPinnedCatalogReleases,
   listReleasesNeedingRetry,
   listSyncRuns,
@@ -2834,6 +2836,44 @@ export class ScraperOrchestrator extends EventEmitter {
     return true;
   }
 
+  hasActiveDownloadQueue(): boolean {
+    return Boolean(this.activeRun && this.activeRun.triggerType === 'download');
+  }
+
+  async resumeDownloadQueue(): Promise<{
+    run: SyncRunRecord;
+    queuedCount: number;
+    alreadyQueuedCount: number;
+    alreadyDownloadedCount: number;
+  }> {
+    if (this.hasActiveDownloadQueue()) {
+      throw new Error(`Download queue Run #${this.activeRun!.id} is already running.`);
+    }
+    const pausedIds = listPausedQueuedReleaseIds();
+    if (pausedIds.length === 0) {
+      throw new Error('No paused queued releases to resume.');
+    }
+    return this.queueCatalogDownloads({ ids: pausedIds });
+  }
+
+  clearDownloadQueue(): { clearedCount: number } {
+    if (this.hasActiveDownloadQueue()) {
+      throw new Error(
+        `Stop the active download queue (Run #${this.activeRun!.id}) before clearing queued releases.`,
+      );
+    }
+    const result = clearPausedQueuedReleases();
+    if (result.clearedCount > 0) {
+      this.log(
+        'info',
+        `Cleared ${result.clearedCount} paused queued release${result.clearedCount === 1 ? '' : 's'} back to available`,
+      );
+      this.emitCatalogUpdated('queue_cleared');
+      this.emitStatus();
+    }
+    return result;
+  }
+
   async queueCatalogDownloads(options: {
     ids?: number[];
     filters?: CatalogQueryFilterParams;
@@ -2843,7 +2883,12 @@ export class ScraperOrchestrator extends EventEmitter {
     alreadyQueuedCount: number;
     alreadyDownloadedCount: number;
   }> {
-    const filterPreview = options.filters ? queryRepositoryItemIds(options.filters) : null;
+    const filterPreview = options.filters
+      ? queryRepositoryItemIds({
+          ...options.filters,
+          includePausedQueued: !this.hasActiveDownloadQueue(),
+        })
+      : null;
     const resolvedIds = filterPreview
       ? filterPreview.queueableIds
       : Array.from(
@@ -3172,7 +3217,11 @@ export class ScraperOrchestrator extends EventEmitter {
       }
     } finally {
       const remainingUnprocessed = Array.from(
-        new Set([...this.pendingDownloadQueueIds, ...this.inFlightDownloadIds]),
+        new Set([
+          ...this.pendingDownloadQueueIds,
+          ...this.pendingDownloadQueueSet,
+          ...this.inFlightDownloadIds,
+        ]),
       );
       for (const id of remainingUnprocessed) {
         try {
@@ -3194,6 +3243,7 @@ export class ScraperOrchestrator extends EventEmitter {
       this.activeRun = null;
       this.abortController = null;
       this.currentPhase = 'Idle · Waiting for next scheduled run or manual trigger';
+      this.emitCatalogUpdated('queue_finished');
       this.emitStatus();
       this.notifyActiveRunFinished();
     }
@@ -6576,6 +6626,7 @@ export class ScraperOrchestrator extends EventEmitter {
     } catch (err) {
       unregisterWorker();
       if (signal.aborted) {
+        const abortedStatus = this.activeRun?.triggerType === 'download' ? 'queued' : 'available';
         upsertReleaseFile({
           releaseId,
           targetFileId: initial.file.id,
@@ -6586,7 +6637,7 @@ export class ScraperOrchestrator extends EventEmitter {
           filename: release.filename,
           displayLabel,
           fileRole,
-          status: 'available',
+          status: abortedStatus,
           errorMessage: null,
           lastRunId: runId,
         });
