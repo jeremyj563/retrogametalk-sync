@@ -283,3 +283,120 @@ test('queryRepositoryItems filters by downloaded=only/exclude and computes conte
     notDownloaded: 2,
   });
 });
+
+test('installed_desc sort orders recently installed games first and respects per-device install timestamps', async () => {
+  const { CATALOG_SORT_OPTIONS, normalizeCatalogSort } = await import('../src/shared/catalogSort.ts');
+  assert.equal(normalizeCatalogSort('installed_desc'), 'installed_desc');
+  assert.ok(
+    CATALOG_SORT_OPTIONS.some(
+      (opt) => opt.value === 'installed_desc' && opt.label === 'Sort: Recently Installed',
+    ),
+  );
+
+  const database = dbMod.initDb();
+  const rows = database
+    .prepare('SELECT id, title FROM catalog_releases')
+    .all() as { id: number; title: string }[];
+  const byTitle = new Map(rows.map((r) => [r.title, r.id]));
+  const chronoId = byTitle.get('Chrono Trigger')!;
+  const earthboundId = byTitle.get('EarthBound')!;
+  const yoshiId = byTitle.get("Yoshi's Island")!;
+
+  const devA = dbMod.upsertStorageDeviceProfileOnMount({
+    id: 'dev_miyoo',
+    name: 'MIYOO_256GB',
+    volumeLabel: 'MIYOO_256GB',
+  });
+  const devB = dbMod.upsertStorageDeviceProfileOnMount({
+    id: 'dev_deck',
+    name: 'STEAM_DECK',
+    volumeLabel: 'STEAM_DECK',
+  });
+
+  // Device A installs: Chrono Trigger (older), EarthBound (newest on A)
+  dbMod.setCatalogItemsInstalled({
+    ids: [chronoId],
+    installed: true,
+    deviceId: devA.id,
+    deviceLabel: devA.name,
+  });
+  dbMod.setCatalogItemsInstalled({
+    ids: [earthboundId],
+    installed: true,
+    deviceId: devA.id,
+    deviceLabel: devA.name,
+  });
+  // Device B installs: Yoshi's Island (newest overall), Chrono Trigger (middle)
+  dbMod.setCatalogItemsInstalled({
+    ids: [chronoId, yoshiId],
+    installed: true,
+    deviceId: devB.id,
+    deviceLabel: devB.name,
+  });
+
+  // Set deterministic timestamps to test exact ordering
+  database
+    .prepare(
+      'UPDATE catalog_release_device_installs SET installed_at = ? WHERE release_id = ? AND device_id = ?',
+    )
+    .run('2026-11-20T10:00:00.000Z', chronoId, devA.id);
+  database
+    .prepare(
+      'UPDATE catalog_release_device_installs SET installed_at = ? WHERE release_id = ? AND device_id = ?',
+    )
+    .run('2026-11-22T10:00:00.000Z', earthboundId, devA.id);
+  database
+    .prepare(
+      'UPDATE catalog_release_device_installs SET installed_at = ? WHERE release_id = ? AND device_id = ?',
+    )
+    .run('2026-11-23T10:00:00.000Z', chronoId, devB.id);
+  database
+    .prepare(
+      'UPDATE catalog_release_device_installs SET installed_at = ? WHERE release_id = ? AND device_id = ?',
+    )
+    .run('2026-11-24T10:00:00.000Z', yoshiId, devB.id);
+
+  // Sync catalog_releases.installed_at to latest across devices
+  database
+    .prepare('UPDATE catalog_releases SET installed_at = ? WHERE id = ?')
+    .run('2026-11-23T10:00:00.000Z', chronoId);
+  database
+    .prepare('UPDATE catalog_releases SET installed_at = ? WHERE id = ?')
+    .run('2026-11-22T10:00:00.000Z', earthboundId);
+  database
+    .prepare('UPDATE catalog_releases SET installed_at = ? WHERE id = ?')
+    .run('2026-11-24T10:00:00.000Z', yoshiId);
+
+  // Global (Any Device): Yoshi (Nov 24) -> Chrono (Nov 23) -> EarthBound (Nov 22) -> uninstalled games last
+  const anyDeviceSorted = dbMod.queryRepositoryItems({
+    system: ['snes'],
+    sort: 'installed_desc',
+    limit: 20,
+    offset: 0,
+  });
+  assert.deepEqual(
+    anyDeviceSorted.items.map((i) => i.title),
+    ["Yoshi's Island", 'Chrono Trigger', 'EarthBound', 'Star Fox'],
+  );
+
+  // Scoped to Device A (MIYOO_256GB): EarthBound (Nov 22) -> Chrono (Nov 20) -> games not on Device A last
+  const devASorted = dbMod.queryRepositoryItems({
+    system: ['snes'],
+    deviceId: devA.id,
+    sort: 'installed_desc',
+    limit: 20,
+    offset: 0,
+  });
+  assert.deepEqual(
+    devASorted.items.slice(0, 2).map((i) => i.title),
+    ['EarthBound', 'Chrono Trigger'],
+  );
+
+  // queryRepositoryItemIds also supports device-scoped installed_desc without SQL binding mismatch
+  const devAIds = dbMod.queryRepositoryItemIds({
+    system: ['snes'],
+    deviceId: devA.id,
+    sort: 'installed_desc',
+  });
+  assert.deepEqual(devAIds.ids.slice(0, 2), [earthboundId, chronoId]);
+});

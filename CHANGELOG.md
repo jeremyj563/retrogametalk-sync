@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.39.0] - 2026-11-24
+
+- Redesigned the **Catalog** toolbar and filter controls for a cleaner, calmer, and more approachable browsing experience, and added a **`Sort: Recently Installed`** ordering option:
+  - **Streamlined 3-Row Controls & Progressive Disclosure**: Kept **Search**, **Systems**, **Types**, a collapsible **More Filters** drawer (`Genres`, `Regions`, `Languages`, `Sources`, `Status`, `Pinned`/`Ignored`), and **Sort** on one balanced row—eliminating the orphaned Sort row and reducing toolbar clutter.
+  - **Unified Quick-Filter Tracks & Grouped Active Filters**: Consolidated download toggles (**Downloaded / Not Downloaded**) and device scope + install toggles (**Device Selector · Installed / Not Installed / Updates**) into cohesive segmented tracks, collapsed multi-select active filter walls into 1-click grouped summary chips (e.g., `Systems: 15 selected` with click-to-edit and full tooltip), and quieted the bottom catalog index footer so **Download Filtered** stands out as the primary action.
+  - **Recently Installed Sort (`installed_desc`)**: Added **`Sort: Recently Installed`** to the Catalog sort selector with device-aware SQL ordering—sorting by the selected storage device's install timestamp when scoped to a specific device, or latest install across devices when viewing **Any Device**.
+
 ## [1.38.9] - 2026-11-24
 
 - Hardened **Catalog Indexing & Discovery** so interrupted, partial, or depleted console indexes can no longer get stuck as **"Fresh"** in delta-only mode and silently miss releases:

@@ -9,6 +9,7 @@ import {
   BarChart3,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Cloud,
   Download,
@@ -650,6 +651,7 @@ export function CatalogPanel({
   const [sources, setSources] = useState<string[]>(() => memoryCatalogViewPrefs.sources);
   const [sourcesMode, setSourcesMode] = useState<FilterMatchMode>(() => memoryCatalogViewPrefs.sourcesMode);
   const [openFilterId, setOpenFilterId] = useState<string | null>(null);
+  const [showMoreFilters, setShowMoreFilters] = useState(false);
 
   useEffect(() => {
     if (!filterPreset || filterPreset.nonce === lastHandledFilterPresetNonce) return;
@@ -2940,6 +2942,261 @@ export function CatalogPanel({
 
   const activeFilterCount = activeFilterTokens.length;
   const hasActiveFilters = activeFilterCount > 0;
+  const secondaryFilterCount =
+    genres.length +
+    regions.length +
+    languages.length +
+    sources.length +
+    statuses.length +
+    (syncOverrideFilter === 'pin' || syncOverrideFilter === 'ignore' ? 1 : 0);
+
+  const groupedActiveFilters = useMemo(() => {
+    const groups: {
+      key: string;
+      groupLabel: string;
+      valueLabel: string;
+      matchAll?: boolean;
+      tooltip: string;
+      onEdit?: () => void;
+      onClear: () => void;
+    }[] = [];
+
+    const addMultiGroup = (opts: {
+      key: string;
+      singular: string;
+      plural: string;
+      values: string[];
+      displayValues?: string[];
+      matchAll?: boolean;
+      filterId: string;
+      isSecondary?: boolean;
+      onClear: () => void;
+    }) => {
+      if (opts.values.length === 0) return;
+      const labels = opts.displayValues ?? opts.values;
+      const groupLabel = labels.length === 1 ? opts.singular : opts.plural;
+      const valueLabel =
+        labels.length === 1
+          ? labels[0]
+          : labels.length === 2
+            ? `${labels[0]}, ${labels[1]}`
+            : `${labels.length} selected`;
+      groups.push({
+        key: opts.key,
+        groupLabel,
+        valueLabel,
+        matchAll: Boolean(opts.matchAll && labels.length > 1),
+        tooltip: `${groupLabel} (${labels.length}): ${labels.join(', ')} — click to edit`,
+        onEdit: () => {
+          if (opts.isSecondary) setShowMoreFilters(true);
+          setOpenFilterId(opts.filterId);
+        },
+        onClear: opts.onClear,
+      });
+    };
+
+    const trimmedSearch = search.trim();
+    if (trimmedSearch) {
+      groups.push({
+        key: 'search',
+        groupLabel: 'Search',
+        valueLabel: `"${trimmedSearch}"`,
+        tooltip: `Search query: "${trimmedSearch}"`,
+        onClear: () => setSearch(''),
+      });
+    }
+
+    addMultiGroup({
+      key: 'systems',
+      singular: 'System',
+      plural: 'Systems',
+      values: systems,
+      filterId: 'systems',
+      onClear: () => setSystems([]),
+    });
+
+    addMultiGroup({
+      key: 'tags',
+      singular: 'Type',
+      plural: 'Types',
+      values: tags,
+      matchAll: tagsMode === 'all',
+      filterId: 'tags',
+      onClear: () => {
+        setTags([]);
+        setTagsMode('any');
+      },
+    });
+
+    addMultiGroup({
+      key: 'genres',
+      singular: 'Genre',
+      plural: 'Genres',
+      values: genres,
+      matchAll: genresMode === 'all',
+      filterId: 'genres',
+      isSecondary: true,
+      onClear: () => {
+        setGenres([]);
+        setGenresMode('any');
+      },
+    });
+
+    addMultiGroup({
+      key: 'regions',
+      singular: 'Region',
+      plural: 'Regions',
+      values: regions,
+      matchAll: regionsMode === 'all',
+      filterId: 'regions',
+      isSecondary: true,
+      onClear: () => {
+        setRegions([]);
+        setRegionsMode('any');
+      },
+    });
+
+    addMultiGroup({
+      key: 'languages',
+      singular: 'Language',
+      plural: 'Languages',
+      values: languages,
+      matchAll: languagesMode === 'all',
+      filterId: 'languages',
+      isSecondary: true,
+      onClear: () => {
+        setLanguages([]);
+        setLanguagesMode('any');
+      },
+    });
+
+    addMultiGroup({
+      key: 'sources',
+      singular: 'Source',
+      plural: 'Sources',
+      values: sources,
+      matchAll: sourcesMode === 'all',
+      filterId: 'sources',
+      isSecondary: true,
+      onClear: () => {
+        setSources([]);
+        setSourcesMode('any');
+      },
+    });
+
+    addMultiGroup({
+      key: 'statuses',
+      singular: 'Status',
+      plural: 'Statuses',
+      values: statuses,
+      displayValues: statuses.map((s) => STATUS_LABELS[s] || s),
+      filterId: 'statuses',
+      isSecondary: true,
+      onClear: () => setStatuses([]),
+    });
+
+    if (downloadedFilter === 'only' || downloadedFilter === 'exclude') {
+      const label = downloadedFilter === 'only' ? 'Downloaded' : 'Not Downloaded';
+      groups.push({
+        key: 'downloaded',
+        groupLabel: 'Local',
+        valueLabel: label,
+        tooltip: `Local download filter: ${label}`,
+        onClear: () => setDownloadedFilter('all'),
+      });
+    }
+
+    if (installedFilter === 'only' || installedFilter === 'exclude' || installedFilter === 'outdated') {
+      const label =
+        installedFilter === 'only'
+          ? 'Installed'
+          : installedFilter === 'exclude'
+            ? 'Not Installed'
+            : 'Updates Available';
+      groups.push({
+        key: 'installed',
+        groupLabel: 'Device',
+        valueLabel: label,
+        tooltip: `Device install filter: ${label}`,
+        onClear: () => setInstalledFilter('all'),
+      });
+    }
+
+    if (syncRulesOnly) {
+      const summary = formatSyncRuleScopeSummary(config.systemFilter, config.allowedReleaseTypes);
+      groups.push({
+        key: 'syncRules',
+        groupLabel: 'Sync Rules',
+        valueLabel: summary,
+        tooltip: `Matching Sync Rules: ${summary}`,
+        onClear: () => setSyncRulesOnly(false),
+      });
+    }
+
+    if (favoriteOnly) {
+      groups.push({
+        key: 'favoriteOnly',
+        groupLabel: 'Curated',
+        valueLabel: 'Favorites',
+        tooltip: 'Showing favorited releases only',
+        onClear: () => setFavoriteOnly(false),
+      });
+    }
+
+    if (collectionId !== null) {
+      const col = collections.find((c) => c.id === collectionId);
+      const name = col ? col.name : `#${collectionId}`;
+      groups.push({
+        key: `collection:${collectionId}`,
+        groupLabel: 'Collection',
+        valueLabel: name,
+        tooltip: `Collection: ${name}`,
+        onClear: () => {
+          setCollectionId(null);
+          setRenamingCollection(false);
+          setConfirmDeleteCollection(false);
+        },
+      });
+    }
+
+    if (syncOverrideFilter === 'pin' || syncOverrideFilter === 'ignore') {
+      const label = syncOverrideFilter === 'pin' ? 'Pinned' : 'Ignored';
+      groups.push({
+        key: `syncOverride:${syncOverrideFilter}`,
+        groupLabel: 'Override',
+        valueLabel: label,
+        tooltip: `Sync override filter: ${label}`,
+        onEdit: () => setShowMoreFilters(true),
+        onClear: () => setSyncOverrideFilter(null),
+      });
+    }
+
+    return groups;
+  }, [
+    search,
+    systems,
+    tags,
+    tagsMode,
+    genres,
+    genresMode,
+    regions,
+    regionsMode,
+    languages,
+    languagesMode,
+    sources,
+    sourcesMode,
+    downloadedFilter,
+    statuses,
+    installedFilter,
+    syncRulesOnly,
+    favoriteOnly,
+    collectionId,
+    collections,
+    syncOverrideFilter,
+    config.systemFilter,
+    config.allowedReleaseTypes,
+  ]);
+
   const hasMountedFiltersRef = useRef(false);
 
   useEffect(() => {
@@ -3059,14 +3316,14 @@ export function CatalogPanel({
                     setCatalogLayout('grid');
                   }}
                   aria-label="Box-Art Grid view"
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     catalogLayout === 'grid'
                       ? 'bg-crt-elevated text-crt-phosphor border border-crt-border-strong'
                       : 'text-crt-muted hover:text-crt-text border border-transparent'
                   }`}
                 >
                   <LayoutGrid className="h-3.5 w-3.5" />
-                  Box-Art Grid
+                  Grid
                 </button>
               </div>
             )}
@@ -3086,10 +3343,10 @@ export function CatalogPanel({
                     queueableCount: queueableFilteredCount,
                     totalMatching: totalItems,
                   })}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer ${
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer ${
                     filteredDownloadConfirm.open
-                      ? 'border-crt-phosphor bg-crt-phosphor/15 text-crt-phosphor'
-                      : 'border-crt-phosphor/60 bg-crt-bg text-crt-phosphor hover:bg-crt-phosphor/10'
+                      ? 'border-crt-phosphor bg-crt-phosphor/20 text-crt-phosphor'
+                      : 'border-crt-phosphor/70 bg-crt-phosphor/12 text-crt-phosphor hover:bg-crt-phosphor/20'
                   }`}
                 >
                   <Download className="h-3.5 w-3.5 shrink-0" />
@@ -3107,18 +3364,16 @@ export function CatalogPanel({
                   onClick={() => void handleSelectAllMatching()}
                   title={
                     hasActiveFilters
-                      ? `Select all ${totalItems} catalog releases matching your active filters across all pages`
-                      : `Select all ${totalItems} indexed catalog releases across all pages`
+                      ? `Select all ${totalItems.toLocaleString()} catalog releases matching your active filters across all pages`
+                      : `Select all ${totalItems.toLocaleString()} indexed catalog releases across all pages`
                   }
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:border-crt-phosphor text-crt-text hover:text-crt-phosphor rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
                 >
                   {selectingAllMatching ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
                   ) : null}
-                  <span>
-                    {hasActiveFilters
-                      ? `Select All Filtered (${totalItems})`
-                      : `Select All (${totalItems})`}
+                  <span className="tabular-nums">
+                    Select All ({totalItems.toLocaleString()})
                   </span>
                 </button>
               )}
@@ -3126,11 +3381,11 @@ export function CatalogPanel({
                 type="button"
                 disabled={refreshing}
                 onClick={() => void loadCatalog(false, { softRefresh: true })}
+                aria-label="Refresh catalog"
                 title="Reload this view and filter counts from your local database (does not fetch new games from RetroGameTalk)"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60"
+                className="inline-flex items-center justify-center h-8 w-8 text-xs border border-crt-border bg-crt-bg hover:bg-crt-elevated text-crt-muted hover:text-crt-text rounded transition-colors shrink-0 cursor-pointer disabled:opacity-60"
               >
                 <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${refreshing ? 'animate-spin' : ''}`} />
-                Refresh
               </button>
             </div>
           ) : viewMode === 'filesystem' ? (
@@ -3187,11 +3442,12 @@ export function CatalogPanel({
           )}
         </div>
 
-        {/* Catalog Filter Row */}
+        {/* Catalog Filter Rows */}
         {viewMode === 'catalog' && (
-          <div className="space-y-2.5 pt-2 border-t border-crt-border">
+          <div className="space-y-2.5 pt-2.5 border-t border-crt-border">
+            {/* Row 2: Search, Primary Facets, Progressive Disclosure & Sort */}
             <div className="flex flex-wrap items-center gap-2">
-              <div className="relative">
+              <div className="relative flex-1 min-w-[200px]">
                 <Search className="h-3.5 w-3.5 text-crt-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="text"
@@ -3208,7 +3464,7 @@ export function CatalogPanel({
                     }
                   }}
                   placeholder="Search title, publisher, file..."
-                  className={`pl-8 ${search ? 'pr-7' : 'pr-3'} py-1.5 text-xs bg-crt-bg border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor w-56 ${
+                  className={`w-full pl-8 ${search ? 'pr-7' : 'pr-3'} py-1.5 text-xs bg-crt-bg border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor ${
                     search.trim() ? 'border-crt-phosphor/60' : 'border-crt-border'
                   }`}
                 />
@@ -3217,7 +3473,7 @@ export function CatalogPanel({
                     type="button"
                     onClick={() => setSearch('')}
                     aria-label="Clear search query"
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-crt-muted hover:text-crt-text p-0.5 rounded"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-crt-muted hover:text-crt-text p-0.5 rounded cursor-pointer"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
@@ -3250,252 +3506,281 @@ export function CatalogPanel({
                 searchPlaceholder="Filter ROM types..."
               />
 
-              <MultiSelectFilterDropdown
-                id="genres"
-                label="Genres"
-                allLabel="All Genres"
-                options={genreOptions}
-                selected={genres}
-                onChange={setGenres}
-                matchMode={genresMode}
-                onMatchModeChange={setGenresMode}
-                open={openFilterId === 'genres'}
-                onOpenChange={(open) => setOpenFilterId(open ? 'genres' : null)}
-                searchPlaceholder="Filter genres..."
-              />
+              <button
+                type="button"
+                aria-expanded={showMoreFilters}
+                onClick={() => setShowMoreFilters((prev) => !prev)}
+                title={
+                  showMoreFilters
+                    ? 'Hide additional metadata filters (Genres, Regions, Languages, Sources, Status)'
+                    : 'Show additional metadata filters (Genres, Regions, Languages, Sources, Status)'
+                }
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  secondaryFilterCount > 0
+                    ? 'bg-crt-phosphor/12 text-crt-phosphor border-crt-phosphor/55 font-medium'
+                    : showMoreFilters
+                      ? 'bg-crt-elevated text-crt-text border-crt-border-strong'
+                      : 'bg-crt-bg text-crt-muted border-crt-border hover:border-crt-border-strong hover:text-crt-text'
+                }`}
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" />
+                <span>More Filters</span>
+                {secondaryFilterCount > 0 && (
+                  <span className="font-mono text-[11px] tabular-nums">
+                    ({secondaryFilterCount})
+                  </span>
+                )}
+                <ChevronDown
+                  className={`h-3 w-3 shrink-0 transition-transform ${
+                    showMoreFilters ? 'rotate-180' : ''
+                  }`}
+                />
+              </button>
 
-              <MultiSelectFilterDropdown
-                id="regions"
-                label="Regions"
-                allLabel="All Regions"
-                options={regionOptions}
-                selected={regions}
-                onChange={setRegions}
-                matchMode={regionsMode}
-                onMatchModeChange={setRegionsMode}
-                open={openFilterId === 'regions'}
-                onOpenChange={(open) => setOpenFilterId(open ? 'regions' : null)}
-                searchPlaceholder="Filter regions..."
-              />
-
-              <MultiSelectFilterDropdown
-                id="languages"
-                label="Languages"
-                allLabel="All Languages"
-                options={languageOptions}
-                selected={languages}
-                onChange={setLanguages}
-                matchMode={languagesMode}
-                onMatchModeChange={setLanguagesMode}
-                open={openFilterId === 'languages'}
-                onOpenChange={(open) => setOpenFilterId(open ? 'languages' : null)}
-                searchPlaceholder="Filter languages..."
-              />
-
-              <MultiSelectFilterDropdown
-                id="sources"
-                label="Sources"
-                allLabel="All Sources"
-                options={sourceOptions}
-                selected={sources}
-                onChange={setSources}
-                matchMode={sourcesMode}
-                onMatchModeChange={setSourcesMode}
-                open={openFilterId === 'sources'}
-                onOpenChange={(open) => setOpenFilterId(open ? 'sources' : null)}
-                searchPlaceholder="Filter release sources..."
-              />
-
-              <MultiSelectFilterDropdown
-                id="statuses"
-                label="Status"
-                allLabel="All Statuses"
-                options={statusOptions}
-                selected={statuses}
-                onChange={handleStatusesChange}
-                open={openFilterId === 'statuses'}
-                onOpenChange={(open) => setOpenFilterId(open ? 'statuses' : null)}
-                showTotalOptionCount={false}
-                searchPlaceholder="Filter statuses..."
-              />
+              <select
+                value={sort}
+                onChange={(e) => setSort(normalizeCatalogSort(e.target.value))}
+                aria-label="Sort catalog releases"
+                className={`px-2.5 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor shrink-0 cursor-pointer ${
+                  sort !== DEFAULT_CATALOG_SORT
+                    ? 'border-crt-phosphor/60 text-crt-phosphor font-medium'
+                    : 'border-crt-border text-crt-text hover:border-crt-border-strong'
+                }`}
+              >
+                {CATALOG_SORT_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
             </div>
 
-            {/* Quick-Filter Action Buttons & Sort Row */}
-            <div className="pt-2 border-t border-crt-border/60 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <div
-                  role="group"
-                  aria-label="Filter by local download state"
-                  className="inline-flex items-center gap-1.5 shrink-0"
-                >
-                  <button
-                    type="button"
-                    aria-pressed={downloadedFilter === 'only'}
-                    onClick={() => {
-                      const next = toggleCatalogDownloadedFilter(downloadedFilter, 'only');
-                      setDownloadedFilter(next);
-                      if (next === 'only') {
-                        setStatuses([]);
-                      }
-                    }}
-                    title={
-                      downloadedFilter === 'only'
-                        ? 'Click to clear Downloaded filter and show all matching games'
-                        : 'Show only matching games already downloaded locally'
-                    }
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      downloadedFilter === 'only'
-                        ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
-                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
-                    }`}
-                  >
-                    <Download
-                      className={`h-3.5 w-3.5 shrink-0 ${
-                        downloadedFilter === 'only' ? 'text-crt-phosphor' : 'text-crt-muted'
-                      }`}
-                    />
-                    <span>Downloaded</span>
-                    {facets.counts?.downloaded && (
-                      <span
-                        className={`font-mono text-[11px] tabular-nums ${
-                          downloadedFilter === 'only' ? 'text-crt-phosphor/90' : 'text-crt-muted'
-                        }`}
-                      >
-                        ({facets.counts.downloaded.downloaded.toLocaleString()})
-                      </span>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={downloadedFilter === 'exclude'}
-                    onClick={() =>
-                      setDownloadedFilter((prev) => toggleCatalogDownloadedFilter(prev, 'exclude'))
-                    }
-                    title={
-                      downloadedFilter === 'exclude'
-                        ? 'Click to clear Not Downloaded filter and show all matching games'
-                        : 'Show all matching un-downloaded games (Available, Queued, Failed)'
-                    }
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      downloadedFilter === 'exclude'
-                        ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
-                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
-                    }`}
-                  >
-                    <span>Not Downloaded</span>
-                    {facets.counts?.downloaded && (
-                      <span
-                        className={`font-mono text-[11px] tabular-nums ${
-                          downloadedFilter === 'exclude' ? 'text-crt-amber/90' : 'text-crt-muted'
-                        }`}
-                      >
-                        ({facets.counts.downloaded.notDownloaded.toLocaleString()})
-                      </span>
-                    )}
-                  </button>
-                </div>
+            {/* Progressive Disclosure Tray: Secondary Metadata & Sync Override Filters */}
+            {showMoreFilters && (
+              <div className="rounded-md border border-crt-border/80 bg-crt-bg/65 px-3 py-2 flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-crt-muted/80 mr-0.5 whitespace-nowrap shrink-0">
+                  Metadata
+                </span>
 
-                <span
-                  aria-hidden="true"
-                  className="hidden sm:inline-block h-4 w-px bg-crt-border mx-0.5 shrink-0"
+                <MultiSelectFilterDropdown
+                  id="genres"
+                  label="Genres"
+                  allLabel="All Genres"
+                  options={genreOptions}
+                  selected={genres}
+                  onChange={setGenres}
+                  matchMode={genresMode}
+                  onMatchModeChange={setGenresMode}
+                  open={openFilterId === 'genres'}
+                  onOpenChange={(open) => setOpenFilterId(open ? 'genres' : null)}
+                  searchPlaceholder="Filter genres..."
                 />
 
-                <div
-                  role="group"
-                  aria-label="Filter by storage device installation"
-                  className="inline-flex items-center gap-1.5 shrink-0"
-                >
+                <MultiSelectFilterDropdown
+                  id="regions"
+                  label="Regions"
+                  allLabel="All Regions"
+                  options={regionOptions}
+                  selected={regions}
+                  onChange={setRegions}
+                  matchMode={regionsMode}
+                  onMatchModeChange={setRegionsMode}
+                  open={openFilterId === 'regions'}
+                  onOpenChange={(open) => setOpenFilterId(open ? 'regions' : null)}
+                  searchPlaceholder="Filter regions..."
+                />
+
+                <MultiSelectFilterDropdown
+                  id="languages"
+                  label="Languages"
+                  allLabel="All Languages"
+                  options={languageOptions}
+                  selected={languages}
+                  onChange={setLanguages}
+                  matchMode={languagesMode}
+                  onMatchModeChange={setLanguagesMode}
+                  open={openFilterId === 'languages'}
+                  onOpenChange={(open) => setOpenFilterId(open ? 'languages' : null)}
+                  searchPlaceholder="Filter languages..."
+                />
+
+                <MultiSelectFilterDropdown
+                  id="sources"
+                  label="Sources"
+                  allLabel="All Sources"
+                  options={sourceOptions}
+                  selected={sources}
+                  onChange={setSources}
+                  matchMode={sourcesMode}
+                  onMatchModeChange={setSourcesMode}
+                  open={openFilterId === 'sources'}
+                  onOpenChange={(open) => setOpenFilterId(open ? 'sources' : null)}
+                  searchPlaceholder="Filter release sources..."
+                />
+
+                <MultiSelectFilterDropdown
+                  id="statuses"
+                  label="Status"
+                  allLabel="All Statuses"
+                  options={statusOptions}
+                  selected={statuses}
+                  onChange={handleStatusesChange}
+                  open={openFilterId === 'statuses'}
+                  onOpenChange={(open) => setOpenFilterId(open ? 'statuses' : null)}
+                  showTotalOptionCount={false}
+                  searchPlaceholder="Filter statuses..."
+                />
+
+                {((facets.counts?.syncOverrides?.pinned ?? 0) > 0 ||
+                  syncOverrideFilter === 'pin') && (
                   <button
                     type="button"
-                    aria-pressed={installedFilter === 'only'}
+                    aria-pressed={syncOverrideFilter === 'pin'}
                     onClick={() =>
-                      setInstalledFilter((prev) => (prev === 'only' ? 'all' : 'only'))
+                      setSyncOverrideFilter((prev) => (prev === 'pin' ? null : 'pin'))
                     }
-                    title={
-                      installedFilter === 'only'
-                        ? 'Click to clear Installed filter and show all matching games'
-                        : 'Show only matching games installed to a storage device'
-                    }
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      installedFilter === 'only'
+                    title="Filter games pinned to always sync"
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      syncOverrideFilter === 'pin'
                         ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
-                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                        : 'bg-crt-surface text-crt-text border-crt-border hover:border-crt-border-strong'
                     }`}
                   >
-                    <HardDrive
-                      className={`h-3.5 w-3.5 shrink-0 ${
-                        installedFilter === 'only' ? 'text-crt-phosphor' : 'text-crt-muted'
-                      }`}
-                    />
-                    <span>Installed</span>
-                    {facets.counts?.installed && (
-                      <span
-                        className={`font-mono text-[11px] tabular-nums ${
-                          installedFilter === 'only' ? 'text-crt-phosphor/90' : 'text-crt-muted'
-                        }`}
-                      >
-                        ({facets.counts.installed.installed.toLocaleString()})
-                      </span>
-                    )}
+                    <Pin className="h-3.5 w-3.5 shrink-0 text-crt-phosphor" />
+                    <span>Pinned</span>
+                    <span className="font-mono text-[11px] tabular-nums text-crt-muted">
+                      ({(facets.counts?.syncOverrides?.pinned ?? 0).toLocaleString()})
+                    </span>
                   </button>
+                )}
+
+                {((facets.counts?.syncOverrides?.ignored ?? 0) > 0 ||
+                  syncOverrideFilter === 'ignore') && (
                   <button
                     type="button"
-                    aria-pressed={installedFilter === 'exclude'}
+                    aria-pressed={syncOverrideFilter === 'ignore'}
                     onClick={() =>
-                      setInstalledFilter((prev) => (prev === 'exclude' ? 'all' : 'exclude'))
+                      setSyncOverrideFilter((prev) => (prev === 'ignore' ? null : 'ignore'))
                     }
-                    title={
-                      installedFilter === 'exclude'
-                        ? 'Click to clear Not Installed filter and show all matching games'
-                        : 'Show only matching games not yet installed to a storage device'
-                    }
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      installedFilter === 'exclude'
-                        ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
-                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                    title="Filter games ignored by automatic sync"
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      syncOverrideFilter === 'ignore'
+                        ? 'bg-crt-crimson/15 text-crt-crimson border-crt-crimson/70 font-medium'
+                        : 'bg-crt-surface text-crt-text border-crt-border hover:border-crt-border-strong'
                     }`}
                   >
-                    <span>Not Installed</span>
-                    {facets.counts?.installed && (
-                      <span
-                        className={`font-mono text-[11px] tabular-nums ${
-                          installedFilter === 'exclude' ? 'text-crt-amber/90' : 'text-crt-muted'
-                        }`}
-                      >
-                        ({facets.counts.installed.notInstalled.toLocaleString()})
-                      </span>
-                    )}
+                    <Ban className="h-3.5 w-3.5 shrink-0 text-crt-crimson" />
+                    <span>Ignored</span>
+                    <span className="font-mono text-[11px] tabular-nums text-crt-muted">
+                      ({(facets.counts?.syncOverrides?.ignored ?? 0).toLocaleString()})
+                    </span>
                   </button>
-                  {((facets.counts?.installed?.outdated ?? 0) > 0 ||
-                    installedFilter === 'outdated') && (
-                    <button
-                      type="button"
-                      aria-pressed={installedFilter === 'outdated'}
-                      onClick={() =>
-                        setInstalledFilter((prev) => (prev === 'outdated' ? 'all' : 'outdated'))
-                      }
-                      title={
-                        installedFilter === 'outdated'
-                          ? 'Click to clear Updates filter and show all matching games'
-                          : 'Show installed games with newer local or RetroGameTalk versions available'
-                      }
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        installedFilter === 'outdated'
-                          ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
-                          : 'bg-crt-bg text-crt-amber border-crt-amber/45 hover:border-crt-amber'
+                )}
+
+                {secondaryFilterCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGenres([]);
+                      setGenresMode('any');
+                      setRegions([]);
+                      setRegionsMode('any');
+                      setLanguages([]);
+                      setLanguagesMode('any');
+                      setSources([]);
+                      setSourcesMode('any');
+                      setStatuses([]);
+                      setSyncOverrideFilter(null);
+                    }}
+                    className="ml-auto text-[11px] font-mono text-crt-muted hover:text-crt-amber hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Reset extra
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Row 3: Unified Quick-Filter Tracks (Local · Device · Scope & Curated) */}
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Group 1: Local Download State Track */}
+              <div
+                role="group"
+                aria-label="Filter by local download state"
+                className="inline-flex items-center p-0.5 bg-crt-bg border border-crt-border rounded-md shrink-0"
+              >
+                <button
+                  type="button"
+                  aria-pressed={downloadedFilter === 'only'}
+                  onClick={() => {
+                    const next = toggleCatalogDownloadedFilter(downloadedFilter, 'only');
+                    setDownloadedFilter(next);
+                    if (next === 'only') {
+                      setStatuses([]);
+                    }
+                  }}
+                  title={
+                    downloadedFilter === 'only'
+                      ? 'Click to clear Downloaded filter and show all matching games'
+                      : 'Show only matching games already downloaded locally'
+                  }
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    downloadedFilter === 'only'
+                      ? 'bg-crt-phosphor/16 text-crt-phosphor font-medium'
+                      : 'text-crt-muted hover:text-crt-text hover:bg-crt-elevated/50'
+                  }`}
+                >
+                  <Download className="h-3.5 w-3.5 shrink-0 opacity-85" />
+                  <span>Downloaded</span>
+                  {facets.counts?.downloaded && (
+                    <span
+                      className={`font-mono text-[11px] tabular-nums ${
+                        downloadedFilter === 'only' ? 'text-crt-phosphor/90' : 'text-crt-muted/80'
                       }`}
                     >
-                      <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
-                      <span>Updates</span>
-                      {facets.counts?.installed && (
-                        <span className="font-mono text-[11px] tabular-nums text-crt-amber/90">
-                          ({facets.counts.installed.outdated.toLocaleString()})
-                        </span>
-                      )}
-                    </button>
+                      {facets.counts.downloaded.downloaded.toLocaleString()}
+                    </span>
                   )}
-                  {deviceProfiles.length > 0 && (
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={downloadedFilter === 'exclude'}
+                  onClick={() =>
+                    setDownloadedFilter((prev) => toggleCatalogDownloadedFilter(prev, 'exclude'))
+                  }
+                  title={
+                    downloadedFilter === 'exclude'
+                      ? 'Click to clear Not Downloaded filter and show all matching games'
+                      : 'Show all matching un-downloaded games (Available, Queued, Failed)'
+                  }
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    downloadedFilter === 'exclude'
+                      ? 'bg-crt-amber/16 text-crt-amber font-medium'
+                      : 'text-crt-muted hover:text-crt-text hover:bg-crt-elevated/50'
+                  }`}
+                >
+                  <span>Not Downloaded</span>
+                  {facets.counts?.downloaded && (
+                    <span
+                      className={`font-mono text-[11px] tabular-nums ${
+                        downloadedFilter === 'exclude' ? 'text-crt-amber/90' : 'text-crt-muted/80'
+                      }`}
+                    >
+                      {facets.counts.downloaded.notDownloaded.toLocaleString()}
+                    </span>
+                  )}
+                </button>
+              </div>
+
+              {/* Group 2: Device Scope + Install State Track */}
+              <div
+                role="group"
+                aria-label="Filter by storage device installation"
+                className="inline-flex items-center p-0.5 bg-crt-bg border border-crt-border rounded-md shrink-0"
+              >
+                {deviceProfiles.length > 0 && (
+                  <>
                     <CatalogDeviceScopeDropdown
+                      embedded
                       devices={deviceProfiles}
                       mountedDeviceId={activeDeviceProfile?.id ?? null}
                       selectedDeviceId={selectedDeviceId}
@@ -3510,14 +3795,103 @@ export function CatalogPanel({
                       }}
                       onManageDevices={() => onOpenDevicesDrawer?.()}
                     />
+                    <span
+                      aria-hidden="true"
+                      className="h-4 w-px bg-crt-border/80 mx-0.5 shrink-0"
+                    />
+                  </>
+                )}
+                <button
+                  type="button"
+                  aria-pressed={installedFilter === 'only'}
+                  onClick={() =>
+                    setInstalledFilter((prev) => (prev === 'only' ? 'all' : 'only'))
+                  }
+                  title={
+                    installedFilter === 'only'
+                      ? 'Click to clear Installed filter and show all matching games'
+                      : 'Show only matching games installed to the scoped storage device'
+                  }
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    installedFilter === 'only'
+                      ? 'bg-crt-phosphor/16 text-crt-phosphor font-medium'
+                      : 'text-crt-muted hover:text-crt-text hover:bg-crt-elevated/50'
+                  }`}
+                >
+                  {deviceProfiles.length === 0 && (
+                    <HardDrive className="h-3.5 w-3.5 shrink-0 opacity-85" />
                   )}
-                </div>
+                  <span>Installed</span>
+                  {facets.counts?.installed && (
+                    <span
+                      className={`font-mono text-[11px] tabular-nums ${
+                        installedFilter === 'only' ? 'text-crt-phosphor/90' : 'text-crt-muted/80'
+                      }`}
+                    >
+                      {facets.counts.installed.installed.toLocaleString()}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={installedFilter === 'exclude'}
+                  onClick={() =>
+                    setInstalledFilter((prev) => (prev === 'exclude' ? 'all' : 'exclude'))
+                  }
+                  title={
+                    installedFilter === 'exclude'
+                      ? 'Click to clear Not Installed filter and show all matching games'
+                      : 'Show only matching games not yet installed to the scoped storage device'
+                  }
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    installedFilter === 'exclude'
+                      ? 'bg-crt-amber/16 text-crt-amber font-medium'
+                      : 'text-crt-muted hover:text-crt-text hover:bg-crt-elevated/50'
+                  }`}
+                >
+                  <span>Not Installed</span>
+                  {facets.counts?.installed && (
+                    <span
+                      className={`font-mono text-[11px] tabular-nums ${
+                        installedFilter === 'exclude' ? 'text-crt-amber/90' : 'text-crt-muted/80'
+                      }`}
+                    >
+                      {facets.counts.installed.notInstalled.toLocaleString()}
+                    </span>
+                  )}
+                </button>
+                {((facets.counts?.installed?.outdated ?? 0) > 0 ||
+                  installedFilter === 'outdated') && (
+                  <button
+                    type="button"
+                    aria-pressed={installedFilter === 'outdated'}
+                    onClick={() =>
+                      setInstalledFilter((prev) => (prev === 'outdated' ? 'all' : 'outdated'))
+                    }
+                    title={
+                      installedFilter === 'outdated'
+                        ? 'Click to clear Updates filter and show all matching games'
+                        : 'Show installed games with newer local or RetroGameTalk versions available'
+                    }
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      installedFilter === 'outdated'
+                        ? 'bg-crt-amber/20 text-crt-amber font-medium'
+                        : 'text-crt-amber/90 hover:text-crt-amber hover:bg-crt-amber/10'
+                    }`}
+                  >
+                    <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
+                    <span>Updates</span>
+                    {facets.counts?.installed && (
+                      <span className="font-mono text-[11px] tabular-nums">
+                        {facets.counts.installed.outdated.toLocaleString()}
+                      </span>
+                    )}
+                  </button>
+                )}
+              </div>
 
-                <span
-                  aria-hidden="true"
-                  className="hidden sm:inline-block h-4 w-px bg-crt-border mx-0.5 shrink-0"
-                />
-
+              {/* Group 3: Sync Rules & Curated (Favorites + Collections) */}
+              <div className="flex flex-wrap items-center gap-2 xl:ml-auto">
                 <button
                   type="button"
                   aria-pressed={syncRulesOnly}
@@ -3527,61 +3901,48 @@ export function CatalogPanel({
                       ? 'Click to clear Sync Rules filter and show all consoles and release types'
                       : `Show only releases matching active Sync Rules (${formatSyncRuleScopeSummary(config.systemFilter, config.allowedReleaseTypes)})`
                   }
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     syncRulesOnly
-                      ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
-                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                      ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/65 font-medium'
+                      : 'bg-crt-bg text-crt-muted border-crt-border hover:border-crt-border-strong hover:text-crt-text'
                   }`}
                 >
-                  <SlidersHorizontal
-                    className={`h-3.5 w-3.5 shrink-0 ${
-                      syncRulesOnly ? 'text-crt-phosphor' : 'text-crt-muted'
-                    }`}
-                  />
-                  <span>Matches Sync Rules</span>
+                  <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 opacity-85" />
+                  <span>Sync Rules</span>
                   {typeof facets.counts?.syncRulesMatched === 'number' && (
                     <span
                       className={`font-mono text-[11px] tabular-nums ${
-                        syncRulesOnly ? 'text-crt-phosphor/90' : 'text-crt-muted'
+                        syncRulesOnly ? 'text-crt-phosphor/90' : 'text-crt-muted/80'
                       }`}
                     >
-                      ({facets.counts.syncRulesMatched.toLocaleString()})
+                      {facets.counts.syncRulesMatched.toLocaleString()}
                     </span>
                   )}
                 </button>
 
-                <span
-                  aria-hidden="true"
-                  className="hidden sm:inline-block h-4 w-px bg-crt-border mx-0.5 shrink-0"
-                />
-
                 <button
                   type="button"
                   aria-pressed={favoriteOnly}
+                  aria-label={`Filter favorited games (${(facets.counts?.favorites ?? status.totals.favoriteItems ?? 0).toLocaleString()})`}
                   onClick={() => setFavoriteOnly((prev) => !prev)}
                   title={
                     favoriteOnly
                       ? 'Click to clear Favorites filter and show all matching games'
-                      : 'Show only favorited games'
+                      : `Show only favorited games (${(facets.counts?.favorites ?? status.totals.favoriteItems ?? 0).toLocaleString()})`
                   }
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     favoriteOnly
-                      ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/70 font-medium'
-                      : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
+                      ? 'bg-crt-amber/15 text-crt-amber border-crt-amber/65 font-medium'
+                      : 'bg-crt-bg text-crt-muted border-crt-border hover:border-crt-border-strong hover:text-crt-text'
                   }`}
                 >
                   <Star
                     className={`h-3.5 w-3.5 shrink-0 ${
-                      favoriteOnly ? 'text-crt-amber fill-crt-amber' : 'text-crt-muted'
+                      favoriteOnly ? 'text-crt-amber fill-crt-amber' : ''
                     }`}
                   />
-                  <span>Favorites</span>
-                  <span
-                    className={`font-mono text-[11px] tabular-nums ${
-                      favoriteOnly ? 'text-crt-amber/90' : 'text-crt-muted'
-                    }`}
-                  >
-                    ({(facets.counts?.favorites ?? status.totals.favoriteItems ?? 0).toLocaleString()})
+                  <span className="font-mono text-[11px] tabular-nums">
+                    {(facets.counts?.favorites ?? status.totals.favoriteItems ?? 0).toLocaleString()}
                   </span>
                 </button>
 
@@ -3618,13 +3979,13 @@ export function CatalogPanel({
                       }
                     }
                   }}
-                  className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor shrink-0 max-w-[14rem] ${
+                  className={`px-2.5 py-1.5 text-xs bg-crt-bg border rounded-md focus:outline-none focus:border-crt-phosphor shrink-0 max-w-[13rem] cursor-pointer ${
                     collectionId !== null
                       ? 'border-crt-phosphor/60 text-crt-phosphor font-medium'
-                      : 'border-crt-border text-crt-text'
+                      : 'border-crt-border text-crt-text hover:border-crt-border-strong'
                   }`}
                 >
-                  <option value="__all__">All Collections</option>
+                  <option value="__all__">Collections</option>
                   <option value="__favorites__">
                     ★ Favorites ({(facets.counts?.favorites ?? status.totals.favoriteItems ?? 0).toLocaleString()})
                   </option>
@@ -3635,70 +3996,7 @@ export function CatalogPanel({
                   ))}
                   <option value="__new__">+ New Collection…</option>
                 </select>
-
-                {((facets.counts?.syncOverrides?.pinned ?? 0) > 0 ||
-                  syncOverrideFilter === 'pin') && (
-                  <button
-                    type="button"
-                    aria-pressed={syncOverrideFilter === 'pin'}
-                    onClick={() =>
-                      setSyncOverrideFilter((prev) => (prev === 'pin' ? null : 'pin'))
-                    }
-                    title="Filter games pinned to always sync"
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      syncOverrideFilter === 'pin'
-                        ? 'bg-crt-phosphor/15 text-crt-phosphor border-crt-phosphor/70 font-medium'
-                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
-                    }`}
-                  >
-                    <Pin className="h-3.5 w-3.5 shrink-0 text-crt-phosphor" />
-                    <span>Pinned</span>
-                    <span className="font-mono text-[11px] tabular-nums text-crt-muted">
-                      ({(facets.counts?.syncOverrides?.pinned ?? 0).toLocaleString()})
-                    </span>
-                  </button>
-                )}
-
-                {((facets.counts?.syncOverrides?.ignored ?? 0) > 0 ||
-                  syncOverrideFilter === 'ignore') && (
-                  <button
-                    type="button"
-                    aria-pressed={syncOverrideFilter === 'ignore'}
-                    onClick={() =>
-                      setSyncOverrideFilter((prev) => (prev === 'ignore' ? null : 'ignore'))
-                    }
-                    title="Filter games ignored by automatic sync"
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      syncOverrideFilter === 'ignore'
-                        ? 'bg-crt-crimson/15 text-crt-crimson border-crt-crimson/70 font-medium'
-                        : 'bg-crt-bg text-crt-text border-crt-border hover:border-crt-border-strong'
-                    }`}
-                  >
-                    <Ban className="h-3.5 w-3.5 shrink-0 text-crt-crimson" />
-                    <span>Ignored</span>
-                    <span className="font-mono text-[11px] tabular-nums text-crt-muted">
-                      ({(facets.counts?.syncOverrides?.ignored ?? 0).toLocaleString()})
-                    </span>
-                  </button>
-                )}
               </div>
-
-              <select
-                value={sort}
-                onChange={(e) => setSort(normalizeCatalogSort(e.target.value))}
-                aria-label="Sort catalog releases"
-                className={`px-3 py-1.5 text-xs bg-crt-bg border rounded focus:outline-none focus:border-crt-phosphor shrink-0 ${
-                  sort !== DEFAULT_CATALOG_SORT
-                    ? 'border-crt-phosphor/60 text-crt-phosphor'
-                    : 'border-crt-border text-crt-text'
-                }`}
-              >
-                {CATALOG_SORT_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
             </div>
 
             {creatingCollectionQuick && (
@@ -3765,38 +4063,65 @@ export function CatalogPanel({
               </form>
             )}
 
-            {/* Removable Active Filter Summary Bar */}
+            {/* Compact Grouped Active Filter Summary Strip */}
             {hasActiveFilters && (
-              <div className="pt-2 border-t border-crt-border/70 flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-[11px] font-mono text-crt-muted mr-0.5 whitespace-nowrap shrink-0">
-                    Active:
+              <div className="pt-2 border-t border-crt-border/60 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                  <span className="text-[11px] font-mono text-crt-muted/85 mr-0.5 whitespace-nowrap shrink-0">
+                    Filters:
                   </span>
-                  {activeFilterTokens.map((tok) => (
-                    <button
-                      key={tok.key}
-                      type="button"
-                      onClick={tok.onRemove}
-                      title={`Remove ${tok.groupLabel}: ${tok.valueLabel}`}
-                      className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-mono border border-crt-border-strong bg-crt-bg hover:border-crt-crimson/60 text-crt-text hover:text-crt-crimson rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  {groupedActiveFilters.map((group) => (
+                    <div
+                      key={group.key}
+                      className="inline-flex items-center rounded border border-crt-border bg-crt-bg/85 text-[11px] font-mono whitespace-nowrap shrink-0 overflow-hidden"
                     >
-                      <span className="text-crt-muted">
-                        {tok.groupLabel}
-                        {tok.matchAll ? ' [ALL]' : ''}:
-                      </span>
-                      <span className="text-crt-phosphor truncate max-w-[12rem]">{tok.valueLabel}</span>
-                      <X className="h-3 w-3 shrink-0 opacity-75" />
-                    </button>
+                      {group.onEdit ? (
+                        <button
+                          type="button"
+                          onClick={group.onEdit}
+                          title={group.tooltip}
+                          className="inline-flex items-center gap-1 pl-2 pr-1.5 py-0.5 hover:bg-crt-elevated/70 transition-colors cursor-pointer"
+                        >
+                          <span className="text-crt-muted">
+                            {group.groupLabel}
+                            {group.matchAll ? ' [ALL]' : ''}:
+                          </span>
+                          <span className="text-crt-phosphor truncate max-w-[14rem]">
+                            {group.valueLabel}
+                          </span>
+                        </button>
+                      ) : (
+                        <span
+                          title={group.tooltip}
+                          className="inline-flex items-center gap-1 pl-2 pr-1.5 py-0.5"
+                        >
+                          <span className="text-crt-muted">{group.groupLabel}:</span>
+                          <span className="text-crt-phosphor truncate max-w-[14rem]">
+                            {group.valueLabel}
+                          </span>
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={group.onClear}
+                        aria-label={`Clear ${group.groupLabel} filter`}
+                        title={`Clear ${group.groupLabel} filter`}
+                        className="px-1.5 py-0.5 text-crt-muted hover:text-crt-crimson hover:bg-crt-crimson/10 border-l border-crt-border/70 transition-colors cursor-pointer"
+                      >
+                        <X className="h-3 w-3 shrink-0" />
+                      </button>
+                    </div>
                   ))}
                 </div>
 
                 <button
                   type="button"
                   onClick={clearCatalogFilters}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  title={`Clear all ${activeFilterCount} active filter selection${activeFilterCount === 1 ? '' : 's'}`}
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-mono text-crt-amber/90 hover:text-crt-amber hover:underline transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
-                  <X className="h-3.5 w-3.5" />
-                  Clear All ({activeFilterCount})
+                  <X className="h-3 w-3 shrink-0" />
+                  <span className="tabular-nums">Clear all ({activeFilterCount})</span>
                 </button>
               </div>
             )}
@@ -3938,9 +4263,9 @@ export function CatalogPanel({
                   }`}
                 >
                   <div className="crt-accordion-inner">
-                    <div className="pt-2 border-t border-crt-border/70 flex flex-wrap items-center justify-between gap-3 text-xs">
+                    <div className="pt-2 border-t border-crt-border/55 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                       <div className="min-w-0 flex-1 space-y-1">
-                        <div className="flex flex-wrap items-center gap-2 font-mono tabular-nums">
+                        <div className="flex flex-wrap items-center gap-1.5 font-mono tabular-nums">
                           {indexer.active ? (
                             <>
                               <span className="text-crt-phosphor font-medium">
@@ -3985,7 +4310,7 @@ export function CatalogPanel({
                                       : `${staleTargetCount}/${targetSystems.length} target console${targetSystems.length === 1 ? '' : 's'} stale (>12h)`}
                                 </span>
                               ) : targetSystems.length > 0 ? (
-                                <span className="text-crt-muted" title={freshnessTooltip}>
+                                <span className="text-crt-muted/90" title={freshnessTooltip}>
                                   {indexer.remainingUnindexedSystems > 0
                                     ? `Target consoles fresh (${targetFreshness.fresh.length}/${targetSystems.length})`
                                     : 'All consoles indexed & fresh (<12h)'}
@@ -3994,11 +4319,11 @@ export function CatalogPanel({
                               {indexer.remainingUnindexedSystems > 0 && (
                                 <>
                                   {targetSystems.length > 0 && (
-                                    <span aria-hidden="true" className="text-crt-muted">·</span>
+                                    <span aria-hidden="true" className="text-crt-muted/70">·</span>
                                   )}
-                                  <span className="text-crt-muted">
-                                    {indexer.remainingUnindexedSystems} console
-                                    {indexer.remainingUnindexedSystems === 1 ? '' : 's'} remaining outside your current filter
+                                  <span className="text-crt-muted/80">
+                                    {indexer.remainingUnindexedSystems} more console
+                                    {indexer.remainingUnindexedSystems === 1 ? '' : 's'} available
                                   </span>
                                 </>
                               )}
@@ -4030,7 +4355,7 @@ export function CatalogPanel({
                         )}
                       </div>
 
-                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <div className="flex flex-wrap items-center gap-1 shrink-0">
                         {indexer.active && onStopCatalogIndex && (
                           <button
                             type="button"
@@ -4044,10 +4369,10 @@ export function CatalogPanel({
                               }
                             }}
                             title="Pause background catalog indexing (already indexed games stay saved)"
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                            className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-mono border border-crt-amber/55 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                           >
                             <Pause className="h-3 w-3" />
-                            Pause Indexing
+                            Pause
                           </button>
                         )}
                         {!indexer.active && canUpdateTargets && onStartCatalogIndex && (
@@ -4067,16 +4392,16 @@ export function CatalogPanel({
                                 ? `${staleTargetCount > 0 ? `${staleTargetCount} target console${staleTargetCount === 1 ? '' : 's'} last checked >12h ago. ` : 'All target consoles checked within 12h. '}Check RetroGameTalk for new or modified games since each was last indexed (fast delta update; does not download ROMs)`
                                 : 'Index unindexed or incomplete target consoles and delta-check any stale ones from RetroGameTalk (does not download ROMs)'
                             }
-                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
+                            className={`inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-mono rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
                               targetAttentionCount > 0
-                                ? 'border-crt-amber/65 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/18'
-                                : 'border-crt-border bg-crt-surface hover:border-crt-phosphor text-crt-text'
+                                ? 'border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/18'
+                                : 'border border-transparent text-crt-muted hover:text-crt-text hover:bg-crt-elevated/70 hover:border-crt-border'
                             }`}
                           >
                             <RefreshCw className={`h-3 w-3 ${indexerBusy ? 'animate-spin' : ''}`} />
                             {allTargetsIndexed
-                              ? `Update Target Consoles${updateTargetSuffix}`
-                              : `Index Target Consoles${updateTargetSuffix}`}
+                              ? `Update Targets${updateTargetSuffix}`
+                              : `Index Targets${updateTargetSuffix}`}
                           </button>
                         )}
                         {!indexer.active && canUpdateTargets && allTargetsIndexed && onStartCatalogIndex && (
@@ -4092,7 +4417,7 @@ export function CatalogPanel({
                               }
                             }}
                             title="Re-scan every page of all target consoles from scratch to rebuild local catalog metadata (slower; does not download ROMs)"
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text hover:border-crt-border-strong rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                            className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-mono border border-transparent text-crt-muted hover:text-crt-text hover:bg-crt-elevated/70 hover:border-crt-border rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                           >
                             <RotateCcw className="h-3 w-3 shrink-0" />
                             Full Re-index
@@ -4113,9 +4438,9 @@ export function CatalogPanel({
                                 }
                               }}
                               title="Fetch game metadata from RetroGameTalk for remaining unindexed consoles (does not download ROMs)"
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                              className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-mono border border-transparent text-crt-muted hover:text-crt-phosphor hover:bg-crt-phosphor/10 hover:border-crt-phosphor/40 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                             >
-                              Index Remaining Consoles ({indexer.remainingUnindexedSystems})
+                              Index Remaining ({indexer.remainingUnindexedSystems})
                             </button>
                           )}
                       </div>
