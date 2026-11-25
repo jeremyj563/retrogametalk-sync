@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.38.8] - 2026-11-24
+
+- Fixed **Device Export → Mounted Device** so manually overridden console folders are no longer reported under **`unrecognized folders ignored`**, and added built-in recognition for standard OnionOS / Miyoo Mini spelled-out ROM folders:
+  - **Manual Override Filtering**: Excluded any folders mapped via global or per-device manual console overrides (matching case-insensitively and across direct vs. `Roms/`-prefixed mounts) from the `unrecognized folders ignored` count and list.
+  - **OnionOS / Miyoo Mini Aliases**: Added automatic folder detection for `FIFTYTWOHUNDRED` (Atari 5200), `SEGASGONE` (Sega SG-1000), `SEVENTYEIGHTHUNDRED` (Atari 7800), `THIRTYTWOX` (Sega 32X), and `TWENTYSIXHUNDRED` (Atari 2600).
+
 ## [1.38.7] - 2026-11-24
 
 - Surfaced clear **stale index (`>12h`)** indicators directly on and beside all catalog index update controls across **Sync**, **Catalog**, and **Sync Rules**:

@@ -34,6 +34,7 @@ import {
   appendNamingToken,
   buildLiveExportDestinations,
   composeEffectiveStorageFolderConfig,
+  filterUnmatchedDeviceFolders,
   findActiveNamingPreset,
   resolveConsolePathSource,
   ROM_NAMING_TOKEN_HELPERS,
@@ -243,6 +244,16 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
         autoConfigChosenPaths,
         autoConfigIncludeSubfolders,
       ],
+    );
+
+    const effectiveUnmatchedFolders = useMemo(
+      () =>
+        filterUnmatchedDeviceFolders(
+          autoConfigResult?.unmatchedFolders,
+          effectiveDraftFolderConfig,
+          autoConfigResult?.detectedRomRoot,
+        ),
+      [autoConfigResult, effectiveDraftFolderConfig],
     );
 
     const activeNamingPreset = useMemo(
@@ -962,7 +973,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
                         })}
                       </div>
 
-                      {autoConfigResult.unmatchedFolders.length > 0 && (
+                      {effectiveUnmatchedFolders.length > 0 && (
                         <div className="space-y-1">
                           <button
                             type="button"
@@ -976,13 +987,13 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
                               <ChevronDown className="h-3 w-3 shrink-0" />
                             )}
                             <span>
-                              {autoConfigResult.unmatchedFolders.length} unrecognized folder
-                              {autoConfigResult.unmatchedFolders.length === 1 ? '' : 's'} ignored
+                              {effectiveUnmatchedFolders.length} unrecognized folder
+                              {effectiveUnmatchedFolders.length === 1 ? '' : 's'} ignored
                             </span>
                           </button>
                           {showUnmatchedFolders && (
                             <div className="text-[11px] font-mono text-crt-muted/85 pl-4 leading-relaxed break-words">
-                              {autoConfigResult.unmatchedFolders.map((folder, idx) => (
+                              {effectiveUnmatchedFolders.map((folder, idx) => (
                                 <span key={folder}>
                                   {idx > 0 && <span aria-hidden="true"> · </span>}/{folder}
                                 </span>

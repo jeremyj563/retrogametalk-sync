@@ -5,6 +5,7 @@ import {
   buildLiveExportDestinations,
   buildScanReviewSummary,
   composeEffectiveStorageFolderConfig,
+  filterUnmatchedDeviceFolders,
   findActiveNamingPreset,
   findEvaluatedScanMatch,
   getActiveManualOverrideSlugs,
@@ -305,4 +306,31 @@ test('buildScanReviewSummary and findEvaluatedScanMatch resolve canonical and al
   assert.equal(findEvaluatedScanMatch(summary, 'snes')?.diff.kind, 'new');
   assert.equal(findEvaluatedScanMatch(summary, 'nes-roms')?.diff.kind, 'updates_custom');
   assert.equal(findEvaluatedScanMatch(summary, 'gba-roms')?.diff.kind, 'unchanged');
+});
+
+test('filterUnmatchedDeviceFolders excludes folders mapped via manual console overrides (including case and Roms/ prefix variants)', () => {
+  const cfg = createDefaultStorageFolderConfig();
+  cfg.systemFolders['32x-roms'] = '/MY_CUSTOM_32X';
+  cfg.systemFolders['sg-1000'] = 'Roms/MY_SG_DIR';
+  cfg.systemFolders['atari-5200-roms'] = 'MY_5200';
+
+  // Direct root mount (unmatched paths have no Roms/ prefix)
+  assert.deepEqual(
+    filterUnmatchedDeviceFolders(
+      ['MY_CUSTOM_32X', 'my_sg_dir', 'STILL_UNKNOWN'],
+      cfg,
+      '',
+    ),
+    ['STILL_UNKNOWN'],
+  );
+
+  // Nested Roms/ mount (manual override entered without Roms/ prefix still clears Roms/MY_5200)
+  assert.deepEqual(
+    filterUnmatchedDeviceFolders(
+      ['Roms/MY_5200', 'Roms/MY_SG_DIR', 'Roms/OTHER_STUFF'],
+      cfg,
+      'Roms',
+    ),
+    ['Roms/OTHER_STUFF'],
+  );
 });

@@ -386,7 +386,7 @@ const ECOSYSTEM_PLATFORM_ALIASES: Readonly<
 
   // Sega
   'sg-1000': {
-    exact: ['sg1000', 'segasg1000'],
+    exact: ['sg1000', 'segasg1000', 'segasgone'],
     extensions: ['sg'],
   },
   'sms-roms': {
@@ -406,7 +406,7 @@ const ECOSYSTEM_PLATFORM_ALIASES: Readonly<
     extensions: ['chd', 'cue', 'bin', 'iso'],
   },
   '32x-roms': {
-    exact: ['32x', 'sega32x', 's32x', '32xroms'],
+    exact: ['32x', 'sega32x', 's32x', '32xroms', 'thirtytwox'],
     extensions: ['32x'],
   },
   'saturn-iso': {
@@ -458,15 +458,15 @@ const ECOSYSTEM_PLATFORM_ALIASES: Readonly<
 
   // Other Consoles & Handhelds
   'atari-2600-roms': {
-    exact: ['atari2600', '2600', 'a2600', 'atari', 'atari2600roms'],
+    exact: ['atari2600', '2600', 'a2600', 'atari', 'atari2600roms', 'twentysixhundred'],
     extensions: ['a26'],
   },
   'atari-5200-roms': {
-    exact: ['atari5200', '5200', 'a5200', 'fiftytwo', 'atari5200roms'],
+    exact: ['atari5200', '5200', 'a5200', 'fiftytwo', 'fiftytwohundred', 'atari5200roms'],
     extensions: ['a52'],
   },
   'atari-7800-roms': {
-    exact: ['atari7800', '7800', 'a7800', 'seventyeight', 'atari7800roms'],
+    exact: ['atari7800', '7800', 'a7800', 'seventyeight', 'seventyeighthundred', 'atari7800roms'],
     extensions: ['a78'],
   },
   'atari-lynx': {
