@@ -2239,6 +2239,7 @@ export default function App() {
                 <OverviewPanel
                   config={config}
                   status={status}
+                  installer={bulkInstaller}
                   runs={runs}
                   logs={logs}
                   preflight={preflight}
