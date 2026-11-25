@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.40.0] - 2026-11-24
+
+- Redesigned **Catalog → Local Disk Tree** into a modern, self-contained CRT file explorer and fixed the empty-viewport scroll bug when drilling into deeply scrolled subdirectories:
+  - **Viewport-Bounded Explorer & Smart Scroll Memory**: Bounded the directory listing inside its own scrollable explorer pane with sticky column headers, automatically resetting scroll to the top (and clearing stale folder filters) whenever you enter a subdirectory or inspect an archive, bringing the explorer into view if the outer page was scrolled down, and restoring your exact parent scroll offset when navigating back up.
+  - **Unified Path Bar, Sorting & Contextual Summary**: Consolidated Up navigation, interactive path breadcrumbs, one-click path copy, folder filtering, column/dropdown sorting (`Name A–Z`, `Name Z–A`, `Largest First`, `Recently Modified`), a quick `..` parent folder row, and an inline contextual selection bar into one clean explorer frame—while simplifying the outer Catalog toolbar.
+  - **Direct Local File Downloads & Safe Row Deletion**: Added `GET /api/fs/download` for streaming validated files directly from local disk alongside domain-aware ROM/disc/archive/patch icons, unboxed file type metadata, and inline 2-step delete confirmation to prevent accidental folder deletions.
+
 ## [1.39.2] - 2026-11-24
 
 - Fixed the **Game Detail Drawer** when opened from the **Sync** page (and its **Failed Queue** drawer) so mounted-device **`Install to <Device>`**, **`Upgrade on <Device>`**, **`Reinstall`**, and **`Uninstall`** actions appear automatically as soon as a release finishes downloading to local storage:
