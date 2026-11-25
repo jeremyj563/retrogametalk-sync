@@ -6,6 +6,7 @@ on:
       - main
     tags:
       - "[0-9]*.*.*"
+    # Skip CI on non-code commits (including chore/update-readme-screenshots and docs-only edits)
     paths-ignore:
       - "docs/**"
       - "**/*.md"
