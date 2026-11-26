@@ -17,6 +17,7 @@ import {
   Trash2,
   XCircle,
 } from 'lucide-react';
+import { EphemeralInlineNotice, EphemeralNotice } from './EphemeralNotice';
 import type {
   BulkInstallKnownItemMeta,
   BulkStorageInstallerController,
@@ -1282,7 +1283,6 @@ export function OverviewPanel({
       await onSaveConfig({ lastWatermarkAt: iso });
       setEditingCutoff(false);
       setCutoffSavedNotice('Cutoff updated');
-      setTimeout(() => setCutoffSavedNotice(null), 3500);
     } catch (err) {
       setCutoffError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1297,7 +1297,6 @@ export function OverviewPanel({
       await onSaveConfig({ lastWatermarkAt: null });
       setEditingCutoff(false);
       setCutoffSavedNotice('Reset to 24h default');
-      setTimeout(() => setCutoffSavedNotice(null), 3500);
     } catch (err) {
       setCutoffError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1631,11 +1630,14 @@ export function OverviewPanel({
                       ? ` · ${status.activeRun.downloadedCount} downloaded`
                       : ''}
                   </span>
-                ) : cutoffSavedNotice && !editingCutoff ? (
-                  <span className="text-crt-phosphor whitespace-nowrap shrink-0">
-                    {cutoffSavedNotice}
-                  </span>
-                ) : null}
+                ) : (
+                  <EphemeralInlineNotice
+                    message={!editingCutoff ? cutoffSavedNotice : null}
+                    tone="phosphor"
+                    autoDismissMs={3500}
+                    onDismiss={() => setCutoffSavedNotice(null)}
+                  />
+                )}
               </div>
 
               {/* Tier 2: Hero Showcase (Adaptive Box-Art spanning Unboxed Title + Docked Transfer Bar) */}
@@ -2136,9 +2138,14 @@ export function OverviewPanel({
                           ? 'Paused by user — resume where it left off or clear back to available.'
                           : 'Left pending after a stop or container restart — resume where it left off or clear back to available.'}
                 </p>
-                {pausedQueueNotice && (
-                  <p className="text-[11px] font-mono text-crt-amber">{pausedQueueNotice}</p>
-                )}
+                <EphemeralNotice
+                  message={pausedQueueNotice}
+                  tone="amber"
+                  variant="compact"
+                  autoDismissMs={5000}
+                  onDismiss={() => setPausedQueueNotice(null)}
+                  surfaceClassName="text-[11px]"
+                />
               </div>
 
               <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -2277,9 +2284,14 @@ export function OverviewPanel({
                   )}
                 </span>
               </p>
-              {monitorQueueNotice && (
-                <p className="text-[11px] font-mono text-crt-phosphor">{monitorQueueNotice}</p>
-              )}
+              <EphemeralNotice
+                message={monitorQueueNotice}
+                tone="phosphor"
+                variant="compact"
+                autoDismissMs={5000}
+                onDismiss={() => setMonitorQueueNotice(null)}
+                surfaceClassName="text-[11px]"
+              />
             </div>
 
             <div className="flex flex-wrap items-center gap-2 shrink-0">

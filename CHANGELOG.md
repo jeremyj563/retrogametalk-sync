@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.44.1] - 2026-11-26
+
+- Added a unified **CRT phosphor afterglow dissolve & zero-jump collapse** disappearance effect across all ephemeral confirmation messages and dismissible notices (`EphemeralNotice`, `EphemeralInlineNotice`, `EphemeralFloatingToast`, `useEphemeralPresence`, and `ConfigSaveBar`):
+  - **CRT Phosphor Exit & Hover-Pausable Decay Bar**: Timed confirmation banners (Catalog queue notices, Sync Rules / System Settings / Device Export save bars, Monitor cutoff & queue notices, System backup notices, Device Fleet feedback, Game Detail uninstall strips, and floating toasts) now display a subtle bottom phosphor decay hairline that pauses on hover/focus, then softly phosphor-dissolve with a horizontal CRT beam pinch and smooth height/margin collapse instead of abruptly blinking out and snapping layout.
+  - **Motion Accessibility**: Respects both the in-app **Living UI Motion = Off** setting (clean fade + smooth collapse without phosphor flare) and OS `prefers-reduced-motion: reduce`.
+
 ## [1.44.0] - 2026-11-25
 
 - Added **automatic download queue recovery with persistent crash-loop backoff** so interrupted queues resume automatically after unexpected restarts (`SIGTERM`, `SIGINT`, `SIGKILL`, OOM kills, or upgrades) without requiring manual intervention:

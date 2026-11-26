@@ -26,6 +26,7 @@ import {
   X,
 } from 'lucide-react';
 import type { BulkStorageInstallerController } from '../hooks/useBulkStorageInstaller';
+import { EphemeralNotice } from './EphemeralNotice';
 import { useSectionSpotlight } from '../hooks/useSectionSpotlight';
 import { formatDateTime } from '../utils/format';
 import {
@@ -140,7 +141,6 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
     const [renameDraft, setRenameDraft] = useState('');
     const [confirmDeleteProfileId, setConfirmDeleteProfileId] = useState<string | null>(null);
     const isDirtyRef = useRef(false);
-    const saveNoticeTimerRef = useRef<number | null>(null);
 
     const resetFormToConfig = useCallback((target: ScraperConfigPublic) => {
       setRomNamingTemplate(target.romNamingTemplate);
@@ -300,9 +300,6 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
     useEffect(() => {
       return () => {
         onDirtyChange?.({ isDirty: false, changedSections: [] });
-        if (saveNoticeTimerRef.current !== null) {
-          window.clearTimeout(saveNoticeTimerRef.current);
-        }
       };
     }, [onDirtyChange]);
 
@@ -313,10 +310,6 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
     }, [dirtyState.isDirty, saveMsg]);
 
     const saveConfiguration = useCallback(async (): Promise<boolean> => {
-      if (saveNoticeTimerRef.current !== null) {
-        window.clearTimeout(saveNoticeTimerRef.current);
-        saveNoticeTimerRef.current = null;
-      }
       setSaving(true);
       setSaveMsg(null);
       setSaveErr(null);
@@ -330,10 +323,6 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
         });
         isDirtyRef.current = false;
         setSaveMsg('Device Export settings saved');
-        saveNoticeTimerRef.current = window.setTimeout(() => {
-          setSaveMsg(null);
-          saveNoticeTimerRef.current = null;
-        }, 3500);
         return true;
       } catch (err) {
         setSaveErr(err instanceof Error ? err.message : String(err));
@@ -729,12 +718,18 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
             </div>
           )}
 
-          {profileNotice && (
-            <div className="text-xs font-mono text-crt-phosphor">{profileNotice}</div>
-          )}
-          {profileError && (
-            <div className="text-xs font-mono text-crt-crimson">{profileError}</div>
-          )}
+          <EphemeralNotice
+            message={profileNotice}
+            tone="phosphor"
+            variant="compact"
+            autoDismissMs={4500}
+            onDismiss={() => setProfileNotice(null)}
+          />
+          <EphemeralNotice
+            message={profileError}
+            tone="crimson"
+            variant="compact"
+          />
 
           {/* Auto-Configure Error (if any) */}
           {autoConfigError && (
@@ -1298,6 +1293,8 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
           saving={saving}
           saveMsg={saveMsg}
           saveErr={saveErr}
+          saveNoticeDurationMs={3500}
+          onDismissSaveMsg={() => setSaveMsg(null)}
           onDiscard={discardChanges}
         />
       </form>

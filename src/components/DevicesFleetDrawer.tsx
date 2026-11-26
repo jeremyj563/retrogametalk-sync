@@ -29,6 +29,7 @@ import {
   DeviceEmblem,
   DeviceIconGlyph,
 } from './DeviceBadge';
+import { EphemeralNotice } from './EphemeralNotice';
 
 interface DevicesFleetDrawerProps {
   open: boolean;
@@ -70,6 +71,10 @@ export function DevicesFleetDrawer({
     tone: 'ok' | 'error';
     message: string;
   } | null>(null);
+  const lastFeedbackToneRef = useRef<'phosphor' | 'crimson'>('phosphor');
+  if (actionFeedback) {
+    lastFeedbackToneRef.current = actionFeedback.tone === 'error' ? 'crimson' : 'phosphor';
+  }
 
   const support = useMemo(() => isFileSystemAccessSupported(), []);
   const phaseRef = useRef<DrawerPhase>(phase);
@@ -440,25 +445,15 @@ export function DevicesFleetDrawer({
             })}
           </div>
 
-          {actionFeedback && (
-            <div
-              className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded border text-[11px] font-mono ${
-                actionFeedback.tone === 'ok'
-                  ? 'border-crt-phosphor/40 bg-crt-phosphor/8 text-crt-phosphor'
-                  : 'border-crt-crimson/45 bg-crt-crimson/10 text-crt-crimson'
-              }`}
-            >
-              <span className="min-w-0 break-words">{actionFeedback.message}</span>
-              <button
-                type="button"
-                onClick={() => setActionFeedback(null)}
-                aria-label="Dismiss notice"
-                className="p-0.5 opacity-75 hover:opacity-100 shrink-0 cursor-pointer"
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </div>
-          )}
+          <EphemeralNotice
+            message={actionFeedback?.message ?? null}
+            tone={lastFeedbackToneRef.current}
+            autoDismissMs={actionFeedback?.tone === 'ok' ? 4500 : null}
+            dismissStyle="icon"
+            dismissAriaLabel="Dismiss notice"
+            onDismiss={() => setActionFeedback(null)}
+            surfaceClassName="px-2.5 py-1.5 text-[11px]"
+          />
         </div>
 
         {/* Fleet List */}

@@ -23,6 +23,7 @@ import {
   Upload,
   XCircle,
 } from 'lucide-react';
+import { EphemeralNotice } from './EphemeralNotice';
 import { useSectionSpotlight } from '../hooks/useSectionSpotlight';
 import {
   parseAndValidateConfigBackup,
@@ -125,13 +126,13 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
 
     const [saving, setSaving] = useState(false);
     const [saveMsg, setSaveMsg] = useState<string | null>(null);
+    const [saveNoticeDurationMs, setSaveNoticeDurationMs] = useState<number>(3500);
     const [saveErr, setSaveErr] = useState<string | null>(null);
 
     const [testingAuth, setTestingAuth] = useState(false);
     const [authResult, setAuthResult] = useState<AuthTestResult | null>(null);
 
     const isDirtyRef = useRef(false);
-    const saveNoticeTimerRef = useRef<number | null>(null);
 
     // Environment override flags
     const baseUrlLockedByEnv = config.envOverrides.includes('RGT_BASE_URL');
@@ -419,9 +420,6 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
     useEffect(() => {
       return () => {
         onDirtyChange?.({ isDirty: false, changedSections: [] });
-        if (saveNoticeTimerRef.current !== null) {
-          window.clearTimeout(saveNoticeTimerRef.current);
-        }
       };
     }, [onDirtyChange]);
 
@@ -432,10 +430,6 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
     }, [dirtyState.isDirty, saveMsg]);
 
     const saveConfiguration = useCallback(async (): Promise<boolean> => {
-      if (saveNoticeTimerRef.current !== null) {
-        window.clearTimeout(saveNoticeTimerRef.current);
-        saveNoticeTimerRef.current = null;
-      }
       setSaving(true);
       setSaveMsg(null);
       setSaveErr(null);
@@ -449,19 +443,13 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
         if (liveReceipt?.applied) {
           const runLabel = formatLiveReloadRunLabel(liveReceipt);
           const detail = liveReceipt.changeSummary ? ` (${liveReceipt.changeSummary})` : '';
+          setSaveNoticeDurationMs(6000);
           setSaveMsg(
             `System Settings saved — applied live to active ${runLabel} #${liveReceipt.runId}${detail}`,
           );
-          saveNoticeTimerRef.current = window.setTimeout(() => {
-            setSaveMsg(null);
-            saveNoticeTimerRef.current = null;
-          }, 6000);
         } else {
+          setSaveNoticeDurationMs(3500);
           setSaveMsg('System Settings saved');
-          saveNoticeTimerRef.current = window.setTimeout(() => {
-            setSaveMsg(null);
-            saveNoticeTimerRef.current = null;
-          }, 3500);
         }
         return true;
       } catch (err) {
@@ -1356,40 +1344,22 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
             </div>
           </div>
 
-          {backupError && (
-            <div
-              role="alert"
-              className="border border-crt-crimson/40 bg-crt-crimson/10 rounded px-4 py-3 text-xs font-mono text-crt-text flex items-start justify-between gap-3"
-            >
-              <span className="inline-flex items-start gap-2">
-                <XCircle className="h-4 w-4 text-crt-crimson shrink-0 mt-0.5" />
-                <span>{backupError}</span>
-              </span>
-              <button
-                type="button"
-                onClick={() => setBackupError(null)}
-                className="text-crt-muted hover:text-crt-text underline shrink-0 cursor-pointer"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
+          <EphemeralNotice
+            message={backupError}
+            tone="crimson"
+            icon={<XCircle className="h-4 w-4 text-crt-crimson" />}
+            onDismiss={() => setBackupError(null)}
+            surfaceClassName="px-4 py-3 items-start"
+          />
 
-          {backupNotice && (
-            <div className="border border-crt-phosphor/40 bg-crt-phosphor/8 rounded px-4 py-3 text-xs font-mono text-crt-text flex items-start justify-between gap-3">
-              <span className="inline-flex items-start gap-2">
-                <CheckCircle2 className="h-4 w-4 text-crt-phosphor shrink-0 mt-0.5" />
-                <span>{backupNotice}</span>
-              </span>
-              <button
-                type="button"
-                onClick={() => setBackupNotice(null)}
-                className="text-crt-muted hover:text-crt-text underline shrink-0 cursor-pointer"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
+          <EphemeralNotice
+            message={backupNotice}
+            tone="phosphor"
+            autoDismissMs={6000}
+            icon={<CheckCircle2 className="h-4 w-4 text-crt-phosphor" />}
+            onDismiss={() => setBackupNotice(null)}
+            surfaceClassName="px-4 py-3 items-start text-crt-text"
+          />
 
           {backupPreview && (
             <div className="border border-crt-border-strong bg-crt-bg rounded-md p-4 space-y-4">
@@ -1471,6 +1441,8 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
           saving={saving}
           saveMsg={saveMsg}
           saveErr={saveErr}
+          saveNoticeDurationMs={saveNoticeDurationMs}
+          onDismissSaveMsg={() => setSaveMsg(null)}
           infoHint={liveReloadHint}
           onDiscard={discardChanges}
         />

@@ -35,6 +35,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
+import { EphemeralFloatingToast, EphemeralNotice } from './EphemeralNotice';
 import { readJsonSafely } from '../utils/http';
 import type {
   BulkInstallKnownItemMeta,
@@ -853,11 +854,7 @@ export function CatalogPanel({
     }
   }, [filterSelectionKey]);
 
-  useEffect(() => {
-    if (!queueNotice) return;
-    const t = window.setTimeout(() => setQueueNotice(null), 4500);
-    return () => window.clearTimeout(t);
-  }, [queueNotice]);
+  // Ephemeral queueNotice auto-dismiss and CRT exit transition are handled by <EphemeralNotice />.
 
   useEffect(() => {
     const nextPrefs: CatalogViewPrefs = {
@@ -4657,18 +4654,12 @@ export function CatalogPanel({
               );
             })()}
 
-            {queueNotice && (
-              <div className="border border-crt-phosphor/45 bg-crt-phosphor/8 rounded px-3 py-2 text-xs font-mono text-crt-phosphor flex items-center justify-between gap-3">
-                <span>{queueNotice}</span>
-                <button
-                  type="button"
-                  onClick={() => setQueueNotice(null)}
-                  className="text-crt-muted hover:text-crt-text shrink-0 cursor-pointer"
-                >
-                  Dismiss
-                </button>
-              </div>
-            )}
+            <EphemeralNotice
+              message={queueNotice}
+              tone="phosphor"
+              autoDismissMs={4500}
+              onDismiss={() => setQueueNotice(null)}
+            />
 
             {activeCollection && (() => {
               const missingCount = activeCollection.queueableCount;
@@ -6455,18 +6446,12 @@ export function CatalogPanel({
         }}
       />
 
-      {installer.mountError && !installer.modalOpen && (
-        <div className="fixed bottom-4 right-4 z-40 max-w-md border border-crt-amber/60 bg-crt-surface px-4 py-3 rounded text-xs font-mono text-crt-amber shadow-lg flex items-center justify-between gap-3">
-          <span>{installer.mountError}</span>
-          <button
-            type="button"
-            onClick={installer.clearMountError}
-            className="text-crt-muted hover:text-crt-text shrink-0 cursor-pointer"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
+      <EphemeralFloatingToast
+        message={installer.mountError && !installer.modalOpen ? installer.mountError : null}
+        tone="amber"
+        onDismiss={installer.clearMountError}
+        className="bottom-4 right-4 z-40 px-4 py-3 rounded shadow-lg"
+      />
     </div>
   );
 }

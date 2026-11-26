@@ -14,6 +14,7 @@ import { CatalogPanel } from './components/CatalogPanel';
 import { CrtDisplayControl } from './components/CrtDisplayControl';
 import { DeviceExportPanel } from './components/DeviceExportPanel';
 import { DevicesFleetDrawer } from './components/DevicesFleetDrawer';
+import { EphemeralFloatingToast, EphemeralNotice } from './components/EphemeralNotice';
 import { HeaderSoundDeck } from './components/HeaderSoundDeck';
 import { IdentifyDeviceModal } from './components/IdentifyDeviceModal';
 import { LivingNavIcon } from './components/LivingNavIcon';
@@ -2285,18 +2286,13 @@ export default function App() {
 
         {/* Main Content Viewport */}
         <main className="flex-1 p-5 lg:p-7 min-w-0">
-          {errorBanner && (
-            <div className="mb-5 border border-crt-crimson/50 bg-crt-crimson/10 text-crt-text px-4 py-3 rounded text-xs font-mono flex items-center justify-between gap-4">
-              <span>{errorBanner}</span>
-              <button
-                type="button"
-                onClick={() => setErrorBanner(null)}
-                className="text-crt-muted hover:text-crt-text underline shrink-0"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
+          <EphemeralNotice
+            message={errorBanner}
+            tone="crimson"
+            onDismiss={() => setErrorBanner(null)}
+            className="mb-5"
+            surfaceClassName="px-4 py-3"
+          />
 
           {!status || !config ? (
             <div className="space-y-4">
@@ -2484,16 +2480,13 @@ export default function App() {
       )}
 
       {/* Mellow Phosphor Easter Egg Toast */}
-      {easterToast && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="crt-easter-toast fixed bottom-5 right-5 z-[72] border border-crt-phosphor/60 bg-crt-surface/95 backdrop-blur px-3.5 py-2 rounded-[5px] shadow-2xl text-xs font-mono text-crt-phosphor flex items-center gap-2 pointer-events-none"
-        >
-          <span className="h-2 w-2 rounded-full bg-crt-phosphor shrink-0" />
-          <span>{easterToast}</span>
-        </div>
-      )}
+      <EphemeralFloatingToast
+        message={easterToast}
+        tone="phosphor"
+        pointerEventsNone
+        icon={<span className="h-2 w-2 rounded-full bg-crt-phosphor shrink-0" />}
+        className="py-2"
+      />
 
       {/* App-Wide Storage Device Installer Modal (can be closed & reopened while transfers run) */}
       {config && (

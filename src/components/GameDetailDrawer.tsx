@@ -53,6 +53,7 @@ import type {
   UserCollectionRecord,
 } from '../types';
 import { ArchiveExplorer } from './ArchiveExplorer';
+import { EphemeralNotice } from './EphemeralNotice';
 import { CollectionPickerPopover } from './CollectionPickerPopover';
 import { DeviceIconGlyph, getDeviceColorOption } from './DeviceBadge';
 import { formatBytes, formatDateTime } from '../utils/format';
@@ -347,6 +348,10 @@ export function GameDetailDrawer({
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [uninstallingLocal, setUninstallingLocal] = useState(false);
   const [uninstallMessage, setUninstallMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const lastUninstallToneRef = useRef<'phosphor' | 'crimson'>('phosphor');
+  if (uninstallMessage) {
+    lastUninstallToneRef.current = uninstallMessage.kind === 'error' ? 'crimson' : 'phosphor';
+  }
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [coverFailed, setCoverFailed] = useState(false);
   const [failedScreenshots, setFailedScreenshots] = useState<Set<number>>(new Set());
@@ -2798,25 +2803,16 @@ export function GameDetailDrawer({
 
           return (
             <>
-              {uninstallMessage && !confirmUninstall && (
-                <div
-                  className={`px-6 py-2 border-t flex items-center justify-between gap-2 text-xs font-mono shrink-0 ${
-                    uninstallMessage.kind === 'error'
-                      ? 'border-crt-crimson/40 bg-crt-crimson/10 text-crt-crimson'
-                      : 'border-crt-phosphor/35 bg-crt-phosphor/8 text-crt-phosphor'
-                  }`}
-                >
-                  <span className="truncate">{uninstallMessage.text}</span>
-                  <button
-                    type="button"
-                    onClick={() => setUninstallMessage(null)}
-                    className="p-0.5 text-crt-muted hover:text-crt-text cursor-pointer shrink-0"
-                    aria-label="Dismiss uninstall status"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              )}
+              <EphemeralNotice
+                message={!confirmUninstall ? uninstallMessage?.text ?? null : null}
+                tone={lastUninstallToneRef.current}
+                variant="strip"
+                autoDismissMs={uninstallMessage?.kind === 'ok' ? 4500 : null}
+                dismissStyle="icon"
+                dismissAriaLabel="Dismiss uninstall status"
+                onDismiss={() => setUninstallMessage(null)}
+                className="shrink-0"
+              />
 
               {confirmUninstall && mountedDeviceName && isInstalledOnActiveDevice && (
                 <div className="px-6 py-3 border-t border-crt-crimson/45 bg-crt-crimson/10 space-y-2 text-xs font-mono shrink-0">

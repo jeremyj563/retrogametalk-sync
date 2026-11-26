@@ -175,9 +175,9 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
 
     const [saving, setSaving] = useState(false);
     const [saveMsg, setSaveMsg] = useState<string | null>(null);
+    const [saveNoticeDurationMs, setSaveNoticeDurationMs] = useState<number>(3500);
     const [saveErr, setSaveErr] = useState<string | null>(null);
     const isDirtyRef = useRef(false);
-    const saveNoticeTimerRef = useRef<number | null>(null);
 
     const cronLockedByEnv = config.envOverrides.includes('CRON_SCHEDULE');
     const scheduleEnabledLockedByEnv = config.envOverrides.includes('SCRAPER_SCHEDULE_ENABLED');
@@ -581,9 +581,6 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
     useEffect(() => {
       return () => {
         onDirtyChange?.({ isDirty: false, changedSections: [] });
-        if (saveNoticeTimerRef.current !== null) {
-          window.clearTimeout(saveNoticeTimerRef.current);
-        }
       };
     }, [onDirtyChange]);
 
@@ -603,10 +600,6 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
         setSaveErr('Select at least one allowed game or ROM type, or switch to All Release Types.');
         setSaveMsg(null);
         return false;
-      }
-      if (saveNoticeTimerRef.current !== null) {
-        window.clearTimeout(saveNoticeTimerRef.current);
-        saveNoticeTimerRef.current = null;
       }
       setSaving(true);
       setSaveMsg(null);
@@ -641,17 +634,11 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
               : '';
             notices.push(`active ${indexerLabel}${detail}`);
           }
+          setSaveNoticeDurationMs(6000);
           setSaveMsg(`Sync Rules saved — applied live to ${notices.join(' and ')}`);
-          saveNoticeTimerRef.current = window.setTimeout(() => {
-            setSaveMsg(null);
-            saveNoticeTimerRef.current = null;
-          }, 6000);
         } else {
+          setSaveNoticeDurationMs(3500);
           setSaveMsg('Sync Rules saved');
-          saveNoticeTimerRef.current = window.setTimeout(() => {
-            setSaveMsg(null);
-            saveNoticeTimerRef.current = null;
-          }, 3500);
         }
         return true;
       } catch (err) {
@@ -1986,6 +1973,8 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
           saving={saving}
           saveMsg={saveMsg}
           saveErr={saveErr}
+          saveNoticeDurationMs={saveNoticeDurationMs}
+          onDismissSaveMsg={() => setSaveMsg(null)}
           validationHint={validationHint}
           infoHint={liveReloadHint}
           saveDisabled={customTypeSelectionEmpty || (!cronLockedByEnv && !cronValidation.valid)}

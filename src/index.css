@@ -5013,3 +5013,308 @@ header:has(.crt-brand-banner[data-banner-dry-run="true"]) .crt-header-beam {
     inset 0 2px 6px rgba(0, 0, 0, 0.8),
     inset 0 0 0 1px rgba(var(--crt-phosphor-rgb, 56, 229, 107), 0.28);
 }
+
+/* ==========================================================================
+   Ephemeral Confirmation Notices — CRT Phosphor Afterglow Dissolve & Collapse
+   ========================================================================== */
+@keyframes crt-ephemeral-decay {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes crt-ephemeral-phosphor-out {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scaleX(1) scaleY(1);
+    filter: brightness(1);
+  }
+  20% {
+    opacity: 0.95;
+    transform: translate3d(0, 0, 0) scaleX(1.003) scaleY(0.96);
+    filter: brightness(1.2);
+  }
+  62% {
+    opacity: 0.34;
+    transform: translate3d(0, -2px, 0) scaleX(0.986) scaleY(0.8);
+    filter: brightness(1.08) blur(0.6px);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0) scaleX(0.96) scaleY(0.58);
+    filter: brightness(0.82) blur(1.4px);
+  }
+}
+
+@keyframes crt-ephemeral-scanline-pinch {
+  0% {
+    opacity: 0;
+    transform: scaleX(0.96);
+  }
+  26% {
+    opacity: 0.72;
+    transform: scaleX(1);
+  }
+  74% {
+    opacity: 0.36;
+    transform: scaleX(0.42);
+  }
+  100% {
+    opacity: 0;
+    transform: scaleX(0.05);
+  }
+}
+
+@keyframes crt-ephemeral-inline-out {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+    filter: brightness(1);
+  }
+  22% {
+    opacity: 0.96;
+    transform: translate3d(0, 0, 0);
+    filter: brightness(1.22);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, -3px, 0);
+    filter: brightness(0.85) blur(1px);
+  }
+}
+
+@keyframes crt-ephemeral-toast-out {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+    filter: brightness(1);
+  }
+  20% {
+    opacity: 0.95;
+    transform: translate3d(0, 0, 0) scale(1);
+    filter: brightness(1.18);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(14px, 2px, 0) scale(0.97);
+    filter: brightness(0.85) blur(1px);
+  }
+}
+
+@keyframes crt-ephemeral-simple-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+[data-ephemeral-tone="phosphor"] {
+  --crt-ephemeral-accent: var(--color-crt-phosphor);
+}
+
+[data-ephemeral-tone="amber"] {
+  --crt-ephemeral-accent: var(--color-crt-amber);
+}
+
+[data-ephemeral-tone="crimson"] {
+  --crt-ephemeral-accent: var(--color-crt-crimson);
+}
+
+.crt-ephemeral-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  overflow-anchor: none;
+  transition:
+    grid-template-rows 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    margin-block-start 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    margin-block-end 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.crt-ephemeral-collapse[data-ephemeral-state="entering"] {
+  grid-template-rows: 0fr;
+  margin-block-start: 0;
+  margin-block-end: 0;
+}
+
+.crt-ephemeral-collapse[data-ephemeral-state="closing"] {
+  grid-template-rows: 0fr;
+  margin-block-start: 0;
+  margin-block-end: 0;
+  pointer-events: none;
+  transition-delay: 120ms;
+  transition-duration: 300ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.crt-ephemeral-collapse-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.crt-ephemeral-surface {
+  --crt-ephemeral-accent: var(--color-crt-phosphor);
+  transform-origin: center center;
+  will-change: transform, opacity, filter;
+  transition:
+    opacity 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.crt-ephemeral-surface[data-ephemeral-state="entering"] {
+  opacity: 0;
+  transform: translate3d(0, -4px, 0) scaleY(0.96);
+}
+
+.crt-ephemeral-surface[data-ephemeral-state="open"] {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scaleY(1);
+}
+
+.crt-ephemeral-surface[data-ephemeral-state="closing"] {
+  animation: crt-ephemeral-phosphor-out 360ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.crt-ephemeral-surface:not(.crt-ephemeral-surface-compact)::after {
+  content: "";
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  top: 50%;
+  height: 1.5px;
+  margin-top: -0.75px;
+  pointer-events: none;
+  opacity: 0;
+  border-radius: 9999px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--crt-ephemeral-accent) 85%, white 15%) 24%,
+    color-mix(in srgb, white 75%, var(--crt-ephemeral-accent)) 50%,
+    color-mix(in srgb, var(--crt-ephemeral-accent) 85%, white 15%) 76%,
+    transparent 100%
+  );
+  box-shadow: 0 0 10px 1px color-mix(in srgb, var(--crt-ephemeral-accent) 60%, transparent);
+  transform-origin: center center;
+  will-change: transform, opacity;
+}
+
+.crt-ephemeral-surface:not(.crt-ephemeral-surface-compact)[data-ephemeral-state="closing"]::after {
+  animation: crt-ephemeral-scanline-pinch 340ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.crt-ephemeral-decay-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  pointer-events: none;
+  transform-origin: left center;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--crt-ephemeral-accent) 38%, transparent) 0%,
+    color-mix(in srgb, var(--crt-ephemeral-accent) 85%, transparent) 100%
+  );
+  box-shadow: 0 0 8px color-mix(in srgb, var(--crt-ephemeral-accent) 55%, transparent);
+  opacity: 0.72;
+  animation: crt-ephemeral-decay var(--crt-ephemeral-duration, 4500ms) linear forwards;
+  will-change: transform;
+}
+
+.crt-ephemeral-decay-bar[data-paused="true"] {
+  animation-play-state: paused;
+  opacity: 0.95;
+}
+
+.crt-ephemeral-inline {
+  display: inline-block;
+  will-change: transform, opacity, filter;
+  transition:
+    opacity 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.crt-ephemeral-inline[data-ephemeral-state="entering"] {
+  opacity: 0;
+  transform: translate3d(0, -2px, 0);
+}
+
+.crt-ephemeral-inline[data-ephemeral-state="open"] {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+}
+
+.crt-ephemeral-inline[data-ephemeral-state="closing"] {
+  animation: crt-ephemeral-inline-out 340ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.crt-ephemeral-toast {
+  --crt-ephemeral-accent: var(--color-crt-phosphor);
+  will-change: transform, opacity, filter;
+  transition:
+    opacity 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.crt-ephemeral-toast[data-ephemeral-state="entering"] {
+  opacity: 0;
+  transform: translate3d(0, 10px, 0) scale(0.98);
+}
+
+.crt-ephemeral-toast[data-ephemeral-state="open"] {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.crt-ephemeral-toast[data-ephemeral-state="closing"] {
+  pointer-events: none;
+  animation: crt-ephemeral-toast-out 320ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* Living UI Motion = Off: crisp opacity dissolve + smooth collapse without phosphor flare */
+[data-crt-motion="off"] .crt-ephemeral-collapse[data-ephemeral-state="closing"] {
+  transition-delay: 40ms;
+  transition-duration: 200ms;
+}
+
+[data-crt-motion="off"] .crt-ephemeral-surface[data-ephemeral-state="closing"],
+[data-crt-motion="off"] .crt-ephemeral-inline[data-ephemeral-state="closing"],
+[data-crt-motion="off"] .crt-ephemeral-toast[data-ephemeral-state="closing"] {
+  animation: crt-ephemeral-simple-fade-out 200ms ease-out forwards;
+}
+
+[data-crt-motion="off"] .crt-ephemeral-surface::after {
+  display: none;
+}
+
+/* Reduced Motion accessibility: gentle opacity fade only */
+@media (prefers-reduced-motion: reduce) {
+  .crt-ephemeral-collapse {
+    transition: none !important;
+  }
+
+  .crt-ephemeral-surface,
+  .crt-ephemeral-inline,
+  .crt-ephemeral-toast {
+    transition: opacity 130ms ease !important;
+    transform: none !important;
+    filter: none !important;
+  }
+
+  .crt-ephemeral-surface[data-ephemeral-state="closing"],
+  .crt-ephemeral-inline[data-ephemeral-state="closing"],
+  .crt-ephemeral-toast[data-ephemeral-state="closing"] {
+    animation: crt-ephemeral-simple-fade-out 130ms ease forwards !important;
+  }
+
+  .crt-ephemeral-surface::after,
+  .crt-ephemeral-decay-bar {
+    display: none !important;
+  }
+}
+
