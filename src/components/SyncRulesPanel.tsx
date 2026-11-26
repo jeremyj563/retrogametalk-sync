@@ -622,13 +622,26 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
             : {}),
         });
         isDirtyRef.current = false;
-        const liveReceipt = saveResult && 'liveSyncReload' in saveResult ? saveResult.liveSyncReload : null;
-        if (liveReceipt?.applied) {
-          const modeLabel = formatLiveReloadRunLabel(liveReceipt);
-          const detail = liveReceipt.changeSummary ? ` (${liveReceipt.changeSummary})` : '';
-          setSaveMsg(
-            `Sync Rules saved — applied live to active ${modeLabel} #${liveReceipt.runId}${detail}`,
-          );
+        const liveReceipt =
+          saveResult && 'liveSyncReload' in saveResult ? saveResult.liveSyncReload : null;
+        const liveIndexerReceipt =
+          saveResult && 'liveIndexerReload' in saveResult ? saveResult.liveIndexerReload : null;
+        if (liveReceipt?.applied || liveIndexerReceipt?.applied) {
+          const notices: string[] = [];
+          if (liveReceipt?.applied) {
+            const modeLabel = formatLiveReloadRunLabel(liveReceipt);
+            const detail = liveReceipt.changeSummary ? ` (${liveReceipt.changeSummary})` : '';
+            notices.push(`active ${modeLabel} #${liveReceipt.runId}${detail}`);
+          }
+          if (liveIndexerReceipt?.applied) {
+            const indexerLabel =
+              liveIndexerReceipt.scope === 'full' ? 'Full Site Indexer' : 'Catalog Indexer';
+            const detail = liveIndexerReceipt.changeSummary
+              ? ` (${liveIndexerReceipt.changeSummary})`
+              : '';
+            notices.push(`active ${indexerLabel}${detail}`);
+          }
+          setSaveMsg(`Sync Rules saved — applied live to ${notices.join(' and ')}`);
           saveNoticeTimerRef.current = window.setTimeout(() => {
             setSaveMsg(null);
             saveNoticeTimerRef.current = null;
@@ -695,14 +708,27 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
       Boolean(liveReloadTargetRun) &&
       liveReloadTargetRun?.triggerType === 'scheduled' &&
       liveReloadTargetRun?.mode !== 'full';
+    const hasUnsavedConsoleEdits = dirtyState.changedSections.includes('Target Consoles');
     const hasUnsavedRuleEdits =
-      dirtyState.changedSections.includes('Target Consoles') ||
+      hasUnsavedConsoleEdits ||
       dirtyState.changedSections.includes('Allowed Types') ||
       (isScheduledIncrementalActive && hasUnsavedAutoDownloadEdit);
+    const activeIndexer = status.indexer?.active ? status.indexer : null;
+    const liveReloadHintParts: string[] = [];
+    if (liveReloadTargetRun && hasUnsavedRuleEdits) {
+      liveReloadHintParts.push(
+        `Active ${formatLiveReloadRunLabel(liveReloadTargetRun)} #${liveReloadTargetRun.id} running — saved rule changes will apply live after the current file.`,
+      );
+    }
+    if (activeIndexer && hasUnsavedConsoleEdits) {
+      liveReloadHintParts.push(
+        activeIndexer.scope === 'full'
+          ? 'Full Site Indexer running — newly selected consoles will be prioritized next in the active queue.'
+          : 'Catalog Indexer running — saved console changes will apply live immediately (dropping removed consoles and queuing added ones).',
+      );
+    }
     const liveReloadHint =
-      liveReloadTargetRun && hasUnsavedRuleEdits
-        ? `Active ${formatLiveReloadRunLabel(liveReloadTargetRun)} #${liveReloadTargetRun.id} running — saved rule changes will apply live after the current file.`
-        : null;
+      liveReloadHintParts.length > 0 ? liveReloadHintParts.join(' ') : null;
 
     return (
       <form

@@ -10,6 +10,7 @@ export type {
   SystemTypeFolderOverride,
   SystemTypeSubfolderMode,
 } from './shared/storageFolderMappings';
+export type { LiveIndexerReloadReceipt } from './shared/catalogIndexerPlan';
 export type { LiveSyncReloadReceipt, SyncOverrideMode } from './shared/syncRuleMatcher';
 export type NavSection =
   | 'monitor'
@@ -114,6 +115,7 @@ export interface ScraperConfigPublic {
 export interface ConfigSaveResult {
   config: ScraperConfigPublic;
   liveSyncReload?: import('./shared/syncRuleMatcher').LiveSyncReloadReceipt | null;
+  liveIndexerReload?: import('./shared/catalogIndexerPlan').LiveIndexerReloadReceipt | null;
 }
 
 export type ConfigPatchPayload = Partial<ScraperConfigPublic> & {
@@ -131,6 +133,7 @@ export interface ConfigBackupImportResult {
   ok: boolean;
   config: ScraperConfigPublic;
   liveSyncReload?: import('./shared/syncRuleMatcher').LiveSyncReloadReceipt | null;
+  liveIndexerReload?: import('./shared/catalogIndexerPlan').LiveIndexerReloadReceipt | null;
   appliedFields: string[];
   skippedEnvLocked: string[];
   changesCount: number;

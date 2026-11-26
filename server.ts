@@ -1563,7 +1563,11 @@ async function bootstrap() {
       const body = (req.body || {}) as ConfigUpdateInput;
       const result = orchestrator.updateConfigurationWithMeta(body);
       res.setHeader('Cache-Control', 'no-store');
-      res.json({ config: result.config, liveSyncReload: result.liveSyncReload });
+      res.json({
+        config: result.config,
+        liveSyncReload: result.liveSyncReload,
+        liveIndexerReload: result.liveIndexerReload,
+      });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -1597,6 +1601,7 @@ async function bootstrap() {
           ok: true,
           config: current,
           liveSyncReload: null,
+          liveIndexerReload: null,
           appliedFields: [],
           skippedEnvLocked: validation.skippedEnvLocked.map((item) => item.envVar),
           changesCount: 0,
@@ -1610,6 +1615,7 @@ async function bootstrap() {
         ok: true,
         config: result.config,
         liveSyncReload: result.liveSyncReload,
+        liveIndexerReload: result.liveIndexerReload,
         appliedFields: validation.appliedFields,
         skippedEnvLocked: validation.skippedEnvLocked.map((item) => item.envVar),
         changesCount: validation.changes.length,

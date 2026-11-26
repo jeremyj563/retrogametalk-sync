@@ -5,8 +5,11 @@ import {
   CATALOG_DELTA_OVERLAP_MS,
   computeCatalogDeltaCutoffIso,
   findSystemIndexCursor,
+  formatLiveIndexerReloadSummary,
   planCatalogIndexTargets,
+  reconcileActiveCatalogIndexQueue,
   type CatalogIndexCursorRecord,
+  type PlannedCatalogIndexTarget,
 } from '../src/shared/catalogIndexerPlan.ts';
 import { DEFAULT_INDEX_STALE_MS } from '../src/shared/syncRuleMatcher.ts';
 
@@ -383,4 +386,159 @@ test('planCatalogIndexTargets auto-heals depleted, partial-page, and poisoned ze
     ],
   );
 });
+
+const makeTarget = (
+  slug: string,
+  strategy: 'full' | 'delta' = 'full',
+): PlannedCatalogIndexTarget => ({
+  slug,
+  strategy,
+  modifiedAfterIso: strategy === 'delta' ? FRESH_ISO : null,
+  existingCursor: null,
+});
+
+test('reconcileActiveCatalogIndexQueue aborts unchecked active console, drops unchecked queued ones, and splices newly added consoles live', () => {
+  const currentTarget = makeTarget('psx', 'full');
+  const remainingQueue = [makeTarget('snes-rom', 'full'), makeTarget('nes-roms', 'delta')];
+  const completedSlugs = new Set<string>(['gb']);
+
+  // User unchecks psx (currently scanning) and nes-roms (queued), keeps snes-rom, and adds gba-roms (unindexed)
+  const desiredCandidates = ['snes-rom', 'gba-roms'];
+  const desiredPlan = planCatalogIndexTargets({
+    candidateTargets: desiredCandidates,
+    indexState: {},
+    scope: 'filtered',
+    nowMs: NOW_MS,
+  });
+
+  const reconciled = reconcileActiveCatalogIndexQueue({
+    scope: 'filtered',
+    currentTarget,
+    remainingQueue,
+    completedSlugs,
+    desiredCandidateSlugs: desiredCandidates,
+    desiredPlan,
+  });
+
+  assert.equal(reconciled.changed, true);
+  assert.equal(reconciled.abortCurrentSystem, true);
+  assert.deepEqual(reconciled.removedSlugs, ['psx', 'nes-roms']);
+  assert.deepEqual(reconciled.addedSlugs, ['gba-roms']);
+  assert.deepEqual(
+    reconciled.nextQueue.map((t) => t.slug),
+    ['snes-rom', 'gba-roms'],
+  );
+
+  assert.equal(
+    formatLiveIndexerReloadSummary({
+      addedSystems: reconciled.addedSlugs,
+      removedSystems: reconciled.removedSlugs,
+      abortedCurrentSystem: 'psx',
+      reprioritized: reconciled.reprioritized,
+    }),
+    'queued gba-roms · dropped psx, nes-roms (cancelled active psx)',
+  );
+});
+
+test('reconcileActiveCatalogIndexQueue keeps active fresh delta console running when a new unindexed console is added', () => {
+  // User started a delta check on [snes-rom, nes-roms] (both fresh), then added unindexed gba-roms mid-run.
+  // desiredPlan now plans ONLY [gba-roms] because unindexed consoles skip fresh deltas,
+  // but snes-rom and nes-roms are still in desiredCandidateSlugs so neither should be aborted/dropped.
+  const indexState: Record<string, CatalogIndexCursorRecord> = {
+    'snes-rom': { lastIndexedAt: FRESH_ISO, fullyIndexed: true, totalWpPosts: 100, totalPages: 1, pagesIndexed: 1 },
+    'nes-roms': { lastIndexedAt: FRESH_ISO, fullyIndexed: true, totalWpPosts: 100, totalPages: 1, pagesIndexed: 1 },
+  };
+  const desiredCandidates = ['snes-rom', 'nes-roms', 'gba-roms'];
+  const desiredPlan = planCatalogIndexTargets({
+    candidateTargets: desiredCandidates,
+    indexState,
+    scope: 'filtered',
+    nowMs: NOW_MS,
+    catalogCountsBySystem: { 'snes-rom': 100, 'nes-roms': 100 },
+  });
+
+  const reconciled = reconcileActiveCatalogIndexQueue({
+    scope: 'filtered',
+    currentTarget: makeTarget('snes-rom', 'delta'),
+    remainingQueue: [makeTarget('nes-roms', 'delta')],
+    completedSlugs: new Set(),
+    desiredCandidateSlugs: desiredCandidates,
+    desiredPlan,
+  });
+
+  assert.equal(reconciled.changed, true);
+  assert.equal(reconciled.abortCurrentSystem, false);
+  assert.deepEqual(reconciled.removedSlugs, []);
+  assert.deepEqual(reconciled.addedSlugs, ['gba-roms']);
+  // Newly added full-index target jumps ahead of lingering delta target
+  assert.deepEqual(
+    reconciled.nextQueue.map((t) => ({ slug: t.slug, strategy: t.strategy })),
+    [
+      { slug: 'gba-roms', strategy: 'full' },
+      { slug: 'nes-roms', strategy: 'delta' },
+    ],
+  );
+});
+
+test('reconcileActiveCatalogIndexQueue reprioritizes full-site queue without dropping any site consoles', () => {
+  const remainingQueue = [
+    makeTarget('atari-2600', 'full'),
+    makeTarget('n64', 'full'),
+    makeTarget('gba-roms', 'full'),
+  ];
+  const desiredCandidates = ['gba-roms', 'n64', 'atari-2600'];
+  const desiredPlan = { targets: desiredCandidates.map((s) => makeTarget(s, 'full')), mode: 'full' as const };
+
+  const reconciled = reconcileActiveCatalogIndexQueue({
+    scope: 'full',
+    currentTarget: makeTarget('snes-rom', 'full'),
+    remainingQueue,
+    completedSlugs: new Set(),
+    desiredCandidateSlugs: desiredCandidates,
+    desiredPlan,
+  });
+
+  assert.equal(reconciled.changed, true);
+  assert.equal(reconciled.abortCurrentSystem, false);
+  assert.equal(reconciled.reprioritized, true);
+  assert.deepEqual(reconciled.removedSlugs, []);
+  assert.deepEqual(reconciled.addedSlugs, []);
+  assert.deepEqual(
+    reconciled.nextQueue.map((t) => t.slug),
+    ['gba-roms', 'n64', 'atari-2600'],
+  );
+  assert.equal(
+    formatLiveIndexerReloadSummary({
+      addedSystems: reconciled.addedSlugs,
+      removedSystems: reconciled.removedSlugs,
+      abortedCurrentSystem: null,
+      reprioritized: reconciled.reprioritized,
+    }),
+    'reprioritized remaining queue',
+  );
+});
+
+test('reconcileActiveCatalogIndexQueue returns changed=false when already-completed or unchanged targets match', () => {
+  const reconciled = reconcileActiveCatalogIndexQueue({
+    scope: 'filtered',
+    currentTarget: makeTarget('snes-rom', 'full'),
+    remainingQueue: [makeTarget('gba-roms', 'full')],
+    completedSlugs: new Set(['nes-roms']),
+    desiredCandidateSlugs: ['nes-roms', 'snes-rom', 'gba-roms'],
+    desiredPlan: {
+      targets: [makeTarget('nes-roms', 'full'), makeTarget('snes-rom', 'full'), makeTarget('gba-roms', 'full')],
+      mode: 'full',
+    },
+  });
+
+  assert.equal(reconciled.changed, false);
+  assert.equal(reconciled.abortCurrentSystem, false);
+  assert.deepEqual(reconciled.addedSlugs, []);
+  assert.deepEqual(reconciled.removedSlugs, []);
+  assert.deepEqual(
+    reconciled.nextQueue.map((t) => t.slug),
+    ['gba-roms'],
+  );
+});
+
 

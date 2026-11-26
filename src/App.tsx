@@ -1355,6 +1355,7 @@ export default function App() {
   ): Promise<{
     config: ScraperConfigPublic;
     liveSyncReload: import('./types').LiveSyncReloadReceipt | null;
+    liveIndexerReload: import('./types').LiveIndexerReloadReceipt | null;
   }> => {
     const res = await fetch('/api/config', {
       method: 'PUT',
@@ -1367,6 +1368,7 @@ export default function App() {
     const parsed = await readJsonSafely<{
       config?: ScraperConfigPublic;
       liveSyncReload?: import('./types').LiveSyncReloadReceipt | null;
+      liveIndexerReload?: import('./types').LiveIndexerReloadReceipt | null;
       error?: string;
     }>(res);
     if (!parsed.ok || !parsed.data?.config) {
@@ -1377,6 +1379,7 @@ export default function App() {
     return {
       config: parsed.data.config,
       liveSyncReload: parsed.data.liveSyncReload ?? null,
+      liveIndexerReload: parsed.data.liveIndexerReload ?? null,
     };
   };
 

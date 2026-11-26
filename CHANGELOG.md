@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.43.0] - 2026-11-25
+
+- Added **live mid-run Target Console reloading for the Catalog Indexer** so saving console changes in **Sync Rules** takes effect immediately without waiting for the current index run to finish:
+  - **Dynamic Live Queue & Per-Console Cancellation (`orchestrator.ts`, `catalogIndexerPlan.ts`)**: Replaced the indexer's static startup target snapshot with a live queue backed by per-console abort signals (`AbortSignal.any`). During a **Target Consoles** (`filtered`) index, unchecked consoles are immediately cancelled (if actively paginating) or dropped from the queue, while newly checked consoles are spliced directly into the active run; during a **Full Site** (`full`) index, newly selected target consoles are immediately reprioritized to the front of the remaining queue without dropping other consoles.
+  - **Live Save Feedback (`SyncRulesPanel.tsx`, `/api/config`)**: Added `liveIndexerReload` receipts and pre-save hints in **Sync Rules** (plus `[Live Indexer]` Activity Log entries) showing exactly which consoles were queued, dropped, cancelled, or reprioritized mid-run.
+
 ## [1.42.3] - 2026-11-25
 
 - Updated the env-locked **Repository Password** field in **System Settings** to display standard obscured password dots instead of placeholder text, and upgraded the shared `EnvLockIndicator` across all environment-locked settings in **System Settings** and **Sync Rules** with an amber lock badge and an instant CRT hover/focus tooltip explaining why the field is read-only and how to change it.

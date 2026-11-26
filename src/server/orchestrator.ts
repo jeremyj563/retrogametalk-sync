@@ -78,8 +78,13 @@ import {
 } from '../shared/releaseTypeFilter.ts';
 import {
   buildUpdatedSystemIndexCursor,
+  type CatalogIndexMode,
   computeCatalogDeltaCutoffIso,
+  formatLiveIndexerReloadSummary,
+  type LiveIndexerReloadReceipt,
+  type PlannedCatalogIndexTarget,
   planCatalogIndexTargets,
+  reconcileActiveCatalogIndexQueue,
 } from '../shared/catalogIndexerPlan.ts';
 import {
   classifySystemIndexFreshness,
@@ -475,7 +480,17 @@ export class ScraperOrchestrator extends EventEmitter {
     lastError: null,
   };
   private indexerAbortController: AbortController | null = null;
-  private pendingAutoIndexAfterCurrent = false;
+  private activeIndexerRun: {
+    scope: 'filtered' | 'full';
+    auto: boolean;
+    forceFull: boolean;
+    queue: PlannedCatalogIndexTarget[];
+    currentTarget: PlannedCatalogIndexTarget | null;
+    currentSystemAbort: AbortController | null;
+    completedSlugs: Set<string>;
+    systemsCompleted: number;
+    liveCancelledCount: number;
+  } | null = null;
   private runFinishedWaiters: (() => void)[] = [];
   private pendingDownloadQueueIds: number[] = [];
   private pendingDownloadQueueSet = new Set<number>();
@@ -947,6 +962,7 @@ export class ScraperOrchestrator extends EventEmitter {
   updateConfigurationWithMeta(input: ConfigUpdateInput): {
     config: ScraperConfigPublic;
     liveSyncReload: LiveSyncReloadReceipt | null;
+    liveIndexerReload: LiveIndexerReloadReceipt | null;
   } {
     const prevCfg = getInternalConfig();
     const prevAuthAt = getLastAuthenticatedAt();
@@ -961,6 +977,7 @@ export class ScraperOrchestrator extends EventEmitter {
     const ruleDiff = diffSyncRules(prevCfg, nextCfg, nextCfg.discoveredSystems);
     const runtimeDiff = diffRuntimeSyncSettings(prevCfg, nextCfg);
     let liveSyncReload: LiveSyncReloadReceipt | null = null;
+    let liveIndexerReload: LiveIndexerReloadReceipt | null = null;
 
     if (ruleDiff.changed) {
       this.syncRulesRevision += 1;
@@ -1040,22 +1057,16 @@ export class ScraperOrchestrator extends EventEmitter {
       this.emitCatalogUpdated('sync_rules_updated');
     }
 
-    // When consoles are added outside an active Full/Incremental Sync, immediately kick off
-    // background auto-indexing for any newly added unindexed consoles (or queue it behind an
-    // active filtered index / download queue) so Catalog populates right away.
+    // When consoles change during an active Catalog Indexer run, reconcile its live queue
+    // immediately (aborting unchecked active consoles, dropping unchecked queued consoles,
+    // and splicing newly added consoles directly into the run). Otherwise kick off background
+    // auto-indexing for newly added unindexed consoles outside an active Full/Incremental Sync.
     const activeRunHandlesLiveIndex =
       this.activeRun !== null && isSyncRunEligibleForLiveRuleReload(this.activeRun);
-    if (
-      ruleDiff.changed &&
-      ruleDiff.consolesChanged &&
-      !this.shuttingDown &&
-      !activeRunHandlesLiveIndex
-    ) {
-      if (this.indexerState.active) {
-        if (this.indexerState.scope === 'filtered') {
-          this.pendingAutoIndexAfterCurrent = true;
-        }
-      } else {
+    if (ruleDiff.changed && ruleDiff.consolesChanged && !this.shuttingDown) {
+      if (this.indexerState.active && this.activeIndexerRun) {
+        liveIndexerReload = this.reconcileLiveIndexerTargets(nextCfg);
+      } else if (!activeRunHandlesLiveIndex) {
         void this.startCatalogIndex('filtered', { auto: true }).catch(() => undefined);
       }
     }
@@ -1067,7 +1078,7 @@ export class ScraperOrchestrator extends EventEmitter {
           ? `Incremental cutoff watermark updated to ${updated.lastWatermarkAt}`
           : 'Incremental cutoff watermark cleared (using default 24h lookback)',
       );
-    } else if (!liveSyncReload) {
+    } else if (!liveSyncReload && !liveIndexerReload) {
       this.log('info', 'Service configuration saved');
     }
     this.emitStatus();
@@ -1098,7 +1109,7 @@ export class ScraperOrchestrator extends EventEmitter {
     } catch {
       // Non-fatal
     }
-    return { config: updated, liveSyncReload };
+    return { config: updated, liveSyncReload, liveIndexerReload };
   }
 
   async testAuth(): Promise<AuthTestResult> {
@@ -2550,6 +2561,123 @@ export class ScraperOrchestrator extends EventEmitter {
     };
   }
 
+  private resolveCatalogIndexCandidates(
+    cfg: ScraperConfigInternal,
+    scope: 'filtered' | 'full',
+    validDiscovered: readonly string[],
+  ): string[] {
+    const explicitFilters = filterValidSystemSlugs(
+      cfg.systemFilter.split(',').map((s) => s.trim()).filter(Boolean),
+    ).map((s) => s.toLowerCase());
+
+    if (scope === 'filtered') {
+      if (explicitFilters.length > 0) {
+        return explicitFilters;
+      }
+      const prioritized = AUTO_INDEX_PRIORITY_SYSTEMS.filter((s) => validDiscovered.includes(s));
+      return prioritized.length > 0 ? prioritized.slice(0, 6) : validDiscovered.slice(0, 6);
+    }
+
+    const seen = new Set<string>();
+    const candidateTargets: string[] = [];
+    for (const s of [...explicitFilters, ...AUTO_INDEX_PRIORITY_SYSTEMS, ...validDiscovered]) {
+      const canonical = (canonicalizeSystemSlug(s) || s).toLowerCase();
+      if (!validDiscovered.includes(canonical) && !explicitFilters.includes(canonical)) continue;
+      if (!seen.has(canonical)) {
+        seen.add(canonical);
+        candidateTargets.push(canonical);
+      }
+    }
+    return candidateTargets;
+  }
+
+  private computeActiveIndexerMode(
+    activeRun: NonNullable<ScraperOrchestrator['activeIndexerRun']>,
+    fallback: CatalogIndexMode | null,
+  ): CatalogIndexMode | null {
+    const activeTargets = activeRun.currentTarget
+      ? [activeRun.currentTarget, ...activeRun.queue]
+      : activeRun.queue;
+    if (activeTargets.length === 0) return fallback;
+    const hasFull = activeTargets.some((t) => t.strategy === 'full');
+    const hasDelta = activeTargets.some((t) => t.strategy === 'delta');
+    return hasFull && hasDelta ? 'mixed' : hasDelta ? 'delta' : 'full';
+  }
+
+  private reconcileLiveIndexerTargets(cfg: ScraperConfigInternal): LiveIndexerReloadReceipt | null {
+    const activeRun = this.activeIndexerRun;
+    if (!this.indexerState.active || !activeRun) return null;
+
+    const validDiscovered = filterValidSystemSlugs(cfg.discoveredSystems).map((s) => s.toLowerCase());
+    const desiredCandidates = this.resolveCatalogIndexCandidates(cfg, activeRun.scope, validDiscovered);
+    const desiredPlan = planCatalogIndexTargets({
+      candidateTargets: desiredCandidates,
+      indexState: getSystemIndexState(),
+      scope: activeRun.scope,
+      auto: activeRun.auto,
+      forceFull: activeRun.forceFull,
+      catalogCountsBySystem: getCatalogReleaseCountsBySystem(),
+    });
+
+    const reconciled = reconcileActiveCatalogIndexQueue({
+      scope: activeRun.scope,
+      currentTarget: activeRun.currentTarget,
+      remainingQueue: activeRun.queue,
+      completedSlugs: activeRun.completedSlugs,
+      desiredCandidateSlugs: desiredCandidates,
+      desiredPlan,
+    });
+
+    this.indexerState.remainingUnindexedSystems = this.computeRemainingUnindexedSystemsCount(cfg);
+    if (!reconciled.changed) {
+      return null;
+    }
+
+    const abortedCurrentSystem =
+      reconciled.abortCurrentSystem && activeRun.currentTarget ? activeRun.currentTarget.slug : null;
+    activeRun.queue = reconciled.nextQueue;
+
+    if (reconciled.abortCurrentSystem) {
+      activeRun.liveCancelledCount += 1;
+      const abortCtrl = activeRun.currentSystemAbort;
+      activeRun.currentTarget = null;
+      activeRun.currentSystemAbort = null;
+      abortCtrl?.abort();
+    }
+
+    const activeCount = activeRun.currentTarget ? 1 : 0;
+    this.indexerState = {
+      ...this.indexerState,
+      mode: this.computeActiveIndexerMode(activeRun, this.indexerState.mode ?? null),
+      systemsCompleted: activeRun.systemsCompleted,
+      systemsTotal: activeRun.systemsCompleted + activeCount + activeRun.queue.length,
+      remainingUnindexedSystems: this.computeRemainingUnindexedSystemsCount(cfg),
+    };
+
+    const changeSummary = formatLiveIndexerReloadSummary({
+      addedSystems: reconciled.addedSlugs,
+      removedSystems: reconciled.removedSlugs,
+      abortedCurrentSystem,
+      reprioritized: reconciled.reprioritized,
+    });
+
+    this.log(
+      'info',
+      '[Live Indexer] Target consoles updated mid-run — applying live now',
+      changeSummary || null,
+    );
+
+    return {
+      applied: true,
+      scope: activeRun.scope,
+      addedSystems: reconciled.addedSlugs,
+      removedSystems: reconciled.removedSlugs,
+      abortedCurrentSystem,
+      reprioritized: reconciled.reprioritized,
+      changeSummary,
+    };
+  }
+
   async startCatalogIndex(
     scope: 'filtered' | 'full' = 'filtered',
     options: { auto?: boolean; forceFull?: boolean } = {},
@@ -2565,6 +2693,7 @@ export class ScraperOrchestrator extends EventEmitter {
       const upgradingScope = scope === 'full' && this.indexerState.scope === 'filtered';
       const upgradingToForceFull = Boolean(options.forceFull) && this.indexerState.mode !== 'full';
       if (upgradingScope || upgradingToForceFull) {
+        this.activeIndexerRun?.currentSystemAbort?.abort();
         this.indexerAbortController?.abort();
       } else {
         return { started: false, targets: [], mode: this.indexerState.mode ?? null };
@@ -2580,30 +2709,7 @@ export class ScraperOrchestrator extends EventEmitter {
     }
 
     const indexState = getSystemIndexState();
-    const explicitFilters = filterValidSystemSlugs(
-      cfg.systemFilter.split(',').map((s) => s.trim()).filter(Boolean),
-    ).map((s) => s.toLowerCase());
-
-    let candidateTargets: string[] = [];
-    if (scope === 'filtered') {
-      if (explicitFilters.length > 0) {
-        candidateTargets = explicitFilters;
-      } else {
-        const prioritized = AUTO_INDEX_PRIORITY_SYSTEMS.filter((s) => validDiscovered.includes(s));
-        candidateTargets =
-          prioritized.length > 0 ? prioritized.slice(0, 6) : validDiscovered.slice(0, 6);
-      }
-    } else {
-      const seen = new Set<string>();
-      for (const s of [...explicitFilters, ...AUTO_INDEX_PRIORITY_SYSTEMS, ...validDiscovered]) {
-        const canonical = (canonicalizeSystemSlug(s) || s).toLowerCase();
-        if (!validDiscovered.includes(canonical) && !explicitFilters.includes(canonical)) continue;
-        if (!seen.has(canonical)) {
-          seen.add(canonical);
-          candidateTargets.push(canonical);
-        }
-      }
-    }
+    const candidateTargets = this.resolveCatalogIndexCandidates(cfg, scope, validDiscovered);
 
     const plan = planCatalogIndexTargets({
       candidateTargets,
@@ -2621,9 +2727,22 @@ export class ScraperOrchestrator extends EventEmitter {
       return { started: false, targets: [], mode: null };
     }
 
-    this.indexerAbortController = new AbortController();
-    const signal = this.indexerAbortController.signal;
+    const runAbortController = new AbortController();
+    this.indexerAbortController = runAbortController;
+    const signal = runAbortController.signal;
     const runMode = plan.mode ?? 'full';
+    const activeRun = {
+      scope,
+      auto: Boolean(options.auto),
+      forceFull: Boolean(options.forceFull),
+      queue: [...plannedTargets],
+      currentTarget: null as PlannedCatalogIndexTarget | null,
+      currentSystemAbort: null as AbortController | null,
+      completedSlugs: new Set<string>(),
+      systemsCompleted: 0,
+      liveCancelledCount: 0,
+    };
+    this.activeIndexerRun = activeRun;
     this.indexerState = {
       active: true,
       scope,
@@ -2675,76 +2794,104 @@ export class ScraperOrchestrator extends EventEmitter {
           }
         }
 
-        for (let i = 0; i < plannedTargets.length; i += 1) {
+        while (activeRun.queue.length > 0) {
           if (signal.aborted || this.shuttingDown) break;
           await this.waitIfActiveRunBusy(signal);
           if (signal.aborted || this.shuttingDown) break;
 
-          const planned = plannedTargets[i];
+          const planned = activeRun.queue.shift();
+          if (!planned) break;
+
           const systemSlug = planned.slug;
-          const activeCfg = getInternalConfig();
-          const restBase = await this.client.resolveWpRestBaseForSystem(systemSlug, activeCfg, signal, indexerLogger);
-          if (restBase && indexedRestBases.has(restBase.toLowerCase())) {
-            this.indexerState.systemsCompleted = i + 1;
-            continue;
-          }
-          if (restBase) indexedRestBases.add(restBase.toLowerCase());
+          const systemAbort = new AbortController();
+          const systemSignal = AbortSignal.any([signal, systemAbort.signal]);
+          activeRun.currentTarget = planned;
+          activeRun.currentSystemAbort = systemAbort;
 
-          this.indexerState = {
-            ...this.indexerState,
-            currentSystem: systemSlug,
-            currentPage: 1,
-            totalPages: 1,
-          };
-          this.emitStatus();
+          try {
+            const activeCfg = getInternalConfig();
+            const restBase = await this.client.resolveWpRestBaseForSystem(
+              systemSlug,
+              activeCfg,
+              systemSignal,
+              indexerLogger,
+            );
+            if (systemSignal.aborted || this.shuttingDown) {
+              continue;
+            }
+            if (restBase && indexedRestBases.has(restBase.toLowerCase())) {
+              activeRun.completedSlugs.add(systemSlug);
+              activeRun.systemsCompleted += 1;
+              this.indexerState.systemsCompleted = activeRun.systemsCompleted;
+              this.indexerState.systemsTotal = activeRun.systemsCompleted + activeRun.queue.length;
+              continue;
+            }
+            if (restBase) indexedRestBases.add(restBase.toLowerCase());
 
-          const scanStartedAtIso = new Date().toISOString();
-          let pagesForSystem = 0;
-          let postsForSystem = 0;
-          let newPostsForSystem = 0;
-          const res = await this.client.listConsoleReleasesViaWpRest(systemSlug, activeCfg, {
-            modifiedAfterIso: planned.modifiedAfterIso,
-            signal,
-            log: indexerLogger,
-            onPageFetched: (page, totalPages) => {
-              pagesForSystem = Math.max(pagesForSystem, page);
-              this.indexerState = {
-                ...this.indexerState,
-                currentSystem: systemSlug,
-                currentPage: page,
-                totalPages,
-              };
-              this.emitStatus();
-            },
-            onPostsPage: async (posts, page, totalPages) => {
-              for (const post of posts) {
-                if (!post.link) continue;
-                const canonicalLink = post.link.split('#')[0];
-                const existedBefore =
-                  planned.strategy === 'delta'
-                    ? Boolean(getRepositoryItemByRemoteUrl(canonicalLink))
-                    : false;
-                upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, activeCfg));
-                postsForSystem += 1;
-                if (planned.strategy === 'delta') {
-                  if (existedBefore) {
-                    totalExistingUpdated += 1;
-                  } else {
-                    newPostsForSystem += 1;
-                    totalNewDiscovered += 1;
+            this.indexerState = {
+              ...this.indexerState,
+              mode: this.computeActiveIndexerMode(activeRun, this.indexerState.mode ?? null),
+              currentSystem: systemSlug,
+              systemsCompleted: activeRun.systemsCompleted,
+              systemsTotal: activeRun.systemsCompleted + 1 + activeRun.queue.length,
+              currentPage: 1,
+              totalPages: 1,
+            };
+            this.emitStatus();
+
+            const scanStartedAtIso = new Date().toISOString();
+            let pagesForSystem = 0;
+            let postsForSystem = 0;
+            let newPostsForSystem = 0;
+            const res = await this.client.listConsoleReleasesViaWpRest(systemSlug, activeCfg, {
+              modifiedAfterIso: planned.modifiedAfterIso,
+              signal: systemSignal,
+              log: indexerLogger,
+              onPageFetched: (page, totalPages) => {
+                if (systemSignal.aborted) return;
+                pagesForSystem = Math.max(pagesForSystem, page);
+                this.indexerState = {
+                  ...this.indexerState,
+                  currentSystem: systemSlug,
+                  currentPage: page,
+                  totalPages,
+                };
+                this.emitStatus();
+              },
+              onPostsPage: async (posts, page, totalPages) => {
+                if (systemSignal.aborted) return;
+                for (const post of posts) {
+                  if (systemSignal.aborted) return;
+                  if (!post.link) continue;
+                  const canonicalLink = post.link.split('#')[0];
+                  const existedBefore =
+                    planned.strategy === 'delta'
+                      ? Boolean(getRepositoryItemByRemoteUrl(canonicalLink))
+                      : false;
+                  upsertIndexedWpRelease(this.buildWpReleaseRecordInput(post, systemSlug, activeCfg));
+                  postsForSystem += 1;
+                  if (planned.strategy === 'delta') {
+                    if (existedBefore) {
+                      totalExistingUpdated += 1;
+                    } else {
+                      newPostsForSystem += 1;
+                      totalNewDiscovered += 1;
+                    }
                   }
+                  this.indexerState.indexedCount += 1;
                 }
-                this.indexerState.indexedCount += 1;
-              }
-              this.indexerState.currentPage = page;
-              this.indexerState.totalPages = totalPages;
-              this.emitCatalogUpdated('indexer_page');
-              this.emitStatus();
-              await this.waitIfActiveRunBusy(signal);
-            },
-          });
+                this.indexerState.currentPage = page;
+                this.indexerState.totalPages = totalPages;
+                this.emitCatalogUpdated('indexer_page');
+                this.emitStatus();
+                await this.waitIfActiveRunBusy(systemSignal);
+              },
+            });
 
-          if (!signal.aborted && !this.shuttingDown) {
+            if (systemSignal.aborted || this.shuttingDown) {
+              continue;
+            }
+
             if (res.supported) {
               const updatedCursor = buildUpdatedSystemIndexCursor({
                 existingCursor: planned.existingCursor,
@@ -2771,26 +2918,50 @@ export class ScraperOrchestrator extends EventEmitter {
                 `Catalog index could not query WP REST for ${systemSlug}${res.truncatedReason ? ` (${res.truncatedReason})` : ''}; leaving console marked unindexed for retry`,
               );
             }
-          }
 
-          this.indexerState.systemsCompleted = i + 1;
-          this.emitStatus();
+            activeRun.completedSlugs.add(systemSlug);
+            activeRun.systemsCompleted += 1;
+            this.indexerState.systemsCompleted = activeRun.systemsCompleted;
+            this.indexerState.systemsTotal = activeRun.systemsCompleted + activeRun.queue.length;
+            this.indexerState.remainingUnindexedSystems = this.computeRemainingUnindexedSystemsCount(
+              getInternalConfig(),
+            );
+            this.emitStatus();
+          } catch (sysErr) {
+            if (!signal.aborted && systemAbort.signal.aborted) {
+              // Console was cleanly unchecked mid-scan via live Sync Rules update; advance to next console.
+              this.indexerState.systemsTotal = activeRun.systemsCompleted + activeRun.queue.length;
+              this.emitStatus();
+              continue;
+            }
+            throw sysErr;
+          } finally {
+            if (activeRun.currentSystemAbort === systemAbort) {
+              activeRun.currentSystemAbort = null;
+              activeRun.currentTarget = null;
+            }
+          }
         }
 
         if (!signal.aborted && !this.shuttingDown) {
-          if (runMode === 'delta') {
+          if (activeRun.systemsCompleted === 0 && activeRun.liveCancelledCount > 0) {
+            this.log(
+              'info',
+              'Catalog indexing stopped early after mid-run Target Consoles update — no remaining target consoles to index',
+            );
+          } else if (this.indexerState.mode === 'delta') {
             const summary =
               this.indexerState.indexedCount === 0
                 ? 'already up to date'
                 : `${totalNewDiscovered} new, ${totalExistingUpdated} updated`;
             this.log(
               'info',
-              `Catalog delta update complete: ${summary} across ${this.indexerState.systemsCompleted} console(s)`,
+              `Catalog delta update complete: ${summary} across ${activeRun.systemsCompleted} console(s)`,
             );
           } else {
             this.log(
               'info',
-              `Catalog indexing complete: ${this.indexerState.indexedCount} release(s) cataloged across ${this.indexerState.systemsCompleted} console(s)`,
+              `Catalog indexing complete: ${this.indexerState.indexedCount} release(s) cataloged across ${activeRun.systemsCompleted} console(s)`,
             );
           }
         }
@@ -2801,21 +2972,21 @@ export class ScraperOrchestrator extends EventEmitter {
           this.log('warn', `Catalog indexing paused: ${msg}`);
         }
       } finally {
-        const shouldChainAutoIndex =
-          !signal.aborted && !this.shuttingDown && this.pendingAutoIndexAfterCurrent;
-        this.pendingAutoIndexAfterCurrent = false;
-        this.indexerState = {
-          ...this.indexerState,
-          active: false,
-          mode: null,
-          currentSystem: null,
-        };
-        this.indexerAbortController = null;
-        this.emitCatalogUpdated('indexer_finished');
-        this.emitStatus();
-        this.evaluateAndEmitAchievements();
-        if (shouldChainAutoIndex) {
-          void this.startCatalogIndex('filtered', { auto: true }).catch(() => undefined);
+        if (this.activeIndexerRun === activeRun) {
+          this.activeIndexerRun = null;
+          this.indexerState = {
+            ...this.indexerState,
+            active: false,
+            mode: null,
+            currentSystem: null,
+            remainingUnindexedSystems: this.computeRemainingUnindexedSystemsCount(getInternalConfig()),
+          };
+          if (this.indexerAbortController === runAbortController) {
+            this.indexerAbortController = null;
+          }
+          this.emitCatalogUpdated('indexer_finished');
+          this.emitStatus();
+          this.evaluateAndEmitAchievements();
         }
       }
     })();
@@ -2825,7 +2996,10 @@ export class ScraperOrchestrator extends EventEmitter {
 
   stopCatalogIndex(): boolean {
     if (!this.indexerState.active || !this.indexerAbortController) return false;
+    this.activeIndexerRun?.currentSystemAbort?.abort();
+    this.activeIndexerRun = null;
     this.indexerAbortController.abort();
+    this.indexerAbortController = null;
     this.indexerState = {
       ...this.indexerState,
       active: false,

@@ -250,3 +250,206 @@ export function buildUpdatedSystemIndexCursor(params: {
     scope,
   };
 }
+
+export interface LiveIndexerReloadReceipt {
+  applied: boolean;
+  scope: CatalogIndexScope;
+  addedSystems: string[];
+  removedSystems: string[];
+  abortedCurrentSystem: string | null;
+  reprioritized: boolean;
+  changeSummary: string;
+}
+
+export interface ReconciledCatalogIndexQueue {
+  abortCurrentSystem: boolean;
+  nextQueue: PlannedCatalogIndexTarget[];
+  addedSlugs: string[];
+  removedSlugs: string[];
+  reprioritized: boolean;
+  changed: boolean;
+}
+
+/**
+ * Reconciles an active catalog indexer's current console and pending queue against
+ * newly saved Target Console rules without losing progress on still-selected consoles.
+ *
+ * - For `filtered` runs: immediately cancels the active console if unchecked, drops
+ *   unchecked queued consoles, and splices newly added consoles from `desiredPlan`
+ *   directly into the live queue (prioritizing newly added full-index targets ahead
+ *   of remaining delta checks).
+ * - For `full` runs: never drops site consoles, but pulls newly selected priority
+ *   consoles to the front of the remaining queue and splices in any newly configured
+ *   target not yet queued or completed.
+ */
+export function reconcileActiveCatalogIndexQueue(params: {
+  scope: CatalogIndexScope;
+  currentTarget: PlannedCatalogIndexTarget | null;
+  remainingQueue: readonly PlannedCatalogIndexTarget[];
+  completedSlugs: ReadonlySet<string>;
+  desiredCandidateSlugs: readonly string[];
+  desiredPlan: CatalogIndexPlan;
+}): ReconciledCatalogIndexQueue {
+  const {
+    scope,
+    currentTarget,
+    remainingQueue,
+    completedSlugs,
+    desiredCandidateSlugs,
+    desiredPlan,
+  } = params;
+
+  const canonicalize = (slug: string) => canonicalizeSystemSlug(slug).toLowerCase();
+
+  const desiredCandidateOrder: string[] = [];
+  const desiredCandidateSet = new Set<string>();
+  for (const raw of desiredCandidateSlugs) {
+    const slug = canonicalize(raw);
+    if (!slug || desiredCandidateSet.has(slug)) continue;
+    desiredCandidateSet.add(slug);
+    desiredCandidateOrder.push(slug);
+  }
+
+  const completedCanonical = new Set<string>();
+  for (const slug of completedSlugs) {
+    completedCanonical.add(canonicalize(slug));
+  }
+
+  const currentSlug = currentTarget ? canonicalize(currentTarget.slug) : null;
+
+  if (scope === 'full') {
+    const priorityRank = new Map<string, number>();
+    desiredCandidateOrder.forEach((slug, idx) => {
+      priorityRank.set(slug, idx);
+    });
+
+    const existingSlugs = new Set<string>();
+    const keptQueue: PlannedCatalogIndexTarget[] = [];
+    for (const item of remainingQueue) {
+      const slug = canonicalize(item.slug);
+      existingSlugs.add(slug);
+      keptQueue.push(item);
+    }
+
+    const addedTargets: PlannedCatalogIndexTarget[] = [];
+    const addedSlugs: string[] = [];
+    for (const target of desiredPlan.targets) {
+      const slug = canonicalize(target.slug);
+      if (completedCanonical.has(slug) || slug === currentSlug || existingSlugs.has(slug)) {
+        continue;
+      }
+      existingSlugs.add(slug);
+      addedTargets.push(target);
+      addedSlugs.push(slug);
+    }
+
+    const combined = [...addedTargets, ...keptQueue];
+    const beforeOrder = remainingQueue.map((t) => canonicalize(t.slug));
+    const reordered = [...combined].sort((a, b) => {
+      const rankA = priorityRank.get(canonicalize(a.slug));
+      const rankB = priorityRank.get(canonicalize(b.slug));
+      const aHas = rankA !== undefined;
+      const bHas = rankB !== undefined;
+      if (aHas && bHas) return rankA - rankB;
+      if (aHas) return -1;
+      if (bHas) return 1;
+      return 0;
+    });
+    const afterOrder = reordered.map((t) => canonicalize(t.slug));
+    const reprioritized =
+      addedSlugs.length === 0 &&
+      beforeOrder.length === afterOrder.length &&
+      beforeOrder.some((slug, idx) => slug !== afterOrder[idx]);
+
+    return {
+      abortCurrentSystem: false,
+      nextQueue: reordered,
+      addedSlugs,
+      removedSlugs: [],
+      reprioritized,
+      changed: addedSlugs.length > 0 || reprioritized,
+    };
+  }
+
+  // Filtered (Target Consoles) scope:
+  // 1. Check whether the currently paginating console was unchecked
+  const abortCurrentSystem = Boolean(currentSlug && !desiredCandidateSet.has(currentSlug));
+  const removedSlugs: string[] = [];
+  if (abortCurrentSystem && currentSlug) {
+    removedSlugs.push(currentSlug);
+  }
+
+  // 2. Keep still-selected queued consoles; drop unchecked ones
+  const survivingQueue: PlannedCatalogIndexTarget[] = [];
+  const survivingSet = new Set<string>();
+  for (const item of remainingQueue) {
+    const slug = canonicalize(item.slug);
+    if (!desiredCandidateSet.has(slug)) {
+      removedSlugs.push(slug);
+      continue;
+    }
+    if (!survivingSet.has(slug)) {
+      survivingSet.add(slug);
+      survivingQueue.push(item);
+    }
+  }
+
+  // 3. Splice in newly checked consoles from desiredPlan that aren't already running/queued/completed
+  const addedTargets: PlannedCatalogIndexTarget[] = [];
+  const addedSlugs: string[] = [];
+  for (const target of desiredPlan.targets) {
+    const slug = canonicalize(target.slug);
+    const isActiveUnaborted = Boolean(currentSlug && slug === currentSlug && !abortCurrentSystem);
+    if (completedCanonical.has(slug) || isActiveUnaborted || survivingSet.has(slug)) {
+      continue;
+    }
+    survivingSet.add(slug);
+    addedTargets.push(target);
+    addedSlugs.push(slug);
+  }
+
+  // Put newly added full-index targets ahead of any lingering delta targets so freshly checked
+  // unindexed consoles populate Catalog as soon as possible.
+  const newlyAddedFull = addedTargets.filter((t) => t.strategy === 'full');
+  const newlyAddedDelta = addedTargets.filter((t) => t.strategy !== 'full');
+  const survivingFull = survivingQueue.filter((t) => t.strategy === 'full');
+  const survivingDelta = survivingQueue.filter((t) => t.strategy !== 'full');
+  const nextQueue = [...survivingFull, ...newlyAddedFull, ...survivingDelta, ...newlyAddedDelta];
+
+  return {
+    abortCurrentSystem,
+    nextQueue,
+    addedSlugs,
+    removedSlugs,
+    reprioritized: false,
+    changed: abortCurrentSystem || addedSlugs.length > 0 || removedSlugs.length > 0,
+  };
+}
+
+export function formatLiveIndexerReloadSummary(params: {
+  addedSystems: readonly string[];
+  removedSystems: readonly string[];
+  abortedCurrentSystem: string | null;
+  reprioritized: boolean;
+}): string {
+  const formatList = (items: readonly string[]): string =>
+    items.length <= 3 ? items.join(', ') : `${items.slice(0, 2).join(', ')} +${items.length - 2} more`;
+
+  const parts: string[] = [];
+  if (params.addedSystems.length > 0) {
+    parts.push(`queued ${formatList(params.addedSystems)}`);
+  }
+  if (params.removedSystems.length > 0) {
+    const removedLabel = formatList(params.removedSystems);
+    parts.push(
+      params.abortedCurrentSystem
+        ? `dropped ${removedLabel} (cancelled active ${params.abortedCurrentSystem})`
+        : `dropped ${removedLabel}`,
+    );
+  }
+  if (parts.length === 0 && params.reprioritized) {
+    parts.push('reprioritized remaining queue');
+  }
+  return parts.join(' · ');
+}
+
