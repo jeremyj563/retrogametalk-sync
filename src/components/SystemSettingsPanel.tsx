@@ -750,13 +750,17 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
               </div>
               <div className="relative">
                 <input
-                  type={showPassword ? 'text' : 'password'}
+                  type={!passwordLockedByEnv && passwordInput.length > 0 && showPassword ? 'text' : 'password'}
                   autoComplete="new-password"
                   value={passwordInput}
                   disabled={passwordLockedByEnv}
                   onChange={(e) => {
-                    setPasswordInput(e.target.value);
-                    if (clearSavedPassword && e.target.value.length > 0) {
+                    const next = e.target.value;
+                    setPasswordInput(next);
+                    if (next.length === 0) {
+                      setShowPassword(false);
+                    }
+                    if (clearSavedPassword && next.length > 0) {
                       setClearSavedPassword(false);
                     }
                   }}
@@ -769,20 +773,27 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
                           ? 'Saved on server — enter a new password to replace'
                           : 'Enter repository password'
                   }
-                  className="w-full pl-3 pr-10 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor disabled:opacity-70"
+                  className={`w-full pl-3 ${!passwordLockedByEnv && passwordInput.length > 0 ? 'pr-10' : 'pr-3'} py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text placeholder:text-crt-muted focus:outline-none focus:border-crt-phosphor disabled:opacity-70`}
                 />
-                <button
-                  type="button"
-                  disabled={passwordLockedByEnv}
-                  onClick={() => setShowPassword((v) => !v)}
-                  aria-label={showPassword ? 'Hide password' : 'Show password'}
-                  title={showPassword ? 'Hide password' : 'Show password'}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-crt-muted hover:text-crt-phosphor transition-colors cursor-pointer disabled:opacity-40"
-                >
-                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
+                {!passwordLockedByEnv && passwordInput.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    title={showPassword ? 'Hide password' : 'Show password'}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-crt-muted hover:text-crt-phosphor transition-colors cursor-pointer"
+                  >
+                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                )}
               </div>
-              {!passwordLockedByEnv && (
+              {passwordLockedByEnv ? (
+                <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                  <span className="text-crt-muted">
+                    Locked to RGT_PASSWORD on server (never transmitted to browser)
+                  </span>
+                </div>
+              ) : (
                 <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
                   <span className={clearSavedPassword ? 'text-crt-amber' : 'text-crt-muted'}>
                     {clearSavedPassword

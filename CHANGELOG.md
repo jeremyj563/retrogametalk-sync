@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.42.2] - 2026-11-25
+
+- Fixed the misleading password visibility ("eye") button in **System Settings → Repository Password**: the reveal toggle now only appears while actively typing a new password (never when `RGT_PASSWORD` is environment-locked or an encrypted password is already saved on the server), and added a clear server-only status note below env-locked password fields.
+
 ## [1.42.1] - 2026-11-25
 
 - Offloaded `README.md` visual preview screenshots out of git history onto a dedicated GitHub Release asset bucket (`readme-assets`) to eliminate repository bloat on UI updates:
