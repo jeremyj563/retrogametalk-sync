@@ -746,14 +746,24 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2">
                 <label className="text-xs font-medium text-crt-text">Repository Password</label>
-                {passwordLockedByEnv && <EnvLockIndicator envVar="RGT_PASSWORD" />}
+                {passwordLockedByEnv && (
+                  <EnvLockIndicator
+                    envVar="RGT_PASSWORD"
+                    detail="Loaded from the RGT_PASSWORD environment variable. Update or unset it in your .env, Compose, or Helm configuration to change it — for security, the value stays strictly on the server and cannot be revealed in the UI."
+                  />
+                )}
               </div>
               <div className="relative">
                 <input
                   type={!passwordLockedByEnv && passwordInput.length > 0 && showPassword ? 'text' : 'password'}
                   autoComplete="new-password"
-                  value={passwordInput}
+                  value={passwordLockedByEnv ? '••••••••••••••' : passwordInput}
                   disabled={passwordLockedByEnv}
+                  title={
+                    passwordLockedByEnv
+                      ? 'Controlled by RGT_PASSWORD environment variable (read-only)'
+                      : undefined
+                  }
                   onChange={(e) => {
                     const next = e.target.value;
                     setPasswordInput(next);
@@ -766,7 +776,7 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
                   }}
                   placeholder={
                     passwordLockedByEnv
-                      ? 'Managed by RGT_PASSWORD environment variable'
+                      ? undefined
                       : clearSavedPassword
                         ? 'Saved password will be cleared when you save'
                         : config.hasPassword
@@ -787,13 +797,7 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
                   </button>
                 )}
               </div>
-              {passwordLockedByEnv ? (
-                <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
-                  <span className="text-crt-muted">
-                    Locked to RGT_PASSWORD on server (never transmitted to browser)
-                  </span>
-                </div>
-              ) : (
+              {!passwordLockedByEnv && (
                 <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
                   <span className={clearSavedPassword ? 'text-crt-amber' : 'text-crt-muted'}>
                     {clearSavedPassword

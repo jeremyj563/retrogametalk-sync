@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.42.3] - 2026-11-25
+
+- Updated the env-locked **Repository Password** field in **System Settings** to display standard obscured password dots instead of placeholder text, and upgraded the shared `EnvLockIndicator` across all environment-locked settings in **System Settings** and **Sync Rules** with an amber lock badge and an instant CRT hover/focus tooltip explaining why the field is read-only and how to change it.
+
 ## [1.42.2] - 2026-11-25
 
 - Fixed the misleading password visibility ("eye") button in **System Settings → Repository Password**: the reveal toggle now only appears while actively typing a new password (never when `RGT_PASSWORD` is environment-locked or an encrypted password is already saved on the server), and added a clear server-only status note below env-locked password fields.
