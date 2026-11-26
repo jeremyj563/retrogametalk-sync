@@ -43,6 +43,7 @@ export interface GroupedInstallOption {
   smartReason: string | null;
   deviceStatus: OptionDeviceStatus;
   replacesEntryName: string | null;
+  hasDuplicateDestination: boolean;
 }
 
 export interface GroupedInstallGame {
@@ -63,6 +64,7 @@ export interface GroupedInstallGame {
   writeDetail: string | null;
   allSelectedAlreadyOnDevice: boolean;
   hasUpgradeOnDevice: boolean;
+  hasDuplicateDestination: boolean;
 }
 
 export interface DestinationFolderSummary {
@@ -210,7 +212,7 @@ export function groupInstallRowsByGame(params: {
     list.push(row);
   }
 
-  return orderedItemIds.map((itemId) => {
+  const games: GroupedInstallGame[] = orderedItemIds.map((itemId) => {
     const itemRows = rowsByItem.get(itemId) || [];
     const first = itemRows[0];
     const isPlaceholder = itemRows.every((r) => Boolean(r.isPlaceholder));
@@ -258,6 +260,7 @@ export function groupInstallRowsByGame(params: {
           smartReason: row.smartReasonsByTargetId[target.id] || null,
           deviceStatus,
           replacesEntryName: cardCheck.olderEntryName,
+          hasDuplicateDestination: false,
         });
       }
     }
@@ -310,8 +313,44 @@ export function groupInstallRowsByGame(params: {
       writeDetail,
       allSelectedAlreadyOnDevice,
       hasUpgradeOnDevice,
+      hasDuplicateDestination: false,
     };
   });
+
+  // Detect any remaining duplicate destination paths across all selected files in the batch
+  // (e.g., from manual renames or cross-release filename collisions).
+  const destinationCounts = new Map<string, number>();
+  const getDestinationKey = (opt: GroupedInstallOption): string | null => {
+    const cleanName = (
+      opt.target.kind === 'disc_set' ? opt.outputName.replace(/\.zip$/i, '') : opt.outputName
+    )
+      .trim()
+      .toLowerCase();
+    if (!cleanName) return null;
+    const cleanFolder = opt.targetFolder.replace(/^\/+|\/+$/g, '').toLowerCase();
+    return `${cleanFolder}::${cleanName}`;
+  };
+
+  for (const game of games) {
+    for (const opt of game.selectedOptions) {
+      const key = getDestinationKey(opt);
+      if (!key) continue;
+      destinationCounts.set(key, (destinationCounts.get(key) || 0) + 1);
+    }
+  }
+
+  for (const game of games) {
+    let gameHasDup = false;
+    for (const opt of game.selectedOptions) {
+      const key = getDestinationKey(opt);
+      const isDup = Boolean(key && (destinationCounts.get(key) || 0) > 1);
+      opt.hasDuplicateDestination = isDup;
+      if (isDup) gameHasDup = true;
+    }
+    game.hasDuplicateDestination = gameHasDup;
+  }
+
+  return games;
 }
 
 export function summarizeDestinationFolders(

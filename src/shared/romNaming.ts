@@ -1264,3 +1264,332 @@ export function buildUpgradeMatchStem(filename: string): { stem: string; role: s
     version,
   };
 }
+
+export interface RomCollisionCandidate {
+  suggestedFilename: string;
+  extension?: string;
+  omitExtension?: boolean;
+  innerPath?: string | null;
+  archiveFilename?: string | null;
+  displayLabel?: string | null;
+}
+
+interface ExtractedDelimitedToken {
+  text: string;
+  norm: string;
+  delimiter: 'paren' | 'bracket';
+}
+
+const GENERIC_ROLE_TOKEN_RE =
+  /^(?:hack|rom\s*hack|rom|patch|translation|trans|t-[a-z]{2}(?:\s+mtl)?|t\+[a-z]{2,4}|mtl|machine\s*translation|proto(?:type)?|beta|demo|sample|homebrew|indie|port|demake|bootleg|unl|unlicensed|pirate|undub|dlc|original(?:\s+rom)?)$/i;
+
+function basenamePosix(rawPath: string): string {
+  const normalized = rawPath.replace(/\\/g, '/').replace(/\/+$/, '');
+  const idx = normalized.lastIndexOf('/');
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
+}
+
+function parentDirSegmentsPosix(rawPath: string): string[] {
+  const normalized = rawPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length <= 1) return [];
+  return parts.slice(0, -1);
+}
+
+function extractDelimitedTokens(rawText: string): ExtractedDelimitedToken[] {
+  if (!rawText) return [];
+  const cleaned = stripKnownFileExtension(rawText.trim())
+    .replace(/\[[0-9a-f]{8}\]/gi, ' ')
+    .trim();
+  const out: ExtractedDelimitedToken[] = [];
+  const seen = new Set<string>();
+  const re = /(\(([^()]+)\)|\[([^\[\]]+)\])/g;
+  for (const match of cleaned.matchAll(re)) {
+    const isBracket = Boolean(match[3]);
+    const text = (match[2] ?? match[3] ?? '').replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    const norm = text.toLowerCase();
+    if (seen.has(norm)) continue;
+    seen.add(norm);
+    out.push({
+      text,
+      norm,
+      delimiter: isBracket ? 'bracket' : 'paren',
+    });
+  }
+  return out;
+}
+
+function isTokenAlreadyRepresented(tokenText: string, formattedLower: string): boolean {
+  const norm = tokenText.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!norm) return true;
+  if (formattedLower.includes(norm)) return true;
+
+  // Check pure region codes (e.g., "(U)" when "(USA)" is already in the formatted name)
+  const regionParts = norm
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (regionParts.length > 0 && regionParts.every((p) => Boolean(REGION_CODE_MAP[p]))) {
+    const mappedRegions = regionParts.map((p) => REGION_CODE_MAP[p]!.toLowerCase());
+    if (mappedRegions.every((r) => formattedLower.includes(r))) {
+      return true;
+    }
+  }
+
+  // Check pure version tokens (e.g., "(v1.0)" or "(ver 1.0)" when "[Hack v1.0]" is already present)
+  const normalizedVer = normalizeVersionMatch(tokenText);
+  if (normalizedVer && formattedLower.includes(normalizedVer.toLowerCase())) {
+    return true;
+  }
+
+  // Check pure generic role tags if the role word is already represented
+  if (GENERIC_ROLE_TOKEN_RE.test(norm)) {
+    return true;
+  }
+
+  return false;
+}
+
+function extractStemWords(rawText: string): string[] {
+  if (!rawText) return [];
+  const base = stripKnownFileExtension(basenamePosix(rawText))
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/[_\-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!base) return [];
+  return base.split(' ').filter((w) => w.length > 0);
+}
+
+function formatSuffixToken(token: ExtractedDelimitedToken): string {
+  return token.delimiter === 'bracket' ? `[${token.text}]` : `(${token.text})`;
+}
+
+function appendDisambiguatorPreservingLimit(
+  currentFilename: string,
+  extension: string,
+  omitExtension: boolean,
+  suffix: string,
+  namingConfig: Pick<RomNamingConfig, 'romSanitizeFat32' | 'romMaxFilenameLen'>,
+): string {
+  const cleanSuffix = suffix.trim();
+  if (!cleanSuffix) return currentFilename;
+
+  let fileExt = '';
+  let stem = currentFilename;
+  if (!omitExtension) {
+    const normalizedExt = extension
+      ? (extension.startsWith('.') ? extension.toLowerCase() : `.${extension.toLowerCase()}`)
+      : '';
+    if (normalizedExt && currentFilename.toLowerCase().endsWith(normalizedExt)) {
+      fileExt = currentFilename.slice(-normalizedExt.length);
+      stem = currentFilename.slice(0, -normalizedExt.length);
+    } else {
+      const m = currentFilename.match(/^(.*)(\.[a-z0-9]{1,8})$/i);
+      if (m) {
+        stem = m[1];
+        fileExt = m[2];
+      }
+    }
+  }
+
+  const sanitizedSuffix = namingConfig.romSanitizeFat32
+    ? sanitizeFat32Filename(cleanSuffix, 0, false)
+    : cleanSuffix;
+
+  const rawCombined = `${stem.trim()} ${sanitizedSuffix}${fileExt}`;
+  const maxLen = namingConfig.romMaxFilenameLen || 0;
+
+  if (maxLen >= 12) {
+    const preLimit = namingConfig.romSanitizeFat32
+      ? sanitizeFat32Filename(rawCombined, 0, !omitExtension)
+      : rawCombined;
+    if (preLimit.length > maxLen) {
+      const suffixPart = ` ${sanitizedSuffix}`;
+      const allowedStemLen = Math.max(4, maxLen - fileExt.length - suffixPart.length);
+      const cleanStem = namingConfig.romSanitizeFat32
+        ? sanitizeFat32Filename(stem, 0, false)
+        : stem.trim();
+      const trimmedStem = cleanStem.slice(0, allowedStemLen).replace(/[. ]+$/g, '').trim() || 'rom';
+      const reconstructed = `${trimmedStem}${suffixPart}${fileExt}`;
+      return namingConfig.romSanitizeFat32
+        ? sanitizeFat32Filename(reconstructed, maxLen, !omitExtension)
+        : reconstructed.slice(0, maxLen);
+    }
+  }
+
+  return namingConfig.romSanitizeFat32
+    ? sanitizeFat32Filename(rawCombined, maxLen, !omitExtension)
+    : rawCombined;
+}
+
+/**
+ * Resolves colliding destination filenames across multiple ROM targets belonging to the same
+ * release (within one archive or across sibling archives) by extracting meaningful variant
+ * distinguishers such as `[Improved Controls v3.1]`, `(Disc 1)`, `(Easy Type)`, or unique
+ * folder/stem terms—leaving base editions clean when variants already disambiguate the group.
+ */
+export function disambiguateCollidingRomFilenames(
+  candidates: readonly RomCollisionCandidate[],
+  namingConfig: Pick<RomNamingConfig, 'romSanitizeFat32' | 'romMaxFilenameLen'>,
+): string[] {
+  const results = candidates.map((c) => c.suggestedFilename);
+  if (candidates.length <= 1) return results;
+
+  const groupIndicesByKey = (names: readonly string[]): Map<string, number[]> => {
+    const map = new Map<string, number[]>();
+    for (let i = 0; i < names.length; i += 1) {
+      const key = names[i].trim().toLowerCase();
+      const list = map.get(key);
+      if (list) list.push(i);
+      else map.set(key, [i]);
+    }
+    return map;
+  };
+
+  // Pass 1: Extract unique structured (...) and [...] variant tags from colliding siblings
+  for (const [, indices] of groupIndicesByKey(results)) {
+    if (indices.length <= 1) continue;
+
+    const formattedLower = results[indices[0]].toLowerCase();
+
+    const perItemTokens = indices.map((idx) => {
+      const cand = candidates[idx];
+      const innerBase = cand.innerPath ? basenamePosix(cand.innerPath) : '';
+      const archiveBase = cand.archiveFilename ? basenamePosix(cand.archiveFilename) : '';
+      const sources = [innerBase, archiveBase, cand.displayLabel || ''];
+      const merged: ExtractedDelimitedToken[] = [];
+      const seen = new Set<string>();
+      for (const src of sources) {
+        for (const tok of extractDelimitedTokens(src)) {
+          if (seen.has(tok.norm)) continue;
+          if (isTokenAlreadyRepresented(tok.text, formattedLower)) continue;
+          seen.add(tok.norm);
+          merged.push(tok);
+        }
+      }
+      return merged;
+    });
+
+    // Tokens present on EVERY colliding sibling don't differentiate them
+    const sharedNorms = new Set<string>();
+    if (perItemTokens[0]) {
+      for (const tok of perItemTokens[0]) {
+        if (perItemTokens.every((list) => list.some((t) => t.norm === tok.norm))) {
+          sharedNorms.add(tok.norm);
+        }
+      }
+    }
+
+    indices.forEach((idx, pos) => {
+      const uniqueTokens = perItemTokens[pos].filter((t) => !sharedNorms.has(t.norm));
+      if (uniqueTokens.length === 0) return;
+      const suffix = uniqueTokens.slice(0, 2).map(formatSuffixToken).join(' ');
+      const cand = candidates[idx];
+      results[idx] = appendDisambiguatorPreservingLimit(
+        results[idx],
+        cand.extension || '',
+        Boolean(cand.omitExtension),
+        suffix,
+        namingConfig,
+      );
+    });
+  }
+
+  // Pass 2: For any sub-groups STILL colliding, extract unique non-common stem words or folder names
+  for (const [, indices] of groupIndicesByKey(results)) {
+    if (indices.length <= 1) continue;
+
+    const formattedLower = results[indices[0]].toLowerCase();
+
+    const tryWordSource = (extractWords: (cand: RomCollisionCandidate) => string[]): boolean => {
+      const wordLists = indices.map((idx) => extractWords(candidates[idx]));
+      if (wordLists.every((w) => w.length === 0)) return false;
+
+      const lowerSets = wordLists.map((words) => new Set(words.map((w) => w.toLowerCase())));
+      const sharedWords = new Set<string>();
+      for (const w of lowerSets[0]) {
+        if (lowerSets.every((s) => s.has(w))) {
+          sharedWords.add(w);
+        }
+      }
+
+      const uniquePhrases = wordLists.map((words) => {
+        const diff = words.filter(
+          (w) => !sharedWords.has(w.toLowerCase()) && !formattedLower.includes(w.toLowerCase()),
+        );
+        return diff.slice(0, 5).join(' ').trim();
+      });
+
+      const anyUnique = uniquePhrases.some((p) => p.length > 0);
+      if (!anyUnique) return false;
+
+      const proposed = indices.map((idx, pos) => {
+        const phrase = uniquePhrases[pos];
+        if (!phrase) return results[idx];
+        const cand = candidates[idx];
+        return appendDisambiguatorPreservingLimit(
+          results[idx],
+          cand.extension || '',
+          Boolean(cand.omitExtension),
+          `(${phrase})`,
+          namingConfig,
+        );
+      });
+
+      const distinctCount = new Set(proposed.map((p) => p.toLowerCase())).size;
+      if (distinctCount <= 1) return false;
+
+      indices.forEach((idx, pos) => {
+        results[idx] = proposed[pos];
+      });
+      return true;
+    };
+
+    const resolvedByInner = tryWordSource((cand) => extractStemWords(cand.innerPath || ''));
+    if (!resolvedByInner) {
+      const resolvedByFolder = tryWordSource((cand) =>
+        cand.innerPath ? parentDirSegmentsPosix(cand.innerPath) : [],
+      );
+      if (!resolvedByFolder) {
+        const resolvedByArchive = tryWordSource((cand) =>
+          extractStemWords(cand.archiveFilename || ''),
+        );
+        if (!resolvedByArchive) {
+          tryWordSource((cand) => extractStemWords(cand.displayLabel || ''));
+        }
+      }
+    }
+  }
+
+  // Pass 3: Final guaranteed uniqueness fallback for truly indistinguishable siblings
+  const usedLower = new Set<string>();
+  for (let i = 0; i < results.length; i += 1) {
+    let candidateName = results[i];
+    if (usedLower.has(candidateName.toLowerCase())) {
+      const cand = candidates[i];
+      let counter = 2;
+      while (counter < 1000) {
+        const nextAttempt = appendDisambiguatorPreservingLimit(
+          results[i],
+          cand.extension || '',
+          Boolean(cand.omitExtension),
+          `(${counter})`,
+          namingConfig,
+        );
+        if (!usedLower.has(nextAttempt.toLowerCase())) {
+          candidateName = nextAttempt;
+          break;
+        }
+        counter += 1;
+      }
+      results[i] = candidateName;
+    }
+    usedLower.add(results[i].toLowerCase());
+  }
+
+  return results;
+}
+

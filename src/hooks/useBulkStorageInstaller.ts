@@ -9,7 +9,11 @@ import {
   type DeviceUninstallTargetRecord,
 } from '../shared/deviceProfiles';
 import { classifyReleaseTagToTypeKey } from '../shared/releaseTypeFilter';
-import { sanitizeFat32Filename } from '../shared/romNaming';
+import {
+  disambiguateCollidingRomFilenames,
+  sanitizeFat32Filename,
+  type RomCollisionCandidate,
+} from '../shared/romNaming';
 import {
   selectSmartPrimaryTargetsForItem,
   type SmartInspectItemInput,
@@ -493,6 +497,36 @@ function buildRowsFromInspectedItem(
   const hasCompetingVariants =
     totalPlayableTargets > 1 && totalRecommendedCount < totalPlayableTargets;
 
+  // Disambiguate any colliding suggested filenames across sibling archives of the same release
+  const disambiguatedByTargetKey = new Map<string, string>();
+  if (entry.inspections.length > 1) {
+    const keys: string[] = [];
+    const candidates: RomCollisionCandidate[] = [];
+    for (const insp of entry.inspections) {
+      for (const t of insp.playableTargets) {
+        if (t.kind === 'patch_only') continue;
+        keys.push(`${insp.fileId}:${t.id}`);
+        candidates.push({
+          suggestedFilename: t.suggestedFilename,
+          extension: t.kind === 'rom' ? t.extension : '',
+          omitExtension: t.kind !== 'rom',
+          innerPath: t.primaryEntry || t.displayName,
+          archiveFilename: insp.sourceFilename,
+          displayLabel: insp.fileDisplayLabel || null,
+        });
+      }
+    }
+    if (candidates.length > 1) {
+      const resolved = disambiguateCollidingRomFilenames(candidates, {
+        romSanitizeFat32: true,
+        romMaxFilenameLen: 0,
+      });
+      for (let i = 0; i < keys.length; i += 1) {
+        disambiguatedByTargetKey.set(keys[i], resolved[i]);
+      }
+    }
+  }
+
   const builtRows: ExportQueueRow[] = [];
 
   for (const insp of entry.inspections) {
@@ -500,9 +534,10 @@ function buildRowsFromInspectedItem(
     const replaceMap: Record<string, boolean> = {};
     const reasonsMap: Record<string, string> = {};
     for (const t of insp.playableTargets) {
-      namesMap[t.id] = t.suggestedFilename;
+      const key = `${insp.fileId}:${t.id}`;
+      namesMap[t.id] = disambiguatedByTargetKey.get(key) ?? t.suggestedFilename;
       replaceMap[t.id] = true;
-      const reason = smartPick.reasonByTargetKey[`${insp.fileId}:${t.id}`];
+      const reason = smartPick.reasonByTargetKey[key];
       if (reason) {
         reasonsMap[t.id] = reason;
       }

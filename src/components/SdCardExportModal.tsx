@@ -380,7 +380,9 @@ export function SdCardExportModal({
     return (
       <div
         key={`dest-${opt.optionKey}`}
-        className="flex flex-col gap-1.5 rounded border border-crt-border bg-crt-bg px-3.5 py-2.5"
+        className={`flex flex-col gap-1.5 rounded border bg-crt-bg px-3.5 py-2.5 ${
+          opt.hasDuplicateDestination ? 'border-crt-amber/60' : 'border-crt-border'
+        }`}
       >
         {isEditing ? (
           <div className="flex flex-wrap items-center gap-2">
@@ -431,6 +433,11 @@ export function SdCardExportModal({
           </div>
         )}
 
+        {opt.hasDuplicateDestination && (
+          <p className="font-mono text-[11px] text-crt-amber">
+            Duplicate destination filename in this install batch — rename one file so both can be saved.
+          </p>
+        )}
         {opt.deviceStatus === 'upgrade' && opt.replacesEntryName && (
           <p className="font-mono text-[11px] text-crt-amber">
             Replaces older file on {shortDeviceName}: {opt.replacesEntryName}
@@ -993,6 +1000,16 @@ export function SdCardExportModal({
                               )}
                             </div>
                           )}
+
+                          {game.hasDuplicateDestination &&
+                            !isEditingThisRow &&
+                            !isRunning &&
+                            !isFinished && (
+                              <p className="font-mono text-[11px] text-crt-amber">
+                                Duplicate destination filename in this install batch — rename one
+                                file so both can be saved.
+                              </p>
+                            )}
 
                           {/* Inline Version Picker Expansion */}
                           {isExpanded && game.hasMultipleOptions && !isRunning && !isFinished && (

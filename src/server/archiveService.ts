@@ -5,9 +5,11 @@ import { PassThrough } from 'node:stream';
 import type { Response } from 'express';
 import yazl from 'yazl';
 import {
+  disambiguateCollidingRomFilenames,
   extractVersionFromText,
   formatPreparedRomName,
   sanitizeFat32Filename,
+  type RomCollisionCandidate,
   type RomNamingConfig,
 } from '../shared/romNaming.ts';
 import { formatErrorDetails, logServer } from './logger.ts';
@@ -815,18 +817,52 @@ export async function browseArchiveAtPath(
   };
 }
 
-function cleanVariantDistinguisher(entryPath: string, totalVariants: number): string | null {
-  if (totalVariants <= 1) return null;
-  const base = path.posix.basename(entryPath).replace(/\.[^.]+$/, '').trim();
-  const parens = Array.from(base.matchAll(/\(([^)]+)\)/g)).map((m) => m[1].trim());
-  const brackets = Array.from(base.matchAll(/\[([^\]]+)\]/g)).map((m) => m[1].trim());
-  const hints = [...parens, ...brackets].filter(
-    (h) => !/^(usa|u|eur|e|jpn|j|world|w|europe|japan)$/i.test(h),
-  );
-  if (hints.length > 0) {
-    return hints[hints.length - 1];
+export function disambiguateItemInspectionTargets(
+  inspections: readonly ArchiveInspectResult[],
+  namingConfig: Pick<RomNamingConfig, 'romSanitizeFat32' | 'romMaxFilenameLen'>,
+): void {
+  const refs: Array<{
+    target: PlayableExportTarget;
+    candidate: RomCollisionCandidate;
+  }> = [];
+
+  for (const insp of inspections) {
+    for (const target of insp.playableTargets) {
+      if (target.kind === 'patch_only') continue;
+      refs.push({
+        target,
+        candidate: {
+          suggestedFilename: target.suggestedFilename,
+          extension: target.kind === 'rom' ? target.extension : '',
+          omitExtension: target.kind !== 'rom',
+          innerPath: target.primaryEntry || target.displayName,
+          archiveFilename: insp.sourceFilename,
+          displayLabel: insp.fileDisplayLabel || null,
+        },
+      });
+    }
   }
-  return base.slice(0, 48);
+
+  if (refs.length <= 1) return;
+
+  const disambiguated = disambiguateCollidingRomFilenames(
+    refs.map((r) => r.candidate),
+    namingConfig,
+  );
+
+  for (let i = 0; i < refs.length; i += 1) {
+    const nextName = disambiguated[i];
+    const target = refs[i].target;
+    if (nextName === target.suggestedFilename) continue;
+    target.suggestedFilename = nextName;
+    if (target.kind === 'rom') {
+      target.suggestedArchiveName = nextName;
+    } else {
+      target.suggestedArchiveName = namingConfig.romSanitizeFat32
+        ? sanitizeFat32Filename(`${nextName}.zip`, namingConfig.romMaxFilenameLen)
+        : `${nextName}.zip`;
+    }
+  }
 }
 
 export async function inspectArchiveForItem(
@@ -962,7 +998,6 @@ export async function inspectArchiveForItem(
     const rom = standaloneRoms[i];
     const baseName = path.posix.basename(rom.entryPath);
     const ext = getExtLower(rom.entryPath);
-    const variantSuffix = cleanVariantDistinguisher(rom.entryPath, standaloneRoms.length);
 
     const suggestedFilename = formatPreparedRomName(
       {
@@ -979,7 +1014,6 @@ export async function inspectArchiveForItem(
       },
       ext,
       namingConfig,
-      { variantSuffix },
     );
 
     const detectedVersion =
@@ -1004,18 +1038,32 @@ export async function inspectArchiveForItem(
     });
   }
 
-  // Deduplicate accidental identical suggested filenames across multi-variant archives
-  const seenNames = new Set<string>();
-  for (let idx = 0; idx < playableTargets.length; idx += 1) {
-    const t = playableTargets[idx];
-    const key = t.suggestedFilename.toLowerCase();
-    if (seenNames.has(key)) {
-      const ext = t.extension && t.kind === 'rom' ? t.extension : '';
-      const stem = ext ? t.suggestedFilename.slice(0, -ext.length) : t.suggestedFilename;
-      t.suggestedFilename = `${stem} (${idx + 1})${ext}`;
-      if (t.kind === 'rom') t.suggestedArchiveName = t.suggestedFilename;
+  // Disambiguate colliding suggested filenames across multi-variant archives using real variant tags
+  if (playableTargets.length > 1) {
+    const disambiguated = disambiguateCollidingRomFilenames(
+      playableTargets.map((t) => ({
+        suggestedFilename: t.suggestedFilename,
+        extension: t.kind === 'rom' ? t.extension : '',
+        omitExtension: t.kind !== 'rom',
+        innerPath: t.primaryEntry || t.displayName,
+        archiveFilename: file.filename,
+        displayLabel: file.displayLabel,
+      })),
+      namingConfig,
+    );
+    for (let idx = 0; idx < playableTargets.length; idx += 1) {
+      const nextName = disambiguated[idx];
+      const t = playableTargets[idx];
+      if (nextName === t.suggestedFilename) continue;
+      t.suggestedFilename = nextName;
+      if (t.kind === 'rom') {
+        t.suggestedArchiveName = nextName;
+      } else {
+        t.suggestedArchiveName = namingConfig.romSanitizeFat32
+          ? sanitizeFat32Filename(`${nextName}.zip`, namingConfig.romMaxFilenameLen)
+          : `${nextName}.zip`;
+      }
     }
-    seenNames.add(t.suggestedFilename.toLowerCase());
   }
 
   const patchOnly = playableTargets.length === 0 && patchPaths.length > 0;

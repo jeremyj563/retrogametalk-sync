@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.43.1] - 2026-11-25
+
+- Fixed destination filename collisions when installing multiple ROM variants from the same release (both across sibling archives and within multi-ROM archives) to a handheld/storage device:
+  - **Smart Variant Disambiguation (`romNaming.ts`, `archiveService.ts`, `server.ts`, `useBulkStorageInstaller.ts`)**: Added multi-pass collision disambiguation that preserves clean base edition filenames while appending only the unique differentiator tags (such as `[Improved Controls v3.1]`, `(Disc 1)`/`(Disc 2)`, or variant folder/stem labels) to colliding siblings—respecting FAT32 rules, max filename length limits, and SD card upgrade stem matching so variants no longer collide or falsely register as already installed.
+  - **Live Batch Duplicate Detection (`deviceInstallView.ts`, `SdCardExportModal.tsx`)**: Added batch-wide duplicate destination filename detection with an inline amber highlight and warning in the install modal whenever two selected files resolve to the same destination path (including manual renames).
+
 ## [1.43.0] - 2026-11-25
 
 - Added **live mid-run Target Console reloading for the Catalog Indexer** so saving console changes in **Sync Rules** takes effect immediately without waiting for the current index run to finish:

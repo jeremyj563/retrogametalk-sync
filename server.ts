@@ -35,6 +35,7 @@ import {
 } from './src/server/db.ts';
 import {
   buildContentDispositionAttachment,
+  disambiguateItemInspectionTargets,
   listArchiveEntries,
   streamCleanDiscZipToResponse,
   streamExtractedEntryToResponse,
@@ -735,6 +736,13 @@ async function bootstrap() {
           itemErr = err instanceof Error ? err.message : String(err);
           logServer('HTTP', 'debug', `Batch inspect error for itemId=${item.id} fileId=${file.id} ("${file.filename}")`, formatErrorDetails(err));
         }
+      }
+      if (inspections.length > 1) {
+        const currentCfg = getPublicConfig();
+        disambiguateItemInspectionTargets(inspections, {
+          romSanitizeFat32: currentCfg.romSanitizeFat32,
+          romMaxFilenameLen: currentCfg.romMaxFilenameLen,
+        });
       }
       results.push({
         itemId: item.id,

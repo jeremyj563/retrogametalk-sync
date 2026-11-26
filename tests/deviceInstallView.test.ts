@@ -795,4 +795,76 @@ test('queue-aware tooltips clearly indicate adding to an active install queue', 
   );
 });
 
+test('groupInstallRowsByGame flags duplicate destination filenames among selected options and clears on rename or deselect', () => {
+  const variantTarget = makeTarget({
+    id: 'v1',
+    displayName: 'Castlevania - Blood Moon (v1.0)[Improved Controls v3.1].nes',
+    suggestedFilename: 'Castlevania - Blood Moon (USA) [Hack v1.0].nes',
+    extension: '.nes',
+  });
+  const baseTarget = makeTarget({
+    id: 'v2',
+    displayName: 'Castlevania - Blood Moon (v1.0).nes',
+    suggestedFilename: 'Castlevania - Blood Moon (USA) [Hack v1.0].nes',
+    extension: '.nes',
+  });
+
+  const collidingRows: ExportQueueRow[] = [
+    makeRow({
+      rowKey: '50-501',
+      itemId: 50,
+      fileId: 501,
+      title: 'Castlevania: Blood Moon',
+      fileRole: 'Hack',
+      releaseTags: ['Hack'],
+      targets: [variantTarget],
+      selectedTargetIds: ['v1'],
+      recommendedTargetIds: ['v1'],
+      outputNamesByTargetId: { v1: 'Castlevania - Blood Moon (USA) [Hack v1.0].nes' },
+    }),
+    makeRow({
+      rowKey: '50-502',
+      itemId: 50,
+      fileId: 502,
+      title: 'Castlevania: Blood Moon',
+      fileRole: 'Hack',
+      releaseTags: ['Hack'],
+      targets: [baseTarget],
+      selectedTargetIds: ['v2'],
+      recommendedTargetIds: [],
+      outputNamesByTargetId: { v2: 'castlevania - blood moon (usa) [hack v1.0].nes' },
+    }),
+  ];
+
+  const collidingGames = groupInstallRowsByGame({
+    rows: collidingRows,
+    storageConfig: baseStorageConfig,
+    filterContext: {},
+    folderScans: {},
+    deviceName: 'MIYOO_256GB',
+  });
+  assert.equal(collidingGames[0].hasDuplicateDestination, true);
+  assert.equal(
+    collidingGames[0].selectedOptions.every((o) => o.hasDuplicateDestination),
+    true,
+  );
+
+  // Renaming one clears the duplicate flag on both
+  collidingRows[0].outputNamesByTargetId.v1 =
+    'Castlevania - Blood Moon (USA) [Hack v1.0] [Improved Controls v3.1].nes';
+  const distinctGames = groupInstallRowsByGame({
+    rows: collidingRows,
+    storageConfig: baseStorageConfig,
+    filterContext: {},
+    folderScans: {},
+    deviceName: 'MIYOO_256GB',
+  });
+  assert.equal(distinctGames[0].hasDuplicateDestination, false);
+  assert.equal(
+    distinctGames[0].selectedOptions.some((o) => o.hasDuplicateDestination),
+    false,
+  );
+});
+
+
 

@@ -6,6 +6,7 @@ import {
   canonicalRomNamingTypeOverridesJson,
   classifyRomNamingType,
   DEFAULT_ROM_NAMING_TEMPLATE,
+  disambiguateCollidingRomFilenames,
   formatPreparedRomName,
   formatPreparedRomNameDetailed,
   LEGACY_ROM_NAMING_TEMPLATE,
@@ -476,3 +477,164 @@ test('cursor-aware insertNamingTokenAtSelection and override disclosure summarie
     'FAT32 safe · Unlimited length · 2 type overrides',
   );
 });
+
+test('disambiguateCollidingRomFilenames preserves base edition and appends unique variant tags', () => {
+  // Exact scenario: Castlevania: Blood Moon with base v1.0 ROM and [Improved Controls v3.1] variant
+  const baseFormatted = formatPreparedRomName(
+    {
+      title: 'Castlevania: Blood Moon',
+      systemName: 'nes-roms',
+      regions: ['USA'],
+      fileRole: 'Hack',
+      archiveFilename: 'Castlevania - Blood Moon (v1.0).zip',
+      innerFilename: 'Castlevania - Blood Moon (v1.0).nes',
+    },
+    '.nes',
+    HYBRID_CFG,
+  );
+  const variantFormatted = formatPreparedRomName(
+    {
+      title: 'Castlevania: Blood Moon',
+      systemName: 'nes-roms',
+      regions: ['USA'],
+      fileRole: 'Hack',
+      archiveFilename: 'Castlevania - Blood Moon (v1.0)[Improved Controls v3.1].zip',
+      innerFilename: 'Castlevania - Blood Moon (v1.0)[Improved Controls v3.1].nes',
+    },
+    '.nes',
+    HYBRID_CFG,
+  );
+  assert.equal(baseFormatted, 'Castlevania - Blood Moon (USA) [Hack v1.0].nes');
+  assert.equal(variantFormatted, 'Castlevania - Blood Moon (USA) [Hack v1.0].nes');
+
+  const resolved = disambiguateCollidingRomFilenames(
+    [
+      {
+        suggestedFilename: variantFormatted,
+        extension: '.nes',
+        innerPath: 'Castlevania - Blood Moon (v1.0)[Improved Controls v3.1].nes',
+        archiveFilename: 'Castlevania - Blood Moon (v1.0)[Improved Controls v3.1].zip',
+        displayLabel: 'Castlevania - Blood Moon (v1.0)[Improved Controls v3.1].nes',
+      },
+      {
+        suggestedFilename: baseFormatted,
+        extension: '.nes',
+        innerPath: 'Castlevania - Blood Moon (v1.0).nes',
+        archiveFilename: 'Castlevania - Blood Moon (v1.0).zip',
+        displayLabel: 'Castlevania - Blood Moon (v1.0).nes',
+      },
+    ],
+    HYBRID_CFG,
+  );
+
+  assert.deepEqual(resolved, [
+    'Castlevania - Blood Moon (USA) [Hack v1.0] [Improved Controls v3.1].nes',
+    'Castlevania - Blood Moon (USA) [Hack v1.0].nes',
+  ]);
+
+  // Verify buildUpgradeMatchStem treats the variant as a distinct role so neither clobbers or
+  // falsely flags the other as already installed on an SD card.
+  const variantStem = buildUpgradeMatchStem(resolved[0]);
+  const baseStem = buildUpgradeMatchStem(resolved[1]);
+  assert.equal(variantStem.stem, baseStem.stem);
+  assert.notEqual(variantStem.role, baseStem.role);
+});
+
+test('disambiguateCollidingRomFilenames handles sibling bracket variants, multi-disc sets, folder names, max length, and numeric fallback', () => {
+  // Two bracketed variants
+  assert.deepEqual(
+    disambiguateCollidingRomFilenames(
+      [
+        {
+          suggestedFilename: 'Super Metroid (USA) [Hack v1.2].sfc',
+          extension: '.sfc',
+          innerPath: 'Super Metroid [Redux + FastROM].sfc',
+        },
+        {
+          suggestedFilename: 'Super Metroid (USA) [Hack v1.2].sfc',
+          extension: '.sfc',
+          innerPath: 'Super Metroid [Redux + MSU-1].sfc',
+        },
+      ],
+      HYBRID_CFG,
+    ),
+    [
+      'Super Metroid (USA) [Hack v1.2] [Redux + FastROM].sfc',
+      'Super Metroid (USA) [Hack v1.2] [Redux + MSU-1].sfc',
+    ],
+  );
+
+  // Multi-disc parenthetical tags preserve parentheses
+  assert.deepEqual(
+    disambiguateCollidingRomFilenames(
+      [
+        {
+          suggestedFilename: 'Final Fantasy VII (USA).chd',
+          extension: '.chd',
+          innerPath: 'Final Fantasy VII (USA) (Disc 1).chd',
+        },
+        {
+          suggestedFilename: 'Final Fantasy VII (USA).chd',
+          extension: '.chd',
+          innerPath: 'Final Fantasy VII (USA) (Disc 2).chd',
+        },
+      ],
+      HYBRID_CFG,
+    ),
+    ['Final Fantasy VII (USA) (Disc 1).chd', 'Final Fantasy VII (USA) (Disc 2).chd'],
+  );
+
+  // Folder differentiator when basenames are identical
+  assert.deepEqual(
+    disambiguateCollidingRomFilenames(
+      [
+        {
+          suggestedFilename: 'Mega Man 2 (USA) [Hack].nes',
+          extension: '.nes',
+          innerPath: 'EasyMode/Mega Man 2.nes',
+        },
+        {
+          suggestedFilename: 'Mega Man 2 (USA) [Hack].nes',
+          extension: '.nes',
+          innerPath: 'HardMode/Mega Man 2.nes',
+        },
+      ],
+      HYBRID_CFG,
+    ),
+    ['Mega Man 2 (USA) [Hack] (EasyMode).nes', 'Mega Man 2 (USA) [Hack] (HardMode).nes'],
+  );
+
+  // Max filename length trims base stem while keeping unique suffix intact
+  const maxLenResolved = disambiguateCollidingRomFilenames(
+    [
+      {
+        suggestedFilename: 'Castlevania - Blood Moon (USA) [Hack v1.0].nes',
+        extension: '.nes',
+        innerPath: 'Castlevania - Blood Moon (v1.0)[Improved Controls v3.1].nes',
+      },
+      {
+        suggestedFilename: 'Castlevania - Blood Moon (USA) [Hack v1.0].nes',
+        extension: '.nes',
+        innerPath: 'Castlevania - Blood Moon (v1.0).nes',
+      },
+    ],
+    { romSanitizeFat32: true, romMaxFilenameLen: 52 },
+  );
+  assert.ok(maxLenResolved[0].length <= 52);
+  assert.ok(maxLenResolved[1].length <= 52);
+  assert.notEqual(maxLenResolved[0].toLowerCase(), maxLenResolved[1].toLowerCase());
+  assert.ok(maxLenResolved[0].includes('[Improved Controls v3.1]'));
+
+  // Identical indistinguishable siblings fall back to (2)
+  assert.deepEqual(
+    disambiguateCollidingRomFilenames(
+      [
+        { suggestedFilename: 'Mystery Game (USA).nes', extension: '.nes', innerPath: 'game.nes' },
+        { suggestedFilename: 'Mystery Game (USA).nes', extension: '.nes', innerPath: 'game.nes' },
+      ],
+      HYBRID_CFG,
+    ),
+    ['Mystery Game (USA).nes', 'Mystery Game (USA) (2).nes'],
+  );
+});
+
