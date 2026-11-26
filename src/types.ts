@@ -579,6 +579,7 @@ export interface ServiceStatusSnapshot {
     diskTotalBytes: number | null;
   };
   indexer?: CatalogIndexerStatus;
+  queueAutoResume?: import('./shared/queueAutoResume').QueueAutoResumeStatus | null;
   totals: {
     totalCatalogItems: number;
     availableItems: number;

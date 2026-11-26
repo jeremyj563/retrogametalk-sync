@@ -11,6 +11,11 @@ import {
   isCatalogStatusQueueable,
 } from '../shared/catalogSelection.ts';
 import { normalizeCatalogSort } from '../shared/catalogSort.ts';
+import {
+  DEFAULT_QUEUE_RECOVERY_STATE,
+  normalizePersistedQueueRecoveryState,
+  type PersistedQueueRecoveryState,
+} from '../shared/queueAutoResume.ts';
 import { parseHumanFileSizeToBytes } from '../shared/fileSize.ts';
 import {
   classifyFileRoleToTypeKeys,
@@ -293,11 +298,110 @@ export function initDb(): Database.Database {
   return db;
 }
 
-export function recoverInterruptedRunsOnStartup(
+export interface StartupRecoverySummary {
+  recoveredRunCount: number;
+  recoveredDownloadRunCount: number;
+  recoveredQueuedReleases: number;
+  interruptedAt: string | null;
+}
+
+const QUEUE_RECOVERY_STATE_KEY = 'queue_auto_resume_state';
+
+let lastStartupRecoverySummary: StartupRecoverySummary = {
+  recoveredRunCount: 0,
+  recoveredDownloadRunCount: 0,
+  recoveredQueuedReleases: 0,
+  interruptedAt: null,
+};
+
+export function getStartupRecoverySummary(): StartupRecoverySummary {
+  return { ...lastStartupRecoverySummary };
+}
+
+export function getRuntimeStateJson<T = unknown>(
+  key: string,
+  targetDb: Database.Database = getDb(),
+): T | null {
+  try {
+    const row = targetDb
+      .prepare('SELECT value_json FROM runtime_state WHERE key = ?')
+      .get(key) as { value_json?: string } | undefined;
+    if (!row?.value_json) return null;
+    return JSON.parse(row.value_json) as T;
+  } catch {
+    return null;
+  }
+}
+
+export function setRuntimeStateJson(
+  key: string,
+  value: unknown,
   targetDb: Database.Database = getDb(),
   now: string = new Date().toISOString(),
 ): void {
+  try {
+    targetDb
+      .prepare(
+        `INSERT INTO runtime_state (key, value_json, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+      )
+      .run(key, JSON.stringify(value), now);
+  } catch {
+    // Table may not exist during partial legacy tests
+  }
+}
+
+export function getQueueRecoveryState(
+  targetDb: Database.Database = getDb(),
+): PersistedQueueRecoveryState {
+  const raw = getRuntimeStateJson(QUEUE_RECOVERY_STATE_KEY, targetDb);
+  return normalizePersistedQueueRecoveryState(raw ?? DEFAULT_QUEUE_RECOVERY_STATE);
+}
+
+export function saveQueueRecoveryState(
+  state: PersistedQueueRecoveryState,
+  targetDb: Database.Database = getDb(),
+  now: string = new Date().toISOString(),
+): PersistedQueueRecoveryState {
+  const normalized = normalizePersistedQueueRecoveryState(state);
+  setRuntimeStateJson(QUEUE_RECOVERY_STATE_KEY, normalized, targetDb, now);
+  return normalized;
+}
+
+export function wasLastDownloadRunStoppedByUser(
+  targetDb: Database.Database = getDb(),
+): boolean {
+  try {
+    const row = targetDb
+      .prepare(
+        `SELECT status, error_summary
+         FROM sync_runs
+         WHERE trigger_type = 'download'
+         ORDER BY id DESC
+         LIMIT 1`,
+      )
+      .get() as { status?: string; error_summary?: string | null } | undefined;
+    if (!row) return false;
+    return (
+      row.status === 'stopped' &&
+      typeof row.error_summary === 'string' &&
+      /^stopped by user$/i.test(row.error_summary.trim())
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function recoverInterruptedRunsOnStartup(
+  targetDb: Database.Database = getDb(),
+  now: string = new Date().toISOString(),
+): StartupRecoverySummary {
   // Recover any stale running jobs left behind by an abrupt container kill
+  const interruptedAllRuns = targetDb.prepare(`
+    SELECT COUNT(*) as count FROM sync_runs
+    WHERE status = 'running'
+  `).get() as { count: number };
   const interruptedDownloadRuns = targetDb.prepare(`
     SELECT COUNT(*) as count FROM sync_runs
     WHERE status = 'running' AND trigger_type = 'download'
@@ -306,8 +410,10 @@ export function recoverInterruptedRunsOnStartup(
     SELECT COUNT(*) as count FROM catalog_releases
     WHERE status = 'queued'
   `).get() as { count: number };
+  const recoveredRunCount = Number(interruptedAllRuns.count || 0);
+  const recoveredDownloadRunCount = Number(interruptedDownloadRuns.count || 0);
   const restoreDownloadingToQueued =
-    Number(interruptedDownloadRuns.count || 0) > 0 || Number(existingQueuedReleases.count || 0) > 0;
+    recoveredDownloadRunCount > 0 || Number(existingQueuedReleases.count || 0) > 0;
 
   targetDb.prepare(`
     UPDATE sync_runs
@@ -350,6 +456,44 @@ export function recoverInterruptedRunsOnStartup(
   for (const relRow of interruptedReleaseRows) {
     recomputeReleaseRollup(Number(relRow.id));
   }
+
+  const remainingQueuedRow = targetDb.prepare(`
+    SELECT COUNT(*) as count FROM (
+      SELECT id FROM catalog_releases WHERE status = 'queued'
+      UNION
+      SELECT DISTINCT release_id AS id FROM catalog_release_files WHERE status = 'queued'
+    )
+  `).get() as { count: number };
+  const recoveredQueuedReleases = Number(remainingQueuedRow.count || 0);
+
+  const summary: StartupRecoverySummary = {
+    recoveredRunCount,
+    recoveredDownloadRunCount,
+    recoveredQueuedReleases,
+    interruptedAt: recoveredRunCount > 0 ? now : null,
+  };
+  lastStartupRecoverySummary = summary;
+
+  // If a running download queue (or run with pending queued items) was abruptly killed
+  // without a graceful SIGTERM handler, persist the crash interruption marker immediately.
+  if (
+    recoveredDownloadRunCount > 0 ||
+    (recoveredRunCount > 0 && recoveredQueuedReleases > 0)
+  ) {
+    const prev = getQueueRecoveryState(targetDb);
+    saveQueueRecoveryState(
+      {
+        ...prev,
+        userPaused: false,
+        lastInterruptedAt: now,
+        lastInterruptionCause: 'crash_or_kill',
+      },
+      targetDb,
+      now,
+    );
+  }
+
+  return summary;
 }
 
 export function getSchemaMigrationReport(): DatabaseMigrationReport {

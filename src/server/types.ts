@@ -561,6 +561,7 @@ export interface ServiceStatusSnapshot {
   auth: AuthSessionStatus;
   storage: StorageStats;
   indexer: CatalogIndexerStatus;
+  queueAutoResume?: import('../shared/queueAutoResume.ts').QueueAutoResumeStatus | null;
   totals: {
     totalCatalogItems: number;
     availableItems: number;

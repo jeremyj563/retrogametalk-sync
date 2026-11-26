@@ -1469,6 +1469,18 @@ export default function App() {
     };
   };
 
+  const handlePauseQueueAutoResume = async (): Promise<void> => {
+    setErrorBanner(null);
+    const res = await fetch('/api/queue/pause-auto-resume', { method: 'POST' });
+    const parsed = await readJsonSafely<{ ok?: boolean; error?: string }>(res);
+    if (!parsed.ok) {
+      const msg = parsed.errorMessage || `Failed to pause auto-resume (HTTP ${res.status})`;
+      setErrorBanner(msg);
+      throw new Error(msg);
+    }
+    await loadInitialData();
+  };
+
   const handleStartCatalogIndex = async (
     scope: 'filtered' | 'full' = 'filtered',
     options?: { forceFull?: boolean },
@@ -2323,6 +2335,7 @@ export default function App() {
                   onPreviewRuleMatchesInCatalog={handleOpenRuleMatchesInCatalog}
                   onQueueDownload={(ids) => handleQueueDownload({ ids })}
                   onResumeDownloadQueue={handleResumeDownloadQueue}
+                  onPauseQueueAutoResume={handlePauseQueueAutoResume}
                   onClearDownloadQueue={handleClearDownloadQueue}
                   onViewQueuedInCatalog={handleViewQueuedInCatalog}
                   onRetryItem={handleRetryItem}
@@ -2344,6 +2357,7 @@ export default function App() {
                   onRetryItem={handleRetryItem}
                   onQueueDownload={handleQueueDownload}
                   onResumeDownloadQueue={handleResumeDownloadQueue}
+                  onPauseQueueAutoResume={handlePauseQueueAutoResume}
                   onClearDownloadQueue={handleClearDownloadQueue}
                   onStartCatalogIndex={handleStartCatalogIndex}
                   onStopCatalogIndex={handleStopCatalogIndex}

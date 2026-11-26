@@ -30,6 +30,10 @@ import {
   formatAllowedReleaseTypesSummary,
   normalizeAllowedReleaseTypes,
 } from '../shared/releaseTypeFilter';
+import {
+  formatAutoResumeDuration,
+  formatInterruptionCauseLabel,
+} from '../shared/queueAutoResume';
 import type { SmartRomFilterContext } from '../shared/smartRomPicker';
 import type {
   ActiveTransferState,
@@ -87,6 +91,7 @@ interface OverviewPanelProps {
   onPreviewRuleMatchesInCatalog?: (onlyNotDownloaded?: boolean) => void;
   onQueueDownload?: (ids: number[]) => Promise<unknown>;
   onResumeDownloadQueue?: () => Promise<{ queuedCount?: number; skippedCount?: number } | void>;
+  onPauseQueueAutoResume?: () => Promise<void>;
   onClearDownloadQueue?: () => Promise<{ clearedCount?: number } | void>;
   onViewQueuedInCatalog?: () => void;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
@@ -530,6 +535,7 @@ export function OverviewPanel({
   onPreviewRuleMatchesInCatalog,
   onQueueDownload,
   onResumeDownloadQueue,
+  onPauseQueueAutoResume,
   onClearDownloadQueue,
   onViewQueuedInCatalog,
   onRetryItem,
@@ -556,6 +562,7 @@ export function OverviewPanel({
   const [confirmQueueRuleMatches, setConfirmQueueRuleMatches] = useState(false);
   const [monitorQueueNotice, setMonitorQueueNotice] = useState<string | null>(null);
   const [resumingQueue, setResumingQueue] = useState(false);
+  const [pausingAutoResume, setPausingAutoResume] = useState(false);
   const [clearingQueue, setClearingQueue] = useState(false);
   const [confirmClearQueue, setConfirmClearQueue] = useState(false);
   const [pausedQueueNotice, setPausedQueueNotice] = useState<string | null>(null);
@@ -690,7 +697,7 @@ export function OverviewPanel({
   };
 
   const handleResumePausedQueueAction = async () => {
-    if (!onResumeDownloadQueue || resumingQueue || clearingQueue) return;
+    if (!onResumeDownloadQueue || resumingQueue || clearingQueue || pausingAutoResume) return;
     setResumingQueue(true);
     setConfirmClearQueue(false);
     setPausedQueueNotice(null);
@@ -700,6 +707,20 @@ export function OverviewPanel({
       setPausedQueueNotice(err instanceof Error ? err.message : String(err));
     } finally {
       setResumingQueue(false);
+    }
+  };
+
+  const handlePauseAutoResumeAction = async () => {
+    if (!onPauseQueueAutoResume || pausingAutoResume || resumingQueue || clearingQueue) return;
+    setPausingAutoResume(true);
+    setConfirmClearQueue(false);
+    setPausedQueueNotice(null);
+    try {
+      await onPauseQueueAutoResume();
+    } catch (err) {
+      setPausedQueueNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPausingAutoResume(false);
     }
   };
 
@@ -2043,62 +2064,137 @@ export function OverviewPanel({
           </div>
         </div>
 
-        {/* Zone 3.4: Paused / Interrupted Download Queue Recovery Strip */}
-        {!status.activeRun && status.totals.queuedItems > 0 && (onResumeDownloadQueue || onClearDownloadQueue) && (
-          <div className="mt-3.5 pt-3 border-t border-crt-amber/40 flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0 space-y-0.5">
-              <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-crt-amber">
-                  <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-crt-amber" />
-                  Paused Download Queue
-                </span>
-                <span className="font-mono text-crt-text tabular-nums">
-                  · {status.totals.queuedItems.toLocaleString()} release
-                  {status.totals.queuedItems === 1 ? '' : 's'} waiting
-                </span>
-              </div>
-              <p className="text-xs font-mono text-crt-muted">
-                Left pending after a stop or container restart — resume where it left off or clear back to available.
-              </p>
-              {pausedQueueNotice && (
-                <p className="text-[11px] font-mono text-crt-amber">{pausedQueueNotice}</p>
-              )}
-            </div>
+        {/* Zone 3.4: Auto-Resume / Paused Download Queue Recovery Strip */}
+        {!status.activeRun && status.totals.queuedItems > 0 && (onResumeDownloadQueue || onClearDownloadQueue) && (() => {
+          const autoResume = status.queueAutoResume;
+          const isScheduled = autoResume?.phase === 'scheduled';
+          const isCircuitOpen = autoResume?.phase === 'circuit_open';
+          const isBlockedAuth = autoResume?.phase === 'blocked_auth';
+          const remainingMs =
+            isScheduled && autoResume?.resumeAt
+              ? Math.max(0, Date.parse(autoResume.resumeAt) - Date.now())
+              : 0;
+          const causeLabel = formatInterruptionCauseLabel(autoResume?.lastInterruptionCause ?? null);
+          const attemptSuffix =
+            autoResume && autoResume.attempt > 1
+              ? ` · backoff attempt ${autoResume.attempt}/${autoResume.maxAttempts}`
+              : autoResume && autoResume.attempt > 0
+                ? ` · attempt ${autoResume.attempt}/${autoResume.maxAttempts}`
+                : '';
 
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {onResumeDownloadQueue && (
-                <button
-                  type="button"
-                  disabled={!status.auth.hasCompletedLogin || resumingQueue || clearingQueue}
-                  onClick={() => void handleResumePausedQueueAction()}
-                  title={
-                    !status.auth.hasCompletedLogin
-                      ? 'Verify login in System Settings before resuming downloads'
-                      : `Resume downloading ${status.totals.queuedItems.toLocaleString()} paused queued release${status.totals.queuedItems === 1 ? '' : 's'}`
-                  }
-                  className="crt-cta-beam inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer tabular-nums"
-                >
-                  {resumingQueue ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
-                  ) : (
-                    <Play className="h-3.5 w-3.5 shrink-0" />
-                  )}
-                  <span>
-                    {resumingQueue
-                      ? 'Resuming...'
-                      : `Resume Queue (${status.totals.queuedItems.toLocaleString()})`}
+          return (
+            <div
+              className={`mt-3.5 pt-3 border-t flex flex-wrap items-center justify-between gap-3 ${
+                isScheduled
+                  ? 'border-crt-phosphor/45'
+                  : isCircuitOpen
+                    ? 'border-crt-crimson/45'
+                    : 'border-crt-amber/40'
+              }`}
+            >
+              <div className="min-w-0 space-y-0.5">
+                <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                  <span
+                    className={`inline-flex items-center gap-1.5 font-mono font-semibold ${
+                      isScheduled
+                        ? 'text-crt-phosphor'
+                        : isCircuitOpen
+                          ? 'text-crt-crimson'
+                          : 'text-crt-amber'
+                    }`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`h-1.5 w-1.5 rounded-full ${
+                        isScheduled
+                          ? 'bg-crt-phosphor animate-pulse'
+                          : isCircuitOpen
+                            ? 'bg-crt-crimson'
+                            : 'bg-crt-amber'
+                      }`}
+                    />
+                    {isScheduled
+                      ? 'Auto-Resuming Queue'
+                      : isCircuitOpen
+                        ? 'Auto-Resume Paused · Backoff Limit'
+                        : 'Paused Download Queue'}
                   </span>
-                </button>
-              )}
-              {onViewQueuedInCatalog && (
-                <button
-                  type="button"
-                  onClick={onViewQueuedInCatalog}
-                  className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  View Queued
-                </button>
-              )}
+                  <span className="font-mono text-crt-text tabular-nums">
+                    · {status.totals.queuedItems.toLocaleString()} release
+                    {status.totals.queuedItems === 1 ? '' : 's'} waiting
+                  </span>
+                </div>
+                <p className="text-xs font-mono text-crt-muted tabular-nums">
+                  {isScheduled
+                    ? `${causeLabel} — resuming automatically in ${formatAutoResumeDuration(remainingMs)}${attemptSuffix}.`
+                    : isCircuitOpen
+                      ? autoResume?.reason ||
+                        'Interrupted repeatedly without stabilizing — auto-resume paused to prevent a restart loop.'
+                      : isBlockedAuth
+                        ? 'Verify repository login in System Settings to automatically resume downloads.'
+                        : autoResume?.phase === 'user_paused'
+                          ? 'Paused by user — resume where it left off or clear back to available.'
+                          : 'Left pending after a stop or container restart — resume where it left off or clear back to available.'}
+                </p>
+                {pausedQueueNotice && (
+                  <p className="text-[11px] font-mono text-crt-amber">{pausedQueueNotice}</p>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {onResumeDownloadQueue && (
+                  <button
+                    type="button"
+                    disabled={!status.auth.hasCompletedLogin || resumingQueue || clearingQueue || pausingAutoResume}
+                    onClick={() => void handleResumePausedQueueAction()}
+                    title={
+                      !status.auth.hasCompletedLogin
+                        ? 'Verify login in System Settings before resuming downloads'
+                        : isScheduled
+                          ? `Skip countdown and resume downloading ${status.totals.queuedItems.toLocaleString()} queued release${status.totals.queuedItems === 1 ? '' : 's'} immediately`
+                          : `Resume downloading ${status.totals.queuedItems.toLocaleString()} paused queued release${status.totals.queuedItems === 1 ? '' : 's'}`
+                    }
+                    className="crt-cta-beam inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer tabular-nums"
+                  >
+                    {resumingQueue ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                    ) : (
+                      <Play className="h-3.5 w-3.5 shrink-0" />
+                    )}
+                    <span>
+                      {resumingQueue
+                        ? 'Resuming...'
+                        : isScheduled
+                          ? `Resume Now (${status.totals.queuedItems.toLocaleString()})`
+                          : `Resume Queue (${status.totals.queuedItems.toLocaleString()})`}
+                    </span>
+                  </button>
+                )}
+                {isScheduled && onPauseQueueAutoResume && (
+                  <button
+                    type="button"
+                    disabled={pausingAutoResume || resumingQueue || clearingQueue}
+                    onClick={() => void handlePauseAutoResumeAction()}
+                    title="Cancel automatic resume and keep the download queue paused"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-amber/70 hover:text-crt-amber text-crt-text rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 cursor-pointer"
+                  >
+                    {pausingAutoResume ? (
+                      <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                    ) : (
+                      <Pause className="h-3 w-3 shrink-0" />
+                    )}
+                    <span>Pause</span>
+                  </button>
+                )}
+                {onViewQueuedInCatalog && (
+                  <button
+                    type="button"
+                    onClick={onViewQueuedInCatalog}
+                    className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    View Queued
+                  </button>
+                )}
               {onClearDownloadQueue && (
                 confirmClearQueue ? (
                   <div className="inline-flex items-center gap-1.5 shrink-0">
@@ -2134,9 +2230,10 @@ export function OverviewPanel({
                   </button>
                 )
               )}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Zone 3.5: Catalog Index Readiness & Direct Rule Queue Strip */}
         {preflight && (

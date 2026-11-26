@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.44.0] - 2026-11-25
+
+- Added **automatic download queue recovery with persistent crash-loop backoff** so interrupted queues resume automatically after unexpected restarts (`SIGTERM`, `SIGINT`, `SIGKILL`, OOM kills, or upgrades) without requiring manual intervention:
+  - **Automatic Startup Resume & Persistent Backoff (SQLite v30 `runtime_state`, `queueAutoResume.ts`, `orchestrator.ts`)**: Persists interruption causes and consecutive restart attempts across container restarts using an exponential backoff schedule (`5s → 15s → 45s → 2m → 5m`). Automatically resets the backoff counter once an auto-resumed run stabilizes for 3 minutes or completes cleanly, trips a safety circuit breaker after 5 consecutive rapid interruptions to prevent infinite reboot loops, and always respects explicit user **Stop** / **Pause** actions across restarts.
+  - **Live Recovery Strip & Pause Control (`OverviewPanel.tsx`, `CatalogPanel.tsx`, `POST /api/queue/pause-auto-resume`)**: Upgraded the queue recovery strip in **Overview** and **Catalog** to show a live auto-resume countdown with interruption cause and backoff attempt telemetry, plus **Resume Now** (skip countdown), **Pause** (cancel auto-resume), and clear circuit-breaker recovery messaging if the loop guard trips.
+
 ## [1.43.1] - 2026-11-25
 
 - Fixed destination filename collisions when installing multiple ROM variants from the same release (both across sibling archives and within multi-ROM archives) to a handheld/storage device:

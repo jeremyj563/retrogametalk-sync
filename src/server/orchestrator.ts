@@ -20,10 +20,12 @@ import {
   getExistingReleaseLocalPaths,
   getInternalConfig,
   getLastAuthenticatedAt,
+  getQueueRecoveryState,
   getReleaseFileById,
   getRepositoryItemById,
   getRepositoryItemByRemoteUrl,
   getSchemaMigrationReport,
+  getStartupRecoverySummary,
   getSystemIndexState,
   listCatalogReleasesForRuleSync,
   listPausedQueuedReleaseIds,
@@ -40,6 +42,7 @@ import {
   recordSuccessfulLogin,
   releaseDistributedLock,
   saveDiscoveredSystems,
+  saveQueueRecoveryState,
   setWatermark,
   updateCatalogCoverPath,
   updateCatalogReleaseMetadata,
@@ -49,6 +52,7 @@ import {
   upsertCatalogRelease,
   upsertIndexedWpRelease,
   upsertReleaseFile,
+  wasLastDownloadRunStoppedByUser,
   type CatalogQueryFilterParams,
 } from './db.ts';
 import { AdaptiveRateLimiter } from './rateLimiter.ts';
@@ -100,6 +104,16 @@ import {
   type SyncRuleDiff,
 } from '../shared/syncRuleMatcher.ts';
 import { normalizeGitRepoUrl } from '../shared/gitUrl.ts';
+import {
+  AUTO_RESUME_MAX_ATTEMPTS,
+  AUTO_RESUME_STABILITY_WINDOW_MS,
+  DEFAULT_QUEUE_RECOVERY_STATE,
+  IDLE_QUEUE_AUTO_RESUME_STATUS,
+  formatAutoResumeDuration,
+  formatInterruptionCauseLabel,
+  planStartupQueueAutoResume,
+  type QueueAutoResumeStatus,
+} from '../shared/queueAutoResume.ts';
 import { canonicalizeSystemSlug, filterValidSystemSlugs } from '../shared/systemCatalog.ts';
 import {
   type DiscoveredRelease,
@@ -496,6 +510,11 @@ export class ScraperOrchestrator extends EventEmitter {
   private pendingDownloadQueueSet = new Set<number>();
   private inFlightDownloadIds = new Set<number>();
   private ruleFilteredDownloadIds = new Set<number>();
+  private queueAutoResumeTimer: NodeJS.Timeout | null = null;
+  private queueAutoResumeStabilityTimer: NodeJS.Timeout | null = null;
+  private queueAutoResumeStatus: QueueAutoResumeStatus = { ...IDLE_QUEUE_AUTO_RESUME_STATUS };
+  private stopRequestedByUser = false;
+  private shutdownSignal: string | null = null;
 
   private subscribeRuntimeConfig = (listener: () => void): (() => void) => {
     this.runtimeConfigListeners.add(listener);
@@ -562,6 +581,7 @@ export class ScraperOrchestrator extends EventEmitter {
 
     this.reconfigureScheduler(refreshedCfg);
     this.scheduleDiskStatsRefresh(refreshedCfg.downloadDir, true);
+    this.scheduleStartupQueueAutoResume(refreshedCfg, authSnap.hasCompletedLogin);
 
     if (authSnap.hasCompletedLogin && refreshedCfg.username && refreshedCfg.password) {
       setTimeout(() => {
@@ -1134,6 +1154,10 @@ export class ScraperOrchestrator extends EventEmitter {
       this.evaluateAndEmitAchievements();
     }
     if (result.authenticated && !this.shuttingDown) {
+      if (this.queueAutoResumeStatus.phase === 'blocked_auth' && !this.activeRun) {
+        this.scheduleStartupQueueAutoResume(cfg, true);
+        this.emitStatus();
+      }
       void this.startCatalogIndex('filtered', { auto: true }).catch(() => undefined);
     }
     return result;
@@ -2471,6 +2495,8 @@ export class ScraperOrchestrator extends EventEmitter {
       auth: this.client.getAuthStatus(cfg, getLastAuthenticatedAt()),
       storage,
       indexer: this.getCatalogIndexerStatus(cfg),
+      queueAutoResume:
+        !this.activeRun && totals.queuedItems > 0 ? { ...this.queueAutoResumeStatus } : null,
       totals,
       systems,
       releaseTypes,
@@ -3015,6 +3041,199 @@ export class ScraperOrchestrator extends EventEmitter {
     return Boolean(this.activeRun && this.activeRun.triggerType === 'download');
   }
 
+  private cancelPendingQueueAutoResume(nextStatus?: QueueAutoResumeStatus): void {
+    if (this.queueAutoResumeTimer) {
+      clearTimeout(this.queueAutoResumeTimer);
+      this.queueAutoResumeTimer = null;
+    }
+    this.queueAutoResumeStatus = nextStatus
+      ? { ...nextStatus }
+      : { ...IDLE_QUEUE_AUTO_RESUME_STATUS };
+  }
+
+  private clearQueueAutoResumeStabilityTimer(): void {
+    if (this.queueAutoResumeStabilityTimer) {
+      clearTimeout(this.queueAutoResumeStabilityTimer);
+      this.queueAutoResumeStabilityTimer = null;
+    }
+  }
+
+  private armQueueStabilityResetTimer(runId: number): void {
+    this.clearQueueAutoResumeStabilityTimer();
+    this.queueAutoResumeStabilityTimer = setTimeout(() => {
+      this.queueAutoResumeStabilityTimer = null;
+      if (this.shuttingDown || this.activeRun?.id !== runId) return;
+      const persisted = getQueueRecoveryState();
+      if (persisted.consecutiveAutoResumes > 0 || persisted.circuitBreakerTripped) {
+        saveQueueRecoveryState({
+          ...persisted,
+          consecutiveAutoResumes: 0,
+          circuitBreakerTripped: false,
+          circuitBreakerReason: null,
+        });
+        this.log(
+          'info',
+          `[Auto-Resume] Download queue #${runId} ran stably for ${formatAutoResumeDuration(AUTO_RESUME_STABILITY_WINDOW_MS)}; reset crash-loop backoff counter`,
+          null,
+          runId,
+        );
+      }
+    }, AUTO_RESUME_STABILITY_WINDOW_MS);
+    this.queueAutoResumeStabilityTimer.unref();
+  }
+
+  private scheduleStartupQueueAutoResume(
+    cfg: ScraperConfigInternal,
+    authHasCompletedLogin: boolean,
+  ): void {
+    if (this.shuttingDown || this.activeRun) return;
+    this.cancelPendingQueueAutoResume();
+
+    const pausedIds = listPausedQueuedReleaseIds();
+    const persisted = getQueueRecoveryState();
+    const recoverySummary = getStartupRecoverySummary();
+    const recoveredCrashOnStartup =
+      recoverySummary.recoveredDownloadRunCount > 0 ||
+      (recoverySummary.recoveredRunCount > 0 && recoverySummary.recoveredQueuedReleases > 0);
+    const lastDownloadRunStoppedByUser = wasLastDownloadRunStoppedByUser();
+    const canAuthenticate = Boolean(authHasCompletedLogin && cfg.username && cfg.password);
+
+    const decision = planStartupQueueAutoResume({
+      state: persisted,
+      queuedCount: pausedIds.length,
+      canAuthenticate,
+      recoveredCrashOnStartup,
+      lastDownloadRunStoppedByUser,
+    });
+
+    if (
+      pausedIds.length > 0 ||
+      persisted.userPaused ||
+      persisted.consecutiveAutoResumes > 0 ||
+      persisted.circuitBreakerTripped
+    ) {
+      saveQueueRecoveryState(decision.nextState);
+    }
+
+    this.queueAutoResumeStatus = { ...decision.status };
+
+    if (decision.action === 'schedule') {
+      const causeLabel = formatInterruptionCauseLabel(decision.status.lastInterruptionCause);
+      this.log(
+        'info',
+        `[Auto-Resume] ${causeLabel}: ${pausedIds.length} queued release${pausedIds.length === 1 ? '' : 's'} will resume automatically in ${formatAutoResumeDuration(decision.delayMs)} (attempt ${decision.attempt}/${decision.status.maxAttempts})`,
+      );
+      this.queueAutoResumeTimer = setTimeout(() => {
+        void this.executeScheduledQueueAutoResume(decision.attempt);
+      }, decision.delayMs);
+      this.queueAutoResumeTimer.unref();
+    } else if (decision.action === 'circuit_open') {
+      this.log(
+        'warn',
+        `[Auto-Resume] ${decision.status.reason || 'Crash-loop backoff limit reached; waiting for manual resume.'}`,
+      );
+    } else if (decision.action === 'blocked_auth') {
+      this.log(
+        'warn',
+        `[Auto-Resume] ${pausedIds.length} queued release${pausedIds.length === 1 ? '' : 's'} waiting, but repository login is not verified yet — skipping automatic resume.`,
+      );
+    }
+  }
+
+  private async executeScheduledQueueAutoResume(attempt: number): Promise<void> {
+    this.queueAutoResumeTimer = null;
+    if (this.shuttingDown || this.activeRun) return;
+
+    const pausedIds = listPausedQueuedReleaseIds();
+    if (pausedIds.length === 0) {
+      this.queueAutoResumeStatus = { ...IDLE_QUEUE_AUTO_RESUME_STATUS };
+      saveQueueRecoveryState({ ...DEFAULT_QUEUE_RECOVERY_STATE });
+      this.emitStatus();
+      return;
+    }
+
+    const persisted = getQueueRecoveryState();
+    if (persisted.userPaused) {
+      this.queueAutoResumeStatus = {
+        phase: 'user_paused',
+        attempt: 0,
+        maxAttempts: AUTO_RESUME_MAX_ATTEMPTS,
+        delayMs: 0,
+        resumeAt: null,
+        reason: 'Paused by user — resume where it left off or clear back to available.',
+        lastInterruptionCause: 'user_stopped',
+      };
+      this.emitStatus();
+      return;
+    }
+
+    // Persist the incremented attempt counter BEFORE starting downloads so an immediate
+    // OOM/SIGKILL/crash inside the download worker escalates backoff on the next boot.
+    saveQueueRecoveryState({
+      ...persisted,
+      userPaused: false,
+      consecutiveAutoResumes: attempt,
+      lastAutoResumeStartedAt: new Date().toISOString(),
+      lastResumeQueuedCount: pausedIds.length,
+      circuitBreakerTripped: false,
+      circuitBreakerReason: null,
+    });
+
+    this.queueAutoResumeStatus = { ...IDLE_QUEUE_AUTO_RESUME_STATUS };
+    this.emitStatus();
+
+    try {
+      await this.queueCatalogDownloads({ ids: pausedIds, source: 'auto_resume' });
+    } catch (err) {
+      if (this.shuttingDown) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/Login required|Credentials missing/i.test(msg)) {
+        this.queueAutoResumeStatus = {
+          phase: 'blocked_auth',
+          attempt,
+          maxAttempts: AUTO_RESUME_MAX_ATTEMPTS,
+          delayMs: 0,
+          resumeAt: null,
+          reason: msg,
+          lastInterruptionCause: persisted.lastInterruptionCause,
+        };
+        this.log('warn', `[Auto-Resume] Blocked waiting for login: ${msg}`);
+        this.emitStatus();
+        return;
+      }
+
+      // Transient startup failure (e.g. distributed lock still held briefly by an exiting pod
+      // during a rolling upgrade): schedule the next exponential backoff step automatically.
+      this.log('warn', `[Auto-Resume] Attempt ${attempt} failed (${msg}); scheduling backoff retry`);
+      const cfg = getInternalConfig();
+      const auth = this.client.getAuthStatus(cfg, getLastAuthenticatedAt());
+      this.scheduleStartupQueueAutoResume(cfg, auth.hasCompletedLogin);
+      this.emitStatus();
+    }
+  }
+
+  pauseQueueAutoResume(): { paused: boolean; status: QueueAutoResumeStatus } {
+    const pausedStatus: QueueAutoResumeStatus = {
+      phase: 'user_paused',
+      attempt: 0,
+      maxAttempts: AUTO_RESUME_MAX_ATTEMPTS,
+      delayMs: 0,
+      resumeAt: null,
+      reason: 'Paused by user — resume where it left off or clear back to available.',
+      lastInterruptionCause: 'user_stopped',
+    };
+    this.cancelPendingQueueAutoResume(pausedStatus);
+    saveQueueRecoveryState({
+      ...DEFAULT_QUEUE_RECOVERY_STATE,
+      userPaused: true,
+      lastInterruptionCause: 'user_stopped',
+      lastInterruptedAt: new Date().toISOString(),
+    });
+    this.log('info', 'Automatic download queue resume paused by user');
+    this.emitStatus();
+    return { paused: true, status: { ...pausedStatus } };
+  }
+
   async resumeDownloadQueue(): Promise<{
     run: SyncRunRecord;
     queuedCount: number;
@@ -3028,7 +3247,9 @@ export class ScraperOrchestrator extends EventEmitter {
     if (pausedIds.length === 0) {
       throw new Error('No paused queued releases to resume.');
     }
-    return this.queueCatalogDownloads({ ids: pausedIds });
+    this.cancelPendingQueueAutoResume();
+    saveQueueRecoveryState({ ...DEFAULT_QUEUE_RECOVERY_STATE });
+    return this.queueCatalogDownloads({ ids: pausedIds, source: 'manual_resume' });
   }
 
   clearDownloadQueue(): { clearedCount: number } {
@@ -3037,6 +3258,8 @@ export class ScraperOrchestrator extends EventEmitter {
         `Stop the active download queue (Run #${this.activeRun!.id}) before clearing queued releases.`,
       );
     }
+    this.cancelPendingQueueAutoResume();
+    saveQueueRecoveryState({ ...DEFAULT_QUEUE_RECOVERY_STATE });
     const result = clearPausedQueuedReleases();
     if (result.clearedCount > 0) {
       this.log(
@@ -3045,6 +3268,8 @@ export class ScraperOrchestrator extends EventEmitter {
       );
       this.emitCatalogUpdated('queue_cleared');
       this.emitStatus();
+    } else {
+      this.emitStatus();
     }
     return result;
   }
@@ -3052,6 +3277,7 @@ export class ScraperOrchestrator extends EventEmitter {
   async queueCatalogDownloads(options: {
     ids?: number[];
     filters?: CatalogQueryFilterParams;
+    source?: 'manual' | 'manual_resume' | 'auto_resume';
   }): Promise<{
     run: SyncRunRecord;
     queuedCount: number;
@@ -3197,13 +3423,26 @@ export class ScraperOrchestrator extends EventEmitter {
     this.abortController = new AbortController();
     this.currentPhase = `Downloading ${marked.queuedIds.length} queued release${marked.queuedIds.length === 1 ? '' : 's'}`;
 
+    this.cancelPendingQueueAutoResume();
+    if (options.source !== 'auto_resume') {
+      saveQueueRecoveryState({ ...DEFAULT_QUEUE_RECOVERY_STATE });
+    }
+    this.stopRequestedByUser = false;
+
     this.lockRenewTimer = setInterval(() => {
       acquireDistributedLock(lockKey, POD_ID, 180);
     }, 60_000);
 
+    const persistedRecovery = getQueueRecoveryState();
+    if (options.source === 'auto_resume' || persistedRecovery.consecutiveAutoResumes > 0) {
+      this.armQueueStabilityResetTimer(run.id);
+    }
+
     this.log(
       'info',
-      `Started on-demand download queue Run #${run.id} for ${marked.queuedIds.length} release(s)`,
+      options.source === 'auto_resume'
+        ? `[Auto-Resume] Resumed download queue Run #${run.id} for ${marked.queuedIds.length} release(s)`
+        : `Started on-demand download queue Run #${run.id} for ${marked.queuedIds.length} release(s)`,
       null,
       run.id,
     );
@@ -3356,6 +3595,14 @@ export class ScraperOrchestrator extends EventEmitter {
       }
 
       const finalStatus = signal.aborted ? 'stopped' : 'completed';
+      const stopReasonSummary =
+        finalStatus === 'stopped'
+          ? this.stopRequestedByUser
+            ? 'Stopped by user'
+            : this.shutdownSignal
+              ? `Interrupted by ${this.shutdownSignal}`
+              : 'Stopped'
+          : undefined;
       updateSyncRun(run.id, {
         status: finalStatus,
         finishedAt: new Date().toISOString(),
@@ -3365,6 +3612,7 @@ export class ScraperOrchestrator extends EventEmitter {
         failedCount: failed,
         bytesDownloaded: bytes,
         avgDelayMs: this.rateLimiter.getTelemetry().currentDelayMs,
+        ...(stopReasonSummary ? { errorSummary: stopReasonSummary } : {}),
       });
       const queueSummaryMsg =
         finalStatus === 'completed' && downloaded === 0 && skipped > 0 && failed === 0
@@ -3372,8 +3620,20 @@ export class ScraperOrchestrator extends EventEmitter {
           : `Download queue #${run.id} ${finalStatus}: ${downloaded} downloaded, ${skipped} already on disk, ${failed} failed`;
       runLogger('info', queueSummaryMsg);
       if (finalStatus === 'completed') {
+        saveQueueRecoveryState({ ...DEFAULT_QUEUE_RECOVERY_STATE });
+        this.queueAutoResumeStatus = { ...IDLE_QUEUE_AUTO_RESUME_STATUS };
         recordAchievementCounter('runs_completed', 1, 'increment');
         this.evaluateAndEmitAchievements();
+      } else if (this.stopRequestedByUser) {
+        this.queueAutoResumeStatus = {
+          phase: 'user_paused',
+          attempt: 0,
+          maxAttempts: AUTO_RESUME_MAX_ATTEMPTS,
+          delayMs: 0,
+          resumeAt: null,
+          reason: 'Paused by user — resume where it left off or clear back to available.',
+          lastInterruptionCause: 'user_stopped',
+        };
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -3385,12 +3645,19 @@ export class ScraperOrchestrator extends EventEmitter {
         skippedCount: skipped,
         failedCount: Math.max(1, failed),
         bytesDownloaded: bytes,
-        errorSummary: msg,
+        errorSummary: signal.aborted
+          ? this.stopRequestedByUser
+            ? 'Stopped by user'
+            : this.shutdownSignal
+              ? `Interrupted by ${this.shutdownSignal}`
+              : msg
+          : msg,
       });
       if (!signal.aborted) {
         runLogger('error', `Download queue #${run.id} failed: ${msg}`);
       }
     } finally {
+      this.clearQueueAutoResumeStabilityTimer();
       const remainingUnprocessed = Array.from(
         new Set([
           ...this.pendingDownloadQueueIds,
@@ -3409,6 +3676,7 @@ export class ScraperOrchestrator extends EventEmitter {
       this.pendingDownloadQueueSet.clear();
       this.inFlightDownloadIds.clear();
       this.ruleFilteredDownloadIds.clear();
+      this.stopRequestedByUser = false;
       if (this.lockRenewTimer) {
         clearInterval(this.lockRenewTimer);
         this.lockRenewTimer = null;
@@ -4270,6 +4538,15 @@ export class ScraperOrchestrator extends EventEmitter {
 
   stopActiveRun(): boolean {
     if (!this.activeRun || !this.abortController) return false;
+    this.stopRequestedByUser = true;
+    if (this.hasActiveDownloadQueue()) {
+      saveQueueRecoveryState({
+        ...DEFAULT_QUEUE_RECOVERY_STATE,
+        userPaused: true,
+        lastInterruptionCause: 'user_stopped',
+        lastInterruptedAt: new Date().toISOString(),
+      });
+    }
     this.activeSyncItem = null;
     this.currentPhase = `Stopping run #${this.activeRun.id}...`;
     this.log('warn', `Abort requested for run #${this.activeRun.id}`, null, this.activeRun.id);
@@ -6874,8 +7151,13 @@ export class ScraperOrchestrator extends EventEmitter {
     ].join('\n');
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(signal: string = 'SIGTERM'): Promise<void> {
     this.shuttingDown = true;
+    this.shutdownSignal = signal;
+    const hadScheduledAutoResume = this.queueAutoResumeStatus.phase === 'scheduled';
+    this.cancelPendingQueueAutoResume();
+    this.clearQueueAutoResumeStabilityTimer();
+
     if (this.cronJob) {
       this.cronJob.stop();
       this.cronJob = null;
@@ -6883,8 +7165,27 @@ export class ScraperOrchestrator extends EventEmitter {
     if (this.indexerAbortController) {
       this.indexerAbortController.abort();
     }
+
+    // Persist interruption metadata BEFORE aborting the active download queue so that
+    // even if the container is force-killed before the grace period finishes, the next
+    // startup knows to auto-resume the queue cleanly.
+    if (this.hasActiveDownloadQueue() || hadScheduledAutoResume) {
+      const prev = getQueueRecoveryState();
+      saveQueueRecoveryState({
+        ...prev,
+        userPaused: false,
+        lastInterruptedAt: new Date().toISOString(),
+        lastInterruptionCause: signal.toUpperCase() === 'SIGINT' ? 'sigint' : 'sigterm',
+      });
+    }
+
     if (this.activeRun && this.abortController) {
-      this.log('warn', 'SIGTERM received; gracefully halting active sync run');
+      this.log(
+        'warn',
+        this.hasActiveDownloadQueue()
+          ? `${signal} received; gracefully halting active download queue (will auto-resume on restart)`
+          : `${signal} received; gracefully halting active sync run`,
+      );
       this.abortController.abort();
       await new Promise((r) => setTimeout(r, 500));
     }

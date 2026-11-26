@@ -438,6 +438,19 @@ async function bootstrap() {
     }
   });
 
+  app.post('/api/queue/pause-auto-resume', (_req, res) => {
+    try {
+      const result = orchestrator.pauseQueueAutoResume();
+      res.json({
+        ok: true,
+        ...result,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
   app.post('/api/queue/clear', (_req, res) => {
     try {
       const result = orchestrator.clearDownloadQueue();
@@ -1686,7 +1699,7 @@ async function bootstrap() {
 
   const handleSignal = async (signal: string) => {
     console.log(`Received ${signal}; shutting down gracefully...`);
-    await orchestrator.shutdown();
+    await orchestrator.shutdown(signal);
     server.close(() => {
       process.exit(0);
     });

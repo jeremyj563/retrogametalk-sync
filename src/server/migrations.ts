@@ -1446,6 +1446,21 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 30,
+    name: 'runtime_state_kv',
+    description:
+      'Create runtime_state key-value table for persistent download queue auto-resume and crash-loop backoff state',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS runtime_state (
+          key TEXT PRIMARY KEY,
+          value_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
