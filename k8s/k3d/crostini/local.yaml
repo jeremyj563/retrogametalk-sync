@@ -1,0 +1,41 @@
+# k3d cluster create --config local.yaml
+# k3d kubeconfig get local > ~/.kube/config
+---
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: local
+servers: 1
+image: rancher/k3s:v1.34.6-k3s1
+kubeAPI:
+  host: k3d-local.docker.internal
+  hostIP: 127.0.0.1
+  hostPort: '6445'
+ports:
+  - port: 8080:80
+    nodeFilters:
+      - loadbalancer
+  - port: 8443:443
+    nodeFilters:
+      - loadbalancer
+options:
+  k3d:
+    disableLoadbalancer: false
+  k3s:
+    extraArgs:
+      - arg: --flannel-backend=none
+        nodeFilters:
+          - server:*
+      - arg: --disable-network-policy
+        nodeFilters:
+          - server:*
+      - arg: --kubelet-arg=feature-gates=KubeletInUserNamespace=true
+        nodeFilters:
+          - server:*
+      - arg: --kube-proxy-arg=proxy-mode=iptables
+        nodeFilters:
+          - server:*
+      - arg: --kube-proxy-arg=conntrack-max-per-core=0
+        nodeFilters:
+          - server:*
+

@@ -1,0 +1,13 @@
+# helm repo add projectcalico https://docs.projectcalico.org/charts
+# helm template calico-crds projectcalico/crd.projectcalico.org.v1 | kubectl apply --server-side -f -
+# helm -n tigera-operator upgrade --install --create-namespace calico projectcalico/tigera-operator -f calico-values.yaml
+---
+installation:
+  cni:
+    type: Calico
+  calicoNetwork:
+    bgp: Enabled
+    ipPools:
+      - cidr: 10.42.0.0/16
+        encapsulation: None
+        natOutgoing: Enabled
