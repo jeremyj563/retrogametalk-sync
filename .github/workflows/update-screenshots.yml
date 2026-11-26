@@ -13,8 +13,8 @@ on:
           - subtle
           - arcade
           - bvm
-      create_pr:
-        description: 'Open or update PR with captured WebP assets'
+      publish_release:
+        description: 'Upload captured WebP assets to the readme-assets GitHub Release'
         required: false
         default: true
         type: boolean
@@ -35,17 +35,14 @@ concurrency:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   capture-previews:
-    name: Capture CRT Visual Previews (Playwright + FFmpeg)
+    name: Capture & Publish CRT Visual Previews
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
@@ -89,68 +86,72 @@ jobs:
           path: docs/assets/screenshots/*.webp
           retention-days: 14
 
-      - name: Check for changed screenshot assets
-        id: diff
-        run: |
-          if [ -n "$(git status --porcelain -- docs/assets/screenshots)" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Open or update pull request with visual previews
-        if: steps.diff.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || inputs.create_pr != false)
+      - name: Publish visual previews to readme-assets GitHub Release
+        if: github.event_name != 'workflow_dispatch' || inputs.publish_release != false
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRANCH_NAME: chore/update-readme-screenshots
+          RELEASE_TAG: readme-assets
+          RELEASE_TITLE: 'README Visual Previews (Managed Asset Bucket)'
           CRT_PRESET: ${{ inputs.crt_preset || 'pvm' }}
           MOTION_LEVEL: 'low'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
 
-          git checkout -B "$BRANCH_NAME"
-          git add docs/assets/screenshots/*.webp
-          git commit -m "docs(screenshots): refresh automated CRT visual previews"
-          git push --force origin "$BRANCH_NAME"
+          shopt -s nullglob
+          ASSETS=(docs/assets/screenshots/*.webp)
+          if [ "${#ASSETS[@]}" -eq 0 ]; then
+            echo "Error: No WebP screenshot assets found in docs/assets/screenshots/." >&2
+            exit 1
+          fi
 
-          RAW_BASE="https://raw.githubusercontent.com/${{ github.repository }}/${BRANCH_NAME}/docs/assets/screenshots"
-          PR_BODY=$(cat <<EOF
-          ## Automated CRT Visual Preview Refresh
+          CAPTURED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          ASSET_BASE="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}"
 
-          Generated automatically via headless Chromium (**Playwright**) + **FFmpeg** against an isolated ephemeral demo SQLite library.
+          RELEASE_NOTES=$(cat <<EOF
+          Automated visual preview assets rendered by \`README.md\`.
 
+          > **Note:** This pre-release is a rolling asset bucket managed automatically by \`.github/workflows/update-screenshots.yml\`. Hosting screenshots as GitHub Release assets keeps binary images completely out of git history and repository clones.
+
+          - **Captured Commit:** \`${SHORT_SHA}\`
+          - **Captured At (UTC):** \`${CAPTURED_AT}\`
           - **CRT Optical Preset:** \`${CRT_PRESET}\`
           - **Living UI Motion:** \`${MOTION_LEVEL}\` (with **Sync Speed Wave** enabled)
           - **Phosphor Palette:** Classic **Green** primary views + **Amber** highlight on SD Card Exporter
-
-          ### Hero Animated Walkthrough
-          <p align="center">
-            <img src="${RAW_BASE}/console-walkthrough.webp" alt="CRT Console Walkthrough" width="840" />
-          </p>
-
-          ### Static Screenshots (1440×900 WebP)
-
-          | Sync Overview & Telemetry | Offline Box-Art Catalog |
-          | :---: | :---: |
-          | <img src="${RAW_BASE}/sync-overview.webp" alt="Sync Overview" width="420" /> | <img src="${RAW_BASE}/catalog-grid.webp" alt="Catalog Box-Art Grid" width="420" /> |
-
-          | Game Detail Drawer | Direct-to-SD-Card Exporter (Amber) |
-          | :---: | :---: |
-          | <img src="${RAW_BASE}/game-detail-drawer.webp" alt="Game Detail Drawer" width="420" /> | <img src="${RAW_BASE}/sd-card-exporter.webp" alt="SD Card Exporter" width="420" /> |
           EOF
           )
 
-          EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --state open --json number --jq '.[0].number // empty')
-          if [ -n "$EXISTING_PR" ]; then
-            gh pr edit "$EXISTING_PR" \
-              --title "docs: refresh README CRT visual previews" \
-              --body "$PR_BODY"
-            echo "Updated existing PR #${EXISTING_PR}"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${ASSETS[@]}" --clobber
+            gh release edit "$RELEASE_TAG" \
+              --prerelease \
+              --latest=false \
+              --title "$RELEASE_TITLE" \
+              --notes "$RELEASE_NOTES"
+            echo "Updated existing release '${RELEASE_TAG}' with ${#ASSETS[@]} WebP assets."
           else
-            gh pr create \
-              --base main \
-              --head "$BRANCH_NAME" \
-              --title "docs: refresh README CRT visual previews" \
-              --body "$PR_BODY"
+            gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --latest=false \
+              --title "$RELEASE_TITLE" \
+              --notes "$RELEASE_NOTES"
+            echo "Created release '${RELEASE_TAG}' with ${#ASSETS[@]} WebP assets."
           fi
+
+          {
+            echo "## Published README Visual Previews (\`${RELEASE_TAG}\`)"
+            echo ""
+            echo "Uploaded **${#ASSETS[@]}** WebP assets to [\`${RELEASE_TAG}\`](https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}) without adding binary blobs to git history."
+            echo ""
+            echo "| Asset | Size | Direct URL |"
+            echo "| :--- | ---: | :--- |"
+            for asset in "${ASSETS[@]}"; do
+              fname=$(basename "$asset")
+              fsize=$(du -h "$asset" | cut -f1)
+              echo "| \`${fname}\` | ${fsize} | [\`${fname}\`](${ASSET_BASE}/${fname}) |"
+            done
+            echo ""
+            echo "### Hero Walkthrough Preview"
+            echo "<p align=\"center\"><img src=\"${ASSET_BASE}/console-walkthrough.webp\" alt=\"CRT Console Walkthrough\" width=\"800\" /></p>"
+          } >> "$GITHUB_STEP_SUMMARY"

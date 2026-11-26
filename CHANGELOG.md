@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.42.1] - 2026-11-25
+
+- Offloaded `README.md` visual preview screenshots out of git history onto a dedicated GitHub Release asset bucket (`readme-assets`) to eliminate repository bloat on UI updates:
+  - **Zero-Bloat Screenshot Publishing (`.github/workflows/update-screenshots.yml`)**: Replaced the `chore/update-readme-screenshots` branch/PR binary commit flow with atomic `gh release upload readme-assets ... --clobber` publishing to a rolling `--prerelease --latest=false` GitHub Release (keeping SemVer releases and `docker-publish.yml` untouched) plus an inline Actions Step Summary.
+  - **Externalized `README.md` Previews & Ignore Rules**: Updated all 5 `README.md` preview images to render from `releases/download/readme-assets/*.webp`, removed tracked `docs/assets/screenshots/*.webp` binaries, and added `docs/assets/screenshots/` and `public/assets/aistudio/` to `.gitignore` (and `public/assets/aistudio` to `.dockerignore`).
+  - **Git History Scrub Helper (`scripts/scrub-screenshot-history.sh`)**: Added a safe, `--dry-run`-by-default `git-filter-repo` mirror scrub script with live `readme-assets` pre-flight verification, local rollback bundle creation, before/after size reporting, stale `chore/update-readme-screenshots` branch cleanup, and optional `--include-aistudio-assets` support.
+
 ## [1.42.0] - 2026-11-25
 
 - Reworked **Device Export → 02. ROM Filename Formatting** around modern **No-Intro + T-En** naming standards with an embedded all-type live preview matrix and cursor-aware pattern builder:

@@ -8,3 +8,10 @@ mirror-data/
 *.log
 .env*
 !.env.example
+
+# Generated README visual previews (hosted via GitHub Release `readme-assets`)
+docs/assets/screenshots/
+
+# Transient AI Studio chat-uploaded screenshot attachments
+public/assets/aistudio/
+

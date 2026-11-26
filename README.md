@@ -45,18 +45,18 @@
 ### Visual Preview
 
 <p align="center">
-  <img src="./docs/assets/screenshots/console-walkthrough.webp" alt="RetroGameTalk Sync CRT Control Console Walkthrough — Sync Overview, Box-Art Catalog, Game Detail Drawer &amp; SD Card Exporter" width="880" />
+  <img src="https://github.com/jeremyj563/retrogametalk-sync/releases/download/readme-assets/console-walkthrough.webp" alt="RetroGameTalk Sync CRT Control Console Walkthrough — Sync Overview, Box-Art Catalog, Game Detail Drawer &amp; SD Card Exporter" width="880" />
 </p>
 
 | Sync Overview &amp; Telemetry *(Green · PVM)* | Offline Box-Art Catalog *(Green · PVM)* |
 | :---: | :---: |
-| <img src="./docs/assets/screenshots/sync-overview.webp" alt="Sync Overview with active transfer, Speed-Reactive Sync Wave, Telemetry Deck and Activity Log" width="440" /> | <img src="./docs/assets/screenshots/catalog-grid.webp" alt="Offline Box-Art Catalog grid with multi-select filters and Downloaded/Installed indicators" width="440" /> |
+| <img src="https://github.com/jeremyj563/retrogametalk-sync/releases/download/readme-assets/sync-overview.webp" alt="Sync Overview with active transfer, Speed-Reactive Sync Wave, Telemetry Deck and Activity Log" width="440" /> | <img src="https://github.com/jeremyj563/retrogametalk-sync/releases/download/readme-assets/catalog-grid.webp" alt="Offline Box-Art Catalog grid with multi-select filters and Downloaded/Installed indicators" width="440" /> |
 
 | Game Detail Drawer *(Green · PVM)* | Direct-to-SD-Card Exporter *(Amber Highlight · PVM)* |
 | :---: | :---: |
-| <img src="./docs/assets/screenshots/game-detail-drawer.webp" alt="Game Detail Drawer with cover art, release specs, ROM files and full-res screenshots" width="440" /> | <img src="./docs/assets/screenshots/sd-card-exporter.webp" alt="Device Export and SD Card Exporter configured in warm Amber phosphor" width="440" /> |
+| <img src="https://github.com/jeremyj563/retrogametalk-sync/releases/download/readme-assets/game-detail-drawer.webp" alt="Game Detail Drawer with cover art, release specs, ROM files and full-res screenshots" width="440" /> | <img src="https://github.com/jeremyj563/retrogametalk-sync/releases/download/readme-assets/sd-card-exporter.webp" alt="Device Export and SD Card Exporter configured in warm Amber phosphor" width="440" /> |
 
-> *Previews are generated automatically via **Playwright + FFmpeg** (`.github/workflows/update-screenshots.yml`) using an isolated ephemeral demo SQLite library. Run `npm run capture:screenshots` locally (or pass `-- --url http://localhost:3000` to capture your own running instance).*
+> *Previews are generated automatically via **Playwright + FFmpeg** (`.github/workflows/update-screenshots.yml`) using an isolated ephemeral demo SQLite library and published to the rolling [`readme-assets`](https://github.com/jeremyj563/retrogametalk-sync/releases/tag/readme-assets) GitHub Release so binary screenshots never bloat git history. Run `npm run capture:screenshots` locally (or pass `-- --url http://localhost:3000` to capture your own running instance).*
 
 ---
 

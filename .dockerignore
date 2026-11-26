@@ -16,6 +16,7 @@ mirror-data
 
 # Documentation, screenshots & visual preview assets
 docs
+public/assets/aistudio
 README.md
 CHANGELOG.md
 AGENTS.md
