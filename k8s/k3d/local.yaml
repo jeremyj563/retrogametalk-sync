@@ -1,4 +1,4 @@
-# k3d cluster create --config bootstrap/_common/k3d/local.yaml
+# k3d cluster create --config local.yaml
 # k3d kubeconfig get local > ~/.kube/config-k3d-local
 ---
 apiVersion: k3d.io/v1alpha5
