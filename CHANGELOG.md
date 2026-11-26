@@ -4,6 +4,10 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.44.2] - 2026-11-26
+
+- Updated the Helm chart post-install/upgrade `NOTES.txt` output (`k8s/charts/retrogametalk-sync/templates/NOTES.txt`) to display the deployed version (`image.tag` or `Chart.AppVersion`), Helm chart version, and resolved container image reference.
+
 ## [1.44.1] - 2026-11-26
 
 - Added a unified **CRT phosphor afterglow dissolve & zero-jump collapse** disappearance effect across all ephemeral confirmation messages and dismissible notices (`EphemeralNotice`, `EphemeralInlineNotice`, `EphemeralFloatingToast`, `useEphemeralPresence`, and `ConfigSaveBar`):
