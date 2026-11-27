@@ -1188,3 +1188,40 @@ export async function streamHttpPayloadToSdFile(
     throw err;
   }
 }
+
+/**
+ * Write a UTF-8 text file (such as a multi-disc `.m3u` playlist) directly to a mounted storage folder.
+ */
+export async function writeTextFileToSdCard(
+  dirHandle: SdDirectoryHandle,
+  filename: string,
+  content: string,
+  signal?: AbortSignal,
+): Promise<number> {
+  if (signal?.aborted) {
+    throw new DOMException('Installation canceled by user.', 'AbortError');
+  }
+  const encoded = new TextEncoder().encode(content);
+  const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+  const writable = await fileHandle.createWritable();
+  try {
+    if (signal?.aborted) {
+      throw new DOMException('Installation canceled by user.', 'AbortError');
+    }
+    await writable.write(encoded);
+    await writable.close();
+    return encoded.byteLength;
+  } catch (err) {
+    try {
+      if (typeof writable.abort === 'function') {
+        await writable.abort();
+      } else {
+        await writable.close();
+      }
+    } catch {
+      // Ignore secondary abort/close error
+    }
+    throw err;
+  }
+}
+

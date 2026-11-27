@@ -1,8 +1,8 @@
 ---
 title: Optional `.chd` Disc Compression & Automatic Multi-Disc `.m3u` Playlists
-status: planned
+status: implemented
 created_at: 2026-11-22T20:35:00Z
-implemented_at: null
+implemented_at: 2026-11-27T15:50:00Z
 ---
 
 # Optional `.chd` Disc Compression & Automatic Multi-Disc `.m3u` Playlists

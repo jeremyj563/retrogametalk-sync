@@ -9,6 +9,11 @@ import {
   normalizeStorageFolderConfig,
   type StorageFolderMappingConfig,
 } from './storageFolderMappings.ts';
+import {
+  canonicalDiscExportConfigJson,
+  normalizeDiscExportConfig,
+  type DiscExportConfig,
+} from './discExport.ts';
 
 export const CONFIG_BACKUP_SCHEMA_VERSION = 1;
 
@@ -47,6 +52,7 @@ export interface ConfigBackupSnapshot {
       romSanitizeFat32: boolean;
       romMaxFilenameLen: number;
       storageFolderConfig: StorageFolderMappingConfig;
+      discExportConfig?: DiscExportConfig;
     };
   };
 }
@@ -190,6 +196,7 @@ export function buildConfigBackupSnapshot(
         romSanitizeFat32: Boolean(config.romSanitizeFat32),
         romMaxFilenameLen: config.romMaxFilenameLen,
         storageFolderConfig: normalizeStorageFolderConfig(config.storageFolderConfig),
+        discExportConfig: normalizeDiscExportConfig(config.discExportConfig),
       },
     },
   };
@@ -438,6 +445,14 @@ export function parseAndValidateConfigBackup(
                     throw new Error('deviceExport.storageFolderConfig must be an object.');
                   })()
               : normalizeStorageFolderConfig(currentConfig.storageFolderConfig),
+          discExportConfig:
+            deviceRaw.discExportConfig !== undefined
+              ? isPlainObject(deviceRaw.discExportConfig)
+                ? normalizeDiscExportConfig(deviceRaw.discExportConfig)
+                : (() => {
+                    throw new Error('deviceExport.discExportConfig must be an object.');
+                  })()
+              : normalizeDiscExportConfig(currentConfig.discExportConfig),
         },
       },
     };
@@ -783,6 +798,23 @@ export function parseAndValidateConfigBackup(
       fromDisplay: `${countStorageOverrides(currentConfig.storageFolderConfig)} override(s)`,
       toDisplay: `${countStorageOverrides(s.deviceExport.storageFolderConfig)} override(s)`,
     });
+
+    if (s.deviceExport.discExportConfig !== undefined) {
+      const curDisc = normalizeDiscExportConfig(currentConfig.discExportConfig);
+      const nextDisc = normalizeDiscExportConfig(s.deviceExport.discExportConfig);
+      const describeDisc = (d: DiscExportConfig) =>
+        `CHD ${d.chdConvertEnabled ? 'On' : 'Off'} · M3U ${d.m3uPlaylistEnabled ? d.m3uLayout : 'Off'}`;
+      maybeApply({
+        field: 'discExportConfig',
+        section: 'Device Export',
+        label: 'Disc Images (.chd & .m3u)',
+        presentInBackup: deviceRaw.discExportConfig !== undefined,
+        nextValue: nextDisc,
+        changed: canonicalDiscExportConfigJson(curDisc) !== canonicalDiscExportConfigJson(nextDisc),
+        fromDisplay: describeDisc(curDisc),
+        toDisplay: describeDisc(nextDisc),
+      });
+    }
 
     const summaryTags: string[] = [];
     summaryTags.push(

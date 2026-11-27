@@ -49,6 +49,12 @@ import {
   type StorageFolderMappingConfig,
   type StorageRomCategoryKey,
 } from '../shared/storageFolderMappings';
+import {
+  canonicalDiscExportConfigJson,
+  normalizeDiscExportConfig,
+  type DiscExportConfig,
+  type RuntimeCapabilities,
+} from '../shared/discExport';
 import { filterValidSystemSlugs } from '../shared/systemCatalog';
 import type {
   ConfigDirtyState,
@@ -68,6 +74,7 @@ import {
 } from '../utils/storageActionCopy';
 import { ConfigSaveBar } from './ConfigSaveBar';
 import { DeviceEmblem } from './DeviceBadge';
+import { DiscExportSettingsSection } from './DiscExportSettingsSection';
 import { RomFilenameFormattingSection } from './RomFilenameFormattingSection';
 import { StorageFolderMappingsSection } from './StorageFolderMappingsSection';
 import { sortDeviceProfilesForFleet } from '../shared/deviceProfiles';
@@ -103,6 +110,12 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
     const [romMaxFilenameLen, setRomMaxFilenameLen] = useState(config.romMaxFilenameLen);
     const [storageFolderConfig, setStorageFolderConfig] = useState<StorageFolderMappingConfig>(
       () => normalizeStorageFolderConfig(config.storageFolderConfig),
+    );
+    const [discExportConfig, setDiscExportConfig] = useState<DiscExportConfig>(() =>
+      normalizeDiscExportConfig(config.discExportConfig),
+    );
+    const [liveCapabilities, setLiveCapabilities] = useState<RuntimeCapabilities | null>(
+      () => status.capabilities ?? null,
     );
     const [showAdvancedNaming, setShowAdvancedNaming] = useState<boolean>(() =>
       shouldAutoExpandAdvancedNaming({
@@ -148,6 +161,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
       setRomSanitizeFat32(target.romSanitizeFat32);
       setRomMaxFilenameLen(target.romMaxFilenameLen);
       setStorageFolderConfig(normalizeStorageFolderConfig(target.storageFolderConfig));
+      setDiscExportConfig(normalizeDiscExportConfig(target.discExportConfig));
     }, []);
 
     useEffect(() => {
@@ -155,6 +169,29 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
         resetFormToConfig(config);
       }
     }, [config, resetFormToConfig]);
+
+    useEffect(() => {
+      if (status.capabilities) {
+        setLiveCapabilities(status.capabilities);
+      }
+    }, [status.capabilities]);
+
+    useEffect(() => {
+      let cancelled = false;
+      void fetch('/api/capabilities')
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: RuntimeCapabilities | null) => {
+          if (!cancelled && data && typeof data.chdman === 'boolean') {
+            setLiveCapabilities(data);
+          }
+        })
+        .catch(() => {
+          // Non-fatal capabilities probe fallback
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, []);
 
     // Collapse detected folders disclosure cleanly whenever mounted device changes
     useEffect(() => {
@@ -278,6 +315,11 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
         romMaxFilenameLen !== config.romMaxFilenameLen;
       if (namingChanged) changedSections.push('ROM Filename Formatting');
 
+      const discExportChanged =
+        canonicalDiscExportConfigJson(discExportConfig) !==
+        canonicalDiscExportConfigJson(config.discExportConfig);
+      if (discExportChanged) changedSections.push('Disc Images (.chd & .m3u)');
+
       return {
         isDirty: changedSections.length > 0,
         changedSections,
@@ -289,6 +331,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
       romSanitizeFat32,
       romMaxFilenameLen,
       storageFolderConfig,
+      discExportConfig,
     ]);
 
     isDirtyRef.current = dirtyState.isDirty;
@@ -320,6 +363,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
           romSanitizeFat32,
           romMaxFilenameLen,
           storageFolderConfig: normalizeStorageFolderConfig(storageFolderConfig),
+          discExportConfig: normalizeDiscExportConfig(discExportConfig),
         });
         isDirtyRef.current = false;
         setSaveMsg('Device Export settings saved');
@@ -337,6 +381,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
       romSanitizeFat32,
       romMaxFilenameLen,
       storageFolderConfig,
+      discExportConfig,
     ]);
 
     const discardChanges = useCallback(() => {
@@ -1047,7 +1092,27 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
           onChangeMaxFilenameLen={setRomMaxFilenameLen}
         />
 
-        {/* Step 03: Saved Storage Device Profiles */}
+        {/* Step 03: Optional .chd Disc Compression & Automatic Multi-Disc .m3u Playlists */}
+        <DiscExportSettingsSection
+          value={discExportConfig}
+          onChange={setDiscExportConfig}
+          capabilities={liveCapabilities}
+          onCacheCleared={(nextCache) => {
+            setLiveCapabilities((prev) =>
+              prev
+                ? { ...prev, chdCache: nextCache }
+                : {
+                    chdman: false,
+                    chdmanVersion: null,
+                    unrar: false,
+                    sevenZip: false,
+                    chdCache: nextCache,
+                  },
+            );
+          }}
+        />
+
+        {/* Step 04: Saved Storage Device Profiles */}
         {installer && deviceProfiles.length > 0 && (() => {
           const orderedProfiles = sortDeviceProfilesForFleet(
             deviceProfiles,
@@ -1070,7 +1135,7 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
                   <div className="space-y-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                       <h2 className="font-display text-lg font-semibold text-crt-text">
-                        03. Saved Device Profiles
+                        04. Saved Device Profiles
                       </h2>
                       <span className="text-xs font-mono text-crt-muted tabular-nums">
                         · {deviceProfiles.length} device{deviceProfiles.length === 1 ? '' : 's'}

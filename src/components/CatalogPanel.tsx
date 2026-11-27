@@ -6053,14 +6053,18 @@ export function CatalogPanel({
                                       ? 'Queued'
                                       : itemInstall.stage === 'finalizing'
                                         ? 'Finalizing…'
-                                        : itemInstall.stage === 'extracting'
-                                          ? 'Extracting…'
-                                          : itemInstall.stage === 'inspecting' ||
-                                              itemInstall.stage === 'scanning_device'
-                                            ? 'Preparing…'
-                                            : itemInstall.percent !== null
-                                              ? `Installing · ${itemInstall.percent}%`
-                                              : 'Installing…'}
+                                        : itemInstall.stage === 'converting_chd'
+                                          ? itemInstall.percent !== null
+                                            ? `Converting .chd · ${itemInstall.percent}%`
+                                            : 'Converting .chd…'
+                                          : itemInstall.stage === 'extracting'
+                                            ? 'Extracting…'
+                                            : itemInstall.stage === 'inspecting' ||
+                                                itemInstall.stage === 'scanning_device'
+                                              ? 'Preparing…'
+                                              : itemInstall.percent !== null
+                                                ? `Installing · ${itemInstall.percent}%`
+                                                : 'Installing…'}
                                   </span>
                                 </span>
                                 {itemInstall.speedLabel && (

@@ -12,6 +12,15 @@ export type {
   SystemTypeFolderOverride,
   SystemTypeSubfolderMode,
 } from '../shared/storageFolderMappings.ts';
+export type {
+  ChdCacheStats,
+  ChdConversionMode,
+  ChdJobSnapshot,
+  ChdJobStatus,
+  DiscExportConfig,
+  M3uLayoutMode,
+  RuntimeCapabilities,
+} from '../shared/discExport.ts';
 export type RunTrigger = 'scheduled' | 'manual' | 'retry' | 'download';
 export type SyncScope = 'incremental' | 'full';
 export type RunMode = SyncScope | 'dry_run';
@@ -86,6 +95,7 @@ export interface ScraperConfigPublic {
   romSanitizeFat32: boolean;
   romMaxFilenameLen: number;
   storageFolderConfig: import('../shared/storageFolderMappings.ts').StorageFolderMappingConfig;
+  discExportConfig?: import('../shared/discExport.ts').DiscExportConfig;
   autoDownloadNewReleases: boolean;
   systemIndexState?: Record<string, SystemIndexCursor>;
   updatedAt: string;
@@ -122,6 +132,7 @@ export interface ConfigUpdateInput {
   romSanitizeFat32?: boolean;
   romMaxFilenameLen?: number;
   storageFolderConfig?: import('../shared/storageFolderMappings.ts').StorageFolderMappingConfig;
+  discExportConfig?: import('../shared/discExport.ts').DiscExportConfig;
   autoDownloadNewReleases?: boolean;
 }
 
@@ -602,6 +613,7 @@ export interface ServiceStatusSnapshot {
   rateLimiter: RateLimiterTelemetry;
   auth: AuthSessionStatus;
   storage: StorageStats;
+  capabilities?: import('../shared/discExport.ts').RuntimeCapabilities;
   indexer: CatalogIndexerStatus;
   ratingsSync?: RatingsSyncStatus;
   queueAutoResume?: import('../shared/queueAutoResume.ts').QueueAutoResumeStatus | null;

@@ -68,6 +68,10 @@ import {
   runSilentBaselineCatchUp,
 } from './achievements.ts';
 import type { ClientAchievementEventPayload } from '../shared/achievements.ts';
+import {
+  getCachedRuntimeCapabilities,
+  probeRuntimeCapabilities,
+} from './chdService.ts';
 import { classifyFileRole, deriveReleaseTags } from './releaseTags.ts';
 import {
   defaultFileExistsWithBytes,
@@ -605,6 +609,16 @@ export class ScraperOrchestrator extends EventEmitter {
     this.reconfigureScheduler(refreshedCfg);
     this.scheduleDiskStatsRefresh(refreshedCfg.downloadDir, true);
     this.scheduleStartupQueueAutoResume(refreshedCfg, authSnap.hasCompletedLogin);
+
+    void probeRuntimeCapabilities(getDataDir(), refreshedCfg.discExportConfig?.chdCacheMaxGb ?? 0)
+      .then(() => {
+        if (!this.shuttingDown) {
+          this.emitStatus();
+        }
+      })
+      .catch(() => {
+        // Non-fatal startup probe error
+      });
 
     if (authSnap.hasCompletedLogin && refreshedCfg.username && refreshedCfg.password) {
       setTimeout(() => {
@@ -2648,6 +2662,7 @@ export class ScraperOrchestrator extends EventEmitter {
       rateLimiter: this.rateLimiter.getTelemetry(),
       auth: this.client.getAuthStatus(cfg, getLastAuthenticatedAt()),
       storage,
+      capabilities: getCachedRuntimeCapabilities(getDataDir(), cfg.discExportConfig?.chdCacheMaxGb ?? 0),
       indexer: this.getCatalogIndexerStatus(cfg),
       ratingsSync: { ...this.ratingsSyncState },
       queueAutoResume:

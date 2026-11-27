@@ -10,6 +10,7 @@ import {
   deleteUserCollection,
   getCatalogNamingPreviewSamples,
   getCatalogStatsSnapshot,
+  getDataDir,
   getDeviceUninstallTargets,
   getPublicConfig,
   getRepositoryItemById,
@@ -40,6 +41,14 @@ import {
   streamCleanDiscZipToResponse,
   streamExtractedEntryToResponse,
 } from './src/server/archiveService.ts';
+import {
+  ChdConversionManager,
+  clearChdCache,
+  getChdCacheDir,
+  getChdCacheStats,
+  isValidChdJobId,
+  probeRuntimeCapabilities,
+} from './src/server/chdService.ts';
 import { formatErrorDetails, isDebugLoggingEnabled, logServer } from './src/server/logger.ts';
 import { AppAuthManager } from './src/server/appAuth.ts';
 import { ScraperOrchestrator } from './src/server/orchestrator.ts';
@@ -49,6 +58,12 @@ import {
   buildConfigBackupSnapshot,
   parseAndValidateConfigBackup,
 } from './src/shared/configBackup.ts';
+import {
+  replaceExtensionWithChd,
+  resolveChdConversionMode,
+  type ChdConversionMode,
+  type ChdJobSnapshot,
+} from './src/shared/discExport.ts';
 import {
   normalizeDeviceRomNaming,
   sanitizeDeviceColorKey,
@@ -71,6 +86,7 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 async function bootstrap() {
   initDb();
   const orchestrator = new ScraperOrchestrator();
+  const chdManager = new ChdConversionManager(() => getDataDir());
   const appAuth = new AppAuthManager();
   const app = express();
 
@@ -117,6 +133,38 @@ async function bootstrap() {
   // Service snapshot
   app.get('/api/status', (_req, res) => {
     res.json(orchestrator.getStatusSnapshot());
+  });
+
+  // Runtime binary capabilities & CHD cache usage
+  app.get('/api/capabilities', async (_req, res) => {
+    try {
+      const cfg = getPublicConfig();
+      const capabilities = await probeRuntimeCapabilities(
+        getDataDir(),
+        cfg.discExportConfig?.chdCacheMaxGb ?? 0,
+      );
+      res.json(capabilities);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // Clear bounded CHD conversion LRU cache on disk
+  app.delete('/api/chd-cache', (_req, res) => {
+    try {
+      const cfg = getPublicConfig();
+      const cacheDir = getChdCacheDir(getDataDir());
+      const cleared = clearChdCache(cacheDir);
+      const chdCache = getChdCacheStats(cacheDir, cfg.discExportConfig?.chdCacheMaxGb ?? 0);
+      res.json({
+        ok: true,
+        deletedCount: cleared.deletedCount,
+        freedBytes: cleared.freedBytes,
+        chdCache,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   // SQLite schema version & applied migration history
@@ -909,6 +957,195 @@ async function bootstrap() {
         `Extract-entry error for itemId=${itemId} fileId=${fileId ?? 'default'} entry="${entry}" outName="${customName || path.posix.basename(entry)}"`,
         formatErrorDetails(err),
       );
+      if (!res.headersSent) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  });
+
+  // Prepare an on-export .chd conversion job for an archive disc target (reusing LRU cache if enabled)
+  app.post('/api/items/:id/prepare-chd', async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+
+    const body = (req.body || {}) as {
+      fileId?: unknown;
+      targetId?: unknown;
+      mode?: unknown;
+      name?: unknown;
+    };
+
+    const fileId =
+      body.fileId !== undefined && body.fileId !== null && body.fileId !== ''
+        ? Number(body.fileId)
+        : undefined;
+    if (fileId !== undefined && (!Number.isInteger(fileId) || fileId <= 0)) {
+      res.status(400).json({ error: 'Invalid fileId' });
+      return;
+    }
+
+    const requestedTargetId =
+      typeof body.targetId === 'string' && body.targetId.trim() ? body.targetId.trim() : undefined;
+    const requestedMode: ChdConversionMode | undefined =
+      body.mode === 'cd' || body.mode === 'dvd' ? body.mode : undefined;
+    const requestedName = typeof body.name === 'string' ? body.name.trim() : '';
+
+    try {
+      const ctx = orchestrator.resolveItemFileContext(itemId, fileId);
+      if (!ctx) {
+        res.status(404).json({ error: 'Mirrored ROM archive not found on disk' });
+        return;
+      }
+
+      const inspection = await orchestrator.inspectItemArchive(itemId, fileId);
+      if (!inspection || inspection.playableTargets.length === 0) {
+        res.status(404).json({ error: 'No playable disc targets found inside archive.' });
+        return;
+      }
+
+      const target =
+        (requestedTargetId
+          ? inspection.playableTargets.find(
+              (t) => t.id === requestedTargetId || t.primaryEntry === requestedTargetId,
+            )
+          : undefined) || inspection.playableTargets[0];
+
+      const mode: ChdConversionMode =
+        requestedMode || resolveChdConversionMode(ctx.item.systemName, target);
+      const baseFilename = requestedName || target.suggestedFilename || path.posix.basename(target.primaryEntry);
+      const filename = replaceExtensionWithChd(
+        sanitizeFat32Filename(baseFilename, ctx.cfg.romMaxFilenameLen),
+      );
+
+      const job = await chdManager.startOrReuseJob({
+        itemId,
+        fileId: inspection.fileId,
+        targetId: target.id,
+        archivePath: ctx.absPath,
+        primaryEntry: target.primaryEntry,
+        entryPaths: target.entryPaths.length > 0 ? target.entryPaths : [target.primaryEntry],
+        mode,
+        filename,
+        cacheMaxGb: ctx.cfg.discExportConfig?.chdCacheMaxGb ?? 0,
+      });
+
+      res.status(job.status === 'done' ? 200 : 202).json({ job });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const status = /chdman is not installed/i.test(msg) ? 503 : 500;
+      logServer('CHD', 'debug', `Prepare-CHD failed for itemId=${itemId}`, formatErrorDetails(err));
+      res.status(status).json({ error: msg });
+    }
+  });
+
+  app.get('/api/chd-jobs/:jobId', (req, res) => {
+    const jobId = String(req.params.jobId || '').trim();
+    if (!isValidChdJobId(jobId)) {
+      res.status(400).json({ error: 'Invalid CHD job ID' });
+      return;
+    }
+    const job = chdManager.getJobSnapshot(jobId);
+    if (!job) {
+      res.status(404).json({ error: 'CHD conversion job not found' });
+      return;
+    }
+    res.json({ job });
+  });
+
+  app.get('/api/chd-jobs/:jobId/events', (req, res) => {
+    const jobId = String(req.params.jobId || '').trim();
+    if (!isValidChdJobId(jobId)) {
+      res.status(400).json({ error: 'Invalid CHD job ID' });
+      return;
+    }
+    const current = chdManager.getJobSnapshot(jobId);
+    if (!current) {
+      res.status(404).json({ error: 'CHD conversion job not found' });
+      return;
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    const isTerminal = (snap: ChdJobSnapshot) =>
+      snap.status === 'done' || snap.status === 'error' || snap.status === 'canceled';
+
+    const sendSnapshot = (snap: ChdJobSnapshot) => {
+      const eventName =
+        snap.status === 'done'
+          ? 'done'
+          : snap.status === 'error' || snap.status === 'canceled'
+            ? 'error'
+            : 'progress';
+      res.write(`event: ${eventName}\ndata: ${JSON.stringify(snap)}\n\n`);
+    };
+
+    sendSnapshot(current);
+    if (isTerminal(current)) {
+      res.end();
+      return;
+    }
+
+    let unsubscribe: (() => void) | null = null;
+    const heartbeat = setInterval(() => {
+      res.write(': keepalive\n\n');
+    }, 15_000);
+
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      unsubscribe?.();
+      unsubscribe = null;
+    };
+
+    unsubscribe = chdManager.subscribeJobEvents(jobId, (snap) => {
+      sendSnapshot(snap);
+      if (isTerminal(snap)) {
+        cleanup();
+        res.end();
+      }
+    });
+
+    req.on('close', () => {
+      cleanup();
+    });
+  });
+
+  app.delete('/api/chd-jobs/:jobId', (req, res) => {
+    const jobId = String(req.params.jobId || '').trim();
+    if (!isValidChdJobId(jobId)) {
+      res.status(400).json({ error: 'Invalid CHD job ID' });
+      return;
+    }
+    const canceled = chdManager.cancelJob(jobId);
+    res.json({ ok: true, canceled });
+  });
+
+  app.get('/api/items/:id/export-chd', async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      res.status(400).json({ error: 'Invalid item ID' });
+      return;
+    }
+    const jobId = typeof req.query.jobId === 'string' ? req.query.jobId.trim() : '';
+    if (!isValidChdJobId(jobId)) {
+      res.status(400).json({ error: 'Missing or invalid jobId' });
+      return;
+    }
+    const job = chdManager.getJobSnapshot(jobId);
+    if (!job || job.itemId !== itemId) {
+      res.status(404).json({ error: 'CHD conversion job not found for this item' });
+      return;
+    }
+    const customName = typeof req.query.name === 'string' ? req.query.name.trim() : undefined;
+    try {
+      await chdManager.streamJobOutputToResponse(jobId, customName, res);
+    } catch (err) {
+      logServer('CHD', 'debug', `Export-CHD stream error for jobId=${jobId}`, formatErrorDetails(err));
       if (!res.headersSent) {
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
       }

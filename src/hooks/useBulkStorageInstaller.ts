@@ -24,6 +24,18 @@ import {
   type DeviceAutoConfigResult,
 } from '../shared/storageAutoConfig';
 import {
+  isDiscTargetEligibleForChd,
+  normalizeDiscExportConfig,
+  replaceExtensionWithChd,
+  resolveChdConversionMode,
+} from '../shared/discExport';
+import {
+  planMultiDiscExportLayout,
+  type MultiDiscInputEntry,
+  type PlannedDiscEntry,
+  type PlannedMultiDiscGroup,
+} from '../shared/multiDiscPlaylist';
+import {
   classifyStorageRomCategory,
   resolveTargetStorageFolder,
   type StorageFolderMappingConfig,
@@ -36,12 +48,14 @@ import type {
   DeviceRomNamingOverrides,
   PlayableExportTarget,
   RepositoryItemRecord,
+  RuntimeCapabilities,
   ScraperConfigPublic,
   StorageDeviceProfile,
 } from '../types';
 import { formatBytes } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
 import { reportAchievementEvent } from '../utils/achievementsClient';
+import { prepareAndWaitForChdJob } from '../utils/chdClient';
 import {
   checkHandlePermission,
   findMatchingStoredDeviceHandle,
@@ -66,6 +80,7 @@ import {
   streamHttpPayloadToSdFile,
   unregisterEntryInScan,
   writeDeviceMarkerToSdCard,
+  writeTextFileToSdCard,
   type SdDirectoryHandle,
   type SdScanFolderResult,
 } from '../utils/sdCardFs';
@@ -147,6 +162,7 @@ export type DeviceInstallStage =
   | 'scanning_device'
   | 'inspecting'
   | 'extracting'
+  | 'converting_chd'
   | 'writing'
   | 'finalizing';
 
@@ -236,8 +252,122 @@ export interface DeviceUninstallResult {
 
 interface UseBulkStorageInstallerOptions {
   config: ScraperConfigPublic | null;
+  capabilities?: RuntimeCapabilities | null;
   debugLogging?: boolean;
   onItemsInstalled?: (updatedItems: RepositoryItemRecord[], deviceLabel: string) => void;
+}
+
+interface MultiDiscTargetAssignment {
+  group: PlannedMultiDiscGroup;
+  entry: PlannedDiscEntry;
+  targetFolderRel: string;
+}
+
+interface MultiDiscBatchPlan {
+  byEntryId: Map<string, MultiDiscTargetAssignment>;
+  groupsByItemId: Map<number, Array<{ group: PlannedMultiDiscGroup; targetFolderRel: string }>>;
+}
+
+function buildMultiDiscBatchPlan(params: {
+  rows: ExportQueueRow[];
+  resolveFilterContext: (row: ExportQueueRow) => SmartRomFilterContext | null;
+  storageCfg: StorageFolderMappingConfig;
+  cfg: ScraperConfigPublic | null;
+  activeProfile: StorageDeviceProfile | null;
+  chdmanAvailable: boolean;
+}): MultiDiscBatchPlan | null {
+  const discCfg = normalizeDiscExportConfig(params.cfg?.discExportConfig);
+  if (!discCfg.m3uPlaylistEnabled) return null;
+
+  const sanitizeFat32 =
+    params.activeProfile?.romNaming?.romSanitizeFat32 ?? params.cfg?.romSanitizeFat32 ?? true;
+  const maxFilenameLen =
+    params.activeProfile?.romNaming?.romMaxFilenameLen ?? params.cfg?.romMaxFilenameLen ?? 0;
+
+  const entriesByFolder = new Map<
+    string,
+    Array<MultiDiscInputEntry<{ itemId: number; rowKey: string; targetId: string }>>
+  >();
+
+  for (const row of params.rows) {
+    if (row.selectedTargetIds.length === 0) continue;
+    const filterCtx = params.resolveFilterContext(row);
+    for (const targetId of row.selectedTargetIds) {
+      const target = row.targets.find((t) => t.id === targetId);
+      if (!target) continue;
+      const { folder: targetFolderRel } = resolveRowTargetCategoryAndFolder(
+        row,
+        target,
+        params.storageCfg,
+        filterCtx,
+      );
+      const willConvertToChd = isDiscTargetEligibleForChd(
+        row.systemName,
+        target,
+        discCfg,
+        params.chdmanAvailable,
+      );
+      const rawDesiredName = (row.outputNamesByTargetId[targetId] || target.suggestedFilename).trim();
+      const baseName = sanitizeFat32
+        ? sanitizeFat32Filename(rawDesiredName, maxFilenameLen, target.kind !== 'disc_set' || willConvertToChd)
+        : rawDesiredName;
+
+      let outputFilename = willConvertToChd ? replaceExtensionWithChd(baseName) : baseName;
+      let isDiscSetFolder = false;
+      let discSetFolderName: string | undefined;
+
+      if (target.kind === 'disc_set' && !willConvertToChd) {
+        isDiscSetFolder = true;
+        discSetFolderName = baseName.replace(/\.zip$/i, '');
+        const primaryLeaf = target.primaryEntry.split('/').pop() || target.primaryEntry;
+        outputFilename = sanitizeFat32
+          ? sanitizeFat32Filename(primaryLeaf, maxFilenameLen)
+          : primaryLeaf;
+      }
+
+      const list = entriesByFolder.get(targetFolderRel) || [];
+      list.push({
+        id: `${row.rowKey}::${targetId}`,
+        gameKey: `item:${row.itemId}`,
+        gameTitle: row.title,
+        outputFilename,
+        isDiscSetFolder,
+        discSetFolderName,
+        payload: { itemId: row.itemId, rowKey: row.rowKey, targetId },
+      });
+      entriesByFolder.set(targetFolderRel, list);
+    }
+  }
+
+  const byEntryId = new Map<string, MultiDiscTargetAssignment>();
+  const groupsByItemId = new Map<
+    number,
+    Array<{ group: PlannedMultiDiscGroup; targetFolderRel: string }>
+  >();
+
+  for (const [targetFolderRel, folderEntries] of entriesByFolder.entries()) {
+    const plan = planMultiDiscExportLayout(folderEntries, {
+      layout: discCfg.m3uLayout,
+      sanitizeFat32,
+      maxFilenameLen: maxFilenameLen > 0 ? maxFilenameLen : 120,
+    });
+    for (const group of plan.groups) {
+      const itemIds = new Set<number>();
+      for (const entry of group.entries) {
+        byEntryId.set(entry.id, { group, entry, targetFolderRel });
+        const payload = entry.payload as { itemId?: number } | undefined;
+        if (payload?.itemId) itemIds.add(payload.itemId);
+      }
+      for (const itemId of itemIds) {
+        const list = groupsByItemId.get(itemId) || [];
+        list.push({ group, targetFolderRel });
+        groupsByItemId.set(itemId, list);
+      }
+    }
+  }
+
+  if (byEntryId.size === 0) return null;
+  return { byEntryId, groupsByItemId };
 }
 
 interface ActiveRunControl {
@@ -610,6 +740,7 @@ function buildRowsFromInspectedItem(
 
 export function useBulkStorageInstaller({
   config,
+  capabilities = null,
   debugLogging = false,
   onItemsInstalled,
 }: UseBulkStorageInstallerOptions) {
@@ -676,6 +807,8 @@ export function useBulkStorageInstaller({
 
   const configRef = useRef(config);
   configRef.current = config;
+  const capabilitiesRef = useRef(capabilities);
+  capabilitiesRef.current = capabilities;
   const effectiveStorageFolderConfigRef = useRef(effectiveStorageFolderConfig);
   effectiveStorageFolderConfigRef.current = effectiveStorageFolderConfig;
   const activeDeviceProfileRef = useRef(activeDeviceProfile);
@@ -1908,6 +2041,7 @@ export function useBulkStorageInstaller({
       dirCache: Map<string, SdDirectoryHandle>,
       signal: AbortSignal,
       onProgress?: (transfer: ActiveDeviceInstallTransfer) => void,
+      multiDiscLookup?: Map<string, MultiDiscTargetAssignment>,
     ): Promise<{
       nextState: ExportRowWriteState;
       detail: string;
@@ -1926,6 +2060,8 @@ export function useBulkStorageInstaller({
       const sanitizeFat32 = activeProfile?.romNaming?.romSanitizeFat32 ?? cfg?.romSanitizeFat32 ?? true;
       const maxFilenameLen = activeProfile?.romNaming?.romMaxFilenameLen ?? cfg?.romMaxFilenameLen ?? 0;
       const storageCfg = effectiveStorageFolderConfigRef.current;
+      const discCfg = normalizeDiscExportConfig(cfg?.discExportConfig);
+      const chdmanAvailable = Boolean(capabilitiesRef.current?.chdman);
 
       const selectedTargets = row.selectedTargetIds
         .map((id) => row.targets.find((t) => t.id === id))
@@ -1937,10 +2073,10 @@ export function useBulkStorageInstaller({
         : null;
       const totalFiles = Math.max(
         1,
-        selectedTargets.reduce(
-          (sum, t) => sum + (t.kind === 'disc_set' ? Math.max(1, t.entryPaths.length) : 1),
-          0,
-        ),
+        selectedTargets.reduce((sum, t) => {
+          const willConvert = isDiscTargetEligibleForChd(row.systemName, t, discCfg, chdmanAvailable);
+          return sum + (t.kind === 'disc_set' && !willConvert ? Math.max(1, t.entryPaths.length) : 1);
+        }, 0),
       );
 
       let rowBytes = 0;
@@ -1960,6 +2096,7 @@ export function useBulkStorageInstaller({
         currentFileBytes: number;
         currentFileTotalBytes: number | null;
         bytesPerSec: number | null;
+        overridePercent?: number | null;
       }) => {
         if (!onProgress) return;
         const cumulativeBytes = rowBytes + params.currentFileBytes;
@@ -1970,9 +2107,11 @@ export function useBulkStorageInstaller({
               ? params.currentFileTotalBytes
               : null;
         const percent =
-          effectiveTotal !== null && effectiveTotal > 0
-            ? Math.min(100, Math.round((cumulativeBytes / effectiveTotal) * 100))
-            : null;
+          params.overridePercent !== undefined
+            ? params.overridePercent
+            : effectiveTotal !== null && effectiveTotal > 0
+              ? Math.min(100, Math.round((cumulativeBytes / effectiveTotal) * 100))
+              : null;
         onProgress({
           itemId: row.itemId,
           rowKey: row.rowKey,
@@ -2002,37 +2141,55 @@ export function useBulkStorageInstaller({
           storageCfg,
           filterContext,
         );
+        const multiDiscAssignment = multiDiscLookup?.get(`${row.rowKey}::${targetId}`) ?? null;
+        const multidiscSubpath =
+          multiDiscAssignment && multiDiscAssignment.group.multidiscSubpathSegments.length > 0
+            ? multiDiscAssignment.group.multidiscSubpathSegments.join('/')
+            : '';
+        const writeFolderRel = multidiscSubpath
+          ? `${targetFolderRel}/${multidiscSubpath}`
+          : targetFolderRel;
         touchedFolders.add(`/${targetFolderRel}`);
 
+        const willConvertToChd = isDiscTargetEligibleForChd(
+          row.systemName,
+          target,
+          discCfg,
+          chdmanAvailable,
+        );
+
         const rawDesiredName = (row.outputNamesByTargetId[targetId] || target.suggestedFilename).trim();
-        const finalName = sanitizeFat32
+        const baseFinalName = sanitizeFat32
           ? sanitizeFat32Filename(
               rawDesiredName,
               maxFilenameLen,
-              target.kind !== 'disc_set',
+              target.kind !== 'disc_set' || willConvertToChd,
             )
           : rawDesiredName;
+        const finalName = willConvertToChd ? replaceExtensionWithChd(baseFinalName) : baseFinalName;
         const leafWrittenName =
-          target.kind === 'disc_set' ? finalName.replace(/\.zip$/i, '') : finalName;
+          target.kind === 'disc_set' && !willConvertToChd
+            ? finalName.replace(/\.zip$/i, '')
+            : finalName;
 
-        if (!scanCache[targetFolderRel]) {
+        if (!scanCache[writeFolderRel]) {
           emitTransferUpdate({
             stage: 'scanning_device',
             filename: finalName,
-            destinationFolder: targetFolderRel,
+            destinationFolder: writeFolderRel,
             currentFileBytes: 0,
             currentFileTotalBytes: null,
             bytesPerSec: null,
           });
-          scanCache[targetFolderRel] = await scanTargetFolder(rootHandle, targetFolderRel);
-          setFolderScans((prev) => ({ ...prev, [targetFolderRel]: scanCache[targetFolderRel] }));
+          scanCache[writeFolderRel] = await scanTargetFolder(rootHandle, writeFolderRel);
+          setFolderScans((prev) => ({ ...prev, [writeFolderRel]: scanCache[writeFolderRel] }));
         }
-        const scan = scanCache[targetFolderRel];
+        const scan = scanCache[writeFolderRel];
 
         const cardStatus = findUpgradeCandidateOnCard(finalName, scan);
         if (cardStatus.exactMatch && !row.overwriteExisting) {
           lastWrittenFilename = leafWrittenName;
-          writtenPaths.add(`${targetFolderRel}/${leafWrittenName}`);
+          writtenPaths.add(`${writeFolderRel}/${leafWrittenName}`);
           continue;
         }
         if (cardStatus.exactMatch && row.overwriteExisting) {
@@ -2040,22 +2197,22 @@ export function useBulkStorageInstaller({
         }
         allSkipped = false;
 
-        let systemDirHandle = dirCache.get(targetFolderRel) || null;
-        if (!systemDirHandle) {
-          systemDirHandle = await resolveOrCreateSubdirectory(
+        let destDirHandle = dirCache.get(writeFolderRel) || null;
+        if (!destDirHandle) {
+          destDirHandle = await resolveOrCreateSubdirectory(
             rootHandle,
-            targetFolderRel,
+            writeFolderRel,
             true,
             (msg, detail) => emitSdDebug(msg, detail, true),
           );
-          if (systemDirHandle) {
-            dirCache.set(targetFolderRel, systemDirHandle);
+          if (destDirHandle) {
+            dirCache.set(writeFolderRel, destDirHandle);
           }
         }
 
-        if (!systemDirHandle) {
-          const detail = `Could not create folder /${targetFolderRel}`;
-          emitSdDebug(`Folder creation failed for "${row.title}"`, `itemId=${row.itemId}, folder=/${targetFolderRel}`, true);
+        if (!destDirHandle) {
+          const detail = `Could not create folder /${writeFolderRel}`;
+          emitSdDebug(`Folder creation failed for "${row.title}"`, `itemId=${row.itemId}, folder=/${writeFolderRel}`, true);
           return {
             nextState: 'error',
             detail,
@@ -2068,10 +2225,84 @@ export function useBulkStorageInstaller({
         }
 
         try {
-          if (target.kind === 'disc_set') {
+          if (willConvertToChd) {
+            fileIndex += 1;
+            const chdMode = resolveChdConversionMode(row.systemName, target);
+            emitTransferUpdate({
+              stage: 'converting_chd',
+              filename: finalName,
+              destinationFolder: writeFolderRel,
+              currentFileBytes: 0,
+              currentFileTotalBytes: target.sizeBytes > 0 ? target.sizeBytes : null,
+              bytesPerSec: null,
+              overridePercent: 0,
+            });
+            const chdJob = await prepareAndWaitForChdJob({
+              itemId: row.itemId,
+              fileId: row.fileId,
+              targetId: target.id,
+              mode: chdMode,
+              name: finalName,
+              signal,
+              onProgress: (snap) => {
+                emitTransferUpdate({
+                  stage: 'converting_chd',
+                  filename: finalName,
+                  destinationFolder: writeFolderRel,
+                  currentFileBytes: 0,
+                  currentFileTotalBytes: snap.outputBytes ?? (target.sizeBytes > 0 ? target.sizeBytes : null),
+                  bytesPerSec: null,
+                  overridePercent: snap.percent !== null ? Math.round(snap.percent) : null,
+                });
+              },
+            });
+            if (signal.aborted) {
+              throw new DOMException('Installation canceled by user.', 'AbortError');
+            }
+            const url = `/api/items/${row.itemId}/export-chd?jobId=${encodeURIComponent(chdJob.jobId)}&name=${encodeURIComponent(finalName)}`;
+            let latestFileBytes = 0;
+            let latestFileTotal: number | null = chdJob.outputBytes ?? null;
+            let latestSpeed: number | null = null;
+            rowBytes += await streamHttpPayloadToSdFile(url, destDirHandle, finalName, {
+              signal,
+              hadExistingFile: cardStatus.exactMatch,
+              expectedBytes: chdJob.outputBytes ?? null,
+              onStage: (stage) =>
+                emitTransferUpdate({
+                  stage,
+                  filename: finalName,
+                  destinationFolder: writeFolderRel,
+                  currentFileBytes: latestFileBytes,
+                  currentFileTotalBytes: latestFileTotal,
+                  bytesPerSec: stage === 'writing' ? latestSpeed : null,
+                }),
+              onProgress: (prog) => {
+                latestFileBytes = prog.bytesWritten;
+                latestFileTotal = prog.totalBytes;
+                latestSpeed = prog.bytesPerSec;
+                emitTransferUpdate({
+                  stage: 'writing',
+                  filename: finalName,
+                  destinationFolder: writeFolderRel,
+                  currentFileBytes: prog.bytesWritten,
+                  currentFileTotalBytes: prog.totalBytes,
+                  bytesPerSec: prog.bytesPerSec,
+                });
+              },
+              onDebug: (msg, detail) => emitSdDebug(msg, detail),
+            });
+            registerWrittenEntryInScan(
+              scan,
+              finalName,
+              'file',
+              cardStatus.olderEntryName && row.replaceOlderByTargetId[targetId] !== false
+                ? cardStatus.olderEntryName
+                : null,
+            );
+          } else if (target.kind === 'disc_set') {
             const discFolderName = finalName.replace(/\.zip$/i, '');
-            const discDir = await systemDirHandle.getDirectoryHandle(discFolderName, { create: true });
-            const discRelFolder = `${targetFolderRel}/${discFolderName}`;
+            const discDir = await destDirHandle.getDirectoryHandle(discFolderName, { create: true });
+            const discRelFolder = `${writeFolderRel}/${discFolderName}`;
             for (const entryPath of target.entryPaths) {
               if (signal.aborted) {
                 throw new DOMException('Installation canceled by user.', 'AbortError');
@@ -2125,7 +2356,7 @@ export function useBulkStorageInstaller({
             let latestFileBytes = 0;
             let latestFileTotal: number | null = target.sizeBytes > 0 ? target.sizeBytes : null;
             let latestSpeed: number | null = null;
-            rowBytes += await streamHttpPayloadToSdFile(url, systemDirHandle, finalName, {
+            rowBytes += await streamHttpPayloadToSdFile(url, destDirHandle, finalName, {
               signal,
               hadExistingFile: cardStatus.exactMatch,
               expectedBytes: target.sizeBytes > 0 ? target.sizeBytes : null,
@@ -2133,7 +2364,7 @@ export function useBulkStorageInstaller({
                 emitTransferUpdate({
                   stage,
                   filename: finalName,
-                  destinationFolder: targetFolderRel,
+                  destinationFolder: writeFolderRel,
                   currentFileBytes: latestFileBytes,
                   currentFileTotalBytes: latestFileTotal,
                   bytesPerSec: stage === 'writing' ? latestSpeed : null,
@@ -2145,7 +2376,7 @@ export function useBulkStorageInstaller({
                 emitTransferUpdate({
                   stage: 'writing',
                   filename: finalName,
-                  destinationFolder: targetFolderRel,
+                  destinationFolder: writeFolderRel,
                   currentFileBytes: prog.bytesWritten,
                   currentFileTotalBytes: prog.totalBytes,
                   bytesPerSec: prog.bytesPerSec,
@@ -2164,7 +2395,7 @@ export function useBulkStorageInstaller({
           }
 
           lastWrittenFilename = leafWrittenName;
-          writtenPaths.add(`${targetFolderRel}/${leafWrittenName}`);
+          writtenPaths.add(`${writeFolderRel}/${leafWrittenName}`);
 
           let olderEntryToRemove: string | null =
             cardStatus.olderEntryName && row.replaceOlderByTargetId[targetId] !== false
@@ -2187,17 +2418,17 @@ export function useBulkStorageInstaller({
 
           if (olderEntryToRemove) {
             try {
-              await systemDirHandle.removeEntry(olderEntryToRemove, { recursive: true });
+              await destDirHandle.removeEntry(olderEntryToRemove, { recursive: true });
               registerWrittenEntryInScan(
                 scan,
                 lastWrittenFilename,
-                target.kind === 'disc_set' ? 'directory' : 'file',
+                target.kind === 'disc_set' && !willConvertToChd ? 'directory' : 'file',
                 olderEntryToRemove,
               );
               upgradedOldName = olderEntryToRemove;
             } catch (removeErr) {
               emitSdDebug(
-                `Could not remove superseded file "${olderEntryToRemove}" in /${targetFolderRel}`,
+                `Could not remove superseded file "${olderEntryToRemove}" in /${writeFolderRel}`,
                 removeErr instanceof Error ? removeErr.message : String(removeErr),
                 true,
               );
@@ -2215,7 +2446,7 @@ export function useBulkStorageInstaller({
                 : String(err);
           rowFailed = errDetail;
           emitSdDebug(
-            `Write failed for "${row.title}" -> /${targetFolderRel}/${finalName}`,
+            `Write failed for "${row.title}" -> /${writeFolderRel}/${finalName}`,
             `itemId=${row.itemId}, fileId=${row.fileId}, target=${targetId}, error=${errDetail}`,
             true,
           );
@@ -2454,6 +2685,16 @@ export function useBulkStorageInstaller({
           }
         }
 
+        const chunkMultiDiscPlan = buildMultiDiscBatchPlan({
+          rows: expandedChunkRows,
+          resolveFilterContext: (r) => entryById.get(r.itemId)?.filterContext ?? fallbackFilterContext,
+          storageCfg: effectiveStorageFolderConfigRef.current,
+          cfg: configRef.current,
+          activeProfile: activeDeviceProfileRef.current,
+          chdmanAvailable: Boolean(capabilitiesRef.current?.chdman),
+        });
+        const chunkFailedItemIds = new Set<number>();
+
         // Stream each inspected row in this chunk directly to the mounted storage device
         for (let rowIdx = 0; rowIdx < expandedChunkRows.length; rowIdx += 1) {
           const row = expandedChunkRows[rowIdx];
@@ -2484,13 +2725,17 @@ export function useBulkStorageInstaller({
                   ? 'Checking device...'
                   : transfer.stage === 'extracting'
                     ? 'Extracting ROM...'
-                    : transfer.stage === 'finalizing'
-                      ? 'Finalizing on device...'
-                      : transfer.totalBytes && transfer.percent !== null
-                        ? `Writing ${formatBytes(transfer.bytesWritten)} / ${formatBytes(transfer.totalBytes)} (${transfer.percent}%)`
-                        : transfer.bytesWritten > 0
-                          ? `Writing ${formatBytes(transfer.bytesWritten)}...`
-                          : 'Writing ROM...';
+                    : transfer.stage === 'converting_chd'
+                      ? transfer.percent !== null
+                        ? `Converting to .chd (${transfer.percent}%)…`
+                        : 'Converting to .chd…'
+                      : transfer.stage === 'finalizing'
+                        ? 'Finalizing on device...'
+                        : transfer.totalBytes && transfer.percent !== null
+                          ? `Writing ${formatBytes(transfer.bytesWritten)} / ${formatBytes(transfer.totalBytes)} (${transfer.percent}%)`
+                          : transfer.bytesWritten > 0
+                            ? `Writing ${formatBytes(transfer.bytesWritten)}...`
+                            : 'Writing ROM...';
               setJob((prev) => {
                 if (!prev || prev.jobId !== jobId) return prev;
                 return {
@@ -2510,7 +2755,12 @@ export function useBulkStorageInstaller({
                 };
               });
             },
+            chunkMultiDiscPlan?.byEntryId,
           );
+
+          if (!outcome.installedSuccess) {
+            chunkFailedItemIds.add(row.itemId);
+          }
 
           if (outcome.installedSuccess) {
             unsyncedInstalledIds.add(row.itemId);
@@ -2526,12 +2776,62 @@ export function useBulkStorageInstaller({
           const hasMoreSelectedRowsForItem = expandedChunkRows
             .slice(rowIdx + 1)
             .some((r) => r.itemId === row.itemId && r.selectedTargetIds.length > 0);
+
+          // Write .m3u playlist(s) once all discs for this multi-disc item finish cleanly
+          if (
+            !hasMoreSelectedRowsForItem &&
+            !chunkFailedItemIds.has(row.itemId) &&
+            chunkMultiDiscPlan?.groupsByItemId.has(row.itemId)
+          ) {
+            const groupsForItem = chunkMultiDiscPlan.groupsByItemId.get(row.itemId) || [];
+            for (const { group, targetFolderRel } of groupsForItem) {
+              try {
+                let consoleDir = dirCache.get(targetFolderRel) || null;
+                if (!consoleDir) {
+                  consoleDir = await resolveOrCreateSubdirectory(
+                    activeHandle,
+                    targetFolderRel,
+                    true,
+                    (msg, detail) => emitSdDebug(msg, detail, true),
+                  );
+                  if (consoleDir) dirCache.set(targetFolderRel, consoleDir);
+                }
+                if (consoleDir && group.m3uContent) {
+                  await writeTextFileToSdCard(
+                    consoleDir,
+                    group.m3uFilename,
+                    group.m3uContent,
+                    controller.signal,
+                  );
+                  const extraPaths = [`${targetFolderRel}/${group.m3uFilename}`];
+                  if (group.multidiscSubpathSegments.length > 0) {
+                    extraPaths.push(`${targetFolderRel}/${group.multidiscSubpathSegments.join('/')}`);
+                  }
+                  const prevPaths = unsyncedItemMeta[row.itemId]?.paths || [];
+                  unsyncedItemMeta[row.itemId] = {
+                    ...(unsyncedItemMeta[row.itemId] || {}),
+                    filename: group.m3uFilename,
+                    paths: Array.from(new Set([...prevPaths, ...extraPaths])),
+                  };
+                  emitSdDebug(
+                    `Generated multi-disc playlist /${targetFolderRel}/${group.m3uFilename}`,
+                    `${group.entries.length} discs (${group.layout})`,
+                  );
+                }
+              } catch (m3uErr) {
+                if (isAbortError(m3uErr)) throw m3uErr;
+                emitSdDebug(
+                  `Failed writing .m3u playlist "${group.m3uFilename}"`,
+                  m3uErr instanceof Error ? m3uErr.message : String(m3uErr),
+                  true,
+                );
+              }
+            }
+          }
+
           const didTransferFiles =
             outcome.nextState === 'written' || outcome.nextState === 'upgraded';
           if (didTransferFiles && !hasMoreSelectedRowsForItem && unsyncedInstalledIds.size > 0) {
-            // Keep actually transferred items visibly in "Finalizing" until the server persists
-            // installed_at and subscribers synchronously patch Catalog rows — prevents flashing
-            // back to "Install" while skipped items batch-sync quietly at chunk end.
             setJob((prev) => {
               if (!prev || prev.jobId !== jobId) return prev;
               return {
@@ -3105,6 +3405,15 @@ export function useBulkStorageInstaller({
 
       try {
         const snapshotRows = jobRef.current?.rows || currentJob.rows;
+        const reviewMultiDiscPlan = buildMultiDiscBatchPlan({
+          rows: snapshotRows,
+          resolveFilterContext: () => currentJob.filterContext,
+          storageCfg: effectiveStorageFolderConfigRef.current,
+          cfg: configRef.current,
+          activeProfile: activeDeviceProfileRef.current,
+          chdmanAvailable: Boolean(capabilitiesRef.current?.chdman),
+        });
+        const reviewFailedItemIds = new Set<number>();
         let wroteOrUpgradedAny = false;
         for (let rowIdx = 0; rowIdx < snapshotRows.length; rowIdx += 1) {
           const row = snapshotRows[rowIdx];
@@ -3130,13 +3439,17 @@ export function useBulkStorageInstaller({
                   ? 'Checking device...'
                   : transfer.stage === 'extracting'
                     ? 'Extracting ROM...'
-                    : transfer.stage === 'finalizing'
-                      ? 'Finalizing on device...'
-                      : transfer.totalBytes && transfer.percent !== null
-                        ? `Writing ${formatBytes(transfer.bytesWritten)} / ${formatBytes(transfer.totalBytes)} (${transfer.percent}%)`
-                        : transfer.bytesWritten > 0
-                          ? `Writing ${formatBytes(transfer.bytesWritten)}...`
-                          : 'Writing ROM...';
+                    : transfer.stage === 'converting_chd'
+                      ? transfer.percent !== null
+                        ? `Converting to .chd (${transfer.percent}%)…`
+                        : 'Converting to .chd…'
+                      : transfer.stage === 'finalizing'
+                        ? 'Finalizing on device...'
+                        : transfer.totalBytes && transfer.percent !== null
+                          ? `Writing ${formatBytes(transfer.bytesWritten)} / ${formatBytes(transfer.totalBytes)} (${transfer.percent}%)`
+                          : transfer.bytesWritten > 0
+                            ? `Writing ${formatBytes(transfer.bytesWritten)}...`
+                            : 'Writing ROM...';
               setJob((prev) => {
                 if (!prev || prev.jobId !== jobId) return prev;
                 return {
@@ -3156,12 +3469,16 @@ export function useBulkStorageInstaller({
                 };
               });
             },
+            reviewMultiDiscPlan?.byEntryId,
           );
 
           const didTransferFiles =
             outcome.nextState === 'written' || outcome.nextState === 'upgraded';
           if (didTransferFiles) {
             wroteOrUpgradedAny = true;
+          }
+          if (!outcome.installedSuccess) {
+            reviewFailedItemIds.add(row.itemId);
           }
 
           if (outcome.installedSuccess) {
@@ -3178,6 +3495,58 @@ export function useBulkStorageInstaller({
           const hasMoreSelectedRowsForItem = snapshotRows
             .slice(rowIdx + 1)
             .some((r) => r.itemId === row.itemId && r.selectedTargetIds.length > 0);
+
+          if (
+            !hasMoreSelectedRowsForItem &&
+            !reviewFailedItemIds.has(row.itemId) &&
+            reviewMultiDiscPlan?.groupsByItemId.has(row.itemId)
+          ) {
+            const groupsForItem = reviewMultiDiscPlan.groupsByItemId.get(row.itemId) || [];
+            for (const { group, targetFolderRel } of groupsForItem) {
+              try {
+                let consoleDir = dirCache.get(targetFolderRel) || null;
+                if (!consoleDir) {
+                  consoleDir = await resolveOrCreateSubdirectory(
+                    activeHandle!,
+                    targetFolderRel,
+                    true,
+                    (msg, detail) => emitSdDebug(msg, detail, true),
+                  );
+                  if (consoleDir) dirCache.set(targetFolderRel, consoleDir);
+                }
+                if (consoleDir && group.m3uContent) {
+                  await writeTextFileToSdCard(
+                    consoleDir,
+                    group.m3uFilename,
+                    group.m3uContent,
+                    controller.signal,
+                  );
+                  const extraPaths = [`${targetFolderRel}/${group.m3uFilename}`];
+                  if (group.multidiscSubpathSegments.length > 0) {
+                    extraPaths.push(`${targetFolderRel}/${group.multidiscSubpathSegments.join('/')}`);
+                  }
+                  const prevPaths = unsyncedItemMeta[row.itemId]?.paths || [];
+                  unsyncedItemMeta[row.itemId] = {
+                    ...(unsyncedItemMeta[row.itemId] || {}),
+                    filename: group.m3uFilename,
+                    paths: Array.from(new Set([...prevPaths, ...extraPaths])),
+                  };
+                  emitSdDebug(
+                    `Generated multi-disc playlist /${targetFolderRel}/${group.m3uFilename}`,
+                    `${group.entries.length} discs (${group.layout})`,
+                  );
+                }
+              } catch (m3uErr) {
+                if (isAbortError(m3uErr)) throw m3uErr;
+                emitSdDebug(
+                  `Failed writing .m3u playlist "${group.m3uFilename}"`,
+                  m3uErr instanceof Error ? m3uErr.message : String(m3uErr),
+                  true,
+                );
+              }
+            }
+          }
+
           if (didTransferFiles && !hasMoreSelectedRowsForItem && unsyncedInstalledIds.size > 0) {
             setJob((prev) => {
               if (!prev || prev.jobId !== jobId) return prev;

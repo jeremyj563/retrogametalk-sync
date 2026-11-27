@@ -1689,3 +1689,124 @@ export async function streamCleanDiscZipToResponse(
   zipFile.end();
   await pipePromise;
 }
+
+export async function probeArchiveExtractorCapabilities(): Promise<{
+  unrar: boolean;
+  sevenZip: boolean;
+}> {
+  const [unrarBin, bin7z] = await Promise.all([resolveUnrarBinary(), resolve7zBinary()]);
+  return {
+    unrar: Boolean(unrarBin),
+    sevenZip: Boolean(bin7z),
+  };
+}
+
+export interface ExtractedEntryResult {
+  entryPath: string;
+  absPath: string;
+  sizeBytes: number;
+}
+
+/**
+ * Safely extract a selected list of archive entries into `destDir`, preserving relative
+ * subdirectory structure while enforcing strict path confinement inside `destDir`.
+ */
+export async function extractArchiveEntriesToDirectory(
+  archivePath: string,
+  entryPaths: string[],
+  destDir: string,
+  options?: {
+    signal?: AbortSignal;
+    onEntryProgress?: (index: number, total: number, entryPath: string) => void;
+  },
+): Promise<ExtractedEntryResult[]> {
+  const resolvedRoot = path.resolve(destDir);
+  const rootPrefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : `${resolvedRoot}${path.sep}`;
+  fs.mkdirSync(resolvedRoot, { recursive: true });
+
+  const uniqueEntries: string[] = [];
+  const seen = new Set<string>();
+  for (const rawEntry of entryPaths) {
+    const normalized = String(rawEntry || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!normalized || !isSafeArchiveEntryPath(normalized) || seen.has(normalized)) continue;
+    seen.add(normalized);
+    uniqueEntries.push(normalized);
+  }
+
+  const results: ExtractedEntryResult[] = [];
+  const total = uniqueEntries.length;
+
+  for (let i = 0; i < total; i += 1) {
+    if (options?.signal?.aborted) {
+      throw new Error('Aborted');
+    }
+    const entryPath = uniqueEntries[i];
+    options?.onEntryProgress?.(i, total, entryPath);
+
+    const safeRelSegments = entryPath.split('/').filter((seg) => seg && seg !== '.' && seg !== '..');
+    if (safeRelSegments.length === 0) {
+      throw new Error(`Unsafe archive entry path: "${entryPath}"`);
+    }
+    const targetPath = path.resolve(resolvedRoot, ...safeRelSegments);
+    if (!targetPath.startsWith(rootPrefix)) {
+      throw new Error(`Archive entry escapes extraction workspace: "${entryPath}"`);
+    }
+
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    const stream = await openEntryReadableStream(archivePath, entryPath);
+
+    let sizeBytes = 0;
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const out = fs.createWriteStream(targetPath);
+
+      const finish = (err?: unknown) => {
+        if (settled) return;
+        settled = true;
+        options?.signal?.removeEventListener('abort', onAbort);
+        if (err) {
+          try {
+            out.destroy();
+          } catch {
+            // ignore
+          }
+          if ('destroy' in stream && typeof stream.destroy === 'function') {
+            try {
+              stream.destroy();
+            } catch {
+              // ignore
+            }
+          }
+          reject(err);
+        } else {
+          resolve();
+        }
+      };
+
+      const onAbort = () => {
+        finish(new Error('Aborted'));
+      };
+
+      if (options?.signal) {
+        if (options.signal.aborted) {
+          onAbort();
+          return;
+        }
+        options.signal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      stream.on('data', (chunk: Buffer | string) => {
+        sizeBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+      });
+      stream.on('error', (err) => finish(err));
+      out.on('error', (err) => finish(err));
+      out.on('finish', () => finish());
+      stream.pipe(out);
+    });
+
+    results.push({ entryPath, absPath: targetPath, sizeBytes });
+  }
+
+  return results;
+}
+

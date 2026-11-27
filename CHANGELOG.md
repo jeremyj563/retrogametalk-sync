@@ -4,6 +4,14 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.48.0] - 2026-11-27
+
+- Implemented **Optional `.chd` Disc Compression & Automatic Multi-Disc `.m3u` Playlists**:
+  - **Multi-Arch `chdman` Runtime & Capabilities Probe (`Dockerfile`, `chdService.ts`, `archiveService.ts`, `orchestrator.ts`, `server.ts`)**: Bundled `mame-tools` (`chdman`) in the Alpine Docker image with a build-time executable verification check and exposed live runtime tool availability + cache stats via `GET /api/capabilities` and `status.capabilities` (gracefully disabling `.chd` conversion with a clear hint on runtimes without `chdman`).
+  - **Server-Side Lossless `.chd` Pipeline & Bounded LRU Cache (`chdService.ts`, `server.ts`, `chdClient.ts`)**: Added `POST /api/items/:id/prepare-chd`, live SSE progress (`GET /api/chd-jobs/:jobId/events`), cancellation (`DELETE /api/chd-jobs/:jobId`), `.chd` streaming (`GET /api/items/:id/export-chd`), and `DELETE /api/chd-cache`. Runs `chdman createcd` / `createdvd` without a shell, strictly confines `.cue` and `.gdi` track references inside isolated temporary workspaces, supports optional bounded LRU disk caching (`0 GB` temp-only up to `50 GB`), and cleans up temporary files automatically on completion, error, or cancellation.
+  - **Automatic Multi-Disc `.m3u` Playlists & Live Installer Integration (`multiDiscPlaylist.ts`, `useBulkStorageInstaller.ts`, `sdCardFs.ts`, `deviceInstallView.ts`, `BulkInstallDock.tsx`, `SdCardExportModal.tsx`, `CatalogPanel.tsx`)**: Automatically detects multi-disc sets (`(Disc 1)`, `(CD 2)`, `(Side A/B)`), sorts discs numerically, places discs in either `.multidisc/<Game>/` (Subfolder mode for OnionOS/ES-DE/MuOS) or alongside the playlist (Inline mode), writes UTF-8 POSIX `<Game>.m3u` playlists at the console root, tracks generated `.m3u` and `.multidisc/<Game>` paths for clean device uninstall, and surfaces live `Converting to .chd (42%)…` stage telemetry.
+  - **Device Export Settings, SQLite `v34` & Config Backup (`DiscExportSettingsSection.tsx`, `DeviceExportPanel.tsx`, `migrations.ts`, `db.ts`, `configBackup.ts`)**: Added collapsible **03. Disc Images (.chd & .m3u)** configuration in **Device Export** (opt-in `.chd` toggle, eligible console selector, LRU cache limit + Clear Cache button, `.m3u` toggle, Subfolder/Inline layout cards with live path preview) persisted in SQLite `v34` (`disc_export_config_json`) and included in JSON Config Backup & Restore.
+
 ## [1.47.0] - 2026-11-26
 
 - Implemented **Non-Destructive Local Disk Cleanup & Storage Guardrails**:

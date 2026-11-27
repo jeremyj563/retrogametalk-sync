@@ -628,21 +628,25 @@ export function SdCardExportModal({
                     ? active.totalBytes
                       ? `Extracting (${formatBytes(active.totalBytes)})…`
                       : 'Extracting…'
-                    : active.stage === 'finalizing'
-                      ? 'Finalizing on device…'
-                      : active.totalBytes && active.totalBytes > 0
-                        ? `${formatBytes(active.bytesWritten)} / ${formatBytes(active.totalBytes)}${
-                            active.bytesPerSec && active.bytesPerSec > 0
-                              ? ` · ${formatBytes(active.bytesPerSec)}/s`
-                              : ''
-                          }${active.percent !== null ? ` · ${active.percent}%` : ''}`
-                        : active.bytesWritten > 0
-                          ? `${formatBytes(active.bytesWritten)}${
+                    : active.stage === 'converting_chd'
+                      ? active.percent !== null
+                        ? `Converting to .chd (${active.percent}%)…`
+                        : 'Converting to .chd…'
+                      : active.stage === 'finalizing'
+                        ? 'Finalizing on device…'
+                        : active.totalBytes && active.totalBytes > 0
+                          ? `${formatBytes(active.bytesWritten)} / ${formatBytes(active.totalBytes)}${
                               active.bytesPerSec && active.bytesPerSec > 0
                                 ? ` · ${formatBytes(active.bytesPerSec)}/s`
                                 : ''
-                            }`
-                          : null
+                            }${active.percent !== null ? ` · ${active.percent}%` : ''}`
+                          : active.bytesWritten > 0
+                            ? `${formatBytes(active.bytesWritten)}${
+                                active.bytesPerSec && active.bytesPerSec > 0
+                                  ? ` · ${formatBytes(active.bytesPerSec)}/s`
+                                  : ''
+                              }`
+                            : null
               : null;
             const showIndeterminate =
               isRunning &&
@@ -651,6 +655,7 @@ export function SdCardExportModal({
                 active.stage === 'scanning_device' ||
                 active.stage === 'inspecting' ||
                 active.stage === 'extracting' ||
+                (active.stage === 'converting_chd' && active.percent === null) ||
                 (active.stage === 'writing' && active.percent === null));
 
             return (

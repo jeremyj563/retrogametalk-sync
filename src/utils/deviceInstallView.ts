@@ -576,6 +576,34 @@ export function resolveItemDeviceInstallState(
       };
     }
 
+    if (active.stage === 'converting_chd') {
+      const pct = active.percent !== null ? Math.max(0, Math.min(100, Math.round(active.percent))) : null;
+      return {
+        status: 'active',
+        isActive: true,
+        isFinished: false,
+        stage: 'converting_chd',
+        mode: pct !== null ? 'determinate' : 'preparing',
+        percent: pct,
+        bytesWritten: active.bytesWritten,
+        totalBytes: active.totalBytes,
+        bytesLabel:
+          pct !== null ? `Compressing disc to .chd (${pct}%)…` : 'Compressing disc to .chd…',
+        speedLabel: '',
+        stageLabel:
+          pct !== null ? `Converting to .chd (${pct}%)…` : 'Converting to .chd…',
+        filename: active.filename,
+        destinationPath: destPath,
+        fileSequenceLabel,
+        outcomeKind: null,
+        outcomeSummary: null,
+        isBatchJob,
+        batchCompletedItems,
+        batchTotalItems,
+        jobId: job.jobId,
+      };
+    }
+
     if (active.stage === 'finalizing') {
       const bytesLabel =
         active.totalBytes && active.totalBytes > 0

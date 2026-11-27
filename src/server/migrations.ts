@@ -1511,6 +1511,19 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    version: 34,
+    name: 'disc_export_chd_m3u_settings',
+    description:
+      'Add disc_export_config_json column to scraper_config for optional on-export .chd disc compression, LRU cache limits, and multi-disc .m3u playlist generation',
+    up: (db) => {
+      if (!tableHasColumn(db, 'scraper_config', 'disc_export_config_json')) {
+        db.exec(
+          `ALTER TABLE scraper_config ADD COLUMN disc_export_config_json TEXT NOT NULL DEFAULT '{}';`,
+        );
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

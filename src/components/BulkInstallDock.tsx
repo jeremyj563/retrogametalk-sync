@@ -41,13 +41,17 @@ export function BulkInstallDock({ installer }: BulkInstallDockProps) {
           ? active.totalBytes
             ? `Extracting (${formatBytes(active.totalBytes)})…`
             : 'Extracting…'
-          : active.stage === 'finalizing'
-            ? 'Finalizing on device…'
-            : active.totalBytes && active.totalBytes > 0
-              ? `${formatBytes(active.bytesWritten)} / ${formatBytes(active.totalBytes)}`
-              : active.bytesWritten > 0
-                ? formatBytes(active.bytesWritten)
-                : null
+          : active.stage === 'converting_chd'
+            ? active.percent !== null
+              ? `Converting to .chd (${active.percent}%)…`
+              : 'Converting to .chd…'
+            : active.stage === 'finalizing'
+              ? 'Finalizing on device…'
+              : active.totalBytes && active.totalBytes > 0
+                ? `${formatBytes(active.bytesWritten)} / ${formatBytes(active.totalBytes)}`
+                : active.bytesWritten > 0
+                  ? formatBytes(active.bytesWritten)
+                  : null
     : null;
   const activeSpeedLabel =
     active && active.stage === 'writing' && active.bytesPerSec && active.bytesPerSec > 0
@@ -60,6 +64,7 @@ export function BulkInstallDock({ installer }: BulkInstallDockProps) {
       active.stage === 'scanning_device' ||
       active.stage === 'inspecting' ||
       active.stage === 'extracting' ||
+      (active.stage === 'converting_chd' && active.percent === null) ||
       (active.stage === 'writing' && active.percent === null));
 
   const breakdownParts: string[] = [];

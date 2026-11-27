@@ -82,6 +82,10 @@ import {
   DEFAULT_MIN_FREE_DISK_GB,
   normalizeMinFreeDiskGb,
 } from '../shared/diskGuardrails.ts';
+import {
+  createDefaultDiscExportConfig,
+  normalizeDiscExportConfig,
+} from '../shared/discExport.ts';
 import type {
   ActivityLogRecord,
   CatalogFacetCounts,
@@ -686,6 +690,14 @@ export function getInternalConfig(): ScraperConfigInternal {
     storageFolderConfig = createDefaultStorageFolderConfig();
   }
 
+  let discExportConfig = createDefaultDiscExportConfig();
+  try {
+    const parsedDiscConfig = JSON.parse(String(row.disc_export_config_json || '{}'));
+    discExportConfig = normalizeDiscExportConfig(parsedDiscConfig);
+  } catch {
+    discExportConfig = createDefaultDiscExportConfig();
+  }
+
   let allowedReleaseTypes: string[] = [];
   if (process.env.SCRAPER_RELEASE_TYPE_FILTER !== undefined && process.env.SCRAPER_RELEASE_TYPE_FILTER !== '') {
     allowedReleaseTypes = normalizeAllowedReleaseTypes(process.env.SCRAPER_RELEASE_TYPE_FILTER);
@@ -747,6 +759,7 @@ export function getInternalConfig(): ScraperConfigInternal {
     romSanitizeFat32: row.rom_sanitize_fat32 !== undefined ? Boolean(row.rom_sanitize_fat32) : true,
     romMaxFilenameLen: Math.max(0, Number(row.rom_max_filename_len || 0)),
     storageFolderConfig,
+    discExportConfig,
     autoDownloadNewReleases,
     systemIndexState,
     updatedAt: String(row.updated_at),
@@ -971,6 +984,13 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     );
   }
 
+  let nextDiscExportConfigJson = String(current.disc_export_config_json || '{}');
+  if (input.discExportConfig !== undefined) {
+    nextDiscExportConfigJson = JSON.stringify(
+      normalizeDiscExportConfig(input.discExportConfig),
+    );
+  }
+
   let nextAllowedReleaseTypesJson = String(current.allowed_release_types_json || '[]');
   if (input.allowedReleaseTypes !== undefined) {
     nextAllowedReleaseTypesJson = JSON.stringify(
@@ -1006,6 +1026,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       rom_sanitize_fat32 = ?,
       rom_max_filename_len = ?,
       storage_folder_config_json = ?,
+      disc_export_config_json = ?,
       auto_download_new_releases = ?,
       last_authenticated_at = ?,
       updated_at = ?
@@ -1046,6 +1067,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
     nextRomSanitizeFat32,
     nextRomMaxFilenameLen,
     nextStorageFolderConfigJson,
+    nextDiscExportConfigJson,
     input.autoDownloadNewReleases !== undefined
       ? (input.autoDownloadNewReleases ? 1 : 0)
       : Number(current.auto_download_new_releases ?? 1),

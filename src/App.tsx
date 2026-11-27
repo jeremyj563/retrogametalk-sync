@@ -960,6 +960,7 @@ export default function App() {
 
   const bulkInstaller = useBulkStorageInstaller({
     config,
+    capabilities: status?.capabilities ?? null,
     debugLogging: Boolean(status?.debugLogging),
     onItemsInstalled: () => {
       setCatalogRevision((rev) => rev + 1);

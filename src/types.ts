@@ -11,6 +11,15 @@ export type {
   SystemTypeFolderOverride,
   SystemTypeSubfolderMode,
 } from './shared/storageFolderMappings';
+export type {
+  ChdCacheStats,
+  ChdConversionMode,
+  ChdJobSnapshot,
+  ChdJobStatus,
+  DiscExportConfig,
+  M3uLayoutMode,
+  RuntimeCapabilities,
+} from './shared/discExport';
 export type { LiveIndexerReloadReceipt } from './shared/catalogIndexerPlan';
 export type { LiveSyncReloadReceipt, SyncOverrideMode } from './shared/syncRuleMatcher';
 export type NavSection =
@@ -121,6 +130,7 @@ export interface ScraperConfigPublic {
   romSanitizeFat32: boolean;
   romMaxFilenameLen: number;
   storageFolderConfig: import('./shared/storageFolderMappings').StorageFolderMappingConfig;
+  discExportConfig?: import('./shared/discExport').DiscExportConfig;
   autoDownloadNewReleases: boolean;
   systemIndexState?: Record<string, SystemIndexCursor>;
   updatedAt: string;
@@ -619,6 +629,7 @@ export interface ServiceStatusSnapshot {
     diskFreeBytes: number | null;
     diskTotalBytes: number | null;
   };
+  capabilities?: import('./shared/discExport').RuntimeCapabilities;
   indexer?: CatalogIndexerStatus;
   ratingsSync?: RatingsSyncStatus;
   queueAutoResume?: import('./shared/queueAutoResume').QueueAutoResumeStatus | null;
