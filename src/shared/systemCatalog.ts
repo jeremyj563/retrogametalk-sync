@@ -201,6 +201,82 @@ export function sanitizeSystemFilterString(rawFilter: string): string {
   return filterValidSystemSlugs(rawFilter.split(',')).join(',');
 }
 
+const WP_GAME_PLATFORM_TAXONOMIES = new Set<string>([
+  'genre',
+  'region',
+  'developer',
+  'publisher',
+  'release-year',
+  'players',
+  'series',
+  'language',
+  'source',
+  'format',
+]);
+
+const WP_NON_GAME_CPT_SLUGS = new Set<string>([
+  'post',
+  'posts',
+  'page',
+  'pages',
+  'attachment',
+  'media',
+  'nav_menu_item',
+  'menu-items',
+  'emulator',
+  'emulators',
+  'guide',
+  'guides',
+  'tool',
+  'tools',
+]);
+
+/**
+ * Extracts canonical game console / platform slugs from a WordPress `/wp-json/wp/v2/types`
+ * payload so platforms registered as ROM Custom Post Types (such as `amiga` and `sega-pico`)
+ * are reliably discovered even when omitted from the repository homepage HTML navigation.
+ */
+export function extractGamePlatformSlugsFromWpTypes(rawTypes: unknown): string[] {
+  if (!rawTypes || typeof rawTypes !== 'object' || Array.isArray(rawTypes)) {
+    return [];
+  }
+
+  const candidates: string[] = [];
+  for (const [key, value] of Object.entries(rawTypes as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue;
+    const def = value as {
+      slug?: unknown;
+      rest_base?: unknown;
+      has_archive?: unknown;
+      taxonomies?: unknown;
+    };
+
+    // WordPress built-in types (post, page, attachment, blocks, templates, etc.) have has_archive=false.
+    if (def.has_archive !== true) continue;
+
+    const rawSlug = String(def.rest_base || def.slug || key || '').trim();
+    const lowerSlug = rawSlug.toLowerCase();
+    const lowerKey = key.trim().toLowerCase();
+    if (!lowerSlug || WP_NON_GAME_CPT_SLUGS.has(lowerSlug) || WP_NON_GAME_CPT_SLUGS.has(lowerKey)) {
+      continue;
+    }
+    if (isNonSystemSlug(lowerSlug)) continue;
+
+    // Require at least one game release taxonomy when taxonomies are present
+    // (excludes utility CPTs like `emulator` that only carry `category`).
+    if (Array.isArray(def.taxonomies) && def.taxonomies.length > 0) {
+      const hasGameTaxonomy = def.taxonomies.some((tax) =>
+        WP_GAME_PLATFORM_TAXONOMIES.has(String(tax || '').trim().toLowerCase()),
+      );
+      if (!hasGameTaxonomy) continue;
+    }
+
+    candidates.push(canonicalizeSystemSlug(rawSlug));
+  }
+
+  return filterValidSystemSlugs(candidates);
+}
+
 interface SystemCatalogEntry {
   displayName: string;
   brandId: SystemBrandId;
@@ -397,6 +473,8 @@ const KNOWN_SYSTEMS: Record<string, SystemCatalogEntry> = {
   'atari-st': { displayName: 'Atari ST', brandId: 'arcade_computers' },
   dos: { displayName: 'MS-DOS / PC', brandId: 'arcade_computers' },
   'ms-dos': { displayName: 'MS-DOS / PC', brandId: 'arcade_computers' },
+  msdos: { displayName: 'MS-DOS / PC', brandId: 'arcade_computers' },
+  windows: { displayName: 'Microsoft Windows / PC', brandId: 'arcade_computers' },
   scummvm: { displayName: 'ScummVM', brandId: 'arcade_computers' },
   x68000: { displayName: 'Sharp X68000', brandId: 'arcade_computers' },
   'sharp-x68000': { displayName: 'Sharp X68000', brandId: 'arcade_computers' },

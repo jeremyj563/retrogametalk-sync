@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.44.3] - 2026-11-26
+
+- Fixed missing console systems (including `amiga` and `sega-pico`) that were omitted from RetroGameTalk's homepage HTML navigation:
+  - **Authoritative WordPress REST Platform Discovery (`systemCatalog.ts`, `rgtClient.ts`, `orchestrator.ts`)**: `filterLiveSystems` now merges all live game platform Custom Post Types from `/wp-json/wp/v2/types` (`has_archive: true` with game release taxonomies, excluding built-in WordPress types and utility CPTs like `emulator`, and canonicalizing aliases like `gb_roms` → `gameboy-roms`). Existing installations automatically refresh live platform registrations in the background on startup and before full catalog indexing so `amiga`, `sega-pico`, and any newly added RGT platforms appear immediately without wiping state.
+  - **Platform Metadata & Storage Defaults (`systemCatalog.ts`, `storageFolderMappings.ts`, `storageAutoConfig.ts`, `db.ts`)**: Aligned SD card auto-configuration to RGT's live `amiga` slug, added `msdos` and `windows` display metadata & default storage folders, and added default ROM extensions for `amiga` (`.adf`) and `sega-pico` (`.md`).
+
 ## [1.44.2] - 2026-11-26
 
 - Updated the Helm chart post-install/upgrade `NOTES.txt` output (`k8s/charts/retrogametalk-sync/templates/NOTES.txt`) to display the deployed version (`image.tag` or `Chart.AppVersion`), Helm chart version, and resolved container image reference.

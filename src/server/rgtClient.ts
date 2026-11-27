@@ -31,6 +31,7 @@ import { classifyFileRole, decodeHtmlEntities, deriveReleaseTags, hasHtmlEntitie
 import {
   CANONICAL_SYSTEM_ALIAS_GROUPS,
   canonicalizeSystemSlug,
+  extractGamePlatformSlugsFromWpTypes,
   filterValidSystemSlugs,
   isNonSystemSlug,
 } from '../shared/systemCatalog.ts';
@@ -736,6 +737,7 @@ export class RetroGameTalkClient {
   private rateLimiter: AdaptiveRateLimiter;
   private liveConfigProvider?: () => ScraperConfigInternal;
   private wpTypesCache: Map<string, string> | null = null;
+  private wpDiscoveredPlatformsCache: string[] | null = null;
   private wpTypesCacheBaseUrl: string | null = null;
   private hostChunkCaps = new Map<string, { maxChunks: number; updatedAt: number }>();
   private hostStreamQueues = new Map<string, Promise<void>>();
@@ -4236,7 +4238,9 @@ export class RetroGameTalkClient {
 
   /**
    * Filters HTML-extracted top-level repo slugs against static non-system rules and live
-   * WordPress `/wp-json/wp/v2/pages` entries so informational pages never appear as ROM consoles.
+   * WordPress `/wp-json/wp/v2/pages` entries, and merges all live ROM Custom Post Types
+   * registered in `/wp-json/wp/v2/types` (so systems like `amiga` and `sega-pico` that may
+   * not be linked in the homepage HTML navigation are always discovered).
    */
   async filterLiveSystems(
     systems: Iterable<string>,
@@ -4245,53 +4249,70 @@ export class RetroGameTalkClient {
     log?: LoggerFn,
   ): Promise<string[]> {
     const valid = filterValidSystemSlugs(systems);
-    if (valid.length === 0) return [];
 
     const wpStaticPageSlugs = new Set<string>();
-    try {
-      const pagesUrl = new URL(
-        'wp-json/wp/v2/pages?per_page=100&_fields=slug',
-        ensureTrailingSlash(config.baseUrl),
-      ).toString();
-      const { response } = await this.fetchWithRedirects(
-        pagesUrl,
-        config,
-        { method: 'GET', headers: { Accept: 'application/json' } },
-        signal,
-        log,
-      );
-      if (response.ok) {
-        const json = (await response.json()) as unknown;
-        if (Array.isArray(json)) {
-          for (const item of json) {
-            if (item && typeof item === 'object' && 'slug' in item) {
-              const slug = String((item as { slug?: unknown }).slug || '').trim().toLowerCase();
-              if (slug) wpStaticPageSlugs.add(slug);
+    if (valid.length > 0) {
+      try {
+        const pagesUrl = new URL(
+          'wp-json/wp/v2/pages?per_page=100&_fields=slug',
+          ensureTrailingSlash(config.baseUrl),
+        ).toString();
+        const { response } = await this.fetchWithRedirects(
+          pagesUrl,
+          config,
+          { method: 'GET', headers: { Accept: 'application/json' } },
+          signal,
+          log,
+        );
+        if (response.ok) {
+          const json = (await response.json()) as unknown;
+          if (Array.isArray(json)) {
+            for (const item of json) {
+              if (item && typeof item === 'object' && 'slug' in item) {
+                const slug = String((item as { slug?: unknown }).slug || '').trim().toLowerCase();
+                if (slug) wpStaticPageSlugs.add(slug);
+              }
             }
           }
+        } else {
+          await response.body?.cancel().catch(() => undefined);
         }
-      } else {
-        await response.body?.cancel().catch(() => undefined);
+      } catch (err) {
+        if (signal?.aborted) throw err;
       }
-    } catch (err) {
-      if (signal?.aborted) throw err;
-    }
-
-    if (wpStaticPageSlugs.size === 0) {
-      return valid;
     }
 
     const wpTypes = await this.getWpRestTypes(config, signal, log);
-    return valid.filter((slug) => {
-      const lower = slug.trim().toLowerCase();
-      if (!wpStaticPageSlugs.has(lower)) return true;
-      // Preserve if explicitly backed by a registered ROM Custom Post Type
-      return (
-        wpTypes.has(lower) ||
-        wpTypes.has(lower.replace(/-/g, '_')) ||
-        wpTypes.has(lower.replace(/_/g, '-'))
-      );
-    });
+    const wpGamePlatforms = this.wpDiscoveredPlatformsCache ?? [];
+
+    const filteredHtmlSystems =
+      wpStaticPageSlugs.size === 0
+        ? valid
+        : valid.filter((slug) => {
+            const lower = slug.trim().toLowerCase();
+            if (!wpStaticPageSlugs.has(lower)) return true;
+            // Preserve if explicitly backed by a registered ROM Custom Post Type
+            return (
+              wpTypes.has(lower) ||
+              wpTypes.has(lower.replace(/-/g, '_')) ||
+              wpTypes.has(lower.replace(/_/g, '-'))
+            );
+          });
+
+    return filterValidSystemSlugs([...filteredHtmlSystems, ...wpGamePlatforms]);
+  }
+
+  /**
+   * Returns all canonical game platform slugs registered in RetroGameTalk's live
+   * WordPress `/wp-json/wp/v2/types` registry (cached per baseUrl).
+   */
+  async discoverWpRestGamePlatforms(
+    config: ScraperConfigInternal,
+    signal?: AbortSignal,
+    log?: LoggerFn,
+  ): Promise<string[]> {
+    await this.getWpRestTypes(config, signal, log);
+    return [...(this.wpDiscoveredPlatformsCache ?? [])];
   }
 
   private async getWpRestTypes(
@@ -4304,6 +4325,7 @@ export class RetroGameTalkClient {
       return this.wpTypesCache;
     }
     const map = new Map<string, string>();
+    let discoveredPlatforms: string[] = [];
     const registerAlias = (alias: string, restBase: string) => {
       const clean = alias.trim().toLowerCase();
       if (!clean) return;
@@ -4332,6 +4354,7 @@ export class RetroGameTalkClient {
       );
       if (response.ok) {
         const json = (await response.json()) as Record<string, { slug?: string; rest_base?: string }>;
+        discoveredPlatforms = extractGamePlatformSlugsFromWpTypes(json);
         for (const [key, def] of Object.entries(json)) {
           if (def?.rest_base) {
             map.set(key.toLowerCase(), def.rest_base);
@@ -4351,6 +4374,7 @@ export class RetroGameTalkClient {
 
     if (map.size > 0) {
       this.wpTypesCache = map;
+      this.wpDiscoveredPlatformsCache = discoveredPlatforms;
       this.wpTypesCacheBaseUrl = normalizedBase;
     }
     return map;

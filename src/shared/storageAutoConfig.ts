@@ -566,7 +566,7 @@ const ECOSYSTEM_PLATFORM_ALIASES: Readonly<
     exact: ['atomiswave'],
     extensions: ['zip', 'chd', 'lst'],
   },
-  'amiga-roms': {
+  amiga: {
     exact: ['amiga', 'amiga500', 'amiga1200', 'commodoreamiga', 'amigaroms'],
     extensions: ['adf', 'lha', 'hdf', 'ipf', 'dms'],
   },

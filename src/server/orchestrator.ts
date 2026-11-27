@@ -585,9 +585,26 @@ export class ScraperOrchestrator extends EventEmitter {
 
     if (authSnap.hasCompletedLogin && refreshedCfg.username && refreshedCfg.password) {
       setTimeout(() => {
-        if (!this.shuttingDown && !this.indexerState.active) {
-          void this.startCatalogIndex('filtered', { auto: true }).catch(() => undefined);
-        }
+        if (this.shuttingDown) return;
+        void (async () => {
+          try {
+            const latestCfg = getInternalConfig();
+            const wpPlatforms = await this.client.discoverWpRestGamePlatforms(latestCfg);
+            if (wpPlatforms.length > 0) {
+              const existingSet = new Set(latestCfg.discoveredSystems.map((s) => s.toLowerCase()));
+              const newlyFound = wpPlatforms.filter((slug) => !existingSet.has(slug.toLowerCase()));
+              if (newlyFound.length > 0) {
+                saveDiscoveredSystems(wpPlatforms);
+                this.emitStatus();
+              }
+            }
+          } catch {
+            // Non-fatal: startup platform refresh retries on next probe or full index.
+          }
+          if (!this.shuttingDown && !this.indexerState.active) {
+            void this.startCatalogIndex('filtered', { auto: true }).catch(() => undefined);
+          }
+        })();
       }, 1500).unref();
     }
   }
@@ -2731,6 +2748,18 @@ export class ScraperOrchestrator extends EventEmitter {
       const probe = await this.client.testAuthAndDiscovery(cfg);
       if (probe.discoveredSystems.length > 0) {
         validDiscovered = saveDiscoveredSystems(probe.discoveredSystems).map((s) => s.toLowerCase());
+      }
+    } else if (scope === 'full' && !options.auto) {
+      try {
+        const wpPlatforms = await this.client.discoverWpRestGamePlatforms(cfg);
+        if (wpPlatforms.length > 0) {
+          const existingSet = new Set(validDiscovered);
+          if (wpPlatforms.some((slug) => !existingSet.has(slug.toLowerCase()))) {
+            validDiscovered = saveDiscoveredSystems(wpPlatforms).map((s) => s.toLowerCase());
+          }
+        }
+      } catch {
+        // Proceed with cached discovered systems if WP REST types endpoint is unreachable.
       }
     }
 
