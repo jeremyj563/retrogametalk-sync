@@ -4,6 +4,18 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.44.5] - 2026-11-26
+
+- Propagated detected ROM-type subfolder sorting prefixes and framing wrappers (such as `!`, `! `, `_`, `~`, `[...]`, `(...)`, `00 - `, and `z_`) to automatically created unseen category folders on mounted storage devices:
+  - **Affix & Casing Inference (`storageAutoConfig.ts`, `deviceExportUi.ts`)**: When a device uses prefixed subfolders like `<console>/!hacks` and `<console>/!trans`, unseen categories created during installation now automatically inherit both the sorting affix and casing style (e.g., `<console>/!ports`, `<console>/!homebrew`, `<console>/!undubs`, `<console>/!prototypes`, `<console>/!unlicensed`) across existing and newly created consoles, while respecting strict-majority voting, internal parenthetical tags (like `Translations (EN)`), sequential numbering (`01 - Hacks`), and explicit manual overrides.
+  - **Standalone System Guards & Live Preview (`storageFolderMappings.ts`, `DeviceExportPanel.tsx`)**: Hardened duplicate-folder guards so standalone `BIOS` and `PSX2PSP` targets never nest into `BIOS/!bios` or `PSX2PSP/!psx2psp`, and surfaced the inferred unseen-type pattern (e.g., `Unseen types → /!<type> (lowercase)`) in the **Device Export** live destination preview.
+
+## [1.44.4] - 2026-11-26
+
+- Overhauled `README.md` and repository documentation across `/docs/features/`, `/docs/specs/`, `/docs/deploy/`, and `/docs/troubleshooting/` to reflect RetroGameTalk Sync's evolution into a full **retro game content management system (CMS)** and **multi-handheld fleet manager** alongside its preservation mirror:
+  - **Main `README.md` & Feature Guides (`/docs/features/`)**: Updated to the current **5-workspace architecture** (`Sync`, `Catalog`, `Sync Rules`, `Device Export`, `System Settings`) and documented **Favorites & Custom Collections / Handheld Loadouts**, per-game **Pin/Ignore** overrides, **Hardware-Pinned Multi-Device Fleet Management** (`.rgt-device.json`, IndexedDB reconnects, **Devices Fleet Drawer**, offline per-device catalog filtering), **Automatic Per-Mount Folder Auto-Configure**, **No-Intro + T-En Hybrid ROM Naming** with live 10-type preview matrix & multi-variant collision disambiguation, **Installed ROM Update Detection** & direct safe **Uninstall**, **In-Place Archive Explorer** & **Local Disk Tree**, **Authoritative WP REST Platform Discovery** (38+ live platforms), **Universal Live Mid-Run Hot-Reloading**, **Automatic Download Queue Recovery with Crash-Loop Backoff**, **Optional Self-Hosted App Lock (`APP_AUTH_PASSWORD`)**, **Secret-Free JSON Config Backup & Restore**, and the upgraded **CRT Display Studio** (7 palettes, 4 presets, phosphor-dissolve notices, dynamic favicon, and 7-track Web Audio VGM Sound Deck).
+  - **Technical Specs, Deployment & Troubleshooting (`/docs/specs/`, `/docs/deploy/`, `/docs/troubleshooting/`)**: Updated architecture diagrams and specs through SQLite schema `v30`, native multi-arch `unrar` + `7zip` + `bsdtar` + `yazl` streaming, `APP_AUTH_*` environment variables & Kubernetes `Secret` keys, Helm `NOTES.txt` deployed version output, current `1.44.4` image/chart examples, and archive/auto-resume/HTTPS troubleshooting guidance.
+
 ## [1.44.3] - 2026-11-26
 
 - Fixed missing console systems (including `amiga` and `sega-pico`) that were omitted from RetroGameTalk's homepage HTML navigation:

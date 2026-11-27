@@ -6,6 +6,7 @@ import {
   type RomNamingConfig,
 } from './romNaming.ts';
 import {
+  applySubfolderNameConvention,
   classifyDiscoveredConsoleDiff,
   inferDeviceConventions,
   type AutoConfigConsoleDiff,
@@ -15,7 +16,6 @@ import {
   type DiscoveredConsoleMapping,
 } from './storageAutoConfig.ts';
 import {
-  applyFolderCasingStyle,
   createDefaultStorageFolderConfig,
   DEFAULT_ROM_TYPE_SUBFOLDERS,
   getStorageRomCategoryShortLabel,
@@ -85,6 +85,7 @@ export interface InferredConventionSummary {
     folder: string;
   }>;
   unseenCasingLabel: string | null;
+  unseenSubfolderPattern: string | null;
   hasAnyInferredConvention: boolean;
 }
 
@@ -204,11 +205,11 @@ export function composeEffectiveStorageFolderConfig(
       } else {
         const defaultName = DEFAULT_ROM_TYPE_SUBFOLDERS[category];
         const manualName = manual.globalTypeSubfolders[category];
-        // Respect explicit custom global subfolder names; otherwise match detected casing style on unseen types
+        // Respect explicit custom global subfolder names; otherwise match detected casing + sorting prefix/suffix on unseen types
         if (manualName === defaultName) {
-          effectiveGlobalTypeSubfolders[category] = applyFolderCasingStyle(
+          effectiveGlobalTypeSubfolders[category] = applySubfolderNameConvention(
             defaultName,
-            conventions.inferredSubfolderCasing,
+            conventions,
           );
         }
       }
@@ -345,6 +346,7 @@ export function summarizeDeviceInferredConventions(
       newConsolePattern: null,
       observedSubfolders: [],
       unseenCasingLabel: null,
+      unseenSubfolderPattern: null,
       hasAnyInferredConvention: false,
     };
   }
@@ -380,10 +382,25 @@ export function summarizeDeviceInferredConventions(
           : 'Title Case'
       : null;
 
+  const hasSubfolderAffix = Boolean(
+    conventions.inferredSubfolderPrefix || conventions.inferredSubfolderSuffix,
+  );
+  const typePlaceholder =
+    conventions.inferredSubfolderCasing === 'lower'
+      ? '<type>'
+      : conventions.inferredSubfolderCasing === 'upper'
+        ? '<TYPE>'
+        : '<Type>';
+  const unseenSubfolderPattern =
+    includeTypeSubfolders && conventions.hasInferredTypeSubfolders && hasSubfolderAffix
+      ? `/${conventions.inferredSubfolderPrefix}${typePlaceholder}${conventions.inferredSubfolderSuffix}`
+      : null;
+
   return {
     newConsolePattern,
     observedSubfolders,
     unseenCasingLabel,
+    unseenSubfolderPattern,
     hasAnyInferredConvention: Boolean(newConsolePattern) || observedSubfolders.length > 0,
   };
 }

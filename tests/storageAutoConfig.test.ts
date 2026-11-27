@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  applySubfolderNameConvention,
   classifyDiscoveredConsoleDiff,
   classifyRomTypeSubfolderName,
   discoverStorageFolderMappings,
   mergeDiscoveredStorageMappings,
   normalizeFolderToken,
+  splitSubfolderAffix,
   type ScannedDirNode,
 } from '../src/shared/storageAutoConfig.ts';
 import {
@@ -457,3 +459,124 @@ test('discoverStorageFolderMappings recognizes OnionOS / Miyoo Mini spelled-out 
   assert.equal(byPath.get('THIRTYTWOX'), '32x-roms');
   assert.deepEqual(result.unmatchedFolders, ['MY_CUSTOM_DIR']);
 });
+
+test('splitSubfolderAffix and classifyRomTypeSubfolderName handle sorting prefixes, wrappers, and false-positive guards', () => {
+  assert.deepEqual(splitSubfolderAffix('!hacks'), { prefix: '!', core: 'hacks', suffix: '' });
+  assert.deepEqual(splitSubfolderAffix('!trans'), { prefix: '!', core: 'trans', suffix: '' });
+  assert.deepEqual(splitSubfolderAffix('! Hacks'), { prefix: '! ', core: 'Hacks', suffix: '' });
+  assert.deepEqual(splitSubfolderAffix('_HACKS'), { prefix: '_', core: 'HACKS', suffix: '' });
+  assert.deepEqual(splitSubfolderAffix('[Translations]'), { prefix: '[', core: 'Translations', suffix: ']' });
+  assert.deepEqual(splitSubfolderAffix('(Ports)'), { prefix: '(', core: 'Ports', suffix: ')' });
+  assert.deepEqual(splitSubfolderAffix('00 - Hacks'), { prefix: '00 - ', core: 'Hacks', suffix: '' });
+  assert.deepEqual(splitSubfolderAffix('z_hacks'), { prefix: 'z_', core: 'hacks', suffix: '' });
+  assert.deepEqual(splitSubfolderAffix('zz-trans'), { prefix: 'zz-', core: 'trans', suffix: '' });
+
+  // Internal parenthetical tags must keep their closing paren inside core
+  assert.deepEqual(splitSubfolderAffix('Translations (EN)'), {
+    prefix: '',
+    core: 'Translations (EN)',
+    suffix: '',
+  });
+  // Sequential numeric prefixes like "01 - Hacks" must NOT be treated as a shared sort-key prefix
+  assert.deepEqual(splitSubfolderAffix('01 - Hacks'), {
+    prefix: '',
+    core: '01 - Hacks',
+    suffix: '',
+  });
+
+  // Classification works across prefixed & wrapped names including z_ / zz- sort keys
+  assert.equal(classifyRomTypeSubfolderName('!hacks'), 'hack');
+  assert.equal(classifyRomTypeSubfolderName('!trans'), 'translations');
+  assert.equal(classifyRomTypeSubfolderName('! Hacks'), 'hack');
+  assert.equal(classifyRomTypeSubfolderName('_HACKS'), 'hack');
+  assert.equal(classifyRomTypeSubfolderName('[Translations]'), 'translations');
+  assert.equal(classifyRomTypeSubfolderName('(Ports)'), 'port');
+  assert.equal(classifyRomTypeSubfolderName('00 - Hacks'), 'hack');
+  assert.equal(classifyRomTypeSubfolderName('z_hacks'), 'hack');
+  assert.equal(classifyRomTypeSubfolderName('zz_trans'), 'translations');
+
+  // applySubfolderNameConvention combines inferred casing + prefix + suffix cleanly
+  assert.equal(
+    applySubfolderNameConvention('Ports', {
+      inferredSubfolderCasing: 'lower',
+      inferredSubfolderPrefix: '!',
+      inferredSubfolderSuffix: '',
+    }),
+    '!ports',
+  );
+  assert.equal(
+    applySubfolderNameConvention('Homebrew', {
+      inferredSubfolderCasing: 'title',
+      inferredSubfolderPrefix: '[',
+      inferredSubfolderSuffix: ']',
+    }),
+    '[Homebrew]',
+  );
+  assert.equal(
+    applySubfolderNameConvention('Ports', {
+      inferredSubfolderCasing: 'upper',
+      inferredSubfolderPrefix: '_',
+      inferredSubfolderSuffix: '',
+    }),
+    '_PORTS',
+  );
+});
+
+test('inferDeviceConventions extracts dominant sorting prefixes/wrappers while enforcing majority and acronym-exclusion rules', () => {
+  // User scenario: <console>/!hacks + <console>/!trans alongside acronym BIOS folder
+  const bangTree: ScannedDirNode[] = [
+    node('', { name: 'HANDHELD_SD', childDirs: ['Roms'] }),
+    node('Roms', { childDirs: ['SNES', 'NES', 'GBA'] }),
+    node('Roms/SNES', { childDirs: ['!hacks', '!trans', 'BIOS'], sampleExtensions: ['sfc'], fileCount: 25 }),
+    node('Roms/NES', { childDirs: ['!hacks', '!trans'], sampleExtensions: ['nes'], fileCount: 18 }),
+    node('Roms/GBA', { sampleExtensions: ['gba'], fileCount: 12 }),
+  ];
+  const bangRes = discoverStorageFolderMappings(bangTree, { rootLabel: 'HANDHELD_SD' });
+  assert.equal(bangRes.conventions.inferredSubfolderCasing, 'lower');
+  assert.equal(bangRes.conventions.inferredSubfolderPrefix, '!');
+  assert.equal(bangRes.conventions.inferredSubfolderSuffix, '');
+  assert.equal(bangRes.conventions.inferredTypeSubfolders.hack, '!hacks');
+  assert.equal(bangRes.conventions.inferredTypeSubfolders.translations, '!trans');
+
+  // Bracket wrapper convention: [Hacks] / [Translations]
+  const bracketTree: ScannedDirNode[] = [
+    node('', { name: 'BRACKET_SD', childDirs: ['Roms'] }),
+    node('Roms', { childDirs: ['SNES', 'NES'] }),
+    node('Roms/SNES', { childDirs: ['[Hacks]', '[Translations]'], sampleExtensions: ['sfc'], fileCount: 12 }),
+    node('Roms/NES', { childDirs: ['[Hacks]'], sampleExtensions: ['nes'], fileCount: 8 }),
+  ];
+  const bracketRes = discoverStorageFolderMappings(bracketTree, { rootLabel: 'BRACKET_SD' });
+  assert.equal(bracketRes.conventions.inferredSubfolderCasing, 'title');
+  assert.equal(bracketRes.conventions.inferredSubfolderPrefix, '[');
+  assert.equal(bracketRes.conventions.inferredSubfolderSuffix, ']');
+
+  // Strict majority guard: 1 prefixed folder vs 2 plain folders keeps plain (no false "!")
+  const mixedTree: ScannedDirNode[] = [
+    node('', { name: 'MIXED_SD', childDirs: ['Roms'] }),
+    node('Roms', { childDirs: ['SNES'] }),
+    node('Roms/SNES', {
+      childDirs: ['!hacks', 'Translations', 'Homebrew'],
+      sampleExtensions: ['sfc'],
+      fileCount: 20,
+    }),
+  ];
+  const mixedRes = discoverStorageFolderMappings(mixedTree, { rootLabel: 'MIXED_SD' });
+  assert.equal(mixedRes.conventions.inferredSubfolderPrefix, '');
+  assert.equal(mixedRes.conventions.inferredSubfolderSuffix, '');
+  assert.equal(mixedRes.conventions.inferredSubfolderCasing, 'title');
+
+  // Sequential numbering must not invent a shared prefix
+  const seqTree: ScannedDirNode[] = [
+    node('', { name: 'SEQ_SD', childDirs: ['Roms'] }),
+    node('Roms', { childDirs: ['SNES'] }),
+    node('Roms/SNES', {
+      childDirs: ['01 - Hacks', '02 - Translations'],
+      sampleExtensions: ['sfc'],
+      fileCount: 15,
+    }),
+  ];
+  const seqRes = discoverStorageFolderMappings(seqTree, { rootLabel: 'SEQ_SD' });
+  assert.equal(seqRes.conventions.inferredSubfolderPrefix, '');
+  assert.equal(seqRes.conventions.inferredSubfolderSuffix, '');
+});
+

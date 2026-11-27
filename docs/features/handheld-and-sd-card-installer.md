@@ -1,75 +1,65 @@
-# Direct Handheld / SD Card Installer, Smart ROM Picker & Folder Mappings
+# Multi-Handheld Fleet Manager, Auto-Configure & Direct SD Installer
 
-Whether you play on an Anbernic, Miyoo Mini, Retroid, TrimUI, Steam Deck, Analogue Pocket, MiSTer FPGA, or original console flashcart (EverDrive / FXPAK Pro / Terraonion / Fenrir), getting mirrored games onto your SD card shouldn't mean spending Saturday afternoon unzipping folders and fixing filenames.
-
-`rgt-sync` lets you **plug your SD card or USB drive into your computer and install extracted, cleanly named ROMs directly from your browser**.
+Whether you play on an Anbernic, Miyoo Mini, Retroid, TrimUI, Steam Deck, Analogue Pocket, MiSTer FPGA, or original console flashcart (EverDrive / FXPAK Pro / Terraonion / Fenrir), `rgt-sync` treats your collection of devices as a first-class fleet—plug in any SD card or USB drive and deploy extracted, cleanly named, ready-to-play ROMs straight from your browser.
 
 ---
 
-## 1. Direct Browser-to-SD-Card Installation
+## 1. Hardware-Pinned Multi-Device Fleet Management
 
-Using Chromium-based browsers (Chrome, Edge, Brave, Vivaldi, Arc, Opera), `rgt-sync` writes directly to any folder or removable drive you select:
+Managing 10+ handhelds, SD cards, and FPGA setups no longer means overwriting one global "Installed" flag or mixing up cards that all happen to be named `SDCARD` or `Roms`:
 
-1. Select a single game, multi-select a curated handful in the **Catalog**, or select **all matching results** from your current filter (e.g., *all downloaded GBA English Translations not yet installed*).
-2. Choose **Express Install** (one-click smart selection) or **Review & Install** (preview and tweak every file, variant, and output name first).
-3. Pick your SD card root directory once in the OS folder picker.
-4. `rgt-sync` streams extracted, clutter-free ROMs straight from your server onto the right console folders on your SD card—preventing your computer from falling asleep mid-transfer and letting you minimize the installer into a **Background Install Dock** while you keep browsing!
-
-*(Using Firefox or Safari? You can still download individual Prepared ROMs with full clutter stripping and clean FAT32 naming right from any game card or detail drawer.)*
-
----
-
-## 2. Clean, FAT32-Friendly ROM Naming
-
-Handheld firmwares and classic hardware flashcarts can be picky about special characters, scene dump noise, and overly long filenames. In **Operations**, you can customize how Prepared ROMs are named once and apply it everywhere:
-
-- **Readable Structured Naming**: Cleanly formats filenames from catalog titles with optional toggles for:
-  - **Region Tags** — e.g., `(USA)`, `(Japan)`
-  - **Role Badges** — e.g., `[T-En]`, `[Hack]`, `[Undub]`, `[Homebrew]`
-  - **Detected Version Tags** — e.g., `(v1.42)`, `(Rev B)`
-- **FAT32 Sanitization & Length Limits**: Automatically strips illegal filesystem characters (`:`, `?`, `*`, `"`, `<`, `>`, `|`, control chars) and enforces a configurable maximum filename length so transfers to FAT32 and exFAT cards never fail mid-copy.
-- **Format-Appropriate Output**: Cartridge ROMs (`.nes`, `.sfc`, `.gb`, `.gba`, `.md`, `.n64`, etc.) and single-file discs (`.chd`, `.rvz`, `.iso`, `.pbp`) extract directly as ready-to-boot files, while multi-track `.cue` + `.bin` CD games are automatically repacked on the fly into clean, clutter-free `.zip` bundles.
+- **Auto-Stamped Card Identity (`.rgt-device.json`):** The first time you mount a storage device, `rgt-sync` stamps a tiny hidden `.rgt-device.json` UUID marker (`dev_<uuid>`) at the card root (protected from ROM scans and uninstalls, with non-blocking fallback for read-only media) paired with Chromium's `FileSystemHandle.isSameEntry()` verification—uniquely identifying every physical SD card even across machines or identical folder names.
+- **Smart Identify / Link Device Modal:** Mounting an unrecognized card probes on-card volume labels and firmware signatures (`autorun.inf`, muOS `device.txt`, Batocera/KNULLI/Recalbox hostnames, OnionOS, GarlicOS, Analogue Pocket, MiSTer, EverDrive, MinUI, ES-DE/EmuDeck) to pre-fill a helpful name and matching hardware icon—letting you **Create New Device** or **Link Existing Profile** (e.g., when migrating to a larger SD card).
+- **Persistent IndexedDB Reconnects:** Mounted directory handles are saved locally in IndexedDB. On reload, authorized cards reconnect automatically or show a 1-click **Reconnect `<Device>`** shortcut in the left sidebar **Storage Device** bay.
+- **Devices Fleet Drawer:** Click **Devices** in the sidebar bay to open a searchable slide-over manager with **Active / Pinned / Archived** tabs, custom hardware icons (7 form factors) and CRT color badges (6 hues), **Stamp Card ID** repair, 1-click **Reconnect**, **Browse Installed** offline jump, **Pin / Archive**, and **Delete**.
+- **Per-Device Install History & Optional Overrides:** Every device tracks its own independent installed games, file versions, and paths in SQLite—plus optional per-device console folder and ROM naming overrides in **Device Export**.
 
 ---
 
-## 3. Smart ROM Picker (Automatic Best-Version Selection)
+## 2. Automatic Per-Mount Folder Auto-Configure
 
-Many retro releases—especially ROM hacks, translations, and multi-region sets—include multiple archives or multiple inner ROM variants (for example, `v1.0`, `v1.1`, `v1.2 Hotfix`, optional `ハードモード / Hard Mode`, or `USA` vs. `Europe`).
+Different handheld firmwares expect totally different folder trees (`Roms/FC` vs. `Emulation/roms/nes` vs. `games/NES` vs. `Assets/*/common`). `rgt-sync` handles this automatically every time you mount or switch a device:
 
-Instead of forcing you to expand 50 games by hand, `rgt-sync`'s **Smart ROM Picker** evaluates every candidate automatically:
-
-- **Version-Aware Intelligence**: Understands semantic versions (`v2.1` > `v1.9`), build dates (`2026-04-12` > `2025-11-03`), revisions (`Rev B` > `Rev A`), and release maturity (`Hotfix / Final` > `Stable` > `RC` > `Beta` > `Alpha`).
-- **Filter-Context Awareness**: Honors the filters you used in the Catalog! If you filtered the Catalog for **Translations** + **English**, Smart ROM Picker prioritizes the English-patched playable ROM over an unpatched Japanese base ROM or bonus soundtrack archive—and explains *why* each target was chosen right in the Review modal.
-- **Full Manual Override Anytime**: In the **Install Prepared ROMs** review modal, multi-choice releases are highlighted so you can check additional variants (e.g., installing both the Normal and Randomizer versions) or edit any output filename before writing.
-
----
-
-## 4. Automatic In-Place Version Upgrades on Your SD Card
-
-Following active ROM hack or translation projects? When `Chrono Trigger+ (USA) [Hack] (v2.5).sfc` is already sitting on your SD card and a sync pulls down `v2.6`:
-
-- `rgt-sync` scans your SD card's target console folder before writing, recognizes `v2.5` as an older version of the exact same title and role, writes `v2.6`, and **cleanly removes the superseded `v2.5` file** so you don't end up with duplicate outdated versions cluttering your handheld menu.
-- Every installed game is automatically marked **Installed** in your Catalog (with manual Mark Installed / Mark Not Installed controls available too if you ever reformat or swap SD cards).
+- **3-Layer Precedence Model:** `Universal Defaults` → `Mounted Device Auto-Config` → `Saved Manual Overrides`. Swapping from a Miyoo Mini SD card to a MiSTer FPGA card or Steam Deck immediately adapts every destination path without touching your saved manual overrides.
+- **75+ Retro Platforms & Firmware Signatures:** Automatically recognizes OnionOS / GarlicOS (including spelled-out folders like `TWENTYSIXHUNDRED`, `FIFTYTWOHUNDRED`, `THIRTYTWOX`, `SEGASGONE`), ES-DE / Batocera / EmuDeck, MiSTer FPGA, Analogue Pocket OpenFPGA, flashcarts, and decorated human-readable folder names using parent-root consensus and shallow ROM-extension corroboration.
+- **Device-Wide ROM Root & Subfolder Convention Inference:** If your card keeps ROMs under `Roms/`, `games/`, or `Emulation/roms/`, installing a console not yet on the card automatically creates its folder inside that inferred root with matching casing (while protecting standalone `BIOS`/`OST` folders and Analogue Pocket `Assets/` paths). Detected shorthand ROM-type subfolders (`hacks`, `trans`, `hb`, `unlic`) and their casing style propagate cleanly across consoles too.
+- **Live Export Destination Preview:** At the top of **Device Export**, inspect real end-to-end sample paths (`Retail`, `ROM Hack`, `Translation`, and `New console · Inferred`) for your active device with clear `Auto-detected` / `Manual override` / `Default` badges, plus a compact **Search-to-Add** manual console override combobox.
 
 ---
 
-## 5. Customizable Console & ROM-Type Folder Mappings
+## 3. No-Intro + T-En Hybrid ROM Naming & Live Preview Matrix
 
-Different handheld firmwares and frontends organize ROM folders differently—and many collectors love keeping Hacks, Translations, and Homebrew neatly separated inside each console folder rather than mixed into thousands of retail titles.
+In **Device Export → 02. ROM Filename Formatting**, configure clean, FAT32-safe filenames built around modern **No-Intro + T-En** conventions:
 
-In **Operations → Storage Folder Mappings**, you configure your folder layout once and `rgt-sync` remembers it permanently in its database:
-
-- **Sensible Defaults Out of the Box**: Every supported system ships with clean, standard default folder names (`snes`, `nes`, `gb`, `gbc`, `gba`, `nds`, `n64`, `genesis`, `dreamcast`, `psx`, `psp`, `pce`, etc.) that work across most common frontends and devices—with instant per-console editing whenever your setup uses custom names (such as `SFC` or `Roms/FC`).
-- **Opt-In ROM-Type Subfolders**: Keep everything in a single console folder by default, or flip on **Categorize by ROM Type Subfolders** to organize non-retail categories automatically:
-  - By default when enabled, **Retail ROMs** stay in the console root (`/snes/`) while **ROM Hacks** (`/snes/Hacks/`), **Translations** (`/snes/Translations/`), **Homebrew** (`/snes/Homebrew/`), **Ports** (`/snes/Ports/`), and **Prototypes/Betas** (`/snes/Prototypes/`) file neatly into dedicated subdirectories.
-  - Customize global subfolder names once, and optionally add **per-system subfolder overrides** for specific consoles where your firmware or flashcart expects a custom layout.
+- **Type-Aware Hybrid Tagging (`{statusParen}` + `{modBracket}`):** Cleanly separates origin/development status in parentheses (`(Proto)`, `(Demo)`, `(Homebrew)`, `(Port)`, `(Unl)`, `(Rev A)`) from post-release fan modifications in square brackets (`[T-En v1.3]`, `[T-Es v2.0]`, `[T-En MTL v1.0]`, `[Hack v1.42]`, `[Undub v1.1]`), while staying compatible with legacy naming stems during SD card upgrades.
+- **Always-Visible 10-Type Live Preview Matrix:** See how every ROM category renders in real time with syntax-tinted segments, tabular character counts, and explicit FAT32 sanitization/truncation badges. Switch between **Built-in Examples** and **Real Catalog Games** (with a **Shuffle** button) to test directly against titles in your own library.
+- **Cursor-Aware Pattern Builder & Per-Type Overrides:** Insert tokens right at your cursor position, hover tokens to inspect live values, catch unknown tokens or unbalanced brackets inline, pick quick max-length presets (`Unlimited`, `64`, `128`, `255`), and optionally customize templates per ROM type.
 
 ---
 
-## 6. Personalize Your Console: The CRT Display Studio
+## 4. Direct Browser-to-SD-Card Streaming & Live Install Queue
 
-Preservation tools should feel inspiring to use! Open the **CRT Display** control in the lower-left sidebar to tailor the interface to your favorite classic monitor aesthetic:
+Using Chromium-based browsers (Chrome, Edge, Brave, Vivaldi, Arc, Opera) over `localhost` or HTTPS:
 
-- **Phosphor Palettes**: Switch instantly between classic **P1 Green**, **P3 Amber**, and **VFD Cyan** phosphor themes.
-- **Monitor Presets & Fine-Tuning Sliders**: Choose **Subtle**, **Sony PVM**, or **90s Arcade**, or dial in custom sliders for **Scanlines**, **Phosphor Glow**, **Tube Vignette**, **Aperture Grille**, and **RGB Chromatic Aberration**—or toggle CRT effects completely off for a crisp modern dark UI.
-- **5-Level UI Motion Control (`Off` → `Ultra`)**: Keep the interface completely still (`Off`) for distraction-free curation, enjoy subtle active indicators (`Low` / `Medium`), or crank it to `High` / `Ultra` for sweeping cathode-ray edge traces and rolling V-sync hum bars.
+- **One-Click Install Anywhere + Live Queueing:** Click **Install**, **Update**, or **Reinstall** on any Catalog grid card, list row, Game Detail drawer, Collection banner, Updates strip, or Bulk Selection bar. Clicking additional games while a transfer is active appends them straight to the **Live Install Queue** (marked **Queued**) with automatic deduplication—no waiting for one game to finish before queueing the next.
+- **Smart ROM Picker & Multi-Variant Disambiguation:** For multi-archive or multi-ROM releases, **Smart ROM Picker** pre-selects the latest playable version (`v1.10 > v1.9`, `Final > Beta`, `Rev B > Rev A`) aligned with your active Catalog filters. When installing multiple variants or discs from the same release via **Install Options…**, automatic multi-pass collision disambiguation preserves clean base filenames while appending only the unique differentiator (such as `[Improved Controls v3.1]` or `(Disc 1)`/`(Disc 2)`), plus live amber duplicate-path warnings in the review modal.
+- **Zero-RAM-Bloat Byte Streaming & Wake Lock:** Streams extracted ROMs (or clutter-free repacked `.cue` + `.bin` disc `.zip`s) straight from the server onto your SD card via `FileSystemWritableFileStream` with live stage readouts (`Checking device…`, `Extracting ROM…`, `Installing to <Device>`, `Finalizing…`), byte progress, transfer speed (`MB/s`), Screen Wake Lock, and a collapsible **Background Install Dock**.
+
+*(Using Firefox or Safari, or accessing over plain LAN HTTP? One-click **Download ROM** still streams extracted, clutter-free, cleanly named ROMs directly to your browser downloads folder.)*
+
+---
+
+## 5. In-Place Version Upgrades & Safe Direct Uninstall
+
+- **Automatic In-Place Upgrades:** When a newer version of an installed ROM hack or translation arrives, `rgt-sync` writes the new file to your SD card, verifies completion, and cleanly deletes the superseded older-version file so duplicate versions never pile up in your handheld menu.
+- **Safe Direct Uninstall from `<Device>`:** Remove a single game from **Game Details → More → Uninstall from `<Device>`** or remove hundreds across pages from the Catalog bulk selection bar (with live `Removing X / Y…` progress and a responsive **`Cancel Uninstall`** button that flushes only the files already deleted before cancellation). Uninstall is strictly path-confined to the mounted external device handle, handles shifted mount roots and FAT32 punctuation/type-subfolder fallbacks cleanly, verifies `readwrite` permission upfront, and **never touches your local RGT Sync archival mirror**.
+
+---
+
+## 6. CRT Display Studio, Soundtrack & Trophy Case
+
+Personalize your console from the lower-left sidebar and top header:
+
+- **7 Phosphor Palettes & 4 Monitor Presets:** Switch across **Green**, **Amber**, and **Cyan** starter phosphors—plus **DMG Olive**, **Synthwave**, **Virtual Boy**, and **Trinitron** unlockable collector palettes—paired with **Subtle**, **Sony PVM**, **90s Arcade**, and **BVM** presets or fine-grained FX sliders (Scanlines, Phosphor Glow, Vignette, Aperture Grille, Chromatic Aberration). The browser tab cartridge favicon and theme color sync dynamically to your active palette.
+- **5-Level Living UI Motion (`Off` → `Ultra`) & Phosphor Dissolve Notices:** Scale UI choreography from completely still (`Off`, also respecting `prefers-reduced-motion`) up to sweeping cathode-ray edge traces and the **Speed-Reactive Sync Wave**, while ephemeral confirmation banners softly phosphor-dissolve with a hover-pausable decay hairline and smooth zero-jump collapse.
+- **Built-In Retro VGM Sound Deck & Trophy Case:** Enjoy **7 original multi-section Web Audio synthesizer tracks** (strictly off by default, auto-pausing on hidden tabs and ducking during chimes) with a center-stage CRT stereo deck, plus unlockable trophies and cosmetics earned naturally as you curate and deploy games.

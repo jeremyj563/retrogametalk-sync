@@ -137,19 +137,25 @@ Once `DEBUG` logging is enabled, events are available in four places:
 
 ### Archive Extraction Failures (`500` on `/api/items/:id/extract-entry` or `inspect`)
 
-1. Enable `SCRAPER_DEBUG=true` and check `[ARCHIVE]` logs for `7z` or `unzip` spawn errors or non-zero exit codes.
-2. Confirm the mirrored archive exists on disk at `DOWNLOAD_DIR/<system>/<release>/<file>` and was not truncated (`0` bytes or `.part` left behind).
-3. If using `.7z` or `.rar`, confirm `Resolved 7-Zip binary ...` appears in `[ARCHIVE]` debug logs; `unzip` only handles `.zip` files.
+1. Enable `SCRAPER_DEBUG=true` and check `[ARCHIVE]` logs for magic-byte header diagnostics (`RAR4`, `RAR5`, `ZIP`, `7z`, or `HTML`/0-byte error page) and `unrar` / `7z` / `bsdtar` / `unzip` exit codes.
+2. Confirm the mirrored archive exists on disk at `DOWNLOAD_DIR/<system>/<release>/<file>` and was not truncated (`0` bytes or an HTML login/error page saved during an upstream hiccup—if magic-byte sniffing reports HTML, re-download the release).
+3. Container images bundle native multi-arch `unrar` (for RAR4/RAR5/solid `.rar` files), `7zip`, and `libarchive-tools` (`bsdtar`). On bare-metal local installs, ensure `unrar` or `7z` with RAR codec support is on `PATH` when inspecting `.rar` archives.
 
-### Download Stuck, Failing Mid-Stream, or `.part` Disk Errors
+### Download Stuck, Failing Mid-Stream, or Queue Auto-Resume Paused
 
 1. Look for `[DOWNLOAD]` debug entries showing `code=ENOSPC` (disk full), `code=EACCES` / `code=EPERM` (PVC volume permissions), or `Byte count differs from Content-Length`.
 2. Ensure the container UID/GID (`1000:100` by default) has write permissions to `persistence.mountPath` (`/run/repo`) and `DATA_DIR` (`/run/repo/.rgt-data`).
-3. Note that `.part` files are automatically removed if a transfer fails or the pod receives `SIGTERM` (within `terminationGracePeriodSeconds`).
+3. If an active download queue is interrupted unexpectedly (`SIGTERM`, `SIGKILL`, OOM kill, or container upgrade), `rgt-sync` automatically resumes it on startup using an exponential backoff (`5s → 15s → 45s → 2m → 5m`). If the server crashes 5 consecutive times rapidly, the **circuit breaker** pauses auto-resume to prevent a reboot loop—fix the underlying issue (e.g., container memory limit or full disk), then click **Resume Queue** in the **Sync** or **Catalog** recovery strip.
+
+### Mount Storage Device Unavailable (`HTTPS Req` or `Unsupported`)
+
+1. Direct browser-to-SD-card writing requires a **Chromium-based browser** (Chrome, Edge, Brave, Vivaldi, Arc, Opera) running in a **secure context** (`https://...` or `http://localhost` / `http://127.0.0.1`).
+2. If you access your homelab server over plain LAN HTTP (e.g., `http://192.168.1.50:3000`), terminate TLS in front of `rgt-sync` (Caddy, Traefik, Nginx Proxy Manager, Kubernetes Ingress, or Tailscale HTTPS) or add your LAN origin to `chrome://flags/#unsafely-treat-insecure-origin-as-secure`—otherwise one-click **Download ROM** still works in every browser.
 
 ### Scraper Finding 0 Releases or Auth Expiring Mid-Run
 
 1. Look for `[AUTH]` and `[WP REST]` debug lines in container stdout or the **Debug** tab.
 2. Common causes:
-   - Incremental cutoff timestamp (`lastWatermarkAt`) is newer than all posts on the selected console—clear or backdate it in **Sync Rules** (or **Overview → Incremental Cutoff**).
+   - Incremental cutoff timestamp (`lastWatermarkAt`) is newer than all posts on the selected console—clear or backdate it in **Sync Rules** (or **Sync → Incremental Cutoff**).
    - Cloudflare or WordPress returned a non-JSON challenge or login form (`Auth wall detected on dynamic download AJAX` / `Blocked by Cloudflare bot protection`). Re-verify credentials in **System Settings**.
+   - If a console looks empty or stale, click **Full Re-index** in **Catalog** or **Sync Rules** to force a fresh page-1-to-N WordPress REST rebuild.

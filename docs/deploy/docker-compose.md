@@ -29,12 +29,16 @@ curl -fsSL https://raw.githubusercontent.com/jeremyj563/retrogametalk-sync/main/
 Edit `.env` to set optional overrides (or leave `RGT_USERNAME` / `RGT_PASSWORD` blank to configure credentials through the web UI):
 
 ```dotenv
-# Optional: Pin a specific bare SemVer image tag (defaults to :1.7.0 / :latest in docker-compose.yml)
-RGT_SYNC_IMAGE=ghcr.io/jeremyj563/retrogametalk-sync:1.7.0
+# Optional: Pin a specific bare SemVer image tag (defaults to :latest in docker-compose.yml)
+RGT_SYNC_IMAGE=ghcr.io/jeremyj563/retrogametalk-sync:1.44.4
 
-# Optional: Lock credentials via env (leave blank to manage in UI)
+# Optional: Lock RetroGameTalk credentials via env (leave blank to manage in UI)
 RGT_USERNAME=""
 RGT_PASSWORD=""
+
+# Optional: Enable self-hosted UI/API lock screen (leave blank for open local access)
+APP_AUTH_USERNAME=""
+APP_AUTH_PASSWORD=""
 
 # Optional: Restrict consoles or release types
 SCRAPER_SYSTEM_FILTER=""
@@ -92,7 +96,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Docker waits up to `stop_grace_period` (`30s`) so in-flight `.part` downloads terminate cleanly and resume cleanly on restart.
+Docker waits up to `stop_grace_period` (`30s`) so in-flight `.part` downloads terminate cleanly and any interrupted download queue resumes automatically on startup (with exponential crash-loop backoff protection).
 
 ### Backing Up State
 

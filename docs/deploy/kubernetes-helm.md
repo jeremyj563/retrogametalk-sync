@@ -35,10 +35,12 @@ On tagged `1.x.y` releases, CI packages and pushes the Helm chart to GHCR OCI:
 
 ```bash
 helm install rgt-sync oci://ghcr.io/jeremyj563/charts/retrogametalk-sync \
-  --version 1.7.0 \
+  --version 1.44.4 \
   --namespace rgt-sync \
   --create-namespace
 ```
+
+After install or upgrade, Helm `NOTES.txt` prints the deployed version, chart version, resolved container image reference, console URL, and health/metrics endpoints.
 
 ### Quick Access via Port-Forward
 
@@ -56,7 +58,7 @@ Create a custom `my-values.yaml` (see [`k8s/charts/retrogametalk-sync/examples/o
 ```yaml
 image:
   repository: ghcr.io/jeremyj563/retrogametalk-sync
-  tag: "1.7.0"
+  tag: "1.44.4"
   pullPolicy: IfNotPresent
 
 persistence:
@@ -99,13 +101,15 @@ resources:
 
 ### Using `credentials.existingSecret` (Recommended)
 
-Keep credentials and your AES-256-GCM key out of Helm release history:
+Keep credentials, your AES-256-GCM key, and optional dashboard lock secrets out of Helm release history:
 
 ```bash
 kubectl --namespace rgt-sync create secret generic rgt-sync-credentials \
   --from-literal=RGT_USERNAME="your-username" \
   --from-literal=RGT_PASSWORD="your-password" \
-  --from-literal=ENCRYPTION_KEY="$(openssl rand -hex 32)"
+  --from-literal=ENCRYPTION_KEY="$(openssl rand -hex 32)" \
+  --from-literal=APP_AUTH_PASSWORD="" \
+  --from-literal=APP_AUTH_SESSION_SECRET="$(openssl rand -hex 32)"
 
 helm upgrade --install rgt-sync ./k8s/charts/retrogametalk-sync \
   --namespace rgt-sync \

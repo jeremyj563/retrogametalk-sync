@@ -22,12 +22,12 @@ This directory contains self-contained deployment guides for running **RetroGame
 
 | Registry | Image Reference | Release Cadence |
 | :--- | :--- | :--- |
-| **GitHub Container Registry (Primary)** | `ghcr.io/jeremyj563/retrogametalk-sync` | Every push to `main` (`latest`, `main`, `sha-<short>`) and bare SemVer release (`1.7.0`, `1.7`). |
-| **GHCR OCI Helm Chart** | `oci://ghcr.io/jeremyj563/charts/retrogametalk-sync` | Packaged and pushed automatically on bare SemVer releases (`1.7.0`). |
+| **GitHub Container Registry (Primary)** | `ghcr.io/jeremyj563/retrogametalk-sync` | Every push to `main` (`latest`, `main`, `sha-<short>`) and bare SemVer release (`1.44.4`, `1.44`). |
+| **GHCR OCI Helm Chart** | `oci://ghcr.io/jeremyj563/charts/retrogametalk-sync` | Packaged and pushed automatically on bare SemVer releases (`1.44.4`). |
 | **Docker Hub (Opt-In Mirror)** | `<!-- TODO: Add <dockerhub_user>/retrogametalk-sync once DOCKERHUB_USERNAME/TOKEN secrets are configured -->` | Pushed **only** on tagged SemVer releases when maintainer secrets are configured. |
 
 > [!NOTE]
-> **Bare SemVer Tags:** All releases, container tags, and Helm charts follow strict **`1.x.y`** bare semantic versions (e.g., `1.7.0`, without a leading `v` prefix).
+> **Bare SemVer Tags:** All releases, container tags, and Helm charts follow strict **`1.x.y`** bare semantic versions (e.g., `1.44.4`, without a leading `v` prefix).
 
 ---
 
@@ -88,8 +88,16 @@ Settings omitted from the environment default cleanly and remain editable in the
 | `RGT_USERNAME` | `""` | RetroGameTalk account username (locks UI username input when non-empty). |
 | `RGT_PASSWORD` | `""` | RetroGameTalk account password (locks UI password input when non-empty). |
 | `RGT_BASE_URL` | `https://retrogametalk.com/repo/` | Repository root URL used for scraping and WP REST catalog discovery. |
-| `RGT_LOGIN_URL` | `https://retrogametalk.com/login/` | XenForo authentication URL. |
+| `RGT_LOGIN_URL` | `https://retrogametalk.com/login/login` | XenForo authentication URL. |
 | `SCRAPER_USER_AGENT` | Chrome desktop UA | Custom HTTP `User-Agent` header override. |
+
+### Optional Self-Hosted UI / API Lock
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `APP_AUTH_PASSWORD` | `""` | Optional dashboard/API lock password (`scrypt` + signed `HttpOnly` session cookie + CSRF & rate limit). Leave unset for open local access. |
+| `APP_AUTH_USERNAME` | `""` | Optional username paired with `APP_AUTH_PASSWORD` (leave blank for password-only unlock). |
+| `APP_AUTH_SESSION_SECRET` | Auto ephemeral | Optional persistent signing secret so login sessions survive container/pod restarts. |
 
 ### Scheduling & Filtering
 

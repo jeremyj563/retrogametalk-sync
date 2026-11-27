@@ -35,10 +35,10 @@ In the Proxmox UI (**`<node> → local (pve) → CT Templates → Pull from OCI 
 
 ```bash
 # Check available OCI pull options on Proxmox 9.1+
-pveam pull local ghcr.io/jeremyj563/retrogametalk-sync:1.7.0
+pveam pull local ghcr.io/jeremyj563/retrogametalk-sync:1.44.4
 ```
 
-*(Note: Proxmox requires OCI registry credentials/anonymous token pulls; check your `pveam` / UI modal for `ghcr.io/jeremyj563/retrogametalk-sync:1.7.0`.)*
+*(Note: Proxmox requires OCI registry credentials/anonymous token pulls; check your `pveam` / UI modal for `ghcr.io/jeremyj563/retrogametalk-sync:1.44.4`.)*
 
 ### Step 2: Create the Container & Attach Persistent `mp0`
 

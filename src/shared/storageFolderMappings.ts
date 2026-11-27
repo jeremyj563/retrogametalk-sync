@@ -873,9 +873,19 @@ export function resolveTargetStorageFolder(
     return baseFolder;
   }
 
-  // Avoid redundant duplication such as "BIOS/BIOS" or "PSX2PSP/PSX2PSP"
-  const baseLeaf = baseFolder.split('/').pop() || baseFolder;
-  if (baseLeaf.toLowerCase() === subFolder.toLowerCase()) {
+  // Avoid redundant duplication such as "BIOS/BIOS", "BIOS/!bios", or "PSX2PSP/!psx2psp"
+  const baseLeaf = (baseFolder.split('/').pop() || baseFolder).toLowerCase();
+  const subLower = subFolder.toLowerCase();
+  const subCoreLower = subLower.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+  if (
+    baseLeaf === subLower ||
+    (subCoreLower && baseLeaf === subCoreLower) ||
+    ((systemName.trim().toLowerCase() === 'bios-files' || systemName.trim().toLowerCase() === 'bios') &&
+      category === 'bios') ||
+    ((systemName.trim().toLowerCase() === 'psx2psp-eboots' ||
+      systemName.trim().toLowerCase() === 'psx2psp') &&
+      category === 'psx2psp')
+  ) {
     return baseFolder;
   }
 

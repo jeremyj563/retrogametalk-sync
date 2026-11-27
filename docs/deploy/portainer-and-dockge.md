@@ -15,7 +15,7 @@ Both **Portainer** and **Dockge** let you deploy and manage **RetroGameTalk Sync
 ```yaml
 services:
   rgt-sync:
-    image: ghcr.io/jeremyj563/retrogametalk-sync:1.7.0
+    image: ghcr.io/jeremyj563/retrogametalk-sync:1.44.4
     container_name: rgt-sync
     restart: unless-stopped
     stop_grace_period: 30s
@@ -58,7 +58,7 @@ services:
 
 ### Upgrading in Portainer
 
-Open **Stacks → `rgt-sync` → Editor → Update the stack**, bump the image tag (e.g., `1.7.0` → `1.7.1`) or toggle **Re-pull image and redeploy**.
+Open **Stacks → `rgt-sync` → Editor → Update the stack**, bump the image tag (e.g., `1.44.3` → `1.44.4`) or toggle **Re-pull image and redeploy**.
 
 ---
 

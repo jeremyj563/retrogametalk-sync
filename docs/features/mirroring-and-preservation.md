@@ -1,60 +1,50 @@
-# Automated Mirroring, Polite Archival & Scheduling
+# Automated Preservation Mirroring, Live Reload & Auto-Recovery
 
-For preservationists and home-lab collectors, `rgt-sync` acts as a "set-and-forget" archival daemon that keeps your local NAS, home server, or desktop hard drive synchronized with RetroGameTalk's repository—without hammering community servers or leaving half-downloaded files behind.
-
----
-
-## 1. Encrypted One-Time Account Setup & Persistent Sessions
-
-- **Encrypted Local Credentials**: Enter your RetroGameTalk username and password once in **Operations** (or pass them via environment variables in Docker/Kubernetes). Your password is encrypted at rest using AES-256-GCM and is never exposed back to the browser.
-- **One-Click Connection Test**: Use **Test Auth & Discover** to verify your login, inspect response latency, and automatically discover available console sections before running your first sync.
-- **Persistent Login Cookies**: Once authenticated, `rgt-sync` saves your session cookies locally so scheduled runs and restarts pick right back up without repeatedly logging in.
+Beneath its library CMS and handheld deployment tools, `rgt-sync` runs a resilient, "set-and-forget" archival engine that keeps your NAS, home server, or Kubernetes volume synchronized with RetroGameTalk—without beating up community servers or losing progress across restarts.
 
 ---
 
-## 2. Three Sync Modes for Every Workflow
+## 1. Encrypted Auth, Self-Hosted App Lock & Config Backups
 
-From the top header bar, you can launch a sync at any time in the mode that fits what you're doing:
-
-- **Incremental Sync (Recommended Default)**: Uses a high-watermark timestamp to check only newly published or recently updated releases since your last completed sync. Ideal for daily or 6-hourly upkeep—finishing quickly while catching brand-new fan translations and hack updates.
-- **Full Sync**: Sweeps the entire catalog across all of your selected consoles to verify completeness and backfill any missing releases or newly added platforms. Includes a confirmation prompt so you never trigger a full multi-console sweep by mistake.
-- **Dry Run Toggle (Preview Without Downloading)**: Flip on **Dry Run** before starting either an Incremental or Full sync to simulate discovery, filtering, and cataloging without downloading any ROM archives to disk—perfect for testing new console or release-type filters first.
+- **Encrypted Local Credentials (`System Settings`):** Enter your RetroGameTalk username and password once in **System Settings** (or lock them via `RGT_USERNAME` / `RGT_PASSWORD` environment variables). Passwords are encrypted at rest with AES-256-GCM, never returned in plaintext by `/api/config`, and paired with persistent `cookies.json` session storage.
+- **Optional Self-Hosted UI/API Lock (`APP_AUTH_PASSWORD`):** Exposing your console on a home network or reverse proxy? Set `APP_AUTH_PASSWORD` (and optionally `APP_AUTH_USERNAME`) to enable a zero-dependency CRT unlock screen backed by `scrypt` password verification, HMAC-SHA256 `HttpOnly` session cookies, same-origin CSRF checks, and login rate limiting. Leave it unset for zero-friction local access.
+- **Secret-Free JSON Configuration Backup & Restore:** Export and restore Mirror URLs, Sync Rules, Cron Schedule, Pacing, ROM Naming (including per-type overrides), and Console Folder Mappings from **System Settings** with inline diff previews, automatic env-lock respect, and guaranteed exclusion of all passwords and host-specific disk paths.
 
 ---
 
-## 3. Selective Console & Release-Type Curation
+## 2. Authoritative Platform Discovery & Index-First Sync
 
-Not everyone has 20 TB of NAS space—maybe you only collect 8-bit/16-bit cartridge consoles, Sony handhelds, or English fan translations! In **Operations**, you can tailor exactly what gets mirrored:
-
-- **30+ Supported Consoles, Handhelds & Computers**: Pick individual platforms grouped by manufacturer (Nintendo, Sega, Sony, NEC, Atari, SNK, Bandai, Commodore, Sinclair, MSX, Arcade, Homebrew Fantasy Consoles, and more)—or leave the filter open to mirror everything.
-- **Granular Release-Type Filtering**: Choose which categories of releases you want `rgt-sync` to download:
-  - **Retail ROMs** (original commercial releases across regions)
-  - **Translations** (English & international fan translations)
-  - **ROM Hacks** (improvement patches, total conversions, randomizers, difficulty & QoL hacks)
-  - **Homebrew** (indie and modern community-made games for classic hardware)
-  - **Ports & Conversions** (cross-platform ports, decompilations, PSX2PSP EBOOTs)
-  - **Undubs & Audio Restorations**
-  - **Prototypes, Betas & Demos**
+- **38+ Live Platforms via WordPress REST Registry:** `rgt-sync` merges RetroGameTalk's live `/wp-json/wp/v2/types` game platform registry with homepage discovery—automatically detecting and canonicalizing all live console, handheld, and computer CPTs (including platforms omitted from the site's top HTML navigation such as `amiga` and `sega-pico`) on startup, login, sync, and full catalog indexing.
+- **Fast Incremental Delta Indexing (`modified_after`):** Already-indexed consoles update quickly using per-console `lastIndexedAt` cursors rather than re-crawling every page from 1 to N. Clear **`Fresh` / `Stale (>12h)`** indicators appear across **Sync**, **Catalog**, and **Sync Rules**, incomplete or depleted scans automatically self-heal back to full backfill, and an explicit **Full Re-index** button is always available when you want a complete metadata rebuild.
+- **Index-First Full Sync, Incremental Sync & Dry Run:**
+  - **Incremental Sync (Recommended Default):** Checks only newly published or updated releases since your high-watermark cutoff.
+  - **Full Sync:** Refreshes stale/unindexed target consoles in Phase 1, then mirrors rule-matched pending releases straight from SQLite in Phase 2—evaluating per-file roles (Retail, Translations incl. MTL, Hacks, Homebrew, Ports, Undubs, Prototypes, Bootlegs, BIOS, DLC, PSX2PSP) plus per-game **Pin / Ignore** overrides so already-mirrored archives skip cleanly.
+  - **Dry Run Toggle:** Simulates discovery, rule matching, and estimated sizes without downloading archives, surfacing a structured **Latest Dry Run** summary on the **Sync** page.
 
 ---
 
-## 4. Complete Preservation: Multi-File Releases, Metadata & Artwork
+## 3. Universal Live Mid-Run Hot-Reloading
 
-Preserving a release means more than saving a mystery `.zip` file:
+You never have to abort a 4-hour sync or wait for a catalog index to finish just because you tweaked a setting:
 
-- **Structured On-Disk Layout**: Archives are organized cleanly on your storage drive by `<system>/<release-folder>/<archive-file>`, preserving original upstream archives intact for archival fidelity while keeping multi-part or multi-version releases grouped together under a single catalog entry.
-- **Offline Box Art & High-Resolution Screenshots**: Alongside ROM archives, `rgt-sync` automatically mirrors cover art and unwraps full-resolution gameplay screenshots locally—so even if you browse your server completely offline years from now, every game card and detail drawer remains rich and visual.
-- **Rich Historical Metadata**: Captures title, console, publisher, developer, release year, genres, regions, languages, patch/translation credits, and full release descriptions.
-- **Crash-Safe `.part` Downloads**: Every file downloads to a temporary `.part` staging file first and is only renamed into place once the complete payload finishes. If your power blinks or you click **Stop** mid-download, `rgt-sync` automatically cleans up partial files so corrupt ROMs never pollute your archive.
+- **Live Sync Rules Reload:** Adding or removing **Target Consoles** or **Allowed Release Types** in **Sync Rules** applies immediately to any active **Full Sync**, **Incremental Sync**, or **Dry Run**—finishing the current in-flight transfer cleanly before skipping excluded items, indexing newly added consoles, or re-evaluating widened types.
+- **Live Catalog Indexer Reload:** Saving console changes while the **Catalog Indexer** is running immediately cancels or drops unchecked consoles and splices newly checked consoles straight into the active queue (or reprioritizes them to the front during a Full Site index).
+- **Live Pacing & Concurrency Reload:** Changing **Request Pacing & Rate Protection** (`baseDelayMs`, `minDelayMs`, `maxDelayMs`, `backoffMultiplier`), **Parallel Workers (`maxConcurrency`)**, **Chunk Concurrency**, **Retries**, or **Timeouts** in **System Settings** takes effect on the very next request or file—elastically spawning or draining download workers mid-batch with `[Live Sync]` / `[Live Rules]` / `[Live Indexer]` Activity Log receipts.
 
 ---
 
-## 5. Polite Adaptive Pacing & Live Telemetry
+## 4. Resilient Multi-Chunk Transfers & Automatic Queue Recovery
 
-Community retro repositories rely on shared bandwidth. `rgt-sync` has a built-in **Adaptive Rate Limiter** that acts as a respectful guest automatically:
+- **Atomic `.part` + Segmented HTTP `Range` Resume:** Large archives download via concurrent HTTP `Range` segments with `.part.meta.json` `If-Range` verification and only rename into `<system>/<release>/<file>` once byte counts verify cleanly.
+- **Automatic Download Queue Recovery with Crash-Loop Backoff:** If the server restarts unexpectedly during a download queue run (`SIGTERM`, `SIGINT`, `SIGKILL`, OOM kill, or container upgrade), in-flight files return cleanly to `queued` and `rgt-sync` **resumes the queue automatically on startup** using a persistent exponential backoff schedule (`5s → 15s → 45s → 2m → 5m`).
+  - Backoff resets automatically once a resumed run stabilizes for 3 minutes or completes cleanly.
+  - A safety circuit breaker pauses auto-resume after 5 consecutive rapid interruptions to prevent infinite reboot loops.
+  - Explicit user **Stop** / **Pause** actions are always respected across restarts, and a live recovery strip on **Sync** and **Catalog** offers **Resume Now**, **Pause**, **View Queued**, and **Clear Queue**.
 
-- **Gentle Jittered Spacing**: Spaces out requests with slight natural randomness instead of robotic bursts, gently speeding up within your configured bounds when the server is responsive and backing off automatically (honoring `Retry-After` cooldowns) if the server ever gets busy.
-- **Smooth Live Transfer Status & Telemetry Deck**: On the **Sync** page, watch active transfers in a layout-stable progress bar (engineered so rapid back-to-back kilobyte-sized 8-bit ROM downloads never make the page jump or flicker), alongside live throughput charts, request latency, rate-limit delay curves, and filterable activity logs.
-- **Unattended Cron Scheduling & Easy Retries**:
-  - Enable automatic background syncs on the **Schedule** page using one-click presets (every 6 hours, every 12 hours, daily at midnight, weekly) or any custom 5-field cron expression.
-  - If a file ever fails due to a brief internet hiccup, open the **Failed Queue Drawer** to retry a single file, retry one specific console, or retry all failed items at once.
+---
+
+## 5. Polite Adaptive AIMD Pacing, Telemetry & Scheduling
+
+- **Adaptive AIMD Rate Limiter:** Spaces outbound requests with ±15% randomized jitter, gradually tightens spacing during healthy streaks, and backs off multiplicatively on `429`/`503` responses while honoring upstream `Retry-After` headers.
+- **Hero Showcase & Telemetry Deck (`Sync`):** Watch active transfers with adaptive box-art crossfades (click cover or title to open **Game Details** directly over Sync), a **Speed-Reactive Sync Wave**, layout-stable transfer progress bars, D3 throughput/latency/catalog-growth charts, filterable live SSE Activity Logs, and a **Failed Queue Drawer** supporting single-file, per-console, or batch retries.
+- **Unattended Cron Scheduling:** Configure automatic background syncs in **Sync Rules** using presets (every 6 hours, 12 hours, daily, weekly) or any custom 5-field cron expression, with a live next-run countdown in the left sidebar.

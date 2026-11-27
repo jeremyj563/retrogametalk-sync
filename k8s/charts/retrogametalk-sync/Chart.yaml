@@ -1,9 +1,9 @@
 apiVersion: v2
 name: retrogametalk-sync
-description: Continuous authenticated scraper and local repository mirror for retrogametalk.com with adaptive rate limiting and a CRT phosphor control console.
+description: Self-hosted retro game content management system, preservation mirror, and multi-handheld SD installer for retrogametalk.com with a CRT phosphor control console.
 type: application
-version: 1.44.3
-appVersion: "1.44.3"
+version: 1.44.5
+appVersion: "1.44.5"
 keywords:
   - retrogametalk
   - roms

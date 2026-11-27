@@ -4,6 +4,7 @@ import {
   type SystemBrandId,
 } from './systemCatalog.ts';
 import {
+  applyFolderCasingStyle,
   CANONICAL_KNOWN_SYSTEM_SLUGS,
   isTypeSubfoldersActiveForSystem,
   normalizeStorageFolderConfig,
@@ -61,10 +62,14 @@ export interface DeviceInferredConventions {
   inferredRomRoot: string;
   /** Dominant leaf casing style for detected console folders under the ROM root. */
   inferredConsoleCasing: ConsoleLeafCasingStyle;
-  /** Majority exact folder name observed on disk for each detected ROM category (e.g. { hack: "hacks", translations: "trans" }). */
+  /** Majority exact folder name observed on disk for each detected ROM category (e.g. { hack: "!hacks", translations: "!trans" }). */
   inferredTypeSubfolders: Partial<Record<StorageRomCategoryKey, string>>;
   /** Dominant casing style across observed ROM-type subfolder names on the device. */
   inferredSubfolderCasing: FolderCasingStyle;
+  /** Dominant sorting/framing prefix shared by observed ROM-type subfolders (e.g. "!", "_", "[", "! "), or "". */
+  inferredSubfolderPrefix: string;
+  /** Dominant trailing wrapper/suffix shared by observed ROM-type subfolders (e.g. "]", ")"), or "". */
+  inferredSubfolderSuffix: string;
   /** True when at least one non-retail ROM-type subfolder was observed on the device. */
   hasInferredTypeSubfolders: boolean;
 }
@@ -736,12 +741,101 @@ for (const category of STORAGE_ROM_CATEGORY_KEYS) {
   }
 }
 
+export interface SubfolderAffix {
+  prefix: string;
+  core: string;
+  suffix: string;
+}
+
+function countChar(str: string, ch: string): number {
+  let count = 0;
+  for (let i = 0; i < str.length; i += 1) {
+    if (str[i] === ch) count += 1;
+  }
+  return count;
+}
+
+/**
+ * Splits a ROM-type subfolder name into an optional sorting/framing prefix, core label,
+ * and trailing suffix (e.g. "!hacks" -> { prefix: "!", core: "hacks", suffix: "" },
+ * "[Translations]" -> { prefix: "[", core: "Translations", suffix: "]" },
+ * "00 - Hacks" -> { prefix: "00 - ", core: "Hacks", suffix: "" }).
+ */
+export function splitSubfolderAffix(rawName: string): SubfolderAffix {
+  const clean = sanitizeRelativeStoragePath(rawName);
+  if (!clean || clean.includes('/')) {
+    return { prefix: '', core: clean, suffix: '' };
+  }
+
+  const symbolMatch = clean.match(/^([^a-zA-Z0-9]*)(.*?)([^a-zA-Z0-9]*)$/);
+  let prefix = symbolMatch?.[1] ?? '';
+  let core = symbolMatch?.[2] ?? clean;
+  let suffix = symbolMatch?.[3] ?? '';
+
+  if (!/[a-zA-Z0-9]/.test(core)) {
+    return { prefix: '', core: clean, suffix: '' };
+  }
+
+  // Re-attach any leading closer(s) in suffix that actually balance an opener inside core
+  // (e.g., "Translations (EN)" must keep ")" inside core rather than treating it as a suffix).
+  const closerToOpener: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+  while (suffix.length > 0) {
+    const first = suffix[0]!;
+    const opener = closerToOpener[first];
+    if (opener && countChar(core, opener) > countChar(core, first)) {
+      core = `${core}${first}`;
+      suffix = suffix.slice(1);
+    } else {
+      break;
+    }
+  }
+
+  // Detect explicit identical sort-key prefixes such as "0_hacks", "00 - Hacks", "z_trans", "zz-ports"
+  // while intentionally leaving sequential numeric prefixes like "01 - Hacks" untouched.
+  if (!prefix) {
+    const sortKeyMatch = core.match(/^((?:0{1,2}|[zZ]{1,2})\s*[-_.]+\s*)(?=[a-zA-Z])/);
+    if (sortKeyMatch) {
+      prefix = sortKeyMatch[1]!;
+      core = core.slice(prefix.length);
+    }
+  }
+
+  return { prefix, core, suffix };
+}
+
+/**
+ * Formats an unseen default ROM-type subfolder name using the mounted device's inferred
+ * casing style and sorting prefix/suffix convention (e.g. "Ports" -> "!ports" or "[Ports]").
+ */
+export function applySubfolderNameConvention(
+  defaultName: string,
+  conventions: Pick<
+    DeviceInferredConventions,
+    'inferredSubfolderCasing' | 'inferredSubfolderPrefix' | 'inferredSubfolderSuffix'
+  >,
+): string {
+  const cased = applyFolderCasingStyle(defaultName, conventions.inferredSubfolderCasing);
+  if (!cased) return '';
+  const prefix = conventions.inferredSubfolderPrefix || '';
+  const suffix = conventions.inferredSubfolderSuffix || '';
+  if (!prefix && !suffix) return cased;
+  return sanitizeRelativeStoragePath(`${prefix}${cased}${suffix}`) || cased;
+}
+
 /**
  * Classifies an immediate child directory name inside a console folder as a known
- * StorageRomCategoryKey (e.g., "ROM Hacks" -> "hack", "Translations" -> "translations").
+ * StorageRomCategoryKey (e.g., "ROM Hacks" -> "hack", "!trans" -> "translations").
  */
 export function classifyRomTypeSubfolderName(folderName: string): StorageRomCategoryKey | null {
   const tokens = extractFolderCandidateTokens(folderName);
+  const { core } = splitSubfolderAffix(folderName);
+  if (core && core !== folderName) {
+    for (const coreTok of extractFolderCandidateTokens(core)) {
+      if (!tokens.includes(coreTok)) {
+        tokens.push(coreTok);
+      }
+    }
+  }
   for (const token of tokens) {
     const direct = SUBFOLDER_TOKEN_TO_CATEGORY.get(token);
     if (direct) return direct;
@@ -871,10 +965,28 @@ export function inferDeviceConventions(
   let upperLeafCount = 0;
   let totalLetteredLeafCount = 0;
 
-  // 2. Tally exact subfolder names per category across all active candidates
+  // 2. Tally exact subfolder names, casing, and sorting prefix/suffix per category across all active candidates
   const countsByCategory = new Map<StorageRomCategoryKey, Map<string, number>>();
   const casingVotes: Record<FolderCasingStyle, number> = { lower: 0, upper: 0, title: 0 };
   const fallbackCasingVotes: Record<FolderCasingStyle, number> = { lower: 0, upper: 0, title: 0 };
+  const affixVotes = new Map<string, { prefix: string; suffix: string; count: number }>();
+  const fallbackAffixVotes = new Map<string, { prefix: string; suffix: string; count: number }>();
+  let totalNonAcronymAffixVotes = 0;
+  let totalFallbackAffixVotes = 0;
+
+  const recordAffixVote = (
+    map: Map<string, { prefix: string; suffix: string; count: number }>,
+    prefix: string,
+    suffix: string,
+  ) => {
+    const key = `${prefix}\0${suffix}`;
+    const existing = map.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      map.set(key, { prefix, suffix, count: 1 });
+    }
+  };
 
   for (const match of matches) {
     const chosenPath = chosenPathBySlug?.[match.canonicalSlug] || match.recommendedPath;
@@ -910,11 +1022,21 @@ export function inferDeviceConventions(
       }
       freqMap.set(cleanName, (freqMap.get(cleanName) ?? 0) + 1);
 
-      const casing = classifyFolderNameCasing(cleanName);
+      const { prefix, core, suffix } = splitSubfolderAffix(cleanName);
+      const casing = classifyFolderNameCasing(core);
       if (casing) {
         fallbackCasingVotes[casing] += 1;
         if (!ACRONYM_SUBFOLDER_CATEGORIES.has(category)) {
           casingVotes[casing] += 1;
+        }
+      }
+
+      if (category !== 'retail') {
+        recordAffixVote(fallbackAffixVotes, prefix, suffix);
+        totalFallbackAffixVotes += 1;
+        if (!ACRONYM_SUBFOLDER_CATEGORIES.has(category)) {
+          recordAffixVote(affixVotes, prefix, suffix);
+          totalNonAcronymAffixVotes += 1;
         }
       }
     }
@@ -950,6 +1072,26 @@ export function inferDeviceConventions(
     inferredSubfolderCasing = 'upper';
   }
 
+  // Adopt a non-empty sorting prefix/suffix when it holds a strict majority (>50%) of observed subfolders
+  const activeAffixVotes = totalNonAcronymAffixVotes > 0 ? affixVotes : fallbackAffixVotes;
+  const totalAffixVotes =
+    totalNonAcronymAffixVotes > 0 ? totalNonAcronymAffixVotes : totalFallbackAffixVotes;
+  let inferredSubfolderPrefix = '';
+  let inferredSubfolderSuffix = '';
+  if (totalAffixVotes > 0) {
+    const nonEmptyRanked = Array.from(activeAffixVotes.values())
+      .filter((entry) => entry.prefix.length > 0 || entry.suffix.length > 0)
+      .sort((a, b) => {
+        if (b.count !== a.count) return b.count - a.count;
+        return `${a.prefix}${a.suffix}`.localeCompare(`${b.prefix}${b.suffix}`);
+      });
+    const topAffix = nonEmptyRanked[0];
+    if (topAffix && topAffix.count * 2 > totalAffixVotes) {
+      inferredSubfolderPrefix = topAffix.prefix;
+      inferredSubfolderSuffix = topAffix.suffix;
+    }
+  }
+
   const hasInferredTypeSubfolders = Object.keys(inferredTypeSubfolders).some(
     (key) => key !== 'retail',
   );
@@ -959,6 +1101,8 @@ export function inferDeviceConventions(
     inferredConsoleCasing,
     inferredTypeSubfolders,
     inferredSubfolderCasing,
+    inferredSubfolderPrefix,
+    inferredSubfolderSuffix,
     hasInferredTypeSubfolders,
   };
 }

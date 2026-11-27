@@ -1,61 +1,77 @@
-# Offline Library Catalog, Rich Metadata & Archive Inspection
+# Offline Library Catalog, Collections, Curation & Archive Explorer
 
-Once `rgt-sync` discovers and mirrors games into your repository, the **Catalog** workspace turns your archive into a fast, visual, searchable museum of classic gaming—completely hosted on your own hardware.
-
----
-
-## 1. Visual Game Browser & Per-System Disk Breakdown
-
-- **Box-Art Grid & Detailed Release Cards**: Browse thousands of titles with locally cached cover art, console labels, release year, region/language indicators, release-type tags (`Retail ROM`, `Translation`, `Hack`, `Homebrew`, `Undub`), file sizes, and SD card installation status.
-- **Rich Game Detail Drawer & Screenshot Lightbox**: Click any game to open its full preservation dossier:
-  - Publisher, developer, release year, genres, regions, languages, and release notes/descriptions
-  - Locally mirrored screenshots with one-click **full-resolution upgrade & lightbox viewer**
-  - Every individual file belonging to that release (e.g., base game, v1.1 bugfix, optional soundtrack, or alternate translation patch) with individual download, Prepared ROM extraction, and retry controls
-- **Per-System Disk Space & Sidebar Telemetry**: The **Mirrored Systems** list in the left sidebar shows exact physical disk space and game counts for every console in your archive. Hover (or keyboard-focus) any system to pop open a detailed console telemetry card showing:
-  - Full platform name and manufacturer
-  - Exact disk footprint and percentage share of your total archive
-  - Mirrored vs. total releases (`%` complete), active queue/failed counts, total archive files on disk, and average size per release
-  - How many games from that console are currently marked **Installed** on your handheld/SD card, its configured target device folder, and last activity time
+Once `rgt-sync` indexes and mirrors releases into your repository, the **Catalog** workspace transforms your local storage into a fast, visual **retro game content management system (CMS)**—complete with personal collections, multi-device tracking, update alerts, in-place archive browsing, and direct disk management.
 
 ---
 
-## 2. Deep Multi-Faceted Search & `ANY` / `ALL` Filtering
+## 1. Visual Game Browser & Three View Modes
 
-Finding *"all English-translated Japanese SNES RPGs that I haven't put on my handheld yet"* takes just a few clicks:
+Switch seamlessly between three Catalog layouts without losing your search or filter context:
 
-- **Instant Keyword Search**: Search across titles, filenames, publishers, developers, and descriptions.
-- **Combinable Facet Dropdowns with Live Counts**: Filter simultaneously by:
-  - **System / Console** (e.g., SNES, GBA, PlayStation, Sega Saturn, PC Engine CD)
-  - **Release Type** (Retail ROM, Hack, Translation, Homebrew, Port, Prototype, etc.)
-  - **Genre** (RPG, Platformer, Shoot 'em Up, Action, Strategy, etc.)
-  - **Region** (USA, Japan, Europe, World, etc.)
-  - **Language** (English, Japanese, Spanish, French, etc.)
-  - **Source / Group**
-  - **Sync Status** (`Downloaded`, `Queued`, `Failed`)
-- **`ANY` vs. `ALL` Match Modes**: Multi-select dropdowns let you toggle between matching **ANY** selected tag (broad `OR` search) or requiring **ALL** selected tags simultaneously (precise `AND` search).
-- **Toggleable `Installed` & `Not Installed` Filters**: Dedicated toggle buttons let you view:
-  - Only games **Installed** on your storage device
-  - Only games **Not Installed** yet (great for spotting newly mirrored games to add to your SD card)
-  - Everything in your catalog (when neither or both are toggled)
-- **Flexible Sorting**: Sort by newest published/updated, recently mirrored, alphabetical (`A → Z` / `Z → A`), largest/smallest file size, or release year.
+- **Box-Art Grid:** Browse thousands of releases with locally cached cover art, console badges, release year, region/language indicators, release-type tags (`Retail ROM`, `Translation`, `Hack`, `Homebrew`, `Port`, `Undub`, `Prototype`), favorite stars, multi-device install badges (`Installed · Miyoo Mini +1`), update cues (`Update ready` / `Update on RGT`), and 1-click **Install / Update / Reinstall** or **Queue** buttons.
+- **Detailed List:** Compact tabular view showing titles, systems, file sizes, sync status, device install status, and quick action buttons for fast high-density curation.
+- **Local Disk Tree:** A viewport-bounded CRT file explorer for browsing your physical `DOWNLOAD_DIR` directory hierarchy directly from the browser—featuring interactive path breadcrumbs, one-click path copy, folder filtering, column sorting (`Name A–Z`, `Name Z–A`, `Largest First`, `Recently Modified`), scroll-offset memory when navigating back up, direct local file downloads, safe 2-step folder/file deletion, and **click-to-open archive inspection** directly inside the directory tree.
+
+### Rich Game Detail Drawer & Screenshot Lightbox
+Click any game—from the **Catalog** or straight from the active **Sync Hero Showcase**—to open its preservation & deployment dossier:
+- Publisher, developer, release year, genres, regions, languages, collection chips, and full release notes
+- Locally cached cover art and screenshots with a GPU-composited **full-resolution lightbox viewer** (smooth directional crossfades, `Fit Screen` / `1:1 Pixel` toggle, adjacent slide preloading)
+- **Mount-Aware Primary Action Footer:** When a storage device is mounted, **Install to `<Device>`** (or **Update** / **Reinstall**) takes primary focus right beside 1-click **Download ROM** (automatically picking the latest playable version, or opening a compact docked **Choose ROM Variant** strip for multi-variant archives)
+- **Inline Archive Inspection:** Every mirrored `.zip`, `.7z`, `.rar`, or `.tar` under **Included Downloads** has a clickable filename and inline **Inspect / Hide Contents** toggle—no menu diving required
+- **Consolidated `More (···)` Menu:** Houses **Install Options…**, **Download Raw Archive**, **Pin / Ignore Sync Override**, **Uninstall from `<Device>`**, **Refresh / Fetch Metadata**, **Mark / Clear Installed Flag**, **Dry Run Retry**, and 2-step **Delete Release**
 
 ---
 
-## 3. Inside-the-Archive Inspection & Clutter Stripping
+## 2. Favorites, Custom Collections & Handheld Loadouts
 
-Archived releases often pack extra files alongside the actual game—readme `.txt` files, `.nfo` scene banners, web shortcuts, screenshots, or standalone `.ips`/`.bps` patch files—or store CD games across multiple `.bin` + `.cue` track files.
+Turn your archive into curated libraries and ready-to-deploy handheld loadouts:
 
-`rgt-sync` inspects inside `.zip`, `.7z`, `.rar`, and `.tar` archives on the server without unpacking clutter onto your drive:
-
-- **Playable Target Detection**: Automatically identifies playable cartridge ROMs (`.nes`, `.sfc`, `.gba`, `.md`, `.n64`, `.nds`, etc.) and single-file compressed discs (`.chd`, `.rvz`, `.iso`, `.pbp`, `.cso`, `.wbfs`).
-- **Smart Multi-Track Disc Bundling**: Recognizes `.cue`, `.gdi`, `.ccd`, and `.m3u` disc descriptors and pairs them with their matching `.bin`/`.img`/audio track files while stripping away readme clutter.
-- **Patch-Only Detection**: Clearly flags archives that contain *only* `.ips`, `.bps`, or `.xdelta` patch files (with no playable ROM inside) so you always know whether an archive is ready to boot on hardware/emulators or needs raw archive download for manual patching.
-- **Dual Download Options Anytime**:
-  - **Prepared ROM Download**: Extracts just the clean playable ROM (or repacks a clutter-free `.cue` + `.bin` disc `.zip` on the fly) using your preferred naming format—ready to drop straight into an emulator or flashcart.
-  - **Raw Archive Download**: Downloads the untouched original `.zip`/`.7z`/`.rar` archive exactly as mirrored for archival purists.
+- **One-Click Favorites:** Toggle the Star icon on any Grid card, List row, or Game Detail header, and filter straight to **Favorites (`N`)** from the Catalog toolbar.
+- **Custom Collections:** Use the **Collection** dropdown (`All Collections`, `Favorites`, custom collections with live counts, `+ New Collection…`) to create named lists—such as *"Miyoo Mini Travel Pack"*, *"SNES English RPGs"*, *"Co-op Arcade Night"*, or *"Analogue Pocket Essentials"*.
+- **Contextual Collection Banner:** Selecting any collection surfaces an action strip with 1-click **`Queue Missing (N)`** (downloads any un-mirrored titles in that collection), **`Install to <Device> (N)`** (deploys the entire loadout to your plugged-in SD card), plus inline **Rename** and **Delete**.
+- **Bulk Curation:** Multi-select cards across pages (`Select visible` or `Select all matching`) and use the **`+ Collection`** popover to add/remove games in bulk, or assign tags straight inside the Game Detail drawer.
 
 ---
 
-## 4. On-Disk Repository Browser & Library Maintenance
+## 3. Per-Game Sync Rule Overrides (`Pin` & `Ignore`)
 
-In **Operations**, a built-in **Repository File Browser** lets you navigate your mirrored directory tree directly from the web UI, check exact folder/file sizes, refresh metadata or high-res artwork on demand, and cleanly delete unwanted files or catalog entries so your database and disk stay in lockstep.
+Sometimes global console and release-type rules aren't granular enough—maybe you only mirror *SNES Translations* globally, yet you always want one specific *PS1 Retail* classic preserved, or you want to skip a massive multi-disc demo you don't care about:
+
+- **Pin (`pin`):** Forces a release to always match Sync Rules during Full Sync, Incremental Sync, Pre-Flight, and the Catalog `Matches Sync Rules` filter—even if its console or release type is excluded globally.
+- **Ignore (`ignore`):** Excludes a release from automatic Full and Incremental Syncs without blocking you from manually queueing or installing it later.
+- Manage overrides per game in **Game Details → More** or in bulk via the Catalog selection bar, and filter directly by **Pinned** or **Ignored** inside **More Filters**.
+
+---
+
+## 4. Streamlined Multi-Facet Filtering & Multi-Device Offline Scoping
+
+Finding *"all English-translated Japanese SNES RPGs that aren't installed on my Miyoo Mini yet"* takes just a few clicks:
+
+- **Clean Progressive Toolbar:** **Search**, **Systems**, **Types**, a collapsible **More Filters** drawer (`Genres`, `Regions`, `Languages`, `Sources`, `Status`, `Pinned`/`Ignored`), and **Sort** (including **`Recently Installed`**, newest published/updated, recently downloaded, alphabetical, size, and year) sit on one balanced row.
+- **`ANY` vs. `ALL` Match Modes:** Toggle multi-select dropdowns between broad `OR` matching (**ANY**) and strict `AND` matching (**ALL**).
+- **Status & Sync Rule Tracks:** Filter quickly by **`Matches Sync Rules`**, **Downloaded / Not Downloaded**, and a unified **Device Scope + Install Track** (`Device Selector · Installed / Not Installed / Updates`).
+- **Offline Saved-Device Filtering:** The searchable Device Scope dropdown is grouped by **Any Device**, **Mounted Now**, **Pinned**, **Saved Devices**, and **Archived**—letting you inspect what's installed, missing, or outdated on *any* handheld in your fleet even when its SD card is sitting on your desk unplugged.
+- **Grouped Active Filter Chips:** Multi-select filters collapse into compact 1-click summary chips (e.g., `Systems: 12 selected`) with click-to-edit and hover tooltips so active filters never turn into a wall of badges.
+
+---
+
+## 5. Installed ROM Update Detection
+
+Following actively developed ROM hacks and fan translations? `rgt-sync` tracks the exact file ID and filename installed on each device and flags version drift automatically:
+
+- **`Update ready` (Local Newer Mirror):** A newer version of an installed release is already mirrored on your server—click **Update** on the card, drawer, **Updates (`N`)** toolbar strip, or Sidebar Drive Bay **Update All** shortcut to stream the new file and remove the superseded older ROM from your SD card.
+- **`Update on RGT` (Upstream Update):** RetroGameTalk has a genuinely newer archive file not yet mirrored locally (metadata-only WordPress description/tag edits are filtered out to prevent false positives). Click **Download Update** (or **Download Updates (`M`)** in batch) to mirror the new release first, then deploy it to your device.
+
+---
+
+## 6. In-Place Archive Explorer & Clutter Stripping
+
+Archived releases frequently bundle `.txt`/`.nfo` scene notes, web links, screenshots, or standalone `.ips`/`.bps` patches—or store optical disc games across multiple `.bin` + `.cue` track files.
+
+`rgt-sync` inspects `.zip`, `.7z`, `.rar` (including RAR4, RAR5, and solid archives via native `unrar`), and `.tar` archives on the server with **zero temporary disk extraction**:
+
+- **Interactive Archive Browser:** Drill into nested archive directories with breadcrumbs, search inner entries, view category badges (`ROM`, `DISC`, `PATCH`, `DOC`, `ARCHIVE`) and uncompressed sizes, read UTF-8 text previews of `.txt`/`.nfo`/`.md`/`.cue`/`.m3u` files (with copy button and 128 KB guard), and stream-download any single inner file.
+- **Smart Playable Target Detection:** Automatically identifies cartridge ROMs (including disambiguating Sega Genesis `.md` ROMs from Markdown READMEs), single-file compressed discs (`.chd`, `.rvz`, `.iso`, `.pbp`, `.cso`, `.wbfs`), multi-track disc bundles (`.cue`/`.gdi`/`.ccd`/`.m3u` + sibling tracks), and **patch-only** archives.
+- **Dual Download Options Anytime:**
+  - **Download ROM (Prepared):** One-click clean extraction (or on-the-fly clutter-free `.zip` repacking for multi-track discs) formatted with your chosen ROM naming rules.
+  - **Download Raw Archive:** Downloads the untouched original `.zip`/`.7z`/`.rar` exactly as mirrored.

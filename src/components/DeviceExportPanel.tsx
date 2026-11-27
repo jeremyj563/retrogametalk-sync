@@ -781,9 +781,20 @@ export const DeviceExportPanel = forwardRef<ConfigPanelHandle, DeviceExportPanel
                       <span aria-hidden="true">·</span>
                       <span>
                         Unseen types →{' '}
-                        <span className="text-crt-text">
-                          {inferredConventions.unseenCasingLabel}
-                        </span>
+                        {inferredConventions.unseenSubfolderPattern ? (
+                          <>
+                            <span className="text-crt-phosphor">
+                              {inferredConventions.unseenSubfolderPattern}
+                            </span>{' '}
+                            <span className="text-crt-muted">
+                              ({inferredConventions.unseenCasingLabel})
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-crt-text">
+                            {inferredConventions.unseenCasingLabel}
+                          </span>
+                        )}
                       </span>
                     </>
                   )}

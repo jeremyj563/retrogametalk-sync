@@ -334,3 +334,115 @@ test('filterUnmatchedDeviceFolders excludes folders mapped via manual console ov
     ['Roms/OTHER_STUFF'],
   );
 });
+
+test('propagates sorting prefix/wrapper conventions like !hacks and !trans to unseen types (!ports, !homebrew) while guarding BIOS, PSX2PSP, and manual overrides', () => {
+  const bangNodes: ScannedDirNode[] = [
+    { relativePath: '', name: 'SORTED_SD', depth: 0, childDirs: ['Roms'], sampleExtensions: [], fileCount: 0 },
+    { relativePath: 'Roms', name: 'Roms', depth: 1, childDirs: ['SNES', 'NES', 'GBA'], sampleExtensions: [], fileCount: 0 },
+    { relativePath: 'Roms/SNES', name: 'SNES', depth: 2, childDirs: ['!hacks', '!trans'], sampleExtensions: ['sfc'], fileCount: 24 },
+    { relativePath: 'Roms/NES', name: 'NES', depth: 2, childDirs: ['!hacks', '!trans'], sampleExtensions: ['nes'], fileCount: 16 },
+    { relativePath: 'Roms/GBA', name: 'GBA', depth: 2, childDirs: [], sampleExtensions: ['gba'], fileCount: 12 },
+  ];
+  const scan = discoverStorageFolderMappings(bangNodes, {
+    rootLabel: 'SORTED_SD',
+    preferredSlugs: ['snes-roms', 'nes-roms', 'gba-roms'],
+  });
+
+  const savedManual = createDefaultStorageFolderConfig();
+  const effective = composeEffectiveStorageFolderConfig(savedManual, scan);
+
+  // Existing consoles keep !hacks / !trans and inherit !ports, !homebrew, !undubs, !prototypes, !unlicensed
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'hack', effective), 'Roms/SNES/!hacks');
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'translations', effective), 'Roms/SNES/!trans');
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'port', effective), 'Roms/SNES/!ports');
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'homebrew', effective), 'Roms/SNES/!homebrew');
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'undub', effective), 'Roms/SNES/!undubs');
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'demo_proto', effective), 'Roms/SNES/!prototypes');
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'bootleg', effective), 'Roms/SNES/!unlicensed');
+
+  // Existing flat console (GBA) and brand-new console (N64) inherit the same ! convention
+  assert.equal(resolveTargetStorageFolder('gba-roms', 'port', effective), 'Roms/GBA/!ports');
+  assert.equal(resolveTargetStorageFolder('gba-roms', 'homebrew', effective), 'Roms/GBA/!homebrew');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'retail', effective), 'Roms/N64');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'hack', effective), 'Roms/N64/!hacks');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'translations', effective), 'Roms/N64/!trans');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'port', effective), 'Roms/N64/!ports');
+  assert.equal(resolveTargetStorageFolder('n64-roms', 'homebrew', effective), 'Roms/N64/!homebrew');
+
+  // Standalone BIOS and PSX2PSP consoles must never duplicate into BIOS/!bios or PSX2PSP/!psx2psp
+  assert.equal(resolveTargetStorageFolder('bios-files', 'bios', effective), 'BIOS');
+  assert.equal(resolveTargetStorageFolder('psx2psp-eboots', 'psx2psp', effective), 'Roms/PSX2PSP');
+
+  // Tier 1 manual global subfolder override still wins over inferred !ports
+  const withManualPort = createDefaultStorageFolderConfig();
+  withManualPort.globalTypeSubfolders.port = 'CustomPorts';
+  const effectiveWithManual = composeEffectiveStorageFolderConfig(withManualPort, scan);
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'port', effectiveWithManual), 'Roms/SNES/CustomPorts');
+  assert.equal(resolveTargetStorageFolder('snes-roms', 'homebrew', effectiveWithManual), 'Roms/SNES/!homebrew');
+
+  // Convention summary & live export preview reflect the inferred /!<type> pattern
+  const summary = summarizeDeviceInferredConventions(scan);
+  assert.equal(summary.unseenSubfolderPattern, '/!<type>');
+  assert.equal(summary.unseenCasingLabel, 'lowercase');
+
+  const preview = buildLiveExportDestinations(
+    effective,
+    {
+      romNamingTemplate: DEFAULT_ROM_NAMING_TEMPLATE,
+      romSanitizeFat32: true,
+      romMaxFilenameLen: 0,
+    },
+    {
+      savedManualConfig: savedManual,
+      autoConfigResult: scan,
+    },
+  );
+  assert.equal(preview[3]?.id, 'new_console');
+  assert.equal(preview[3]?.folderPath, 'Roms/N64/!homebrew');
+  assert.equal(preview[3]?.source, 'inferred');
+});
+
+test('propagates alternate sorting conventions (_HACKS, [Hacks], ! Hacks) to unseen ROM types', () => {
+  const cases: Array<{
+    observed: string[];
+    expectedPort: string;
+    expectedHomebrew: string;
+    expectedPattern: string;
+  }> = [
+    {
+      observed: ['_HACKS', '_TRANS'],
+      expectedPort: 'Roms/SNES/_PORTS',
+      expectedHomebrew: 'Roms/SNES/_HOMEBREW',
+      expectedPattern: '/_<TYPE>',
+    },
+    {
+      observed: ['[Hacks]', '[Translations]'],
+      expectedPort: 'Roms/SNES/[Ports]',
+      expectedHomebrew: 'Roms/SNES/[Homebrew]',
+      expectedPattern: '/[<Type>]',
+    },
+    {
+      observed: ['! Hacks', '! Trans'],
+      expectedPort: 'Roms/SNES/! Ports',
+      expectedHomebrew: 'Roms/SNES/! Homebrew',
+      expectedPattern: '/! <Type>',
+    },
+  ];
+
+  for (const tc of cases) {
+    const nodes: ScannedDirNode[] = [
+      { relativePath: '', name: 'TEST_SD', depth: 0, childDirs: ['Roms'], sampleExtensions: [], fileCount: 0 },
+      { relativePath: 'Roms', name: 'Roms', depth: 1, childDirs: ['SNES'], sampleExtensions: [], fileCount: 0 },
+      { relativePath: 'Roms/SNES', name: 'SNES', depth: 2, childDirs: tc.observed, sampleExtensions: ['sfc'], fileCount: 15 },
+    ];
+    const scan = discoverStorageFolderMappings(nodes, {
+      rootLabel: 'TEST_SD',
+      preferredSlugs: ['snes-roms'],
+    });
+    const effective = composeEffectiveStorageFolderConfig(createDefaultStorageFolderConfig(), scan);
+    assert.equal(resolveTargetStorageFolder('snes-roms', 'port', effective), tc.expectedPort);
+    assert.equal(resolveTargetStorageFolder('snes-roms', 'homebrew', effective), tc.expectedHomebrew);
+    assert.equal(summarizeDeviceInferredConventions(scan).unseenSubfolderPattern, tc.expectedPattern);
+  }
+});
+

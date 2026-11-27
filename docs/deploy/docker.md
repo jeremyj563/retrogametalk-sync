@@ -27,7 +27,7 @@ docker run -d \
   -e DATA_DIR=/run/repo/.rgt-data \
   -e DOWNLOAD_DIR=/run/repo \
   -v "$(pwd)/mirror-data:/run/repo" \
-  ghcr.io/jeremyj563/retrogametalk-sync:1.7.0
+  ghcr.io/jeremyj563/retrogametalk-sync:1.44.4
 ```
 
 ### Fedora, RHEL, CentOS & Rootless Podman (SELinux `:Z`)
@@ -45,15 +45,15 @@ podman run -d \
   -e DATA_DIR=/run/repo/.rgt-data \
   -e DOWNLOAD_DIR=/run/repo \
   -v "$(pwd)/mirror-data:/run/repo:Z" \
-  ghcr.io/jeremyj563/retrogametalk-sync:1.7.0
+  ghcr.io/jeremyj563/retrogametalk-sync:1.44.4
 ```
 
 > [!TIP]
-> **Podman Rootless Ownership:** If `./mirror-data` is owned by your host user (`1000:1000`) while the container runs as the Alpine `rgt` user, Podman rootless users can use `--userns=keep-id` or inspect the exact container UID/GID first with `docker run --rm --entrypoint id ghcr.io/jeremyj563/retrogametalk-sync:1.7.0` and `chown` the directory accordingly.
+> **Podman Rootless Ownership:** If `./mirror-data` is owned by your host user (`1000:1000`) while the container runs as the Alpine `rgt` user, Podman rootless users can use `--userns=keep-id` or inspect the exact container UID/GID first with `docker run --rm --entrypoint id ghcr.io/jeremyj563/retrogametalk-sync:1.44.4` and `chown` the directory accordingly.
 
 ### GUI Setup (Docker Desktop / Rancher Desktop / Podman Desktop)
 
-1. Pull **`ghcr.io/jeremyj563/retrogametalk-sync:1.7.0`** (or `:latest` for tracking `main`).
+1. Pull **`ghcr.io/jeremyj563/retrogametalk-sync:1.44.4`** (or `:latest` for tracking `main`).
 2. Click **Run** and expand **Optional Settings**:
    - **Container Name:** `rgt-sync`
    - **Ports:** Host port `3000` → Container port `3000`
@@ -77,7 +77,7 @@ docker run -d \
   -e SCRAPER_SCHEDULE_ENABLED="true" \
   -e SCRAPER_SYSTEM_FILTER="snes,gba,psx" \
   -v "/srv/rgt-mirror:/run/repo" \
-  ghcr.io/jeremyj563/retrogametalk-sync:1.7.0
+  ghcr.io/jeremyj563/retrogametalk-sync:1.44.4
 ```
 
 > [!NOTE]
@@ -105,8 +105,8 @@ Open **`http://localhost:3000`** in your browser to access the RetroGameTalk Syn
 ## 5. Upgrading & Rollback
 
 ```bash
-# Pull the target release tag (bare SemVer, e.g. 1.7.0 -> 1.7.1)
-docker pull ghcr.io/jeremyj563/retrogametalk-sync:1.7.0
+# Pull the target release tag (bare SemVer, e.g. 1.44.3 -> 1.44.4)
+docker pull ghcr.io/jeremyj563/retrogametalk-sync:1.44.4
 
 # Gracefully stop (allows active .part downloads up to termination grace window to clean up)
 docker stop -t 30 rgt-sync
@@ -121,6 +121,6 @@ Because `/run/repo/.rgt-data/scraper.db` tracks applied SQLite migrations automa
 
 ## 6. Troubleshooting
 
-- **`DOWNLOAD_DIR not writable` on `/readyz`:** Verify host directory permissions match the container `rgt` UID/GID (`docker run --rm --entrypoint id ghcr.io/jeremyj563/retrogametalk-sync:1.7.0`), or add `:Z` on SELinux hosts.
+- **`DOWNLOAD_DIR not writable` on `/readyz`:** Verify host directory permissions match the container `rgt` UID/GID (`docker run --rm --entrypoint id ghcr.io/jeremyj563/retrogametalk-sync:1.44.4`), or add `:Z` on SELinux hosts.
 - **Direct-to-SD-Card Exporter button unavailable in browser:** Chromium-based browsers require a **Secure Context** (`http://localhost:3000`, `http://127.0.0.1:3000`, or `https://...`) for the File System Access API (`showDirectoryPicker`). When accessing over a LAN IP (e.g., `http://192.168.1.50:3000`), place `rgt-sync` behind HTTPS (Tailscale Serve, Caddy, Traefik, or Nginx) to unlock direct SD card writes, or use single-file / prepared ROM downloads directly.
 - **Need Docker Hub instead of GHCR?** <!-- TODO: Document docker.io/<username>/retrogametalk-sync image path once DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets are activated --> Docker Hub mirroring is opt-in; use `ghcr.io/jeremyj563/retrogametalk-sync` directly in the meantime.

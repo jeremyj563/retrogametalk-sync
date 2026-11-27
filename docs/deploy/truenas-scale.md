@@ -27,7 +27,7 @@ Create two datasets (using **Apps** preset for SQLite state, and **Generic** for
 ```yaml
 services:
   rgt-sync:
-    image: ghcr.io/jeremyj563/retrogametalk-sync:1.7.0
+    image: ghcr.io/jeremyj563/retrogametalk-sync:1.44.4
     container_name: rgt-sync
     restart: unless-stopped
     stop_grace_period: 30s
@@ -61,7 +61,7 @@ services:
 
 ## 3. Upgrading & Dataset Snapshots
 
-- **Upgrading:** Open **Apps → `rgt-sync` → Edit**, bump the image tag (e.g., `1.7.0` → `1.7.1`) in the YAML, and save. Active `.part` downloads resume cleanly.
+- **Upgrading:** Open **Apps → `rgt-sync` → Edit**, bump the image tag (e.g., `1.44.3` → `1.44.4`) in the YAML, and save. Active `.part` downloads and interrupted download queues resume cleanly on startup.
 - **Snapshots:** Schedule ZFS snapshots on `<apps-pool>/apps/rgt-sync/data` for instant point-in-time rollbacks of your SQLite database before major experiments.
 
 ---

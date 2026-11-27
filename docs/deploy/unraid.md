@@ -37,7 +37,7 @@ If adding the container manually without the XML template:
 1. Go to **Docker → Add Container** and click **Basic / Advanced View**.
 2. Configure:
    - **Name:** `retrogametalk-sync`
-   - **Repository:** `ghcr.io/jeremyj563/retrogametalk-sync:1.7.0`
+   - **Repository:** `ghcr.io/jeremyj563/retrogametalk-sync:1.44.4`
    - **Network Type:** `bridge` *(or custom Docker network if using Swag/Nginx Proxy Manager/Traefik)*
    - **WebUI:** `http://[IP]:[PORT:3000]`
    - **Icon URL:** `https://raw.githubusercontent.com/jeremyj563/retrogametalk-sync/main/docs/assets/icon.svg` <!-- TODO: Confirm PNG vs SVG compatibility with your target Unraid OS / CA portal version and replace if needed -->
