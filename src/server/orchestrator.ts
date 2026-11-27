@@ -3191,6 +3191,7 @@ export class ScraperOrchestrator extends EventEmitter {
                   cards.map((entry) => ({
                     remoteUrl: entry.pageUrl,
                     userRating: entry.userRating,
+                    votedRank: entry.votedRank ?? null,
                     rgtDownloads: entry.rgtDownloads,
                     downloadsLabel: entry.rgtDownloadsText,
                   })),

@@ -1279,6 +1279,10 @@ function mapReleaseRow(
       row.user_rating_votes !== null && row.user_rating_votes !== undefined
         ? normalizeVoteCount(row.user_rating_votes)
         : normalizeVoteCount(parsedMeta?.userRatingVotes),
+    votedRank:
+      row.voted_rank !== null && row.voted_rank !== undefined && Number(row.voted_rank) > 0
+        ? Math.round(Number(row.voted_rank))
+        : null,
     rgtDownloads:
       row.rgt_downloads !== null && row.rgt_downloads !== undefined
         ? normalizeVoteCount(row.rgt_downloads)
@@ -3443,6 +3447,7 @@ export interface BatchReleaseRatingInput {
   remoteUrl: string;
   userRating: number | null;
   userRatingVotes?: number | null;
+  votedRank?: number | null;
   rgtDownloads?: number | null;
   downloadsLabel?: string | null;
 }
@@ -3453,8 +3458,8 @@ export interface BatchReleaseRatingResult {
 }
 
 /**
- * Batch-update Users Score (`user_rating`), vote count, and RGT download count
- * for catalog releases matched by their canonical RGT release URL.
+ * Batch-update Users Score (`user_rating`), vote count, RGT Most Voted rank (`voted_rank`),
+ * and RGT download count for catalog releases matched by their canonical RGT release URL.
  */
 export function batchUpdateReleaseRatings(
   entries: BatchReleaseRatingInput[],
@@ -3473,6 +3478,7 @@ export function batchUpdateReleaseRatings(
     `UPDATE catalog_releases SET
        user_rating = COALESCE(?, user_rating),
        user_rating_votes = COALESCE(?, user_rating_votes),
+       voted_rank = COALESCE(?, voted_rank),
        rgt_downloads = COALESCE(?, rgt_downloads),
        rating_synced_at = ?,
        metadata_json = COALESCE(?, metadata_json)
@@ -3496,6 +3502,13 @@ export function batchUpdateReleaseRatings(
 
       const cleanRating = normalizeUserRating(entry.userRating);
       const cleanVotes = normalizeVoteCount(entry.userRatingVotes);
+      const cleanVotedRank =
+        entry.votedRank !== null &&
+        entry.votedRank !== undefined &&
+        Number.isFinite(Number(entry.votedRank)) &&
+        Number(entry.votedRank) > 0
+          ? Math.round(Number(entry.votedRank))
+          : null;
       const cleanDownloads = normalizeVoteCount(entry.rgtDownloads);
 
       let nextMetadataJson: string | null = null;
@@ -3526,6 +3539,7 @@ export function batchUpdateReleaseRatings(
       updateStmt.run(
         cleanRating,
         cleanVotes,
+        cleanVotedRank,
         cleanDownloads,
         syncedAtIso,
         nextMetadataJson,
@@ -3766,8 +3780,9 @@ const CATALOG_SORT_ORDER_BY: Record<CatalogSortOption, string> = {
   year_asc: "CASE WHEN release_year GLOB '[0-9][0-9][0-9][0-9]*' THEN 0 ELSE 1 END ASC, CAST(substr(release_year, 1, 4) AS INTEGER) ASC, title COLLATE NOCASE ASC, id DESC",
   system_asc: 'system_name COLLATE NOCASE ASC, title COLLATE NOCASE ASC, id DESC',
   system_desc: 'system_name COLLATE NOCASE DESC, title COLLATE NOCASE ASC, id DESC',
-  rating_desc: 'CASE WHEN user_rating IS NOT NULL AND user_rating > 0 THEN 0 ELSE 1 END ASC, user_rating DESC, COALESCE(user_rating_votes, rgt_downloads, 0) DESC, title COLLATE NOCASE ASC, id DESC',
-  rating_asc: 'CASE WHEN user_rating IS NOT NULL AND user_rating > 0 THEN 0 ELSE 1 END ASC, user_rating ASC, COALESCE(user_rating_votes, rgt_downloads, 0) DESC, title COLLATE NOCASE ASC, id DESC',
+  rating_desc: 'CASE WHEN user_rating IS NOT NULL AND user_rating > 0 THEN 0 ELSE 1 END ASC, user_rating DESC, CASE WHEN voted_rank IS NOT NULL THEN 0 ELSE 1 END ASC, COALESCE(voted_rank, 999999999) ASC, COALESCE(user_rating_votes, rgt_downloads, 0) DESC, title COLLATE NOCASE ASC, id DESC',
+  rating_asc: 'CASE WHEN user_rating IS NOT NULL AND user_rating > 0 THEN 0 ELSE 1 END ASC, user_rating ASC, CASE WHEN voted_rank IS NOT NULL THEN 0 ELSE 1 END ASC, COALESCE(voted_rank, 999999999) ASC, COALESCE(user_rating_votes, rgt_downloads, 0) DESC, title COLLATE NOCASE ASC, id DESC',
+  votes_desc: 'CASE WHEN voted_rank IS NOT NULL THEN 0 WHEN COALESCE(user_rating_votes, 0) > 0 THEN 1 ELSE 2 END ASC, COALESCE(voted_rank, 999999999) ASC, COALESCE(user_rating_votes, 0) DESC, COALESCE(rgt_downloads, 0) DESC, COALESCE(user_rating, 0) DESC, title COLLATE NOCASE ASC, id DESC',
 };
 
 export interface CatalogQueryFilterParams {

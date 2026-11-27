@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.46.0] - 2026-11-26
+
+- Added **Sort: Most Voted** (`votes_desc`) backed by RetroGameTalk's live `orderby=meta__voted&order=desc` ranking:
+  - **SQLite Schema `v32` & Single-Pass `meta__voted` Sync (`migrations.ts`, `rgtClient.ts`, `db.ts`, `orchestrator.ts`)**: Added indexed `voted_rank` column to `catalog_releases` (preserved across WP REST re-indexes) and switched **Sync Scores** to crawl RGT's `orderby=meta__voted&order=desc` stream, capturing Users Scores, RGT Total Downloads, and exact 1-based Most Voted rankings in a single pass with roughly half the HTTP requests. Also improved `rating_desc` / `rating_asc` tie-breaking to prefer better `voted_rank`.
+  - **Catalog & Game Detail Drawer UI (`catalogSort.ts`, `CatalogPanel.tsx`, `GameDetailDrawer.tsx`)**: Added **Sort: Most Voted** to the Catalog Sort dropdown, highlighted the Table **Score** column as `Most Voted ↓` when active, surfaced inline `#rank` indicators on Table rows and Grid cards (plus rank tooltips), and appended `#<rank> Most Voted` to the **Users Score** row in the Game Detail Drawer.
+
 ## [1.45.0] - 2026-11-26
 
 - Added full **RetroGameTalk Users Score** (out of 5.0 stars, down to the tenth) syncing, filtering, sorting, and display across the Catalog and Game Detail Drawer:

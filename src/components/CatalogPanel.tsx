@@ -5487,14 +5487,16 @@ export function CatalogPanel({
                           setSort((cur) => (cur === 'rating_desc' ? 'rating_asc' : 'rating_desc'))
                         }
                         className={`inline-flex items-center justify-end gap-1 font-medium whitespace-nowrap shrink-0 transition-colors hover:text-crt-text cursor-pointer focus-visible:outline-none focus-visible:text-crt-phosphor ${
-                          sort === 'rating_desc' || sort === 'rating_asc' ? 'text-crt-amber' : ''
+                          sort === 'rating_desc' || sort === 'rating_asc' || sort === 'votes_desc'
+                            ? 'text-crt-amber'
+                            : ''
                         }`}
-                        title="Sort by RetroGameTalk Users Score"
+                        title="Sort by RetroGameTalk Users Score (use Sort menu for Most Voted)"
                       >
-                        <span>Score</span>
+                        <span>{sort === 'votes_desc' ? 'Most Voted' : 'Score'}</span>
                         {sort === 'rating_asc' ? (
                           <ArrowUp className="h-3 w-3 shrink-0" />
-                        ) : sort === 'rating_desc' ? (
+                        ) : sort === 'rating_desc' || sort === 'votes_desc' ? (
                           <ArrowDown className="h-3 w-3 shrink-0" />
                         ) : (
                           <ArrowUpDown className="h-3 w-3 shrink-0 opacity-50" />
@@ -5701,13 +5703,21 @@ export function CatalogPanel({
                         <td className="px-3 py-2 font-mono text-right tabular-nums whitespace-nowrap">
                           {item.userRating !== null && item.userRating !== undefined && item.userRating > 0 ? (
                             <span
-                              title={
+                              title={[
                                 item.userRatingVotes
                                   ? `Users Score: ${formatUserRating(item.userRating)} / 5.0 (${item.userRatingVotes.toLocaleString()} votes)`
-                                  : `Users Score: ${formatUserRating(item.userRating)} / 5.0`
-                              }
+                                  : `Users Score: ${formatUserRating(item.userRating)} / 5.0`,
+                                item.votedRank ? `#${item.votedRank.toLocaleString()} Most Voted in ${item.systemName}` : null,
+                              ]
+                                .filter(Boolean)
+                                .join(' · ')}
                               className="inline-flex items-center justify-end gap-1 text-crt-amber font-medium"
                             >
+                              {sort === 'votes_desc' && item.votedRank && (
+                                <span className="text-[10px] text-crt-muted font-normal mr-0.5">
+                                  #{item.votedRank}
+                                </span>
+                              )}
                               <Star className="h-3 w-3 fill-crt-amber shrink-0" />
                               <span>{formatUserRating(item.userRating)}</span>
                             </span>
@@ -6385,13 +6395,21 @@ export function CatalogPanel({
                             <p className="font-mono text-[11px] text-crt-muted truncate">{subline}</p>
                             {item.userRating !== null && item.userRating !== undefined && item.userRating > 0 && (
                               <span
-                                title={
+                                title={[
                                   item.userRatingVotes
                                     ? `Users Score: ${formatUserRating(item.userRating)} / 5.0 (${item.userRatingVotes.toLocaleString()} votes)`
-                                    : `Users Score: ${formatUserRating(item.userRating)} / 5.0`
-                                }
+                                    : `Users Score: ${formatUserRating(item.userRating)} / 5.0`,
+                                  item.votedRank ? `#${item.votedRank.toLocaleString()} Most Voted in ${item.systemName}` : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ')}
                                 className="inline-flex items-center gap-0.5 font-mono text-[11px] font-medium text-crt-amber tabular-nums shrink-0"
                               >
+                                {sort === 'votes_desc' && item.votedRank && (
+                                  <span className="text-[10px] text-crt-muted font-normal mr-0.5">
+                                    #{item.votedRank}
+                                  </span>
+                                )}
                                 <Star className="h-3 w-3 fill-crt-amber shrink-0" />
                                 <span>{formatUserRating(item.userRating)}</span>
                               </span>

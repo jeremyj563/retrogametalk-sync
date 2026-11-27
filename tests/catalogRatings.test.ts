@@ -211,10 +211,10 @@ test('extractReleaseMetadata parses Users Score and vote count from detail page 
   assert.equal(meta.userRatingVotes, 312);
 });
 
-test('SQLite v31 batchUpdateReleaseRatings, tenth-step filtering, sorting, facet counts, and re-index preservation', () => {
+test('SQLite v32 batchUpdateReleaseRatings, voted_rank Most Voted sorting, tenth-step filtering, facet counts, and re-index preservation', () => {
   assert.equal(dbMod.getDataDir(), tempDataDir);
   const report = dbMod.getSchemaMigrationReport();
-  assert.ok(report.currentVersion >= 31, `expected schema >= 31, got ${report.currentVersion}`);
+  assert.ok(report.currentVersion >= 32, `expected schema >= 32, got ${report.currentVersion}`);
 
   const r1 = dbMod.upsertIndexedWpRelease({
     remoteUrl: 'https://retrogametalk.com/repo/snes-rom/chrono-trigger/',
@@ -248,70 +248,103 @@ test('SQLite v31 batchUpdateReleaseRatings, tenth-step filtering, sorting, facet
     title: 'Aaa Unrated Gem',
     metadata: makeWpMetadata('Aaa Unrated Gem', 'unrated-gem'),
   });
-  assert.ok(r1.id && r2.id && r3.id && r4.id);
+  const r5 = dbMod.upsertIndexedWpRelease({
+    remoteUrl: 'https://retrogametalk.com/repo/snes-rom/super-metroid/',
+    remotePath: 'snes/super-metroid',
+    localPath: path.join(tempDownloadDir, 'snes', 'super-metroid'),
+    systemName: 'snes',
+    title: 'Super Metroid',
+    metadata: makeWpMetadata('Super Metroid', 'super-metroid'),
+  });
+  assert.ok(r1.id && r2.id && r3.id && r4.id && r5.id);
 
   // Batch update including URL without trailing slash to test normalization matching
+  // Super Metroid and Chrono Trigger tie at 4.9★, but Super Metroid has better votedRank (#2 vs #3)
+  // EarthBound has lower score (4.4★) but is #1 Most Voted
   const res = dbMod.batchUpdateReleaseRatings([
-    {
-      remoteUrl: 'https://retrogametalk.com/repo/snes-rom/chrono-trigger',
-      userRating: 4.9,
-      userRatingVotes: 500,
-      rgtDownloads: 15000,
-      downloadsLabel: '15.0k',
-    },
     {
       remoteUrl: 'https://retrogametalk.com/repo/snes-rom/earthbound/',
       userRating: 4.4,
       userRatingVotes: 240,
+      votedRank: 1,
       rgtDownloads: 8200,
       downloadsLabel: '8.2k',
     },
     {
+      remoteUrl: 'https://retrogametalk.com/repo/snes-rom/super-metroid/',
+      userRating: 4.9,
+      votedRank: 2,
+      rgtDownloads: 24100,
+      downloadsLabel: '24.1k',
+    },
+    {
+      remoteUrl: 'https://retrogametalk.com/repo/snes-rom/chrono-trigger',
+      userRating: 4.9,
+      userRatingVotes: 500,
+      votedRank: 3,
+      rgtDownloads: 15000,
+      downloadsLabel: '15.0k',
+    },
+    {
       remoteUrl: 'https://retrogametalk.com/repo/snes-rom/pilotwings/',
       userRating: 3.7,
+      votedRank: 4,
       rgtDownloads: 1200,
       downloadsLabel: '1.2k',
     },
     {
       remoteUrl: 'https://retrogametalk.com/repo/snes-rom/unrated-gem/',
       userRating: null,
+      votedRank: null,
       rgtDownloads: 42,
       downloadsLabel: '42',
     },
   ]);
-  assert.equal(res.matched, 4);
-  assert.equal(res.ratedUpdated, 3);
+  assert.equal(res.matched, 5);
+  assert.equal(res.ratedUpdated, 4);
 
-  // Sort highest -> lowest (unrated MUST stay at bottom)
+  // Sort: Most Voted (votes_desc) follows voted_rank ASC, keeping unvoted at bottom
+  const mostVoted = dbMod.queryRepositoryItems({ system: 'snes', sort: 'votes_desc', limit: 20 });
+  assert.deepEqual(
+    mostVoted.items.map((i) => i.title),
+    ['EarthBound', 'Super Metroid', 'Chrono Trigger', 'Pilotwings', 'Aaa Unrated Gem'],
+  );
+  assert.deepEqual(
+    mostVoted.items.map((i) => i.votedRank ?? null),
+    [1, 2, 3, 4, null],
+  );
+
+  // Sort highest -> lowest (ties break by better votedRank; unrated MUST stay at bottom)
   const desc = dbMod.queryRepositoryItems({ system: 'snes', sort: 'rating_desc', limit: 20 });
   assert.deepEqual(
     desc.items.map((i) => i.title),
-    ['Chrono Trigger', 'EarthBound', 'Pilotwings', 'Aaa Unrated Gem'],
+    ['Super Metroid', 'Chrono Trigger', 'EarthBound', 'Pilotwings', 'Aaa Unrated Gem'],
   );
-  assert.equal(desc.items[0].userRating, 4.9);
-  assert.equal(desc.items[0].userRatingVotes, 500);
-  assert.equal(desc.items[0].rgtDownloads, 15000);
-  assert.equal(desc.items[3].userRating, null);
+  assert.equal(desc.items[1].userRating, 4.9);
+  assert.equal(desc.items[1].userRatingVotes, 500);
+  assert.equal(desc.items[1].votedRank, 3);
+  assert.equal(desc.items[1].rgtDownloads, 15000);
+  assert.equal(desc.items[4].userRating, null);
 
   // Sort lowest -> highest (unrated MUST STILL stay at bottom)
   const asc = dbMod.queryRepositoryItems({ system: 'snes', sort: 'rating_asc', limit: 20 });
   assert.deepEqual(
     asc.items.map((i) => i.title),
-    ['Pilotwings', 'EarthBound', 'Chrono Trigger', 'Aaa Unrated Gem'],
+    ['Pilotwings', 'EarthBound', 'Super Metroid', 'Chrono Trigger', 'Aaa Unrated Gem'],
   );
 
   // Tenth-of-a-star filter: minRating = 4.4
   const gte44 = dbMod.queryRepositoryItems({ system: 'snes', minRating: 4.4, sort: 'rating_desc' });
   assert.deepEqual(
     gte44.items.map((i) => i.title),
-    ['Chrono Trigger', 'EarthBound'],
+    ['Super Metroid', 'Chrono Trigger', 'EarthBound'],
   );
 
   // Tenth-of-a-star filter: minRating = 4.5 excludes 4.4
   const gte45 = dbMod.queryRepositoryItems({ system: 'snes', minRating: 4.5, sort: 'rating_desc' });
   assert.deepEqual(
     gte45.items.map((i) => i.title),
-    ['Chrono Trigger'],
+    ['Super Metroid', 'Chrono Trigger'],
   );
 
   // Unrated mode
@@ -323,21 +356,21 @@ test('SQLite v31 batchUpdateReleaseRatings, tenth-step filtering, sorting, facet
 
   // Rated mode
   const ratedOnly = dbMod.queryRepositoryItems({ system: 'snes', ratingMode: 'rated' });
-  assert.equal(ratedOnly.total, 3);
+  assert.equal(ratedOnly.total, 4);
 
   // Facet counts
   const ratingCounts = desc.facets.counts?.ratings;
   assert.ok(ratingCounts);
-  assert.equal(ratingCounts.total, 4);
-  assert.equal(ratingCounts.rated, 3);
+  assert.equal(ratingCounts.total, 5);
+  assert.equal(ratingCounts.rated, 4);
   assert.equal(ratingCounts.unrated, 1);
-  assert.equal(ratingCounts.atLeast48, 1);
-  assert.equal(ratingCounts.atLeast45, 1);
-  assert.equal(ratingCounts.atLeast40, 2);
-  assert.equal(ratingCounts.atLeast35, 3);
-  assert.equal(ratingCounts.atLeast30, 3);
+  assert.equal(ratingCounts.atLeast48, 2);
+  assert.equal(ratingCounts.atLeast45, 2);
+  assert.equal(ratingCounts.atLeast40, 3);
+  assert.equal(ratingCounts.atLeast35, 4);
+  assert.equal(ratingCounts.atLeast30, 4);
 
-  // WP REST re-index MUST preserve stored user_rating & metadata.userRating
+  // WP REST re-index MUST preserve stored user_rating, voted_rank, & metadata.userRating
   const reindexed = dbMod.upsertIndexedWpRelease({
     remoteUrl: 'https://retrogametalk.com/repo/snes-rom/chrono-trigger/',
     remotePath: 'snes/chrono-trigger',
@@ -347,5 +380,6 @@ test('SQLite v31 batchUpdateReleaseRatings, tenth-step filtering, sorting, facet
     metadata: makeWpMetadata('Chrono Trigger', 'chrono-trigger'),
   });
   assert.equal(reindexed.userRating, 4.9);
+  assert.equal(reindexed.votedRank, 3);
   assert.equal(reindexed.metadata?.userRating, 4.9);
 });

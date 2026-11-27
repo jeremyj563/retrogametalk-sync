@@ -1485,6 +1485,21 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `);
     },
   },
+  {
+    version: 32,
+    name: 'release_voted_rank',
+    description:
+      'Add voted_rank column and index to catalog_releases for RGT Most Voted (meta__voted) sorting',
+    up: (db) => {
+      if (!tableHasColumn(db, 'catalog_releases', 'voted_rank')) {
+        db.exec(`ALTER TABLE catalog_releases ADD COLUMN voted_rank INTEGER;`);
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_catalog_releases_voted_rank
+          ON catalog_releases(voted_rank ASC, id DESC);
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

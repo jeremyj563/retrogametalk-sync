@@ -419,6 +419,7 @@ export interface RepositoryItemRecord {
   metadata: ReleaseMetadata | null;
   userRating?: number | null;
   userRatingVotes?: number | null;
+  votedRank?: number | null;
   rgtDownloads?: number | null;
   ratingSyncedAt?: string | null;
   installedAt: string | null;

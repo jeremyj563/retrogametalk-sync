@@ -387,6 +387,7 @@ export interface WpPostMetadata {
 export interface RgtCardRatingEntry {
   pageUrl: string;
   userRating: number | null;
+  votedRank?: number | null;
   rgtDownloads: number | null;
   rgtDownloadsText: string | null;
 }
@@ -5073,10 +5074,13 @@ export class RetroGameTalkClient {
     }
 
     const repoBase = ensureTrailingSlash(config.baseUrl);
+    // Crawl using RGT's `orderby=meta__voted&order=desc`: RGT returns only voted/rated releases
+    // ordered from most-voted to least-voted, yielding both exact Users Score (`.score`) and
+    // Most Voted rank (`votedRank`) in a single pass with ~half as many pages as `meta__rating`.
     const buildArchivePageUrl = (pageNum: number): string => {
       const qs = new URLSearchParams();
       qs.append('types[]', restBase);
-      qs.set('orderby', 'meta__rating');
+      qs.set('orderby', 'meta__voted');
       qs.set('order', 'desc');
       const relPath = pageNum <= 1 ? `?${qs.toString()}` : `page/${pageNum}/?${qs.toString()}`;
       return new URL(relPath, repoBase).toString();
@@ -5084,6 +5088,7 @@ export class RetroGameTalkClient {
 
     const collected: RgtCardRatingEntry[] = [];
     const seenUrls = new Set<string>();
+    let nextVotedRank = 1;
     let page = 1;
     let totalPages = 1;
     let pagesFetched = 0;
@@ -5175,11 +5180,16 @@ export class RetroGameTalkClient {
         const key = normalizeComparableReleaseUrl(card.pageUrl);
         if (seenUrls.has(key)) continue;
         seenUrls.add(key);
-        if (card.userRating !== null && card.userRating > 0) {
+        const isRated = card.userRating !== null && card.userRating > 0;
+        const rankedCard: RgtCardRatingEntry = {
+          ...card,
+          votedRank: isRated ? nextVotedRank++ : null,
+        };
+        if (isRated) {
           ratedOnPage += 1;
         }
-        freshCards.push(card);
-        collected.push(card);
+        freshCards.push(rankedCard);
+        collected.push(rankedCard);
       }
 
       if (onPageFetched && !signal?.aborted) {
@@ -5190,7 +5200,7 @@ export class RetroGameTalkClient {
         });
       }
 
-      // Sorted descending by meta__rating: once an entire page has no rated entries, all remaining pages are unrated.
+      // Sorted descending by meta__voted: once an entire page has no rated/voted entries, all remaining pages are unvoted.
       if (ratedOnPage === 0) {
         stoppedEarlyUnrated = true;
         break;
@@ -5212,7 +5222,7 @@ export class RetroGameTalkClient {
       try {
         const qs = new URLSearchParams({
           types: restBase,
-          orderby: 'meta__rating',
+          orderby: 'meta__voted',
           order: 'desc',
         });
         const endpoint = new URL(`wp-json/repo-db/v1/database?${qs.toString()}`, repoBase).toString();
@@ -5230,11 +5240,16 @@ export class RetroGameTalkClient {
           };
           const parsed = parseRgtDatabaseCardsHtml(String(payload?.html || ''), repoBase);
           if (parsed.cards.length > 0) {
+            let fallbackRank = 1;
+            const rankedFallbackCards = parsed.cards.map((card) => ({
+              ...card,
+              votedRank: card.userRating !== null && card.userRating > 0 ? fallbackRank++ : null,
+            }));
             pagesFetched = 1;
             totalPages = Math.max(1, Number(payload?.max_num_pages) || 1);
-            collected.push(...parsed.cards);
+            collected.push(...rankedFallbackCards);
             if (onPageFetched && !signal?.aborted) {
-              await onPageFetched({ page: 1, totalPages: 1, cards: parsed.cards });
+              await onPageFetched({ page: 1, totalPages: 1, cards: rankedFallbackCards });
             }
             return {
               supported: true,

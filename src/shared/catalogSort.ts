@@ -3,6 +3,7 @@ export type CatalogSortOption =
   | 'submitted_asc'
   | 'rating_desc'
   | 'rating_asc'
+  | 'votes_desc'
   | 'title_asc'
   | 'title_desc'
   | 'size_desc'
@@ -27,6 +28,7 @@ export const CATALOG_SORT_OPTIONS: readonly CatalogSortChoice[] = [
   { value: 'submitted_asc', label: 'Sort: Oldest Submissions' },
   { value: 'rating_desc', label: 'Sort: Users Score (Highest)' },
   { value: 'rating_asc', label: 'Sort: Users Score (Lowest)' },
+  { value: 'votes_desc', label: 'Sort: Most Voted' },
   { value: 'title_asc', label: 'Sort: Title (A → Z)' },
   { value: 'title_desc', label: 'Sort: Title (Z → A)' },
   { value: 'size_desc', label: 'Sort: File Size (Largest)' },

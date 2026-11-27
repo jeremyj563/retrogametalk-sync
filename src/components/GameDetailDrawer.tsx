@@ -1026,11 +1026,16 @@ export function GameDetailDrawer({
     const effectiveVotes = item.userRatingVotes ?? meta?.userRatingVotes ?? null;
     if (effectiveRating !== null && effectiveRating > 0) {
       const scoreFormatted = formatUserRating(effectiveRating);
+      const scoreParts = [`★ ${scoreFormatted} / 5.0`];
+      if (effectiveVotes) {
+        scoreParts.push(`(${effectiveVotes.toLocaleString()} votes)`);
+      }
+      if (item.votedRank && item.votedRank > 0) {
+        scoreParts.push(`· #${item.votedRank.toLocaleString()} Most Voted`);
+      }
       rows.push({
         label: 'Users Score',
-        value: effectiveVotes
-          ? `★ ${scoreFormatted} / 5.0 (${effectiveVotes.toLocaleString()} votes)`
-          : `★ ${scoreFormatted} / 5.0`,
+        value: scoreParts.join(' '),
         mono: true,
       });
     }
