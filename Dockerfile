@@ -38,12 +38,16 @@ ENV DATA_DIR=/run/repo/.rgt-data
 ENV DOWNLOAD_DIR=/run/repo
 
 COPY --from=unrar /usr/bin/unrar-alpine /usr/bin/unrar
-RUN apk add --no-cache curl 7zip libstdc++ libgcc libarchive-tools \
-  && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing mame-tools \
+RUN apk add --no-cache curl 7zip libstdc++ libgcc libarchive-tools sdl2 libogg \
+  && apk add --no-cache \
+       --repository=https://dl-cdn.alpinelinux.org/alpine/edge/main \
+       --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community \
+       --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
+       mame-tools \
   && chmod +x /usr/bin/unrar \
   && /usr/bin/unrar >/dev/null \
   && test -x /usr/bin/chdman \
-  && (chdman 2>&1 | grep -qi "chdman") \
+  && (chdman help 2>&1 | grep -qi "chdman") \
   && addgroup -S rgt && adduser -S rgt -G rgt \
   && mkdir -p $DOWNLOAD_DIR $DATA_DIR /app/data \
   && chown -R rgt:rgt $DOWNLOAD_DIR /app/data

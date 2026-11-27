@@ -4,6 +4,11 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.48.1] - 2026-11-27
+
+- Fixed multi-arch Docker image build failure when installing `mame-tools` (`chdman`) on `node:22-alpine`:
+  - Included Alpine `edge/main` and `edge/community` repositories alongside `edge/testing` strictly for the `mame-tools` installation step (after installing stable base packages including `sdl2` and `libogg`) so `mame-tools`'s `so:libFLAC.so.14` (`libflac` 1.5.x) dependency resolves cleanly on both `linux/amd64` and `linux/arm64`.
+
 ## [1.48.0] - 2026-11-27
 
 - Implemented **Optional `.chd` Disc Compression & Automatic Multi-Disc `.m3u` Playlists**:
