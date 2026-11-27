@@ -28,6 +28,10 @@ import {
   type CrtUiMotionLevel,
 } from '../shared/crtDisplay';
 import {
+  evaluateDiskSpaceGuardrail,
+  formatReserveGbLabel,
+} from '../shared/diskGuardrails';
+import {
   formatAllowedReleaseTypesSummary,
   normalizeAllowedReleaseTypes,
 } from '../shared/releaseTypeFilter';
@@ -39,6 +43,7 @@ import type { SmartRomFilterContext } from '../shared/smartRomPicker';
 import type {
   ActiveTransferState,
   ActivityLogRecord,
+  EvictLocalFilesResult,
   LogLevel,
   OperationsSectionTarget,
   RepositoryItemRecord,
@@ -95,6 +100,7 @@ interface OverviewPanelProps {
   onPauseQueueAutoResume?: () => Promise<void>;
   onClearDownloadQueue?: () => Promise<{ clearedCount?: number } | void>;
   onViewQueuedInCatalog?: () => void;
+  onReclaimSpaceInCatalog?: () => void;
   onRetryItem: (itemId: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onRetryAllFailed: (options?: { system?: string; ids?: number[]; dryRun?: boolean }) => Promise<void>;
   onStartCatalogIndex?: (scope: 'filtered' | 'full', options?: { forceFull?: boolean }) => Promise<void>;
@@ -539,6 +545,7 @@ export function OverviewPanel({
   onPauseQueueAutoResume,
   onClearDownloadQueue,
   onViewQueuedInCatalog,
+  onReclaimSpaceInCatalog,
   onRetryItem,
   onRetryAllFailed,
   onStartCatalogIndex,
@@ -663,7 +670,10 @@ export function OverviewPanel({
     async (id: number) => {
       const res = await fetch('/api/items', {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'RetroGameTalkSync',
+        },
         body: JSON.stringify({ ids: [id] }),
       });
       if (res.ok) {
@@ -672,6 +682,39 @@ export function OverviewPanel({
       }
     },
     [closeSyncItemDetail, onRefreshStatus],
+  );
+
+  const handleEvictDetailLocalFiles = useCallback(
+    async (
+      id: number,
+      options?: { ignoreInSync?: boolean },
+    ): Promise<EvictLocalFilesResult> => {
+      const res = await fetch('/api/items/evict-files', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'RetroGameTalkSync',
+        },
+        body: JSON.stringify({
+          ids: [id],
+          ignoreInSync: Boolean(options?.ignoreInSync),
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as EvictLocalFilesResult & {
+        error?: string;
+      };
+      if (!res.ok) {
+        throw new Error(data.error || `Failed to remove local files (HTTP ${res.status})`);
+      }
+      if (Array.isArray(data.items) && data.items[0]) {
+        setActiveDetailItem((current) =>
+          current?.id === id ? data.items[0] : current,
+        );
+      }
+      await onRefreshStatus();
+      return data;
+    },
+    [onRefreshStatus],
   );
 
   const latestDryRunWithSummary = useMemo(
@@ -2243,168 +2286,217 @@ export function OverviewPanel({
         })()}
 
         {/* Zone 3.5: Catalog Index Readiness & Direct Rule Queue Strip */}
-        {preflight && (
-          <div className="mt-3.5 pt-3 border-t border-crt-border flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0 space-y-0.5">
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
-                <span className="text-crt-muted">Sync Rule Readiness</span>
-                <span className="font-mono text-crt-text truncate max-w-md" title={preflight.ruleScopeLabel}>
-                  · {preflight.ruleScopeLabel}
-                </span>
-              </div>
-              <p className="text-xs font-mono text-crt-muted tabular-nums">
-                <span className={preflight.pendingDownloadCount > 0 ? 'text-crt-phosphor font-medium' : 'text-crt-text'}>
-                  {preflight.pendingDownloadCount.toLocaleString()} pending
-                </span>
-                {preflight.estimatedPendingBytes > 0 && (
-                  <span> (~{formatBytes(preflight.estimatedPendingBytes)})</span>
-                )}
-                {' · '}
-                <span>{preflight.alreadyDownloadedCount.toLocaleString()} on disk</span>
-                {preflight.excludedByRulesCount > 0 && (
-                  <span> · {preflight.excludedByRulesCount.toLocaleString()} excluded</span>
-                )}
-                {' · '}
-                <span
-                  className="cursor-help"
-                  title={`Fresh = catalog metadata checked against RetroGameTalk within 12h (${preflight.freshConsoles.length}/${preflight.targetSystemsCount}). Stale = last checked >12h ago (${preflight.staleConsoles.length}).${
-                    preflight.oldestIndexedAt
-                      ? ` Oldest target check: ${formatDateTime(preflight.oldestIndexedAt)}.`
-                      : ''
-                  }`}
-                >
-                  <span>
-                    Index {preflight.freshConsoles.length}/{preflight.targetSystemsCount} fresh
-                  </span>
-                  {preflight.unindexedConsoles.length > 0 && (
-                    <span className="text-crt-amber"> · {preflight.unindexedConsoles.length} unindexed</span>
-                  )}
-                  {preflight.staleConsoles.length > 0 && (
-                    <span className="text-crt-amber"> · {preflight.staleConsoles.length} stale (&gt;12h)</span>
-                  )}
-                </span>
-              </p>
-              <EphemeralNotice
-                message={monitorQueueNotice}
-                tone="phosphor"
-                variant="compact"
-                autoDismissMs={5000}
-                onDismiss={() => setMonitorQueueNotice(null)}
-                surfaceClassName="text-[11px]"
-              />
-            </div>
+        {preflight && (() => {
+          const preflightDiskGuardrail = evaluateDiskSpaceGuardrail({
+            diskFreeBytes: status.storage.diskFreeBytes,
+            estimatedBytes: preflight.estimatedPendingBytes,
+            minFreeDiskGb: config.minFreeDiskGb,
+          });
+          const showLowDiskPreflightWarning =
+            preflight.pendingDownloadCount > 0 && preflightDiskGuardrail.exceedsUsable;
 
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {status.auth.hasCompletedLogin && status.indexer?.active && onStopCatalogIndex ? (
-                <button
-                  type="button"
-                  disabled={indexerBusy}
-                  onClick={async () => {
-                    setIndexerBusy(true);
-                    try {
-                      await onStopCatalogIndex();
-                    } finally {
-                      setIndexerBusy(false);
-                    }
-                  }}
-                  title="Pause background catalog indexing (already indexed games stay saved)"
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-                >
-                  <Pause className="h-3.5 w-3.5 shrink-0" />
-                  <span>
-                    Indexing {status.indexer.systemsCompleted + (status.indexer.currentSystem ? 1 : 0)}/
-                    {Math.max(1, status.indexer.systemsTotal)} · Pause
-                  </span>
-                </button>
-              ) : (
-                status.auth.hasCompletedLogin &&
-                onStartCatalogIndex &&
-                (preflight.staleConsoles.length > 0 || preflight.unindexedConsoles.length > 0) && (
-                  <button
-                    type="button"
-                    disabled={indexerBusy}
-                    onClick={async () => {
-                      setIndexerBusy(true);
-                      try {
-                        await onStartCatalogIndex('filtered');
-                      } finally {
-                        setIndexerBusy(false);
-                      }
-                    }}
-                    title="Check RetroGameTalk for new or modified games across your stale/unindexed target consoles (metadata delta check; does not download ROMs)"
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono border border-crt-amber/65 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/18 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-                  >
-                    <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${indexerBusy ? 'animate-spin' : ''}`} />
-                    <span>
-                      {preflight.unindexedConsoles.length > 0 && preflight.staleConsoles.length > 0
-                        ? `Update Index (${preflight.unindexedConsoles.length} new · ${preflight.staleConsoles.length} stale)`
-                        : preflight.unindexedConsoles.length > 0
-                          ? `Index Consoles (${preflight.unindexedConsoles.length} new)`
-                          : `Update Index (${preflight.staleConsoles.length} stale)`}
+          return (
+            <div className="mt-3.5 pt-3 border-t border-crt-border space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0 space-y-0.5">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
+                    <span className="text-crt-muted">Sync Rule Readiness</span>
+                    <span className="font-mono text-crt-text truncate max-w-md" title={preflight.ruleScopeLabel}>
+                      · {preflight.ruleScopeLabel}
                     </span>
-                  </button>
-                )
-              )}
-              {onPreviewRuleMatchesInCatalog && (
-                <button
-                  type="button"
-                  onClick={() => onPreviewRuleMatchesInCatalog(true)}
-                  className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  View in Catalog
-                </button>
-              )}
-              {onQueueRuleMatches && preflight.pendingDownloadCount > 0 && (
-                confirmQueueRuleMatches ? (
-                  <div className="inline-flex items-center gap-1.5 shrink-0">
-                    <span className="text-[11px] font-mono text-crt-amber tabular-nums">
-                      Queue {preflight.pendingDownloadCount.toLocaleString()}?
-                    </span>
-                    <button
-                      type="button"
-                      disabled={queueingRuleMatches}
-                      onClick={() => void handleQueueRuleMatchesAction()}
-                      className="px-2.5 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
-                    >
-                      {queueingRuleMatches ? 'Queueing...' : 'Confirm'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setConfirmQueueRuleMatches(false)}
-                      className="px-2 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      Cancel
-                    </button>
                   </div>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={
-                      queueingRuleMatches ||
-                      Boolean(status.activeRun && status.activeRun.triggerType !== 'download')
-                    }
-                    onClick={() => {
-                      if (preflight.pendingDownloadCount > 25) {
-                        setConfirmQueueRuleMatches(true);
-                      } else {
-                        void handleQueueRuleMatchesAction();
-                      }
-                    }}
-                    title="Queue all cataloged releases matching active Sync Rules that are not yet downloaded"
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
-                  >
-                    <Download className="h-3.5 w-3.5 shrink-0" />
-                    <span>
-                      {queueingRuleMatches
-                        ? 'Queueing...'
-                        : `Queue Pending (${preflight.pendingDownloadCount.toLocaleString()})`}
+                  <p className="text-xs font-mono text-crt-muted tabular-nums">
+                    <span className={preflight.pendingDownloadCount > 0 ? 'text-crt-phosphor font-medium' : 'text-crt-text'}>
+                      {preflight.pendingDownloadCount.toLocaleString()} pending
                     </span>
-                  </button>
-                )
+                    {preflight.estimatedPendingBytes > 0 && (
+                      <span> (~{formatBytes(preflight.estimatedPendingBytes)})</span>
+                    )}
+                    {' · '}
+                    <span>{preflight.alreadyDownloadedCount.toLocaleString()} on disk</span>
+                    {preflight.excludedByRulesCount > 0 && (
+                      <span> · {preflight.excludedByRulesCount.toLocaleString()} excluded</span>
+                    )}
+                    {' · '}
+                    <span
+                      className="cursor-help"
+                      title={`Fresh = catalog metadata checked against RetroGameTalk within 12h (${preflight.freshConsoles.length}/${preflight.targetSystemsCount}). Stale = last checked >12h ago (${preflight.staleConsoles.length}).${
+                        preflight.oldestIndexedAt
+                          ? ` Oldest target check: ${formatDateTime(preflight.oldestIndexedAt)}.`
+                          : ''
+                      }`}
+                    >
+                      <span>
+                        Index {preflight.freshConsoles.length}/{preflight.targetSystemsCount} fresh
+                      </span>
+                      {preflight.unindexedConsoles.length > 0 && (
+                        <span className="text-crt-amber"> · {preflight.unindexedConsoles.length} unindexed</span>
+                      )}
+                      {preflight.staleConsoles.length > 0 && (
+                        <span className="text-crt-amber"> · {preflight.staleConsoles.length} stale (&gt;12h)</span>
+                      )}
+                    </span>
+                  </p>
+                  <EphemeralNotice
+                    message={monitorQueueNotice}
+                    tone="phosphor"
+                    variant="compact"
+                    autoDismissMs={5000}
+                    onDismiss={() => setMonitorQueueNotice(null)}
+                    surfaceClassName="text-[11px]"
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {status.auth.hasCompletedLogin && status.indexer?.active && onStopCatalogIndex ? (
+                    <button
+                      type="button"
+                      disabled={indexerBusy}
+                      onClick={async () => {
+                        setIndexerBusy(true);
+                        try {
+                          await onStopCatalogIndex();
+                        } finally {
+                          setIndexerBusy(false);
+                        }
+                      }}
+                      title="Pause background catalog indexing (already indexed games stay saved)"
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono border border-crt-amber/60 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      <Pause className="h-3.5 w-3.5 shrink-0" />
+                      <span>
+                        Indexing {status.indexer.systemsCompleted + (status.indexer.currentSystem ? 1 : 0)}/
+                        {Math.max(1, status.indexer.systemsTotal)} · Pause
+                      </span>
+                    </button>
+                  ) : (
+                    status.auth.hasCompletedLogin &&
+                    onStartCatalogIndex &&
+                    (preflight.staleConsoles.length > 0 || preflight.unindexedConsoles.length > 0) && (
+                      <button
+                        type="button"
+                        disabled={indexerBusy}
+                        onClick={async () => {
+                          setIndexerBusy(true);
+                          try {
+                            await onStartCatalogIndex('filtered');
+                          } finally {
+                            setIndexerBusy(false);
+                          }
+                        }}
+                        title="Check RetroGameTalk for new or modified games across your stale/unindexed target consoles (metadata delta check; does not download ROMs)"
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono border border-crt-amber/65 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/18 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${indexerBusy ? 'animate-spin' : ''}`} />
+                        <span>
+                          {preflight.unindexedConsoles.length > 0 && preflight.staleConsoles.length > 0
+                            ? `Update Index (${preflight.unindexedConsoles.length} new · ${preflight.staleConsoles.length} stale)`
+                            : preflight.unindexedConsoles.length > 0
+                              ? `Index Consoles (${preflight.unindexedConsoles.length} new)`
+                              : `Update Index (${preflight.staleConsoles.length} stale)`}
+                        </span>
+                      </button>
+                    )
+                  )}
+                  {onPreviewRuleMatchesInCatalog && (
+                    <button
+                      type="button"
+                      onClick={() => onPreviewRuleMatchesInCatalog(true)}
+                      className="px-2.5 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg hover:border-crt-border-strong text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      View in Catalog
+                    </button>
+                  )}
+                  {onQueueRuleMatches && preflight.pendingDownloadCount > 0 && (
+                    confirmQueueRuleMatches ? (
+                      <div className="inline-flex items-center gap-1.5 shrink-0">
+                        <span className="text-[11px] font-mono text-crt-amber tabular-nums">
+                          {showLowDiskPreflightWarning
+                            ? `Low disk · Queue ${preflight.pendingDownloadCount.toLocaleString()} anyway?`
+                            : `Queue ${preflight.pendingDownloadCount.toLocaleString()}?`}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={queueingRuleMatches}
+                          onClick={() => void handleQueueRuleMatchesAction()}
+                          className={`px-2.5 py-1.5 text-xs font-semibold rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer ${
+                            showLowDiskPreflightWarning
+                              ? 'bg-crt-amber text-crt-bg hover:brightness-110'
+                              : 'bg-crt-phosphor text-crt-bg hover:brightness-110'
+                          }`}
+                        >
+                          {queueingRuleMatches ? 'Queueing...' : 'Confirm'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmQueueRuleMatches(false)}
+                          className="px-2 py-1.5 text-xs font-mono border border-crt-border bg-crt-bg text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={
+                          queueingRuleMatches ||
+                          Boolean(status.activeRun && status.activeRun.triggerType !== 'download')
+                        }
+                        onClick={() => {
+                          if (preflight.pendingDownloadCount > 25 || showLowDiskPreflightWarning) {
+                            setConfirmQueueRuleMatches(true);
+                          } else {
+                            void handleQueueRuleMatchesAction();
+                          }
+                        }}
+                        title="Queue all cataloged releases matching active Sync Rules that are not yet downloaded"
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer ${
+                          showLowDiskPreflightWarning
+                            ? 'border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20'
+                            : 'border-crt-phosphor/60 bg-crt-phosphor/10 text-crt-phosphor hover:bg-crt-phosphor/20'
+                        }`}
+                      >
+                        {showLowDiskPreflightWarning ? (
+                          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                        ) : (
+                          <Download className="h-3.5 w-3.5 shrink-0" />
+                        )}
+                        <span>
+                          {queueingRuleMatches
+                            ? 'Queueing...'
+                            : `Queue Pending (${preflight.pendingDownloadCount.toLocaleString()})`}
+                        </span>
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
+
+              {showLowDiskPreflightWarning && (
+                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border border-crt-amber/45 bg-crt-amber/10 rounded text-xs font-mono text-crt-amber tabular-nums">
+                  <div className="flex items-start gap-2 min-w-0">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    <span>
+                      {preflightDiskGuardrail.belowReserveNow
+                        ? `Host volume has ${formatBytes(status.storage.diskFreeBytes)} free, below the ${formatReserveGbLabel(preflightDiskGuardrail.reserveGb)} safety reserve. Runtime guardrail will pause transfers automatically.`
+                        : `Pending matches (~${formatBytes(preflight.estimatedPendingBytes)}) exceed usable free space (${formatBytes(preflightDiskGuardrail.usableBytes)} after ${formatReserveGbLabel(preflightDiskGuardrail.reserveGb)} reserve) by ~${formatBytes(preflightDiskGuardrail.shortfallBytes)}.`}
+                    </span>
+                  </div>
+                  {status.storage.totalBytesOnDisk > 0 && onReclaimSpaceInCatalog && (
+                    <button
+                      type="button"
+                      onClick={onReclaimSpaceInCatalog}
+                      className="inline-flex items-center gap-1 text-[11px] font-mono text-crt-amber hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <span>Free Space</span>
+                      <ArrowUpRight className="h-3 w-3 shrink-0" />
+                    </button>
+                  )}
+                </div>
               )}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Latest Structured Dry Run Result Callout */}
         {latestDryRunWithSummary?.summary && (
@@ -2601,17 +2693,47 @@ export function OverviewPanel({
           </p>
         </div>
 
-        <div className="p-4 space-y-1">
-          <p className="text-xs text-crt-muted">Local Archive Footprint</p>
-          <p className="crt-kpi-value font-mono text-2xl font-semibold text-crt-text tabular-nums">
-            {formatBytes(status.storage.totalBytesOnDisk)}
-          </p>
-          <p className="text-xs font-mono text-crt-muted tabular-nums">
-            {status.storage.diskFreeBytes !== null
-              ? `${formatBytes(status.storage.diskFreeBytes)} free on volume`
-              : status.storage.writable ? 'Volume writable' : 'Volume read-only'}
-          </p>
-        </div>
+        {(() => {
+          const footprintGuardrail = evaluateDiskSpaceGuardrail({
+            diskFreeBytes: status.storage.diskFreeBytes,
+            estimatedBytes: 0,
+            minFreeDiskGb: config.minFreeDiskGb,
+          });
+          return (
+            <div className="p-4 space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs text-crt-muted">Local Archive Footprint</p>
+                {status.storage.totalBytesOnDisk > 0 && onReclaimSpaceInCatalog && (
+                  <button
+                    type="button"
+                    onClick={onReclaimSpaceInCatalog}
+                    title="Open Downloaded items sorted by largest file size to reclaim disk space without deleting catalog entries"
+                    className="inline-flex items-center gap-0.5 text-[11px] font-mono text-crt-amber hover:underline cursor-pointer whitespace-nowrap"
+                  >
+                    <span>Free Space</span>
+                    <ArrowUpRight className="h-3 w-3 shrink-0" />
+                  </button>
+                )}
+              </div>
+              <p className="crt-kpi-value font-mono text-2xl font-semibold text-crt-text tabular-nums">
+                {formatBytes(status.storage.totalBytesOnDisk)}
+              </p>
+              <p
+                className={`text-xs font-mono tabular-nums ${
+                  footprintGuardrail.belowReserveNow ? 'text-crt-amber' : 'text-crt-muted'
+                }`}
+              >
+                {status.storage.diskFreeBytes !== null
+                  ? `${formatBytes(status.storage.diskFreeBytes)} free${
+                      footprintGuardrail.belowReserveNow
+                        ? ` (< ${formatReserveGbLabel(footprintGuardrail.reserveGb)} reserve)`
+                        : ' on volume'
+                    }`
+                  : status.storage.writable ? 'Volume writable' : 'Volume read-only'}
+              </p>
+            </div>
+          );
+        })()}
 
         <div className="p-4 space-y-1">
           <p className="text-xs text-crt-muted">Adaptive Request Delay</p>
@@ -2924,6 +3046,7 @@ export function OverviewPanel({
         onCancelDeviceInstall={installer.cancelInstall}
         onDismissDeviceInstall={installer.dismissJob}
         onViewDeviceInstallQueue={installer.openModal}
+        onEvictLocalFiles={handleEvictDetailLocalFiles}
         onDeleteItem={handleDeleteDetailItem}
       />
     </div>

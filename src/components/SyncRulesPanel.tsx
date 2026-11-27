@@ -56,6 +56,10 @@ import {
   formatLiveReloadRunLabel,
   isSyncRunEligibleForLiveRuleReload,
 } from '../shared/syncRuleMatcher';
+import {
+  evaluateDiskSpaceGuardrail,
+  formatReserveGbLabel,
+} from '../shared/diskGuardrails';
 import type {
   ConfigDirtyState,
   ConfigFocusRequest,
@@ -65,7 +69,7 @@ import type {
   ServiceStatusSnapshot,
   SyncPreflightSummary,
 } from '../types';
-import { formatDateTime } from '../utils/format';
+import { formatBytes, formatDateTime } from '../utils/format';
 import { ConfigSaveBar } from './ConfigSaveBar';
 import { EnvLockIndicator } from './EnvLockIndicator';
 
@@ -1203,6 +1207,25 @@ export const SyncRulesPanel = forwardRef<ConfigPanelHandle, SyncRulesPanelProps>
               )}
             </div>
           </div>
+
+          {preflight && preflight.pendingDownloadCount > 0 && (() => {
+            const ruleDiskGuardrail = evaluateDiskSpaceGuardrail({
+              diskFreeBytes: status.storage.diskFreeBytes,
+              estimatedBytes: preflight.estimatedPendingBytes,
+              minFreeDiskGb: config.minFreeDiskGb,
+            });
+            if (!ruleDiskGuardrail.exceedsUsable) return null;
+            return (
+              <div className="flex items-start gap-2.5 px-3.5 py-2.5 border border-crt-amber/45 bg-crt-amber/10 rounded-md text-xs font-mono text-crt-amber tabular-nums">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>
+                  {ruleDiskGuardrail.belowReserveNow
+                    ? `Host disk free space (${formatBytes(status.storage.diskFreeBytes)}) is below the ${formatReserveGbLabel(ruleDiskGuardrail.reserveGb)} reserve. Free local files or raise volume space before syncing.`
+                    : `Estimated pending matches (~${formatBytes(preflight.estimatedPendingBytes)}) exceed usable free disk space (${formatBytes(ruleDiskGuardrail.usableBytes)} after ${formatReserveGbLabel(ruleDiskGuardrail.reserveGb)} reserve) by ~${formatBytes(ruleDiskGuardrail.shortfallBytes)}.`}
+                </span>
+              </div>
+            );
+          })()}
 
           {/* Background Catalog Indexer Strip */}
           {(onStartCatalogIndex || onStopCatalogIndex) && status.auth.hasCompletedLogin && status.indexer && (() => {

@@ -74,6 +74,7 @@ export interface ScraperConfigPublic {
   maxConcurrency: number;
   downloadChunkConcurrency: number;
   downloadChunkMinSizeMb: number;
+  minFreeDiskGb: number;
   requestTimeoutMs: number;
   userAgent: string;
   systemFilter: string;
@@ -110,6 +111,7 @@ export interface ConfigUpdateInput {
   maxConcurrency?: number;
   downloadChunkConcurrency?: number;
   downloadChunkMinSizeMb?: number;
+  minFreeDiskGb?: number;
   requestTimeoutMs?: number;
   userAgent?: string;
   systemFilter?: string;
@@ -516,6 +518,15 @@ export interface StorageStats {
   sqliteBytes: number;
   diskFreeBytes: number | null;
   diskTotalBytes: number | null;
+}
+
+export interface EvictLocalFilesResult {
+  evictedItemsCount: number;
+  deletedFilesCount: number;
+  freedBytes: number;
+  skippedActiveIds: number[];
+  ignoredInSyncCount: number;
+  items: RepositoryItemRecord[];
 }
 
 export interface TransferSpeedSample {

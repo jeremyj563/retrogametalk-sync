@@ -27,6 +27,7 @@ function makeConfig(overrides: Partial<ScraperConfigInternal> = {}): ScraperConf
     loginUrl: 'https://retrogametalk.com/login/',
     dataDir: tempDataDir,
     downloadDir: tempDownloadDir,
+    minFreeDiskGb: 2,
     username: 'tester',
     password: 'secret',
     hasPassword: true,

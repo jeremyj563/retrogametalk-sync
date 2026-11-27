@@ -47,6 +47,12 @@ import type {
   ScraperConfigPublic,
   ServiceStatusSnapshot,
 } from '../types';
+import {
+  DEFAULT_MIN_FREE_DISK_GB,
+  evaluateDiskSpaceGuardrail,
+  formatReserveGbLabel,
+  normalizeMinFreeDiskGb,
+} from '../shared/diskGuardrails';
 import { formatBytes } from '../utils/format';
 import { readJsonSafely } from '../utils/http';
 import { ConfigSaveBar } from './ConfigSaveBar';
@@ -83,6 +89,9 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
     const [clearSavedPassword, setClearSavedPassword] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
     const [downloadDir, setDownloadDir] = useState(config.downloadDir);
+    const [minFreeDiskGb, setMinFreeDiskGb] = useState(
+      normalizeMinFreeDiskGb(config.minFreeDiskGb, DEFAULT_MIN_FREE_DISK_GB),
+    );
 
     // 2. Request Pacing & Rate Protection state
     const [baseDelayMs, setBaseDelayMs] = useState(config.baseDelayMs);
@@ -141,6 +150,7 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
     const passwordLockedByEnv = config.envOverrides.includes('RGT_PASSWORD');
     const dataDirLockedByEnv = config.envOverrides.includes('DATA_DIR');
     const downloadDirLockedByEnv = config.envOverrides.includes('DOWNLOAD_DIR');
+    const minFreeDiskLockedByEnv = config.envOverrides.includes('SCRAPER_MIN_FREE_DISK_GB');
 
     const baseDelayLockedByEnv = config.envOverrides.includes('SCRAPER_BASE_DELAY_MS');
     const minDelayLockedByEnv = config.envOverrides.includes('SCRAPER_MIN_DELAY_MS');
@@ -185,6 +195,7 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
       setPasswordInput('');
       setClearSavedPassword(false);
       setDownloadDir(target.downloadDir);
+      setMinFreeDiskGb(normalizeMinFreeDiskGb(target.minFreeDiskGb, DEFAULT_MIN_FREE_DISK_GB));
 
       setBaseDelayMs(target.baseDelayMs);
       setMinDelayMs(target.minDelayMs);
@@ -269,6 +280,9 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
             ? { password: passwordInput }
             : {}),
         ...(!downloadDirLockedByEnv ? { downloadDir } : {}),
+        ...(!minFreeDiskLockedByEnv
+          ? { minFreeDiskGb: normalizeMinFreeDiskGb(minFreeDiskGb, DEFAULT_MIN_FREE_DISK_GB) }
+          : {}),
       }),
       [
         baseUrlLockedByEnv,
@@ -282,6 +296,8 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
         passwordInput,
         downloadDirLockedByEnv,
         downloadDir,
+        minFreeDiskLockedByEnv,
+        minFreeDiskGb,
       ],
     );
 
@@ -351,7 +367,12 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
         (!usernameLockedByEnv && username !== config.username) ||
         (!passwordLockedByEnv &&
           (passwordInput.length > 0 || (clearSavedPassword && config.hasPassword))) ||
-        (!downloadDirLockedByEnv && downloadDir !== config.downloadDir);
+        (!downloadDirLockedByEnv && downloadDir !== config.downloadDir) ||
+        (!minFreeDiskLockedByEnv &&
+          Math.abs(
+            normalizeMinFreeDiskGb(minFreeDiskGb, DEFAULT_MIN_FREE_DISK_GB) -
+              normalizeMinFreeDiskGb(config.minFreeDiskGb, DEFAULT_MIN_FREE_DISK_GB),
+          ) >= 0.05);
       if (accountChanged) changedSections.push('Account & Paths');
 
       const pacingChanged =
@@ -389,6 +410,8 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
       clearSavedPassword,
       downloadDirLockedByEnv,
       downloadDir,
+      minFreeDiskLockedByEnv,
+      minFreeDiskGb,
       baseDelayLockedByEnv,
       baseDelayMs,
       minDelayLockedByEnv,
@@ -857,6 +880,67 @@ export const SystemSettingsPanel = forwardRef<ConfigPanelHandle, SystemSettingsP
                 Status: {status.storage.writable ? 'Writable' : 'Read-Only'} ·{' '}
                 {formatBytes(status.storage.totalBytesOnDisk)} mirrored across{' '}
                 {status.storage.totalFilesOnDisk} files
+              </p>
+            </div>
+
+            <div className="space-y-1.5 md:col-span-2">
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="system-min-free-disk-gb"
+                  className="text-xs font-medium text-crt-text"
+                >
+                  Minimum Free Disk Space Reserve (GB)
+                </label>
+                {minFreeDiskLockedByEnv && <EnvLockIndicator envVar="SCRAPER_MIN_FREE_DISK_GB" />}
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <input
+                  id="system-min-free-disk-gb"
+                  type="number"
+                  min={0}
+                  max={10000}
+                  step={0.5}
+                  value={minFreeDiskGb}
+                  disabled={minFreeDiskLockedByEnv}
+                  onChange={(e) => {
+                    const parsed = Number(e.target.value);
+                    setMinFreeDiskGb(
+                      Number.isFinite(parsed) && parsed >= 0 ? Math.min(10000, parsed) : 0,
+                    );
+                  }}
+                  className="w-36 px-3 py-2 text-sm font-mono bg-crt-bg border border-crt-border rounded text-crt-text focus:outline-none focus:border-crt-phosphor disabled:opacity-70 tabular-nums"
+                />
+                {(() => {
+                  const evalRes = evaluateDiskSpaceGuardrail({
+                    diskFreeBytes: status.storage.diskFreeBytes,
+                    estimatedBytes: 0,
+                    minFreeDiskGb,
+                  });
+                  if (!evalRes.checked || evalRes.diskFreeBytes === null) {
+                    return (
+                      <span className="text-[11px] font-mono text-crt-muted">
+                        Warns before queueing oversized batches and pauses active downloads if free space drops below{' '}
+                        {formatReserveGbLabel(minFreeDiskGb)} (set 0 to disable).
+                      </span>
+                    );
+                  }
+                  return (
+                    <span
+                      className={`text-[11px] font-mono tabular-nums ${
+                        evalRes.belowReserveNow ? 'text-crt-amber' : 'text-crt-muted'
+                      }`}
+                    >
+                      {evalRes.belowReserveNow
+                        ? `Below reserve now: ${formatBytes(evalRes.diskFreeBytes)} free on volume (${formatReserveGbLabel(evalRes.reserveGb)} safety floor).`
+                        : `${formatBytes(evalRes.diskFreeBytes)} free on volume · ${formatBytes(evalRes.usableBytes ?? 0)} usable after ${formatReserveGbLabel(evalRes.reserveGb)} safety reserve${
+                            evalRes.reserveBytes === 0 ? ' (guardrail disabled)' : ''
+                          }.`}
+                    </span>
+                  );
+                })()}
+              </div>
+              <p className="text-[11px] font-mono text-crt-muted">
+                Default 2 GB (overridable via SCRAPER_MIN_FREE_DISK_GB). Warns in Catalog &amp; Monitor pre-flight checks and pauses active transfers gracefully before filling the mirror volume.
               </p>
             </div>
           </div>

@@ -70,6 +70,7 @@ import type {
   AppAuthStatus,
   CatalogDownloadedFilter,
   CatalogInstalledFilter,
+  CatalogSortOption,
   ConfigDirtyState,
   ConfigFocusRequest,
   ConfigPanelHandle,
@@ -486,6 +487,7 @@ export default function App() {
     installedFilter?: CatalogInstalledFilter;
     statuses?: string[];
     deviceId?: string | 'any' | null;
+    sort?: CatalogSortOption;
     nonce: number;
   } | null>(null);
   const [devicesDrawerOpen, setDevicesDrawerOpen] = useState(false);
@@ -1701,6 +1703,18 @@ export default function App() {
     requestSectionChange('catalog');
   }, [requestSectionChange]);
 
+  const handleOpenReclaimSpaceInCatalog = useCallback(() => {
+    setCatalogPresetIntent((prev) => ({
+      syncRulesOnly: false,
+      downloadedFilter: 'only',
+      installedFilter: 'all',
+      statuses: [],
+      sort: 'size_desc',
+      nonce: (prev?.nonce ?? 0) + 1,
+    }));
+    requestSectionChange('catalog');
+  }, [requestSectionChange]);
+
   const handleUpdateOutdatedOnDevice = useCallback(async () => {
     if (bulkInstaller.isBusy && !bulkInstaller.canAppendToQueue) {
       bulkInstaller.openModal();
@@ -2276,6 +2290,7 @@ export default function App() {
                 config={config}
                 runs={runs}
                 sseConnected={sseConnected}
+                onReclaimSpaceInCatalog={handleOpenReclaimSpaceInCatalog}
               />
             )}
 
@@ -2374,6 +2389,7 @@ export default function App() {
                   onPauseQueueAutoResume={handlePauseQueueAutoResume}
                   onClearDownloadQueue={handleClearDownloadQueue}
                   onViewQueuedInCatalog={handleViewQueuedInCatalog}
+                  onReclaimSpaceInCatalog={handleOpenReclaimSpaceInCatalog}
                   onRetryItem={handleRetryItem}
                   onRetryAllFailed={handleRetryAllFailed}
                   onStartCatalogIndex={handleStartCatalogIndex}

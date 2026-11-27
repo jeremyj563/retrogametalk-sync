@@ -28,6 +28,7 @@ function makeSampleConfig(overrides: Partial<ScraperConfigPublic> = {}): Scraper
     hasPassword: true,
     dataDir: '/tmp/rgt-data',
     downloadDir: '/tmp/rgt-roms',
+    minFreeDiskGb: 2,
     cronSchedule: '0 */6 * * *',
     scheduleEnabled: true,
     baseDelayMs: 1500,

@@ -9,6 +9,7 @@ import {
 import * as d3 from 'd3';
 import {
   Activity,
+  ArrowUpRight,
   BarChart3,
   Database,
   HardDrive,
@@ -26,13 +27,19 @@ import type {
   ServiceStatusSnapshot,
   SystemCoverageStat,
 } from '../types';
+import {
+  evaluateDiskSpaceGuardrail,
+  formatReserveGbLabel,
+} from '../shared/diskGuardrails';
 import { resolveSystemDisplayInfo } from '../shared/systemCatalog';
 import { formatBytes, formatDateTime, formatDurationMs } from '../utils/format';
 
 interface CatalogStatsPanelProps {
   status: ServiceStatusSnapshot;
   catalogRevision: number;
+  minFreeDiskGb?: number;
   onInspectSystem: (systemSlug: string) => void;
+  onReclaimSpace?: () => void;
   onStartCatalogIndex?: (
     scope: 'filtered' | 'full',
     options?: { forceFull?: boolean },
@@ -227,7 +234,9 @@ function buildDailyTrendSeries(raw: DownloadTrendDailyPoint[], limitDays = 30): 
 export function CatalogStatsPanel({
   status,
   catalogRevision,
+  minFreeDiskGb = 2,
   onInspectSystem,
+  onReclaimSpace,
   onStartCatalogIndex,
 }: CatalogStatsPanelProps) {
   const [stats, setStats] = useState<CatalogStatsSnapshot | null>(null);
@@ -958,6 +967,8 @@ export function CatalogStatsPanel({
             estimatedRemainingBytes={summary.estimatedAvailableBytes}
             diskFreeBytes={status.storage.diskFreeBytes}
             diskTotalBytes={status.storage.diskTotalBytes}
+            minFreeDiskGb={minFreeDiskGb}
+            onReclaimSpace={onReclaimSpace}
           />
         </section>
       </div>
@@ -2151,11 +2162,15 @@ function StorageCapacityForecast({
   estimatedRemainingBytes,
   diskFreeBytes,
   diskTotalBytes,
+  minFreeDiskGb = 2,
+  onReclaimSpace,
 }: {
   mirroredBytes: number;
   estimatedRemainingBytes: number;
   diskFreeBytes: number | null;
   diskTotalBytes: number | null;
+  minFreeDiskGb?: number;
+  onReclaimSpace?: () => void;
 }) {
   const denom = Math.max(
     1,
@@ -2165,8 +2180,14 @@ function StorageCapacityForecast({
   );
   const mirroredPct = Math.min(100, (mirroredBytes / denom) * 100);
   const remainingPct = Math.min(100 - mirroredPct, (estimatedRemainingBytes / denom) * 100);
-  const fits = diskFreeBytes !== null ? diskFreeBytes >= estimatedRemainingBytes : null;
-  const deltaBytes = diskFreeBytes !== null ? diskFreeBytes - estimatedRemainingBytes : null;
+  const guardrail = evaluateDiskSpaceGuardrail({
+    diskFreeBytes,
+    estimatedBytes: estimatedRemainingBytes,
+    minFreeDiskGb,
+  });
+  const usableFreeBytes = guardrail.usableBytes;
+  const fits = usableFreeBytes !== null ? usableFreeBytes >= estimatedRemainingBytes : null;
+  const deltaBytes = usableFreeBytes !== null ? usableFreeBytes - estimatedRemainingBytes : null;
 
   return (
     <div className="pt-2 border-t border-crt-border/80 space-y-2 text-[11px] font-mono tabular-nums">
@@ -2189,7 +2210,7 @@ function StorageCapacityForecast({
         </div>
 
         {diskFreeBytes !== null && (
-          <span className={fits ? 'text-crt-phosphor' : 'text-crt-crimson'}>
+          <span className={fits ? 'text-crt-phosphor' : 'text-crt-amber'}>
             {fits
               ? `Headroom +${formatBytes(deltaBytes)}`
               : `Shortfall ${formatBytes(Math.abs(deltaBytes || 0))}`}
@@ -2215,13 +2236,29 @@ function StorageCapacityForecast({
         />
       </div>
 
-      <div className="flex items-center justify-between text-crt-muted">
-        <span>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-crt-muted">
+        <span className={guardrail.belowReserveNow ? 'text-crt-amber' : ''}>
           Host Free: {diskFreeBytes !== null ? formatBytes(diskFreeBytes) : '—'}
+          {guardrail.reserveBytes > 0
+            ? ` (Reserve ${formatReserveGbLabel(guardrail.reserveGb)})`
+            : ''}
         </span>
-        <span>
-          Projected Full Mirror: ~{formatBytes(mirroredBytes + estimatedRemainingBytes)}
-        </span>
+        <div className="flex items-center gap-3">
+          <span>
+            Projected Full Mirror: ~{formatBytes(mirroredBytes + estimatedRemainingBytes)}
+          </span>
+          {mirroredBytes > 0 && onReclaimSpace && (
+            <button
+              type="button"
+              onClick={onReclaimSpace}
+              title="Open Downloaded items sorted by largest file size to reclaim local disk space without deleting catalog metadata"
+              className="inline-flex items-center gap-1 text-crt-amber hover:underline cursor-pointer whitespace-nowrap"
+            >
+              <span>Free Space</span>
+              <ArrowUpRight className="h-3 w-3 shrink-0" />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

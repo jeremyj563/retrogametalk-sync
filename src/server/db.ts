@@ -78,6 +78,10 @@ import {
   type InstalledUpdateDownloadHintLike,
   type InstalledUpdateFileLike,
 } from '../shared/deviceInstallUpdates.ts';
+import {
+  DEFAULT_MIN_FREE_DISK_GB,
+  normalizeMinFreeDiskGb,
+} from '../shared/diskGuardrails.ts';
 import type {
   ActivityLogRecord,
   CatalogFacetCounts,
@@ -93,6 +97,7 @@ import type {
   DownloadTrendRunPoint,
   DryRunConsoleBreakdown,
   DryRunSampleRelease,
+  EvictLocalFilesResult,
   FileItemStatus,
   FilterMatchMode,
   ItemStatus,
@@ -592,6 +597,7 @@ export function getInternalConfig(): ScraperConfigInternal {
   let downloadChunkMinSizeMb = Number.isFinite(rawRowChunkMinMb)
     ? Math.max(4, Math.min(128, Math.round(rawRowChunkMinMb)))
     : 32;
+  let minFreeDiskGb = normalizeMinFreeDiskGb(row.min_free_disk_gb, DEFAULT_MIN_FREE_DISK_GB);
   let requestTimeoutMs = Number(row.request_timeout_ms);
   let userAgent = String(row.user_agent);
 
@@ -645,6 +651,13 @@ export function getInternalConfig(): ScraperConfigInternal {
       downloadChunkMinSizeMb = Math.max(4, Math.min(128, Math.round(parsedMinMb)));
     }
     envOverrides.push('SCRAPER_DOWNLOAD_CHUNK_MIN_SIZE_MB');
+  }
+  if (
+    process.env.SCRAPER_MIN_FREE_DISK_GB !== undefined &&
+    process.env.SCRAPER_MIN_FREE_DISK_GB.trim() !== ''
+  ) {
+    minFreeDiskGb = normalizeMinFreeDiskGb(process.env.SCRAPER_MIN_FREE_DISK_GB, minFreeDiskGb);
+    envOverrides.push('SCRAPER_MIN_FREE_DISK_GB');
   }
   if (process.env.SCRAPER_REQUEST_TIMEOUT_MS) {
     requestTimeoutMs = Number(process.env.SCRAPER_REQUEST_TIMEOUT_MS);
@@ -714,6 +727,7 @@ export function getInternalConfig(): ScraperConfigInternal {
     maxConcurrency,
     downloadChunkConcurrency,
     downloadChunkMinSizeMb,
+    minFreeDiskGb,
     requestTimeoutMs,
     userAgent,
     systemFilter,
@@ -981,6 +995,7 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       max_concurrency = ?,
       download_chunk_concurrency = ?,
       download_chunk_min_size_mb = ?,
+      min_free_disk_gb = ?,
       request_timeout_ms = ?,
       user_agent = ?,
       system_filter = ?,
@@ -1017,6 +1032,10 @@ export function updateConfig(input: ConfigUpdateInput): ScraperConfigPublic {
       const n = Number(input.downloadChunkMinSizeMb ?? current.download_chunk_min_size_mb ?? 32);
       return Number.isFinite(n) ? Math.max(4, Math.min(128, Math.round(n))) : 32;
     })(),
+    normalizeMinFreeDiskGb(
+      input.minFreeDiskGb !== undefined ? input.minFreeDiskGb : current.min_free_disk_gb,
+      DEFAULT_MIN_FREE_DISK_GB,
+    ),
     Math.max(5000, Math.min(180000, Number(input.requestTimeoutMs ?? current.request_timeout_ms))),
     (input.userAgent ?? String(current.user_agent)).trim(),
     sanitizeSystemFilterString((input.systemFilter ?? String(current.system_filter)).trim()),
@@ -6106,6 +6125,210 @@ export function deleteRepositoryItemsByIds(ids: number[]): RepositoryItemRecord[
     invalidateSystemIndexCursors(items.map((item) => item.systemName));
   }
   return items;
+}
+
+const PRESERVED_RELEASE_ASSET_BASENAMES = new Set([
+  'metadata.json',
+  'cover.jpg',
+  'cover.jpeg',
+  'cover.png',
+  'cover.webp',
+  'cover.avif',
+  'cover.gif',
+  'cover.bmp',
+]);
+
+function isStrictlyInsideDir(candidatePath: string, rootDir: string): boolean {
+  const resolvedRoot = path.resolve(rootDir);
+  const resolvedCandidate = path.resolve(candidatePath);
+  const rootPrefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
+  return resolvedCandidate !== resolvedRoot && resolvedCandidate.startsWith(rootPrefix);
+}
+
+function pruneEmptyAncestorsInsideRoot(startDir: string, rootDir: string): void {
+  const resolvedRoot = path.resolve(rootDir);
+  let cursor = path.resolve(startDir);
+  while (isStrictlyInsideDir(cursor, resolvedRoot)) {
+    try {
+      if (!fs.existsSync(cursor)) {
+        cursor = path.dirname(cursor);
+        continue;
+      }
+      const entries = fs.readdirSync(cursor);
+      if (entries.length > 0) break;
+      fs.rmdirSync(cursor);
+      cursor = path.dirname(cursor);
+    } catch {
+      break;
+    }
+  }
+}
+
+/**
+ * Non-destructively evicts mirrored local archive files (and partial download sidecars)
+ * for the given release IDs while keeping catalog metadata, artwork, ratings, favorites,
+ * collections, and device install history intact, resetting releases cleanly to `available`.
+ */
+export function evictLocalFilesForReleaseIds(
+  ids: number[],
+  options?: { ignoreInSync?: boolean; downloadDir?: string },
+): EvictLocalFilesResult {
+  const validIds = Array.from(new Set(ids.filter((id) => Number.isInteger(id) && id > 0)));
+  if (validIds.length === 0) {
+    return {
+      evictedItemsCount: 0,
+      deletedFilesCount: 0,
+      freedBytes: 0,
+      skippedActiveIds: [],
+      ignoredInSyncCount: 0,
+      items: [],
+    };
+  }
+
+  const root = path.resolve(options?.downloadDir || getInternalConfig().downloadDir);
+  let realRoot = root;
+  try {
+    realRoot = fs.realpathSync(root);
+  } catch {
+    realRoot = root;
+  }
+  const ignoreInSync = options?.ignoreInSync === true;
+  const placeholders = validIds.map(() => '?').join(',');
+  const rows = getDb()
+    .prepare(`SELECT * FROM catalog_releases WHERE id IN (${placeholders})`)
+    .all(...validIds) as Record<string, unknown>[];
+  const filesMap = loadFilesByReleaseIds(validIds);
+  const loadedItems = rows.map((r) => mapReleaseRow(r, filesMap.get(Number(r.id)) || []));
+
+  const skippedActiveIds: number[] = [];
+  const evictableItems: RepositoryItemRecord[] = [];
+  for (const item of loadedItems) {
+    if (item.status === 'downloading') {
+      skippedActiveIds.push(item.id);
+      continue;
+    }
+    evictableItems.push(item);
+  }
+
+  let deletedFilesCount = 0;
+  let freedBytes = 0;
+  const dirsToPrune = new Set<string>();
+  const unlinkedPaths = new Set<string>();
+
+  const unlinkSingleFileIfSafe = (rawPath: string, countAsArchiveFile: boolean): boolean => {
+    const resolved = path.resolve(rawPath);
+    if (unlinkedPaths.has(resolved)) return false;
+    if (!isStrictlyInsideDir(resolved, root)) return false;
+    if (PRESERVED_RELEASE_ASSET_BASENAMES.has(path.basename(resolved).toLowerCase())) {
+      return false;
+    }
+    try {
+      if (!fs.existsSync(resolved)) return false;
+      const parentReal = fs.realpathSync(path.dirname(resolved));
+      if (parentReal !== realRoot && !isStrictlyInsideDir(parentReal, realRoot)) {
+        return false;
+      }
+      const st = fs.lstatSync(resolved);
+      if (st.isDirectory()) return false;
+      const bytes = st.isFile() ? Math.max(0, Number(st.size || 0)) : 0;
+      fs.rmSync(resolved, { force: true });
+      unlinkedPaths.add(resolved);
+      freedBytes += bytes;
+      if (countAsArchiveFile) {
+        deletedFilesCount += 1;
+      }
+      dirsToPrune.add(path.dirname(resolved));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  for (const item of evictableItems) {
+    const fileCandidates = new Set<string>();
+    for (const file of item.files) {
+      if (file.localPath && file.localPath.trim()) {
+        fileCandidates.add(path.resolve(file.localPath));
+      }
+    }
+    if (item.localPath && item.localPath.trim()) {
+      const resolvedItemPath = path.resolve(item.localPath);
+      if (isStrictlyInsideDir(resolvedItemPath, root)) {
+        try {
+          if (fs.existsSync(resolvedItemPath)) {
+            const st = fs.lstatSync(resolvedItemPath);
+            if (st.isDirectory()) {
+              dirsToPrune.add(resolvedItemPath);
+            } else if (!PRESERVED_RELEASE_ASSET_BASENAMES.has(path.basename(resolvedItemPath).toLowerCase())) {
+              fileCandidates.add(resolvedItemPath);
+            }
+          }
+        } catch {
+          // ignore stat errors
+        }
+      }
+    }
+
+    for (const target of fileCandidates) {
+      const removedMain = unlinkSingleFileIfSafe(target, true);
+      const removedPart = unlinkSingleFileIfSafe(`${target}.part`, !removedMain);
+      unlinkSingleFileIfSafe(`${target}.part.meta.json`, false);
+      unlinkSingleFileIfSafe(`${target}.part.meta.json.tmp`, false);
+      if (removedMain || removedPart) {
+        dirsToPrune.add(path.dirname(target));
+      }
+    }
+  }
+
+  for (const dir of dirsToPrune) {
+    pruneEmptyAncestorsInsideRoot(dir, root);
+  }
+
+  let ignoredInSyncCount = 0;
+  const updatedItems: RepositoryItemRecord[] = [];
+  const resetFilesStmt = getDb().prepare(
+    `UPDATE catalog_release_files
+     SET status = 'available', downloaded_at = NULL, error_message = NULL
+     WHERE release_id = ?`,
+  );
+  const resetReleaseStmt = getDb().prepare(
+    `UPDATE catalog_releases
+     SET status = 'available',
+         downloaded_at = NULL,
+         error_message = NULL,
+         size_is_estimated = CASE WHEN file_size_bytes > 0 THEN 1 ELSE 0 END
+     WHERE id = ?`,
+  );
+  const setIgnoreStmt = getDb().prepare(
+    `UPDATE catalog_releases SET sync_override = 'ignore' WHERE id = ?`,
+  );
+
+  const tx = getDb().transaction(() => {
+    for (const item of evictableItems) {
+      resetFilesStmt.run(item.id);
+      resetReleaseStmt.run(item.id);
+      if (ignoreInSync) {
+        if ((item.syncOverride || 'default') !== 'ignore') {
+          setIgnoreStmt.run(item.id);
+        }
+        ignoredInSyncCount += 1;
+      }
+      const recomputed = recomputeReleaseRollup(item.id);
+      if (recomputed) {
+        updatedItems.push(recomputed);
+      }
+    }
+  });
+  tx();
+
+  return {
+    evictedItemsCount: updatedItems.length,
+    deletedFilesCount,
+    freedBytes,
+    skippedActiveIds,
+    ignoredInSyncCount,
+    items: updatedItems,
+  };
 }
 
 export function deleteRepositoryItemsByLocalPaths(absPaths: string[]): number {

@@ -35,6 +35,7 @@ function makeConfig(): ScraperConfigInternal {
     loginUrl: 'https://retrogametalk.com/login/',
     dataDir: tempDataDir,
     downloadDir: tempDownloadDir,
+    minFreeDiskGb: 2,
     username: 'tester',
     password: 'secret',
     hasPassword: true,

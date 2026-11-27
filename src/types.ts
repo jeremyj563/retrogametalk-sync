@@ -109,6 +109,7 @@ export interface ScraperConfigPublic {
   maxConcurrency: number;
   downloadChunkConcurrency: number;
   downloadChunkMinSizeMb: number;
+  minFreeDiskGb: number;
   requestTimeoutMs: number;
   userAgent: string;
   systemFilter: string;
@@ -136,6 +137,15 @@ export type ConfigPatchPayload = Partial<ScraperConfigPublic> & {
   password?: string;
   clearPassword?: boolean;
 };
+
+export interface EvictLocalFilesResult {
+  evictedItemsCount: number;
+  deletedFilesCount: number;
+  freedBytes: number;
+  skippedActiveIds: number[];
+  ignoredInSyncCount: number;
+  items: RepositoryItemRecord[];
+}
 
 export interface AppAuthStatus {
   enabled: boolean;

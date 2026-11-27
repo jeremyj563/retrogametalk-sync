@@ -4,6 +4,13 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.47.0] - 2026-11-26
+
+- Implemented **Non-Destructive Local Disk Cleanup & Storage Guardrails**:
+  - **Non-Destructive Local File Eviction (`POST /api/items/evict-files`, `db.ts`, `orchestrator.ts`)**: Added safe single-item and bulk local archive eviction that deletes mirrored ROM archives (plus `.part` / `.part.meta.json` sidecars) strictly within `DOWNLOAD_DIR`, prunes empty directories, and resets releases back to `available` while preserving Catalog metadata, cover art, favorites, collections, ratings, and device install history. Skips actively downloading items automatically and supports an optional **Also ignore in future Auto-Syncs** (`sync_override = 'ignore'`) checkbox.
+  - **Game Details, Catalog Bulk Bar & Quick-Jump Helpers (`GameDetailDrawer.tsx`, `CatalogPanel.tsx`, `OverviewPanel.tsx`, `ServiceTelemetrySidebar.tsx`, `CatalogStatsPanel.tsx`, `App.tsx`)**: Added amber **Remove Local Files (Free <size>)** cleanly above crimson **Delete from Catalog & Disk** in Game Details, added bulk **Free Space (N · <size>)** with inline confirmation to the Catalog selection bar, and wired **Free Space →** quick-jumps from Monitor's Local Archive Footprint card, the Telemetry Sidebar, and Catalog Stats directly into Catalog filtered to `Downloaded` and sorted by `File Size (Largest)`.
+  - **Configurable Disk Reserve & Pre-Queue / Runtime Guardrails (SQLite `v33`, `diskGuardrails.ts`, `rgtClient.ts`, `SystemSettingsPanel.tsx`, `SyncRulesPanel.tsx`, `configBackup.ts`)**: Added **Minimum Free Disk Space Reserve (GB)** (default `2 GB`, `0` = disabled, overridable via `SCRAPER_MIN_FREE_DISK_GB` and included in JSON config backups & live hot-reload). Surfaces inline amber headroom warnings in Catalog **Download Filtered**, Monitor **Sync Rule Readiness**, and **Sync Rules** whenever queued estimates exceed usable free disk space, and enforces runtime `statfsSync` checks before starting each download and before sparse file allocation—pausing transfers cleanly without crash-looping `queueAutoResume`.
+
 ## [1.46.0] - 2026-11-26
 
 - Added **Sort: Most Voted** (`votes_desc`) backed by RetroGameTalk's live `orderby=meta__voted&order=desc` ranking:

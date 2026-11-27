@@ -1437,6 +1437,21 @@ async function bootstrap() {
     res.json(result);
   });
 
+  app.post('/api/items/evict-files', (req, res) => {
+    const rawList = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const ids: number[] = Array.from(
+      new Set<number>(
+        rawList.map(Number).filter((id: number) => Number.isInteger(id) && id > 0),
+      ),
+    ).slice(0, 5000);
+    if (ids.length === 0) {
+      res.status(400).json({ error: 'Provide one or more valid item IDs to free local disk space' });
+      return;
+    }
+    const ignoreInSync = req.body?.ignoreInSync === true;
+    res.json(orchestrator.evictCatalogItemsLocalFiles(ids, { ignoreInSync }));
+  });
+
   app.delete('/api/items', (req, res) => {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number) : [];
     if (ids.length === 0) {

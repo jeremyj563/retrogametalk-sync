@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   ArrowUpCircle,
@@ -82,12 +83,14 @@ import {
   findItemInstallForDevice,
   formatInstalledDevicesBadge,
 } from '../shared/deviceProfiles';
+import { evaluateDiskSpaceGuardrail } from '../shared/diskGuardrails';
 import type {
   ArchiveBrowseListing,
   CatalogDownloadedFilter,
   CatalogFacets,
   CatalogInstalledFilter,
   CatalogSortOption,
+  EvictLocalFilesResult,
   FilterMatchMode,
   FsTreeNode,
   ItemStatus,
@@ -135,6 +138,7 @@ interface CatalogPanelProps {
     installedFilter?: CatalogInstalledFilter;
     statuses?: string[];
     deviceId?: string | 'any' | null;
+    sort?: CatalogSortOption;
     nonce: number;
   } | null;
   onOpenDevicesDrawer?: () => void;
@@ -732,6 +736,9 @@ export function CatalogPanel({
         setDeviceScopeSelection(filterPreset.deviceId);
       }
     }
+    if (filterPreset.sort) {
+      setSort(normalizeCatalogSort(filterPreset.sort));
+    }
   }, [filterPreset]);
   const [items, setItems] = useState<RepositoryItemRecord[]>(() => initialMatchedCatalog?.items ?? []);
   const [facets, setFacets] = useState<CatalogFacets>(() => memoryCatalogFacets);
@@ -768,6 +775,9 @@ export function CatalogPanel({
     Map<number, boolean>
   >(() => new Map());
   const [confirmCatalogBulk, setConfirmCatalogBulk] = useState(false);
+  const [confirmBulkEvict, setConfirmBulkEvict] = useState(false);
+  const [bulkEvictIgnoreInSync, setBulkEvictIgnoreInSync] = useState(false);
+  const [evictingLocalFiles, setEvictingLocalFiles] = useState(false);
 
   // On-demand download queueing & background indexer UI state
   const [queueingIds, setQueueingIds] = useState<Set<number>>(new Set());
@@ -1597,6 +1607,34 @@ export function CatalogPanel({
     () => summarizeCatalogSelection(selectedCatalogIds, effectiveStatusById, { includePausedQueued }),
     [selectedCatalogIds, effectiveStatusById, includePausedQueued],
   );
+
+  const selectedEvictableSummary = useMemo(() => {
+    const ids = selectionSummary.installableIds;
+    if (ids.length === 0) {
+      return { ids: [] as number[], knownBytes: 0, allKnown: true };
+    }
+    const visibleById = new Map<number, RepositoryItemRecord>();
+    for (const item of items) {
+      visibleById.set(item.id, item);
+    }
+    if (activeDetailItem) {
+      visibleById.set(activeDetailItem.id, activeDetailItem);
+    }
+    let knownBytes = 0;
+    let allKnown = true;
+    for (const id of ids) {
+      const rec = visibleById.get(id);
+      if (!rec) {
+        allKnown = false;
+        continue;
+      }
+      const downloadedFileBytes = rec.files
+        .filter((f) => f.status === 'downloaded' || f.status === 'skipped')
+        .reduce((sum, f) => sum + Math.max(0, Number(f.fileSizeBytes || 0)), 0);
+      knownBytes += downloadedFileBytes > 0 ? downloadedFileBytes : Math.max(0, Number(rec.fileSizeBytes || 0));
+    }
+    return { ids, knownBytes, allKnown };
+  }, [selectionSummary.installableIds, items, activeDetailItem]);
 
   const fsSupport = useMemo(() => isFileSystemAccessSupported(), []);
 
@@ -2618,6 +2656,65 @@ export function CatalogPanel({
     }
   };
 
+  const handleEvictCatalogLocalFiles = async (
+    ids: number[],
+    options?: { ignoreInSync?: boolean; clearSelection?: boolean },
+  ): Promise<EvictLocalFilesResult | undefined> => {
+    if (ids.length === 0) return undefined;
+    setEvictingLocalFiles(true);
+    try {
+      const res = await fetch('/api/items/evict-files', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'rgt-sync',
+        },
+        body: JSON.stringify({
+          ids,
+          ignoreInSync: options?.ignoreInSync === true,
+        }),
+      });
+      const parsed = await readJsonSafely<EvictLocalFilesResult & { error?: string }>(res);
+      if (!parsed.ok || !parsed.data) {
+        const errMsg = parsed.data?.error || parsed.errorMessage || `HTTP ${res.status}`;
+        setQueueNotice(`Could not free local disk space: ${errMsg}`);
+        throw new Error(errMsg);
+      }
+      const data = parsed.data;
+      if (activeDetailItem) {
+        const updatedActive = data.items.find((u) => u.id === activeDetailItem.id);
+        if (updatedActive) {
+          setActiveDetailItem(updatedActive);
+        }
+      }
+      if (options?.clearSelection) {
+        setSelectedCatalogIds(new Set());
+        setConfirmBulkEvict(false);
+        setBulkEvictIgnoreInSync(false);
+      }
+      const freedText = data.freedBytes > 0 ? formatBytes(data.freedBytes) : null;
+      const ignoreSuffix =
+        data.ignoredInSyncCount > 0 ? ` · ${data.ignoredInSyncCount} ignored in Auto-Sync` : '';
+      const skippedSuffix =
+        data.skippedActiveIds.length > 0
+          ? ` (${data.skippedActiveIds.length} actively downloading skipped)`
+          : '';
+      setQueueNotice(
+        freedText
+          ? `Freed ${freedText} from ${data.evictedItemsCount.toLocaleString()} game${
+              data.evictedItemsCount === 1 ? '' : 's'
+            } (metadata & install history preserved${ignoreSuffix})${skippedSuffix}.`
+          : `Removed local files from ${data.evictedItemsCount.toLocaleString()} game${
+              data.evictedItemsCount === 1 ? '' : 's'
+            } (metadata & install history preserved${ignoreSuffix})${skippedSuffix}.`,
+      );
+      await Promise.all([loadCatalog(false, { softRefresh: true }), onRefreshStatus()]);
+      return data;
+    } finally {
+      setEvictingLocalFiles(false);
+    }
+  };
+
   const handleDeleteCatalogItems = async (ids: number[]) => {
     if (ids.length === 0) return;
     setDeletingKey(ids.length === 1 ? `item-${ids[0]}` : 'catalog-bulk');
@@ -2633,6 +2730,7 @@ export function CatalogPanel({
       if (res.ok) {
         setSelectedCatalogIds(new Set());
         setConfirmCatalogBulk(false);
+        setConfirmBulkEvict(false);
         if (activeDetailItem && ids.includes(activeDetailItem.id)) {
           closeDetailDrawer();
         }
@@ -4503,81 +4601,120 @@ export function CatalogPanel({
               }`}
             >
               <div className="crt-accordion-inner">
-                <div className="mt-1 border border-crt-phosphor/45 bg-crt-bg rounded-md px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
-                  {filteredDownloadConfirm.loading ? (
-                    <div className="inline-flex items-center gap-2 font-mono text-crt-muted">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin text-crt-phosphor" />
-                      <span>Calculating queueable releases and estimated archive footprint…</span>
-                    </div>
-                  ) : filteredDownloadConfirm.error ? (
-                    <span className="font-mono text-crt-crimson">{filteredDownloadConfirm.error}</span>
-                  ) : filteredDownloadConfirm.queueableIds.length === 0 ? (
-                    <span className="font-mono text-crt-muted">
-                      {filteredDownloadConfirm.alreadyQueuedCount > 0 &&
-                      filteredDownloadConfirm.alreadyDownloadedCount > 0
-                        ? `All matching releases are already handled (${filteredDownloadConfirm.alreadyQueuedCount.toLocaleString()} queued/downloading, ${filteredDownloadConfirm.alreadyDownloadedCount.toLocaleString()} downloaded).`
-                        : filteredDownloadConfirm.alreadyQueuedCount > 0
-                          ? `All ${filteredDownloadConfirm.alreadyQueuedCount.toLocaleString()} matching release${filteredDownloadConfirm.alreadyQueuedCount === 1 ? ' is' : 's are'} already queued or downloading.`
-                          : `All ${filteredDownloadConfirm.alreadyDownloadedCount.toLocaleString()} matching release${filteredDownloadConfirm.alreadyDownloadedCount === 1 ? ' is' : 's are'} already downloaded on disk.`}
-                    </span>
-                  ) : (
-                    <div className="font-mono text-crt-text tabular-nums flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <span className="text-crt-phosphor font-semibold">
-                        {filteredDownloadConfirm.queueableIds.length.toLocaleString()} un-downloaded release
-                        {filteredDownloadConfirm.queueableIds.length === 1 ? '' : 's'}
-                      </span>
-                      {filteredDownloadConfirm.estimatedQueueBytes > 0 && (
-                        <>
-                          <span aria-hidden="true" className="text-crt-muted">·</span>
-                          <span>~{formatBytes(filteredDownloadConfirm.estimatedQueueBytes)} est.</span>
-                        </>
-                      )}
-                      {filteredDownloadConfirm.alreadyQueuedCount > 0 && (
-                        <>
-                          <span aria-hidden="true" className="text-crt-muted">·</span>
-                          <span className="text-crt-muted">
-                            {filteredDownloadConfirm.alreadyQueuedCount.toLocaleString()} already queued skipped
-                          </span>
-                        </>
-                      )}
-                      {filteredDownloadConfirm.alreadyDownloadedCount > 0 && (
-                        <>
-                          <span aria-hidden="true" className="text-crt-muted">·</span>
-                          <span className="text-crt-muted">
-                            {filteredDownloadConfirm.alreadyDownloadedCount.toLocaleString()} already downloaded skipped
-                          </span>
-                        </>
-                      )}
-                    </div>
-                  )}
+                {(() => {
+                  const filteredDiskEval =
+                    !filteredDownloadConfirm.loading &&
+                    !filteredDownloadConfirm.error &&
+                    filteredDownloadConfirm.queueableIds.length > 0
+                      ? evaluateDiskSpaceGuardrail({
+                          diskFreeBytes: status.storage.diskFreeBytes,
+                          estimatedBytes: filteredDownloadConfirm.estimatedQueueBytes,
+                          minFreeDiskGb: config.minFreeDiskGb,
+                        })
+                      : null;
+                  const showDiskWarning = Boolean(
+                    filteredDiskEval?.exceedsUsable && filteredDiskEval.warningMessage,
+                  );
 
-                  <div className="flex items-center gap-2 shrink-0 ml-auto">
-                    <button
-                      type="button"
-                      disabled={queueingBulk}
-                      onClick={() => setFilteredDownloadConfirm((prev) => ({ ...prev, open: false }))}
-                      className="px-3 py-1.5 text-xs font-medium border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  return (
+                    <div
+                      className={`mt-1 border rounded-md px-3.5 py-2.5 space-y-2 text-xs ${
+                        showDiskWarning
+                          ? 'border-crt-amber/60 bg-crt-amber/5'
+                          : 'border-crt-phosphor/45 bg-crt-bg'
+                      }`}
                     >
-                      Cancel
-                    </button>
-                    {!filteredDownloadConfirm.loading &&
-                      filteredDownloadConfirm.queueableIds.length > 0 && (
-                        <button
-                          type="button"
-                          disabled={queueingBulk}
-                          onClick={() => void handleConfirmDownloadFiltered()}
-                          className="crt-cta-beam inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold bg-crt-phosphor text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer"
-                        >
-                          <Download className="h-3.5 w-3.5 shrink-0" />
-                          {queueingBulk
-                            ? 'Queueing...'
-                            : `Queue ${filteredDownloadConfirm.queueableIds.length.toLocaleString()} Download${
-                                filteredDownloadConfirm.queueableIds.length === 1 ? '' : 's'
-                              }`}
-                        </button>
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        {filteredDownloadConfirm.loading ? (
+                          <div className="inline-flex items-center gap-2 font-mono text-crt-muted">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin text-crt-phosphor" />
+                            <span>Calculating queueable releases and estimated archive footprint…</span>
+                          </div>
+                        ) : filteredDownloadConfirm.error ? (
+                          <span className="font-mono text-crt-crimson">{filteredDownloadConfirm.error}</span>
+                        ) : filteredDownloadConfirm.queueableIds.length === 0 ? (
+                          <span className="font-mono text-crt-muted">
+                            {filteredDownloadConfirm.alreadyQueuedCount > 0 &&
+                            filteredDownloadConfirm.alreadyDownloadedCount > 0
+                              ? `All matching releases are already handled (${filteredDownloadConfirm.alreadyQueuedCount.toLocaleString()} queued/downloading, ${filteredDownloadConfirm.alreadyDownloadedCount.toLocaleString()} downloaded).`
+                              : filteredDownloadConfirm.alreadyQueuedCount > 0
+                                ? `All ${filteredDownloadConfirm.alreadyQueuedCount.toLocaleString()} matching release${filteredDownloadConfirm.alreadyQueuedCount === 1 ? ' is' : 's are'} already queued or downloading.`
+                                : `All ${filteredDownloadConfirm.alreadyDownloadedCount.toLocaleString()} matching release${filteredDownloadConfirm.alreadyDownloadedCount === 1 ? ' is' : 's are'} already downloaded on disk.`}
+                          </span>
+                        ) : (
+                          <div className="font-mono text-crt-text tabular-nums flex flex-wrap items-center gap-x-2 gap-y-1">
+                            <span className="text-crt-phosphor font-semibold">
+                              {filteredDownloadConfirm.queueableIds.length.toLocaleString()} un-downloaded release
+                              {filteredDownloadConfirm.queueableIds.length === 1 ? '' : 's'}
+                            </span>
+                            {filteredDownloadConfirm.estimatedQueueBytes > 0 && (
+                              <>
+                                <span aria-hidden="true" className="text-crt-muted">·</span>
+                                <span>~{formatBytes(filteredDownloadConfirm.estimatedQueueBytes)} est.</span>
+                              </>
+                            )}
+                            {filteredDownloadConfirm.alreadyQueuedCount > 0 && (
+                              <>
+                                <span aria-hidden="true" className="text-crt-muted">·</span>
+                                <span className="text-crt-muted">
+                                  {filteredDownloadConfirm.alreadyQueuedCount.toLocaleString()} already queued skipped
+                                </span>
+                              </>
+                            )}
+                            {filteredDownloadConfirm.alreadyDownloadedCount > 0 && (
+                              <>
+                                <span aria-hidden="true" className="text-crt-muted">·</span>
+                                <span className="text-crt-muted">
+                                  {filteredDownloadConfirm.alreadyDownloadedCount.toLocaleString()} already downloaded skipped
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-2 shrink-0 ml-auto">
+                          <button
+                            type="button"
+                            disabled={queueingBulk}
+                            onClick={() => setFilteredDownloadConfirm((prev) => ({ ...prev, open: false }))}
+                            className="px-3 py-1.5 text-xs font-medium border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                          {!filteredDownloadConfirm.loading &&
+                            filteredDownloadConfirm.queueableIds.length > 0 && (
+                              <button
+                                type="button"
+                                disabled={queueingBulk}
+                                onClick={() => void handleConfirmDownloadFiltered()}
+                                className={`crt-cta-beam inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold hover:brightness-110 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer ${
+                                  showDiskWarning
+                                    ? 'bg-crt-amber text-crt-bg'
+                                    : 'bg-crt-phosphor text-crt-bg'
+                                }`}
+                              >
+                                <Download className="h-3.5 w-3.5 shrink-0" />
+                                {queueingBulk
+                                  ? 'Queueing...'
+                                  : `Queue ${filteredDownloadConfirm.queueableIds.length.toLocaleString()} Download${
+                                      filteredDownloadConfirm.queueableIds.length === 1 ? '' : 's'
+                                    }`}
+                              </button>
+                            )}
+                        </div>
+                      </div>
+
+                      {showDiskWarning && filteredDiskEval?.warningMessage && (
+                        <div className="pt-2 border-t border-crt-amber/30 flex items-start gap-2 font-mono text-[11px] text-crt-amber tabular-nums">
+                          <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                          <span>
+                            {filteredDiskEval.warningMessage} Active downloads will pause automatically if free space reaches the safety reserve.
+                          </span>
+                        </div>
                       )}
-                  </div>
-                </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 
@@ -5229,6 +5366,26 @@ export function CatalogPanel({
                         <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" />
                         Install Options ({selectionSummary.installableIds.length.toLocaleString()})
                       </button>
+                      <button
+                        type="button"
+                        disabled={evictingLocalFiles}
+                        title="Remove local mirrored archive files to reclaim disk space while keeping Catalog entries, cover art, collections, and device install history intact"
+                        onClick={() => {
+                          setConfirmCatalogBulk(false);
+                          setConfirmBulkUninstall(false);
+                          setConfirmBulkEvict(true);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer tabular-nums"
+                      >
+                        <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          Free Space ({selectedEvictableSummary.ids.length.toLocaleString()}
+                          {selectedEvictableSummary.knownBytes > 0
+                            ? ` · ${selectedEvictableSummary.allKnown ? '' : '≥'}${formatBytes(selectedEvictableSummary.knownBytes)}`
+                            : ''}
+                          )
+                        </span>
+                      </button>
                     </>
                   )}
                   {sdRootHandle &&
@@ -5240,6 +5397,7 @@ export function CatalogPanel({
                         title={`Delete ROM files for ${selectedInstalledOnMountedIds.length.toLocaleString()} selected game${selectedInstalledOnMountedIds.length === 1 ? '' : 's'} from ${effectiveMountedDeviceName || 'mounted device'} (local mirror stays untouched)`}
                         onClick={() => {
                           setConfirmCatalogBulk(false);
+                          setConfirmBulkEvict(false);
                           setConfirmBulkUninstall(true);
                         }}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-crt-amber/60 bg-crt-amber/10 text-crt-amber hover:bg-crt-amber/20 rounded transition-colors whitespace-nowrap shrink-0 disabled:opacity-45 cursor-pointer"
@@ -5294,7 +5452,61 @@ export function CatalogPanel({
                   )}
                 </>
               )}
-              {confirmBulkUninstall ? (
+              {confirmBulkEvict ? (
+                <>
+                  <span className="text-xs font-mono text-crt-amber tabular-nums">
+                    Remove local files
+                    {selectedEvictableSummary.knownBytes > 0
+                      ? ` (${selectedEvictableSummary.allKnown ? '' : '≥'}${formatBytes(selectedEvictableSummary.knownBytes)})`
+                      : ''}{' '}
+                    from {selectedEvictableSummary.ids.length.toLocaleString()} game
+                    {selectedEvictableSummary.ids.length === 1 ? '' : 's'}? Metadata &amp; install history stay intact.
+                  </span>
+                  <label className="inline-flex items-center gap-1.5 text-xs font-mono text-crt-text cursor-pointer select-none whitespace-nowrap">
+                    <input
+                      type="checkbox"
+                      checked={bulkEvictIgnoreInSync}
+                      disabled={evictingLocalFiles}
+                      onChange={(e) => setBulkEvictIgnoreInSync(e.target.checked)}
+                      className="h-3.5 w-3.5 accent-crt-amber cursor-pointer"
+                    />
+                    <span>Ignore in Auto-Sync</span>
+                  </label>
+                  <button
+                    type="button"
+                    disabled={evictingLocalFiles || selectedEvictableSummary.ids.length === 0}
+                    onClick={() =>
+                      void handleEvictCatalogLocalFiles(selectedEvictableSummary.ids, {
+                        ignoreInSync: bulkEvictIgnoreInSync,
+                        clearSelection: true,
+                      })
+                    }
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-crt-bg bg-crt-amber hover:brightness-110 rounded transition-colors disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer tabular-nums"
+                  >
+                    {evictingLocalFiles ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                    ) : (
+                      <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                    )}
+                    {evictingLocalFiles
+                      ? 'Freeing Space...'
+                      : selectedEvictableSummary.knownBytes > 0
+                        ? `Confirm Free ${selectedEvictableSummary.allKnown ? '' : '≥'}${formatBytes(selectedEvictableSummary.knownBytes)} (${selectedEvictableSummary.ids.length.toLocaleString()})`
+                        : `Confirm Free Space (${selectedEvictableSummary.ids.length.toLocaleString()})`}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={evictingLocalFiles}
+                    onClick={() => {
+                      setConfirmBulkEvict(false);
+                      setBulkEvictIgnoreInSync(false);
+                    }}
+                    className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : confirmBulkUninstall ? (
                 <>
                   <span className="text-xs font-mono text-crt-amber">
                     Remove {selectedInstalledOnMountedIds.length.toLocaleString()} game
@@ -5349,7 +5561,7 @@ export function CatalogPanel({
                     type="button"
                     disabled={deletingKey === 'catalog-bulk'}
                     onClick={() => void handleDeleteCatalogItems(Array.from(selectedCatalogIds))}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-crt-bg bg-crt-crimson hover:brightness-110 rounded transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-crt-bg bg-crt-crimson hover:brightness-110 rounded transition-colors disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <Trash2 className="h-3.5 w-3.5 shrink-0" />
                     {deletingKey === 'catalog-bulk' ? 'Deleting...' : `Confirm Delete (${selectedCatalogIds.size})`}
@@ -5357,7 +5569,7 @@ export function CatalogPanel({
                   <button
                     type="button"
                     onClick={() => setConfirmCatalogBulk(false)}
-                    className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0"
+                    className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     Cancel
                   </button>
@@ -5366,8 +5578,10 @@ export function CatalogPanel({
                 <>
                   <button
                     type="button"
+                    title="Permanently delete selected releases from both Catalog and Disk"
                     onClick={() => {
                       setConfirmBulkUninstall(false);
+                      setConfirmBulkEvict(false);
                       setConfirmCatalogBulk(true);
                     }}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-crt-crimson/60 text-crt-crimson hover:bg-crt-crimson/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
@@ -5377,7 +5591,11 @@ export function CatalogPanel({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSelectedCatalogIds(new Set())}
+                    onClick={() => {
+                      setSelectedCatalogIds(new Set());
+                      setConfirmBulkEvict(false);
+                      setBulkEvictIgnoreInSync(false);
+                    }}
                     className="px-3 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     Clear Selection
@@ -6671,10 +6889,17 @@ export function CatalogPanel({
       ) : viewMode === 'stats' ? (
         <CatalogStatsPanel
           status={status}
+          minFreeDiskGb={config.minFreeDiskGb}
           catalogRevision={catalogRevision}
           onStartCatalogIndex={onStartCatalogIndex}
           onInspectSystem={(slug) => {
             setSystems([slug]);
+            setViewMode('catalog');
+          }}
+          onReclaimSpace={() => {
+            setDownloadedFilter('only');
+            setStatuses([]);
+            setSort('size_desc');
             setViewMode('catalog');
           }}
         />
@@ -6767,6 +6992,9 @@ export function CatalogPanel({
           handleRemoveItemsFromCollection(colId, [itemId])
         }
         onCreateCollection={handleCreateCollection}
+        onEvictLocalFiles={(id, opts) =>
+          handleEvictCatalogLocalFiles([id], { ignoreInSync: opts?.ignoreInSync })
+        }
         onDeleteItem={async (id) => {
           await handleDeleteCatalogItems([id]);
         }}

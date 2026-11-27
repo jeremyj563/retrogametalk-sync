@@ -15,6 +15,7 @@ import {
   createSyncRun,
   deleteRepositoryItemsByIds,
   deleteRepositoryItemsByLocalPaths,
+  evictLocalFilesForReleaseIds,
   getCatalogReleaseCountsBySystem,
   getCatalogTotalsAndSystems,
   getDataDir,
@@ -118,6 +119,11 @@ import {
 } from '../shared/queueAutoResume.ts';
 import { canonicalizeSystemSlug, filterValidSystemSlugs } from '../shared/systemCatalog.ts';
 import {
+  DiskSpaceGuardrailError,
+  evaluateDiskSpaceGuardrail,
+  type DiskSpaceEvaluation,
+} from '../shared/diskGuardrails.ts';
+import {
   type DiscoveredRelease,
   type LoggerFn,
   RetroGameTalkClient,
@@ -144,6 +150,7 @@ import type {
   ConfigUpdateInput,
   DryRunConsoleBreakdown,
   DryRunSampleRelease,
+  EvictLocalFilesResult,
   FsTreeNode,
   LogLevel,
   RatingsSyncStatus,
@@ -1154,7 +1161,8 @@ export class ScraperOrchestrator extends EventEmitter {
         input.maxDelayMs !== undefined ||
         input.maxConcurrency !== undefined ||
         input.downloadChunkConcurrency !== undefined ||
-        input.downloadChunkMinSizeMb !== undefined
+        input.downloadChunkMinSizeMb !== undefined ||
+        input.minFreeDiskGb !== undefined
       ) {
         recordAchievementCounter('pacing_customized', 1, 'set');
       }
@@ -1557,6 +1565,93 @@ export class ScraperOrchestrator extends EventEmitter {
       deletedCount: removedItems.length,
       filesRemoved,
     };
+  }
+
+  evictCatalogItemsLocalFiles(
+    ids: number[],
+    options?: { ignoreInSync?: boolean },
+  ): EvictLocalFilesResult {
+    const cfg = getInternalConfig();
+    const result = evictLocalFilesForReleaseIds(ids, {
+      ignoreInSync: options?.ignoreInSync === true,
+      downloadDir: cfg.downloadDir,
+    });
+
+    if (result.evictedItemsCount > 0 || result.deletedFilesCount > 0) {
+      this.diskStatsCache = null;
+      const freedLabel =
+        result.freedBytes >= 1024 * 1024 * 1024
+          ? `${(result.freedBytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+          : result.freedBytes >= 1024 * 1024
+            ? `${(result.freedBytes / (1024 * 1024)).toFixed(1)} MB`
+            : `${Math.max(0, Math.round(result.freedBytes / 1024))} KB`;
+      const ignoreSuffix =
+        result.ignoredInSyncCount > 0
+          ? `; ${result.ignoredInSyncCount} marked Ignore in Auto-Sync`
+          : '';
+      this.log(
+        'info',
+        `Freed ${freedLabel} from ${result.evictedItemsCount} catalog release(s) (${result.deletedFilesCount} local file(s) removed; metadata & install history preserved${ignoreSuffix})`,
+      );
+      this.emitCatalogUpdated('items_evicted');
+      this.emitStatus();
+    }
+
+    return result;
+  }
+
+  private lowDiskHaltedRunId: number | null = null;
+
+  private checkRuntimeDiskSpaceGuardrail(
+    downloadDir: string,
+    minFreeDiskGb: number,
+    requiredBytes = 0,
+  ): DiskSpaceEvaluation {
+    let diskFreeBytes: number | null = null;
+    try {
+      const fsStat = fs.statfsSync(downloadDir);
+      diskFreeBytes = Number(fsStat.bavail) * Number(fsStat.bsize);
+    } catch {
+      diskFreeBytes = null;
+    }
+    return evaluateDiskSpaceGuardrail({
+      diskFreeBytes,
+      estimatedBytes: requiredBytes,
+      minFreeDiskGb,
+    });
+  }
+
+  private triggerLowDiskHalt(
+    runId: number,
+    evaluation: DiskSpaceEvaluation,
+    contextLabel: string,
+    runLogger?: LoggerFn,
+  ): void {
+    if (this.lowDiskHaltedRunId === runId) {
+      return;
+    }
+    this.lowDiskHaltedRunId = runId;
+    const msg = `Low disk space guardrail paused active downloads before "${contextLabel}": ${
+      evaluation.warningMessage || 'Available free space is below the configured safety reserve.'
+    }`;
+    const detail =
+      'Free local archive space in Catalog or adjust the Minimum Free Disk Space Reserve in System Settings before resuming.';
+    if (runLogger) {
+      runLogger('warn', msg, detail);
+    } else {
+      this.log('warn', msg, detail);
+    }
+    // Prevent crash-loop auto-resume into a full volume
+    saveQueueRecoveryState({
+      ...DEFAULT_QUEUE_RECOVERY_STATE,
+      userPaused: true,
+      lastInterruptionCause: 'user_stopped',
+      lastInterruptedAt: new Date().toISOString(),
+    });
+    this.currentPhase = 'Paused · Low disk space safety reserve reached';
+    this.diskStatsCache = null;
+    this.emitStatus();
+    this.abortController?.abort();
   }
 
   private getCoverCacheDir(): string {
@@ -3831,13 +3926,16 @@ export class ScraperOrchestrator extends EventEmitter {
       }
 
       const finalStatus = signal.aborted ? 'stopped' : 'completed';
+      const haltedByLowDisk = this.lowDiskHaltedRunId === run.id;
       const stopReasonSummary =
         finalStatus === 'stopped'
-          ? this.stopRequestedByUser
-            ? 'Stopped by user'
-            : this.shutdownSignal
-              ? `Interrupted by ${this.shutdownSignal}`
-              : 'Stopped'
+          ? haltedByLowDisk
+            ? 'Paused by low disk space guardrail'
+            : this.stopRequestedByUser
+              ? 'Stopped by user'
+              : this.shutdownSignal
+                ? `Interrupted by ${this.shutdownSignal}`
+                : 'Stopped'
           : undefined;
       updateSyncRun(run.id, {
         status: finalStatus,
@@ -3860,6 +3958,17 @@ export class ScraperOrchestrator extends EventEmitter {
         this.queueAutoResumeStatus = { ...IDLE_QUEUE_AUTO_RESUME_STATUS };
         recordAchievementCounter('runs_completed', 1, 'increment');
         this.evaluateAndEmitAchievements();
+      } else if (haltedByLowDisk) {
+        this.queueAutoResumeStatus = {
+          phase: 'user_paused',
+          attempt: 0,
+          maxAttempts: AUTO_RESUME_MAX_ATTEMPTS,
+          delayMs: 0,
+          resumeAt: null,
+          reason:
+            'Paused by low disk space guardrail — free local space in Catalog or adjust the reserve in System Settings before resuming.',
+          lastInterruptionCause: 'user_stopped',
+        };
       } else if (this.stopRequestedByUser) {
         this.queueAutoResumeStatus = {
           phase: 'user_paused',
@@ -3873,22 +3982,37 @@ export class ScraperOrchestrator extends EventEmitter {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const haltedByLowDisk = this.lowDiskHaltedRunId === run.id;
       updateSyncRun(run.id, {
         status: signal.aborted ? 'stopped' : 'failed',
         finishedAt: new Date().toISOString(),
         newFound: attemptedFiles,
         downloadedCount: downloaded,
         skippedCount: skipped,
-        failedCount: Math.max(1, failed),
+        failedCount: haltedByLowDisk ? failed : Math.max(1, failed),
         bytesDownloaded: bytes,
         errorSummary: signal.aborted
-          ? this.stopRequestedByUser
-            ? 'Stopped by user'
-            : this.shutdownSignal
-              ? `Interrupted by ${this.shutdownSignal}`
-              : msg
+          ? haltedByLowDisk
+            ? 'Paused by low disk space guardrail'
+            : this.stopRequestedByUser
+              ? 'Stopped by user'
+              : this.shutdownSignal
+                ? `Interrupted by ${this.shutdownSignal}`
+                : msg
           : msg,
       });
+      if (haltedByLowDisk) {
+        this.queueAutoResumeStatus = {
+          phase: 'user_paused',
+          attempt: 0,
+          maxAttempts: AUTO_RESUME_MAX_ATTEMPTS,
+          delayMs: 0,
+          resumeAt: null,
+          reason:
+            'Paused by low disk space guardrail — free local space in Catalog or adjust the reserve in System Settings before resuming.',
+          lastInterruptionCause: 'user_stopped',
+        };
+      }
       if (!signal.aborted) {
         runLogger('error', `Download queue #${run.id} failed: ${msg}`);
       }
@@ -3913,6 +4037,9 @@ export class ScraperOrchestrator extends EventEmitter {
       this.inFlightDownloadIds.clear();
       this.ruleFilteredDownloadIds.clear();
       this.stopRequestedByUser = false;
+      if (this.lowDiskHaltedRunId === run.id) {
+        this.lowDiskHaltedRunId = null;
+      }
       if (this.lockRenewTimer) {
         clearInterval(this.lockRenewTimer);
         this.lockRenewTimer = null;
@@ -6931,6 +7058,7 @@ export class ScraperOrchestrator extends EventEmitter {
       }
 
       const finalStatus = signal.aborted ? 'stopped' : 'completed';
+      const haltedByLowDisk = this.lowDiskHaltedRunId === run.id;
       const rl = this.rateLimiter.getTelemetry();
       updateSyncRun(run.id, {
         status: finalStatus,
@@ -6944,6 +7072,7 @@ export class ScraperOrchestrator extends EventEmitter {
         rateLimitHits: Math.max(0, rl.rateLimitHits - startRateHits),
         avgDelayMs: rl.currentDelayMs,
         summary: runSummarySnapshot,
+        ...(haltedByLowDisk ? { errorSummary: 'Paused by low disk space guardrail' } : {}),
       });
 
       const typeSkipDetail = skippedByTypeCount > 0 ? ` (${skippedByTypeCount} filtered by type)` : '';
@@ -6973,6 +7102,7 @@ export class ScraperOrchestrator extends EventEmitter {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const haltedByLowDisk = this.lowDiskHaltedRunId === run.id;
       updateSyncRun(run.id, {
         status: signal.aborted ? 'stopped' : 'failed',
         finishedAt: new Date().toISOString(),
@@ -6982,10 +7112,15 @@ export class ScraperOrchestrator extends EventEmitter {
         skippedCount,
         failedCount,
         bytesDownloaded,
-        errorSummary: msg,
+        errorSummary: haltedByLowDisk ? 'Paused by low disk space guardrail' : msg,
       });
-      runLogger('error', `Run #${run.id} failed: ${msg}`);
+      if (!(signal.aborted && haltedByLowDisk)) {
+        runLogger('error', `Run #${run.id} failed: ${msg}`);
+      }
     } finally {
+      if (this.lowDiskHaltedRunId === run.id) {
+        this.lowDiskHaltedRunId = null;
+      }
       if (this.lockRenewTimer) {
         clearInterval(this.lockRenewTimer);
         this.lockRenewTimer = null;
@@ -7035,6 +7170,28 @@ export class ScraperOrchestrator extends EventEmitter {
       systemName: parentContext?.systemName || release.systemName,
       siblingFilenames,
     });
+
+    // Runtime disk-space guardrail BEFORE starting download or marking file active
+    const liveDiskCfg = getInternalConfig();
+    const matchedKnownFile =
+      targetFileId !== undefined
+        ? parentContext?.files?.find((f) => f.id === targetFileId)
+        : parentContext?.files?.find(
+            (f) => f.filename.toLowerCase() === release.filename.toLowerCase(),
+          );
+    const knownFileBytes =
+      matchedKnownFile && matchedKnownFile.fileSizeBytes > 0
+        ? matchedKnownFile.fileSizeBytes
+        : 0;
+    const preflightDiskEval = this.checkRuntimeDiskSpaceGuardrail(
+      liveDiskCfg.downloadDir,
+      liveDiskCfg.minFreeDiskGb,
+      knownFileBytes,
+    );
+    if (preflightDiskEval.exceedsUsable) {
+      this.triggerLowDiskHalt(runId, preflightDiskEval, release.filename, runLogger);
+      return { downloaded: false, skipped: false, failed: false, bytes: 0 };
+    }
 
     const initial = upsertReleaseFile({
       releaseId,
@@ -7167,6 +7324,9 @@ export class ScraperOrchestrator extends EventEmitter {
           downloadLogger,
         );
       } catch (firstErr) {
+        if (firstErr instanceof DiskSpaceGuardrailError) {
+          throw firstErr;
+        }
         const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
         const pageUrl = (release.pageUrl || '').split('#')[0];
         const isCloudflareErr = /cloudflare/i.test(firstMsg);
@@ -7313,6 +7473,26 @@ export class ScraperOrchestrator extends EventEmitter {
       return { downloaded: true, skipped: false, failed: false, bytes: res.bytes };
     } catch (err) {
       unregisterWorker();
+      if (err instanceof DiskSpaceGuardrailError) {
+        const pausedStatus = this.activeRun?.triggerType === 'download' ? 'queued' : 'available';
+        upsertReleaseFile({
+          releaseId,
+          targetFileId: initial.file.id,
+          remoteUrl: release.remoteUrl,
+          downloadUrl: release.downloadUrl,
+          remotePath,
+          localPath: initial.file.localPath,
+          filename: release.filename,
+          displayLabel,
+          fileRole,
+          status: pausedStatus,
+          errorMessage: null,
+          lastRunId: runId,
+        });
+        this.triggerLowDiskHalt(runId, err.evaluation, release.filename, runLogger);
+        this.emitCatalogUpdated('file_aborted', releaseId);
+        return { downloaded: false, skipped: false, failed: false, bytes: 0 };
+      }
       if (signal.aborted) {
         const abortedStatus = this.activeRun?.triggerType === 'download' ? 'queued' : 'available';
         upsertReleaseFile({

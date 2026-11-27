@@ -1500,6 +1500,17 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `);
     },
   },
+  {
+    version: 33,
+    name: 'min_free_disk_reserve',
+    description:
+      'Add min_free_disk_gb safety reserve column to scraper_config for pre-queue and runtime low-disk guardrails',
+    up: (db) => {
+      if (!tableHasColumn(db, 'scraper_config', 'min_free_disk_gb')) {
+        db.exec(`ALTER TABLE scraper_config ADD COLUMN min_free_disk_gb REAL NOT NULL DEFAULT 2;`);
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

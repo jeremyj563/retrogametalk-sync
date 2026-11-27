@@ -297,6 +297,7 @@ export interface RuntimeSyncSettingsConfigLike {
   maxConcurrency?: number | null;
   downloadChunkConcurrency?: number | null;
   downloadChunkMinSizeMb?: number | null;
+  minFreeDiskGb?: number | null;
   requestTimeoutMs?: number | null;
   userAgent?: string | null;
   autoDownloadNewReleases?: boolean | null;
@@ -384,6 +385,13 @@ export function diffRuntimeSyncSettings(
     chunkingChanged = true;
     changedFields.push('downloadChunkMinSizeMb');
     parts.push(`Chunk threshold ${prevChunkMb}→${nextChunkMb} MiB`);
+  }
+
+  const prevMinFreeGb = Number(prevConfig.minFreeDiskGb ?? 2);
+  const nextMinFreeGb = Number(nextConfig.minFreeDiskGb ?? 2);
+  if (Math.abs(prevMinFreeGb - nextMinFreeGb) >= 0.05) {
+    changedFields.push('minFreeDiskGb');
+    parts.push(`Disk reserve ${prevMinFreeGb}→${nextMinFreeGb} GB`);
   }
 
   const prevRetries = Number(prevConfig.maxRetries ?? 0);

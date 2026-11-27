@@ -16,7 +16,11 @@ import type {
   BulkStorageInstallerController,
 } from '../hooks/useBulkStorageInstaller';
 import type { SmartRomFilterContext } from '../shared/smartRomPicker';
-import type { RepositoryItemRecord, ServiceStatusSnapshot } from '../types';
+import type {
+  EvictLocalFilesResult,
+  RepositoryItemRecord,
+  ServiceStatusSnapshot,
+} from '../types';
 import { resolveItemDeviceInstallState } from '../utils/deviceInstallView';
 import { readJsonSafely } from '../utils/http';
 import { isFileSystemAccessSupported } from '../utils/sdCardFs';
@@ -999,6 +1003,30 @@ export function FailedQueueDrawer({
         onCancelDeviceInstall={installer?.cancelInstall}
         onDismissDeviceInstall={installer?.dismissJob}
         onViewDeviceInstallQueue={installer?.openModal}
+        onEvictLocalFiles={async (id, options) => {
+          const res = await fetch('/api/items/evict-files', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'RetroGameTalkSync',
+            },
+            body: JSON.stringify({
+              ids: [id],
+              ignoreInSync: Boolean(options?.ignoreInSync),
+            }),
+          });
+          const parsed = await readJsonSafely<EvictLocalFilesResult & { error?: string }>(res);
+          if (!parsed.ok || !parsed.data) {
+            throw new Error(parsed.data?.error || parsed.errorMessage || `HTTP ${res.status}`);
+          }
+          if (parsed.data.items?.[0]) {
+            const updated = parsed.data.items[0];
+            setActiveDetailItem((current) => (current?.id === id ? updated : current));
+            setItems((prev) => prev.map((row) => (row.id === id ? updated : row)));
+          }
+          await Promise.all([loadFailedQueue(true), onRefreshStatus()]);
+          return parsed.data;
+        }}
         onDeleteItem={async (id) => {
           await handleDeleteItems([id]);
         }}

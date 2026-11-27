@@ -48,6 +48,7 @@ import type {
   ActiveTransferState,
   ArchiveBrowseListing,
   ArchiveInspectResult,
+  EvictLocalFilesResult,
   PlayableExportTarget,
   RepositoryItemRecord,
   SyncOverrideMode,
@@ -116,6 +117,10 @@ interface GameDetailDrawerProps {
   onItemUpdated: (updated: RepositoryItemRecord) => void;
   onRetryItem: (id: number, fileId?: number, options?: { dryRun?: boolean }) => Promise<void>;
   onQueueDownload?: (ids: number[]) => Promise<unknown>;
+  onEvictLocalFiles?: (
+    id: number,
+    options?: { ignoreInSync?: boolean },
+  ) => Promise<EvictLocalFilesResult | void>;
   onDeleteItem: (id: number) => Promise<void>;
   onExpressInstallToDevice?: (id: number) => void;
   onUpgradeOnDevice?: (id: number) => void;
@@ -315,6 +320,7 @@ export function GameDetailDrawer({
   onItemUpdated,
   onRetryItem,
   onQueueDownload,
+  onEvictLocalFiles,
   onDeleteItem,
   onExpressInstallToDevice,
   onUpgradeOnDevice,
@@ -346,6 +352,14 @@ export function GameDetailDrawer({
   const [queueingDownload, setQueueingDownload] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [confirmEvict, setConfirmEvict] = useState(false);
+  const [evictIgnoreInSync, setEvictIgnoreInSync] = useState(false);
+  const [evictingLocal, setEvictingLocal] = useState(false);
+  const [evictMessage, setEvictMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const lastEvictToneRef = useRef<'phosphor' | 'crimson'>('phosphor');
+  if (evictMessage) {
+    lastEvictToneRef.current = evictMessage.kind === 'error' ? 'crimson' : 'phosphor';
+  }
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [uninstallingLocal, setUninstallingLocal] = useState(false);
   const [uninstallMessage, setUninstallMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
@@ -638,6 +652,9 @@ export function GameDetailDrawer({
     if (!activeItem) return;
     setMetaError(null);
     setConfirmDelete(false);
+    setConfirmEvict(false);
+    setEvictIgnoreInSync(false);
+    setEvictMessage(null);
     setConfirmUninstall(false);
     setUninstallMessage(null);
     setMoreMenuOpen(false);
@@ -1177,6 +1194,58 @@ export function GameDetailDrawer({
       await onDeleteItem(item.id);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleConfirmEvictLocalFiles = async () => {
+    if (!activeItem || evictingLocal) return;
+    setEvictingLocal(true);
+    setEvictMessage(null);
+    try {
+      let result: EvictLocalFilesResult | undefined;
+      if (onEvictLocalFiles) {
+        const res = await onEvictLocalFiles(item.id, { ignoreInSync: evictIgnoreInSync });
+        if (res) result = res;
+      } else {
+        const res = await fetch('/api/items/evict-files', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'rgt-sync',
+          },
+          body: JSON.stringify({
+            ids: [item.id],
+            ignoreInSync: evictIgnoreInSync,
+          }),
+        });
+        const parsed = await readJsonSafely<EvictLocalFilesResult & { error?: string }>(res);
+        if (!parsed.ok || !parsed.data) {
+          throw new Error(parsed.data?.error || parsed.errorMessage || `HTTP ${res.status}`);
+        }
+        result = parsed.data;
+        if (result.items?.[0]) {
+          onItemUpdated(result.items[0]);
+        }
+      }
+      setConfirmEvict(false);
+      setEvictIgnoreInSync(false);
+      setArchiveBrowse(null);
+      setRomOutcomePanel(null);
+      const freedText = result && result.freedBytes > 0 ? formatBytes(result.freedBytes) : null;
+      const ignoreNote = evictIgnoreInSync ? ' · marked Ignore in Auto-Sync' : '';
+      setEvictMessage({
+        kind: 'ok',
+        text: freedText
+          ? `Removed local files (freed ${freedText}). Catalog metadata & device install history preserved${ignoreNote}.`
+          : `Removed local files. Catalog metadata & device install history preserved${ignoreNote}.`,
+      });
+    } catch (err) {
+      setEvictMessage({
+        kind: 'error',
+        text: `Could not remove local files: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setEvictingLocal(false);
     }
   };
 
@@ -2841,6 +2910,86 @@ export function GameDetailDrawer({
                 className="shrink-0"
               />
 
+              <EphemeralNotice
+                message={evictMessage?.text ?? null}
+                tone={lastEvictToneRef.current}
+                variant="strip"
+                autoDismissMs={evictMessage?.kind === 'ok' ? 4500 : null}
+                dismissStyle="icon"
+                dismissAriaLabel="Dismiss local cleanup status"
+                onDismiss={() => setEvictMessage(null)}
+                className="shrink-0"
+              />
+
+              {confirmEvict && (() => {
+                const downloadedFilesBytes = item.files
+                  .filter((f) => f.status === 'downloaded' || f.status === 'skipped')
+                  .reduce((sum, f) => sum + Math.max(0, Number(f.fileSizeBytes || 0)), 0);
+                const reclaimBytes =
+                  downloadedFilesBytes > 0
+                    ? downloadedFilesBytes
+                    : item.status === 'downloaded' || item.status === 'skipped' || item.status === 'partial'
+                      ? Math.max(0, Number(item.fileSizeBytes || 0))
+                      : 0;
+                const alreadyIgnored = item.syncOverride === 'ignore';
+                return (
+                  <div className="px-6 py-3 border-t border-crt-amber/45 bg-crt-amber/10 space-y-2.5 text-xs font-mono shrink-0">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="space-y-1 min-w-0 flex-1">
+                        <p className="font-semibold text-crt-text">
+                          Remove local mirror files{reclaimBytes > 0 ? ` (Free ${formatBytes(reclaimBytes)})` : ''}?
+                        </p>
+                        <p className="text-[11px] text-crt-muted leading-relaxed">
+                          Catalog metadata and device install history will be preserved; you can re-download anytime.
+                        </p>
+                        {!alreadyIgnored && (
+                          <label className="inline-flex items-center gap-2 pt-0.5 text-[11px] text-crt-text/90 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={evictIgnoreInSync}
+                              disabled={evictingLocal}
+                              onChange={(e) => setEvictIgnoreInSync(e.target.checked)}
+                              className="h-3.5 w-3.5 accent-crt-amber cursor-pointer"
+                            />
+                            <span>Also ignore in future Auto-Syncs (skip automatic re-downloads)</span>
+                          </label>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          disabled={evictingLocal}
+                          onClick={() => void handleConfirmEvictLocalFiles()}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-crt-amber text-crt-bg hover:brightness-110 rounded transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer"
+                        >
+                          {evictingLocal ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <HardDrive className="h-3.5 w-3.5" />
+                          )}
+                          {evictingLocal
+                            ? 'Freeing Space…'
+                            : reclaimBytes > 0
+                              ? `Free ${formatBytes(reclaimBytes)}`
+                              : 'Confirm Free Space'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={evictingLocal}
+                          onClick={() => {
+                            setConfirmEvict(false);
+                            setEvictIgnoreInSync(false);
+                          }}
+                          className="px-2.5 py-1.5 text-xs border border-crt-border text-crt-muted hover:text-crt-text rounded transition-colors cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {confirmUninstall && mountedDeviceName && isInstalledOnActiveDevice && (
                 <div className="px-6 py-3 border-t border-crt-crimson/45 bg-crt-crimson/10 space-y-2 text-xs font-mono shrink-0">
                   <div className="flex items-start justify-between gap-3">
@@ -3319,20 +3468,72 @@ export function GameDetailDrawer({
 
                         <div className="my-1 border-t border-crt-border" />
 
-                        <div className="py-0.5">
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => {
-                              setMoreMenuOpen(false);
-                              setConfirmDelete(true);
-                            }}
-                            className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-crimson hover:bg-crt-crimson/10 transition-colors cursor-pointer"
-                          >
-                            <Trash2 className="h-3.5 w-3.5 shrink-0" />
-                            <span className="truncate">Delete Release</span>
-                          </button>
-                        </div>
+                        {(() => {
+                          const hasLocalFiles =
+                            item.status === 'downloaded' ||
+                            item.status === 'skipped' ||
+                            item.status === 'partial' ||
+                            item.files.some(
+                              (f) => f.status === 'downloaded' || f.status === 'skipped',
+                            );
+                          const downloadedFilesBytes = item.files
+                            .filter((f) => f.status === 'downloaded' || f.status === 'skipped')
+                            .reduce((sum, f) => sum + Math.max(0, Number(f.fileSizeBytes || 0)), 0);
+                          const reclaimBytes =
+                            downloadedFilesBytes > 0
+                              ? downloadedFilesBytes
+                              : hasLocalFiles
+                                ? Math.max(0, Number(item.fileSizeBytes || 0))
+                                : 0;
+
+                          return (
+                            <div className="py-0.5">
+                              {hasLocalFiles && (
+                                <>
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    disabled={evictingLocal || item.status === 'downloading'}
+                                    onClick={() => {
+                                      setMoreMenuOpen(false);
+                                      setConfirmDelete(false);
+                                      setConfirmUninstall(false);
+                                      setConfirmEvict(true);
+                                    }}
+                                    title="Delete local mirrored archive files to reclaim disk space while keeping this Catalog entry, cover art, collections, and install history intact"
+                                    className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-amber hover:bg-crt-amber/10 transition-colors disabled:opacity-50 cursor-pointer"
+                                  >
+                                    <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                                    <span className="truncate">
+                                      {reclaimBytes > 0
+                                        ? `Remove Local Files (Free ${formatBytes(reclaimBytes)})`
+                                        : 'Remove Local Files'}
+                                    </span>
+                                  </button>
+                                  <div
+                                    role="separator"
+                                    className="my-0.5 border-t border-crt-border/70"
+                                  />
+                                </>
+                              )}
+                              <button
+                                type="button"
+                                role="menuitem"
+                                onClick={() => {
+                                  setMoreMenuOpen(false);
+                                  setConfirmEvict(false);
+                                  setConfirmUninstall(false);
+                                  setConfirmDelete(true);
+                                }}
+                                title="Permanently delete both local archive files and this Catalog database entry"
+                                className="w-full px-3 py-2 text-left flex items-center gap-2.5 text-crt-crimson hover:bg-crt-crimson/10 transition-colors cursor-pointer"
+                              >
+                                <Trash2 className="h-3.5 w-3.5 shrink-0" />
+                                <span className="truncate">Delete from Catalog &amp; Disk</span>
+                              </button>
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>

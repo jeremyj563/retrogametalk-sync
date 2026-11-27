@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Activity } from 'lucide-react';
+import { Activity, ArrowUpRight } from 'lucide-react';
+import {
+  evaluateDiskSpaceGuardrail,
+  formatReserveGbLabel,
+} from '../shared/diskGuardrails';
 import type { ScraperConfigPublic, ServiceStatusSnapshot, SyncRunRecord } from '../types';
 import {
   formatBytes,
@@ -24,6 +28,7 @@ interface ServiceTelemetrySidebarProps {
   config: ScraperConfigPublic | null;
   runs: SyncRunRecord[];
   sseConnected: boolean;
+  onReclaimSpaceInCatalog?: () => void;
 }
 
 function formatPacingCompact(ms: number): string {
@@ -37,6 +42,7 @@ export function ServiceTelemetrySidebar({
   config,
   runs,
   sseConnected,
+  onReclaimSpaceInCatalog,
 }: ServiceTelemetrySidebarProps) {
   const [activeTopic, setActiveTopic] = useState<TelemetryTopicKey | null>(null);
   const [nowTickMs, setNowTickMs] = useState<number>(() => Date.now());
@@ -232,18 +238,55 @@ export function ServiceTelemetrySidebar({
           </span>
         </div>
 
-        <div {...bindTopicHandlers('storage')} className={rowClass('storage')}>
-          <span className="truncate">Disk Used</span>
-          <span
-            className={`tabular-nums shrink-0 ${
-              status.storage.writable ? 'text-crt-text' : 'text-crt-crimson'
-            }`}
-          >
-            {status.storage.writable
-              ? formatBytes(status.storage.totalBytesOnDisk)
-              : 'Read-Only'}
-          </span>
-        </div>
+        {(() => {
+          const storageGuardrail = evaluateDiskSpaceGuardrail({
+            diskFreeBytes: status.storage.diskFreeBytes,
+            estimatedBytes: 0,
+            minFreeDiskGb: config?.minFreeDiskGb,
+          });
+          return (
+            <>
+              <div {...bindTopicHandlers('storage')} className={rowClass('storage')}>
+                <span className="truncate">Disk Used</span>
+                <span
+                  className={`tabular-nums shrink-0 ${
+                    !status.storage.writable
+                      ? 'text-crt-crimson'
+                      : storageGuardrail.belowReserveNow
+                        ? 'text-crt-amber'
+                        : 'text-crt-text'
+                  }`}
+                >
+                  {status.storage.writable
+                    ? formatBytes(status.storage.totalBytesOnDisk)
+                    : 'Read-Only'}
+                </span>
+              </div>
+              {status.storage.totalBytesOnDisk > 0 && onReclaimSpaceInCatalog && (
+                <div className="pt-1.5 mt-1 border-t border-crt-border/70 flex items-center justify-between gap-2 px-1.5">
+                  <span
+                    className={`text-[10px] font-mono tabular-nums truncate ${
+                      storageGuardrail.belowReserveNow ? 'text-crt-amber' : 'text-crt-muted'
+                    }`}
+                  >
+                    {status.storage.diskFreeBytes !== null
+                      ? `${formatBytes(status.storage.diskFreeBytes)} free`
+                      : 'Mirror storage'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={onReclaimSpaceInCatalog}
+                    title="Jump to Downloaded items sorted by largest file size to reclaim disk space without deleting catalog entries"
+                    className="inline-flex items-center gap-0.5 text-[10px] font-mono text-crt-amber hover:underline cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <span>Free Space</span>
+                    <ArrowUpRight className="h-3 w-3 shrink-0" />
+                  </button>
+                </div>
+              )}
+            </>
+          );
+        })()}
       </div>
 
       {/* Floating CRT Subsystem Telemetry Popover */}
@@ -704,10 +747,28 @@ export function ServiceTelemetrySidebar({
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <dt className="text-crt-muted">Volume Free</dt>
-                  <dd className="text-crt-text text-right whitespace-nowrap">
+                  <dd
+                    className={`text-right whitespace-nowrap ${
+                      evaluateDiskSpaceGuardrail({
+                        diskFreeBytes: status.storage.diskFreeBytes,
+                        estimatedBytes: 0,
+                        minFreeDiskGb: config?.minFreeDiskGb,
+                      }).belowReserveNow
+                        ? 'text-crt-amber font-semibold'
+                        : 'text-crt-text'
+                    }`}
+                  >
                     {formatBytes(status.storage.diskFreeBytes)}
                   </dd>
                 </div>
+                {config && (
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-crt-muted">Safety Reserve</dt>
+                    <dd className="text-crt-text text-right whitespace-nowrap">
+                      {formatReserveGbLabel(config.minFreeDiskGb)}
+                    </dd>
+                  </div>
+                )}
                 <div className="flex items-center justify-between gap-3">
                   <dt className="text-crt-muted">SQLite Database</dt>
                   <dd className="text-crt-text text-right whitespace-nowrap">

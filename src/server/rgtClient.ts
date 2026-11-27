@@ -40,6 +40,10 @@ import {
   filterValidSystemSlugs,
   isNonSystemSlug,
 } from '../shared/systemCatalog.ts';
+import {
+  DiskSpaceGuardrailError,
+  evaluateDiskSpaceGuardrail,
+} from '../shared/diskGuardrails.ts';
 import type {
   AuthSessionStatus,
   AuthTestResult,
@@ -896,6 +900,7 @@ export class RetroGameTalkClient {
         maxConcurrency: live.maxConcurrency,
         downloadChunkConcurrency: live.downloadChunkConcurrency,
         downloadChunkMinSizeMb: live.downloadChunkMinSizeMb,
+        minFreeDiskGb: live.minFreeDiskGb,
         requestTimeoutMs: live.requestTimeoutMs,
         userAgent: live.userAgent,
       };
@@ -3801,6 +3806,36 @@ export class RetroGameTalkClient {
             });
           };
 
+          // Runtime disk-space guardrail BEFORE pre-allocating multi-chunk sparse file
+          const latestChunkCfg = this.resolveLiveRuntimeConfig(config);
+          let existingAllocatedBytes = 0;
+          if (isResuming && fs.existsSync(activePartPath)) {
+            try {
+              existingAllocatedBytes = fs.statSync(activePartPath).size;
+            } catch {
+              existingAllocatedBytes = 0;
+            }
+          }
+          const additionalBytesNeeded = Math.max(0, totalBytes - existingAllocatedBytes);
+          try {
+            const fsStat = fs.statfsSync(path.dirname(activePartPath));
+            const diskFreeBytes = Number(fsStat.bavail) * Number(fsStat.bsize);
+            const diskEval = evaluateDiskSpaceGuardrail({
+              diskFreeBytes,
+              estimatedBytes: additionalBytesNeeded,
+              minFreeDiskGb: latestChunkCfg.minFreeDiskGb,
+            });
+            if (diskEval.exceedsUsable) {
+              await response.body.cancel().catch(() => undefined);
+              throw new DiskSpaceGuardrailError(diskEval);
+            }
+          } catch (statErr) {
+            if (statErr instanceof DiskSpaceGuardrailError) {
+              throw statErr;
+            }
+            // Optional on platforms without statfsSync
+          }
+
           let fileHandle: fs.promises.FileHandle;
           if (isResuming && fs.existsSync(activePartPath)) {
             fileHandle = await fs.promises.open(activePartPath, 'r+');
@@ -4218,6 +4253,27 @@ export class RetroGameTalkClient {
         const totalBytes = Number.isFinite(parsedLen) && parsedLen > 0 ? parsedLen : null;
         const canResumeLater = acceptRanges.includes('bytes') && totalBytes !== null;
 
+        // Runtime disk-space guardrail BEFORE writing single-stream archive to disk
+        const latestStreamCfg = this.resolveLiveRuntimeConfig(config);
+        try {
+          const fsStat = fs.statfsSync(path.dirname(activePartPath));
+          const diskFreeBytes = Number(fsStat.bavail) * Number(fsStat.bsize);
+          const diskEval = evaluateDiskSpaceGuardrail({
+            diskFreeBytes,
+            estimatedBytes: totalBytes ?? 0,
+            minFreeDiskGb: latestStreamCfg.minFreeDiskGb,
+          });
+          if (diskEval.exceedsUsable) {
+            await response.body.cancel().catch(() => undefined);
+            throw new DiskSpaceGuardrailError(diskEval);
+          }
+        } catch (statErr) {
+          if (statErr instanceof DiskSpaceGuardrailError) {
+            throw statErr;
+          }
+          // Optional on platforms without statfsSync
+        }
+
         await removePartialTransferFiles(activePartPath);
         const fileHandle = await fs.promises.open(activePartPath, 'w+');
         keepPartialOnError = canResumeLater;
@@ -4310,7 +4366,7 @@ export class RetroGameTalkClient {
             log?.('debug', `[Download] Failed cleaning up partial file "${partPath}"`, formatErrorDetails(unlinkErr));
           });
         }
-        if (signal.aborted) {
+        if (err instanceof DiskSpaceGuardrailError || signal.aborted) {
           throw err;
         }
         const canRetryStream =

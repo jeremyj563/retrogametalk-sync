@@ -1,8 +1,8 @@
 ---
 title: Non-Destructive Local Disk Cleanup & Storage Guardrails
-status: planned
+status: implemented
 created_at: 2026-11-22T20:35:00Z
-implemented_at: null
+implemented_at: 2026-11-26T22:55:00Z
 ---
 
 # Non-Destructive Local Disk Cleanup & Storage Guardrails

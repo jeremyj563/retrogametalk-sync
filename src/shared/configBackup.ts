@@ -20,6 +20,7 @@ export interface ConfigBackupSnapshot {
     mirror: {
       baseUrl: string;
       loginUrl: string;
+      minFreeDiskGb?: number;
     };
     syncRules: {
       systemFilter: string;
@@ -162,6 +163,7 @@ export function buildConfigBackupSnapshot(
       mirror: {
         baseUrl: config.baseUrl,
         loginUrl: config.loginUrl,
+        minFreeDiskGb: config.minFreeDiskGb,
       },
       syncRules: {
         systemFilter: config.systemFilter,
@@ -270,6 +272,18 @@ export function parseAndValidateConfigBackup(
             mirrorRaw.loginUrl !== undefined
               ? validateHttpUrlString(mirrorRaw.loginUrl, 'mirror.loginUrl')
               : currentConfig.loginUrl,
+          minFreeDiskGb:
+            mirrorRaw.minFreeDiskGb !== undefined
+              ? Math.round(
+                  validateNumberInRange(
+                    mirrorRaw.minFreeDiskGb,
+                    'mirror.minFreeDiskGb',
+                    0,
+                    10000,
+                    false,
+                  ) * 10,
+                ) / 10
+              : currentConfig.minFreeDiskGb,
         },
         syncRules: {
           systemFilter:
@@ -504,6 +518,20 @@ export function parseAndValidateConfigBackup(
       fromDisplay: currentConfig.loginUrl,
       toDisplay: s.mirror.loginUrl,
     });
+
+    if (s.mirror.minFreeDiskGb !== undefined) {
+      maybeApply({
+        field: 'minFreeDiskGb',
+        envVar: 'SCRAPER_MIN_FREE_DISK_GB',
+        section: 'Mirror',
+        label: 'Minimum Free Disk Reserve',
+        presentInBackup: mirrorRaw.minFreeDiskGb !== undefined,
+        nextValue: s.mirror.minFreeDiskGb,
+        changed: s.mirror.minFreeDiskGb !== currentConfig.minFreeDiskGb,
+        fromDisplay: `${currentConfig.minFreeDiskGb} GB`,
+        toDisplay: `${s.mirror.minFreeDiskGb} GB`,
+      });
+    }
 
     const curSystems = normalizeSystemFilterList(currentConfig.systemFilter);
     const nextSystems = normalizeSystemFilterList(s.syncRules.systemFilter);
