@@ -59,6 +59,10 @@ import {
 } from './src/shared/deviceProfiles.ts';
 import { normalizeStorageFolderConfig } from './src/shared/storageFolderMappings.ts';
 import { sanitizeFat32Filename } from './src/shared/romNaming.ts';
+import {
+  normalizeCatalogRatingMode,
+  normalizeMinRatingFilter,
+} from './src/shared/catalogRating.ts';
 import type { ConfigUpdateInput, RunMode } from './src/server/types.ts';
 
 const PORT = Number(process.env.PORT || 3000);
@@ -257,6 +261,16 @@ async function bootstrap() {
     return undefined;
   };
 
+  const parseOptionalMinRating = (raw: unknown): number | undefined => {
+    const normalized = normalizeMinRatingFilter(raw);
+    return normalized === null ? undefined : normalized;
+  };
+
+  const parseOptionalRatingMode = (raw: unknown): string | undefined => {
+    const mode = normalizeCatalogRatingMode(raw);
+    return mode === 'all' ? undefined : mode;
+  };
+
   // Repository catalog, metadata, local assets, download & retry
   app.get('/api/items', (req, res) => {
     const result = queryRepositoryItems({
@@ -270,6 +284,8 @@ async function bootstrap() {
       favoriteOnly: req.query.favoriteOnly === 'true' || req.query.favoriteOnly === '1',
       collectionId: parseOptionalPositiveInt(req.query.collectionId),
       syncOverride: parseOptionalSyncOverride(req.query.syncOverride),
+      minRating: parseOptionalMinRating(req.query.minRating),
+      ratingMode: parseOptionalRatingMode(req.query.ratingMode),
       tag: parseQueryFilterParam(req.query.tag),
       tagMode: typeof req.query.tagMode === 'string' ? req.query.tagMode : undefined,
       genre: parseQueryFilterParam(req.query.genre),
@@ -301,6 +317,8 @@ async function bootstrap() {
       favoriteOnly: req.query.favoriteOnly === 'true' || req.query.favoriteOnly === '1',
       collectionId: parseOptionalPositiveInt(req.query.collectionId),
       syncOverride: parseOptionalSyncOverride(req.query.syncOverride),
+      minRating: parseOptionalMinRating(req.query.minRating),
+      ratingMode: parseOptionalRatingMode(req.query.ratingMode),
       tag: parseQueryFilterParam(req.query.tag),
       tagMode: typeof req.query.tagMode === 'string' ? req.query.tagMode : undefined,
       genre: parseQueryFilterParam(req.query.genre),
@@ -355,6 +373,30 @@ async function bootstrap() {
     });
   });
 
+  app.post('/api/catalog/sync-ratings', async (req, res) => {
+    const scope = req.body?.scope === 'full' ? 'full' : 'filtered';
+    try {
+      const result = await orchestrator.startRatingsSync(scope);
+      res.status(202).json({
+        ...result,
+        status: orchestrator.getStatusSnapshot(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const code = /Catalog is empty/i.test(msg) ? 400 : 409;
+      res.status(code).json({ error: msg });
+    }
+  });
+
+  app.post('/api/catalog/sync-ratings/stop', (_req, res) => {
+    const stopped = orchestrator.stopRatingsSync();
+    res.json({
+      ok: true,
+      stopped,
+      status: orchestrator.getStatusSnapshot(),
+    });
+  });
+
   app.post('/api/items/download', async (req, res) => {
     const rawIds: unknown[] | undefined = Array.isArray(req.body?.ids) ? req.body.ids : undefined;
     const rawFilters =
@@ -377,6 +419,8 @@ async function bootstrap() {
           favoriteOnly: Boolean(rawFilters.favoriteOnly),
           collectionId: parseOptionalPositiveInt(rawFilters.collectionId),
           syncOverride: parseOptionalSyncOverride(rawFilters.syncOverride),
+          minRating: parseOptionalMinRating(rawFilters.minRating),
+          ratingMode: parseOptionalRatingMode(rawFilters.ratingMode),
           tag: parseQueryFilterParam(rawFilters.tag),
           tagMode: typeof rawFilters.tagMode === 'string' ? rawFilters.tagMode : undefined,
           genre: parseQueryFilterParam(rawFilters.genre),

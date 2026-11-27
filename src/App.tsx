@@ -1526,6 +1526,46 @@ export default function App() {
     }
   };
 
+  const handleStartRatingsSync = async (scope: 'filtered' | 'full' = 'filtered') => {
+    setErrorBanner(null);
+    const res = await fetch('/api/catalog/sync-ratings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope }),
+    });
+    const parsed = await readJsonSafely<{
+      started?: boolean;
+      targets?: string[];
+      status?: ServiceStatusSnapshot;
+      error?: string;
+    }>(res);
+    if (!parsed.ok) {
+      const msg = parsed.errorMessage || `Failed to start Users Score sync (HTTP ${res.status})`;
+      setErrorBanner(msg);
+      throw new Error(msg);
+    }
+    if (parsed.data?.status) {
+      setStatus(parsed.data.status);
+    } else {
+      await loadInitialData();
+    }
+  };
+
+  const handleStopRatingsSync = async () => {
+    setErrorBanner(null);
+    const res = await fetch('/api/catalog/sync-ratings/stop', { method: 'POST' });
+    const parsed = await readJsonSafely<{ status?: ServiceStatusSnapshot; error?: string }>(res);
+    if (!parsed.ok) {
+      setErrorBanner(parsed.errorMessage || `Failed to pause Users Score sync (HTTP ${res.status})`);
+      return;
+    }
+    if (parsed.data?.status) {
+      setStatus(parsed.data.status);
+    } else {
+      await loadInitialData();
+    }
+  };
+
   const navItems: { id: NavSection; label: string }[] = [
     { id: 'monitor', label: 'Sync' },
     { id: 'catalog', label: 'Catalog' },
@@ -2357,6 +2397,8 @@ export default function App() {
                   onClearDownloadQueue={handleClearDownloadQueue}
                   onStartCatalogIndex={handleStartCatalogIndex}
                   onStopCatalogIndex={handleStopCatalogIndex}
+                  onStartRatingsSync={handleStartRatingsSync}
+                  onStopRatingsSync={handleStopRatingsSync}
                   onRefreshStatus={loadInitialData}
                   onEasterEggEffect={handleEasterEggEffect}
                 />

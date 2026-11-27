@@ -1461,6 +1461,30 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `);
     },
   },
+  {
+    version: 31,
+    name: 'release_user_ratings',
+    description:
+      'Add user_rating, user_rating_votes, rgt_downloads, and rating_synced_at columns with rating index to catalog_releases',
+    up: (db) => {
+      if (!tableHasColumn(db, 'catalog_releases', 'user_rating')) {
+        db.exec(`ALTER TABLE catalog_releases ADD COLUMN user_rating REAL;`);
+      }
+      if (!tableHasColumn(db, 'catalog_releases', 'user_rating_votes')) {
+        db.exec(`ALTER TABLE catalog_releases ADD COLUMN user_rating_votes INTEGER;`);
+      }
+      if (!tableHasColumn(db, 'catalog_releases', 'rgt_downloads')) {
+        db.exec(`ALTER TABLE catalog_releases ADD COLUMN rgt_downloads INTEGER;`);
+      }
+      if (!tableHasColumn(db, 'catalog_releases', 'rating_synced_at')) {
+        db.exec(`ALTER TABLE catalog_releases ADD COLUMN rating_synced_at TEXT;`);
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_catalog_releases_user_rating
+          ON catalog_releases(user_rating DESC, id DESC);
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);

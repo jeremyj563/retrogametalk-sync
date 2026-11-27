@@ -42,6 +42,7 @@ import {
   findItemInstallForDevice,
   formatInstalledDevicesBadge,
 } from '../shared/deviceProfiles';
+import { formatUserRating } from '../shared/catalogRating';
 import type { DeviceUninstallResult } from '../hooks/useBulkStorageInstaller';
 import type {
   ActiveTransferState,
@@ -1021,6 +1022,18 @@ export function GameDetailDrawer({
       },
     ];
 
+    const effectiveRating = item.userRating ?? meta?.userRating ?? null;
+    const effectiveVotes = item.userRatingVotes ?? meta?.userRatingVotes ?? null;
+    if (effectiveRating !== null && effectiveRating > 0) {
+      const scoreFormatted = formatUserRating(effectiveRating);
+      rows.push({
+        label: 'Users Score',
+        value: effectiveVotes
+          ? `★ ${scoreFormatted} / 5.0 (${effectiveVotes.toLocaleString()} votes)`
+          : `★ ${scoreFormatted} / 5.0`,
+        mono: true,
+      });
+    }
     if (meta?.formats?.length) {
       rows.push({ label: 'Format', value: meta.formats.join(', ') });
     }
@@ -1055,6 +1068,11 @@ export function GameDetailDrawer({
       'released',
       'downloads',
       'updated',
+      'users score',
+      'user score',
+      'users rating',
+      'user rating',
+      'rating',
     ]);
     if (meta?.specs?.length) {
       for (const spec of meta.specs) {
@@ -1401,7 +1419,11 @@ export function GameDetailDrawer({
     }
   };
 
+  const effectiveHeaderRating = item.userRating ?? item.metadata?.userRating ?? null;
   const subtitleParts = [
+    effectiveHeaderRating !== null && effectiveHeaderRating > 0
+      ? `★ ${formatUserRating(effectiveHeaderRating)}`
+      : null,
     item.publisher,
     item.developer && item.developer !== item.publisher ? item.developer : null,
     item.releaseYear,

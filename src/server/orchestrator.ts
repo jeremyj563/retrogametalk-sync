@@ -7,6 +7,7 @@ import { Cron } from 'croner';
 import {
   acquireDistributedLock,
   appendActivityLog,
+  batchUpdateReleaseRatings,
   clearActivityLogs,
   clearPausedQueuedReleases,
   clearSyncRuns,
@@ -28,6 +29,7 @@ import {
   getStartupRecoverySummary,
   getSystemIndexState,
   listCatalogReleasesForRuleSync,
+  listCatalogSystemsWithItems,
   listPausedQueuedReleaseIds,
   listPinnedCatalogReleases,
   listReleasesNeedingRetry,
@@ -144,6 +146,7 @@ import type {
   DryRunSampleRelease,
   FsTreeNode,
   LogLevel,
+  RatingsSyncStatus,
   ReleaseFileRecord,
   ReleaseMetadata,
   RepositoryItemRecord,
@@ -505,6 +508,19 @@ export class ScraperOrchestrator extends EventEmitter {
     systemsCompleted: number;
     liveCancelledCount: number;
   } | null = null;
+  private ratingsSyncState: RatingsSyncStatus = {
+    active: false,
+    scope: null,
+    currentSystem: null,
+    systemsCompleted: 0,
+    systemsTotal: 0,
+    currentPage: 0,
+    totalPages: 0,
+    updatedCount: 0,
+    ratedCount: 0,
+    lastError: null,
+  };
+  private ratingsSyncAbortController: AbortController | null = null;
   private runFinishedWaiters: (() => void)[] = [];
   private pendingDownloadQueueIds: number[] = [];
   private pendingDownloadQueueSet = new Set<number>();
@@ -2160,9 +2176,35 @@ export class ScraperOrchestrator extends EventEmitter {
           fileRoles,
         );
         const prevMeta = existing.metadata;
+        let fallbackRating = extractedMeta.userRating ?? prevMeta?.userRating ?? existing.userRating ?? null;
+        let fallbackDownloads = extractedMeta.downloadsCount ?? prevMeta?.downloadsCount ?? null;
+        if (fallbackRating == null) {
+          try {
+            const ratingHit = await this.client.lookupSingleReleaseRatingViaRepoDb(
+              existing.remoteUrl,
+              existing.systemName,
+              existing.title,
+              cfg,
+              undefined,
+              runLogger,
+            );
+            if (ratingHit) {
+              if (ratingHit.userRating != null) fallbackRating = ratingHit.userRating;
+              if (!fallbackDownloads && ratingHit.rgtDownloadsText) {
+                fallbackDownloads = ratingHit.rgtDownloadsText;
+              }
+            }
+          } catch {
+            // Non-fatal: continue with detail HTML metadata
+          }
+        }
         const mergedMeta: ReleaseMetadata = {
           ...extractedMeta,
           detailHydrated: true,
+          userRating: fallbackRating,
+          userRatingVotes:
+            extractedMeta.userRatingVotes ?? prevMeta?.userRatingVotes ?? existing.userRatingVotes ?? null,
+          downloadsCount: fallbackDownloads,
           coverUrl: extractedMeta.coverUrl || prevMeta?.coverUrl || null,
           coverLocalRelPath: prevMeta?.coverLocalRelPath ?? null,
           screenshotUrls:
@@ -2512,6 +2554,7 @@ export class ScraperOrchestrator extends EventEmitter {
       auth: this.client.getAuthStatus(cfg, getLastAuthenticatedAt()),
       storage,
       indexer: this.getCatalogIndexerStatus(cfg),
+      ratingsSync: { ...this.ratingsSyncState },
       queueAutoResume:
         !this.activeRun && totals.queuedItems > 0 ? { ...this.queueAutoResumeStatus } : null,
       totals,
@@ -3062,6 +3105,169 @@ export class ScraperOrchestrator extends EventEmitter {
       currentSystem: null,
     };
     this.log('info', 'Catalog background indexing paused by user');
+    this.emitStatus();
+    return true;
+  }
+
+  async startRatingsSync(
+    scope: 'filtered' | 'full' = 'filtered',
+  ): Promise<{ started: boolean; targets: string[] }> {
+    if (this.ratingsSyncState.active) {
+      throw new Error('Users Score sync is already running.');
+    }
+
+    const cfg = getInternalConfig();
+    const catalogedSystems = listCatalogSystemsWithItems();
+    if (catalogedSystems.length === 0) {
+      throw new Error('Catalog is empty. Index at least one console before syncing Users Scores.');
+    }
+
+    let targetSlugs: string[];
+    if (scope === 'filtered') {
+      const targetScope = resolveTargetConsoleScope(cfg.systemFilter, catalogedSystems);
+      targetSlugs = targetScope.length > 0 ? targetScope : catalogedSystems;
+    } else {
+      targetSlugs = catalogedSystems;
+    }
+
+    const runAbort = new AbortController();
+    this.ratingsSyncAbortController = runAbort;
+    const signal = runAbort.signal;
+
+    this.ratingsSyncState = {
+      active: true,
+      scope,
+      currentSystem: targetSlugs[0] || null,
+      systemsCompleted: 0,
+      systemsTotal: targetSlugs.length,
+      currentPage: 0,
+      totalPages: 0,
+      updatedCount: 0,
+      ratedCount: 0,
+      lastError: null,
+    };
+    this.emitStatus();
+
+    const runLogger: LoggerFn = (level, msg, detail) => this.log(level, msg, detail ?? null);
+
+    void (async () => {
+      try {
+        const liveCfg = getInternalConfig();
+        if (!this.client.getAuthStatus(liveCfg).authenticated && liveCfg.username && liveCfg.password) {
+          const authRes = await this.client.login(liveCfg, signal, runLogger);
+          if (authRes.authenticated) {
+            recordSuccessfulLogin();
+          } else {
+            this.log(
+              'warn',
+              `Users Score sync could not authenticate (${authRes.message}); falling back to public top-rated pages.`,
+            );
+          }
+        }
+
+        this.log(
+          'info',
+          `Starting Users Score sync across ${targetSlugs.length} console(s) (${scope === 'full' ? 'all cataloged consoles' : 'target consoles'})`,
+        );
+
+        let systemsCompleted = 0;
+        for (const slug of targetSlugs) {
+          if (signal.aborted || this.shuttingDown) break;
+          this.ratingsSyncState = {
+            ...this.ratingsSyncState,
+            currentSystem: slug,
+            currentPage: 0,
+            totalPages: 0,
+          };
+          this.emitStatus();
+
+          try {
+            const crawlRes = await this.client.listConsoleRatingsFromRgt(slug, getInternalConfig(), {
+              signal,
+              log: runLogger,
+              onPageFetched: ({ page, totalPages, cards }) => {
+                if (signal.aborted || this.shuttingDown) return;
+                const persisted = batchUpdateReleaseRatings(
+                  cards.map((entry) => ({
+                    remoteUrl: entry.pageUrl,
+                    userRating: entry.userRating,
+                    rgtDownloads: entry.rgtDownloads,
+                    downloadsLabel: entry.rgtDownloadsText,
+                  })),
+                );
+                this.ratingsSyncState = {
+                  ...this.ratingsSyncState,
+                  currentSystem: slug,
+                  currentPage: page,
+                  totalPages,
+                  updatedCount: this.ratingsSyncState.updatedCount + persisted.matched,
+                  ratedCount: this.ratingsSyncState.ratedCount + persisted.ratedUpdated,
+                };
+                if (persisted.matched > 0) {
+                  this.emitCatalogUpdated('ratings_updated');
+                }
+                this.emitStatus();
+              },
+            });
+            if (crawlRes.usedFallback) {
+              this.log(
+                'info',
+                `Users Score sync for ${slug}: synced top page via public RGT database API (sign in for full multi-page ratings)`,
+              );
+            }
+          } catch (sysErr) {
+            if (signal.aborted || this.shuttingDown) break;
+            const msg = sysErr instanceof Error ? sysErr.message : String(sysErr);
+            this.log('warn', `Users Score sync skipped ${slug}: ${msg}`);
+          }
+
+          systemsCompleted += 1;
+          this.ratingsSyncState = {
+            ...this.ratingsSyncState,
+            systemsCompleted,
+          };
+          this.emitStatus();
+        }
+
+        if (!signal.aborted && !this.shuttingDown) {
+          this.log(
+            'info',
+            `Users Score sync complete: updated ${this.ratingsSyncState.updatedCount} release(s) (${this.ratingsSyncState.ratedCount} rated) across ${systemsCompleted} console(s)`,
+          );
+        }
+      } catch (err) {
+        if (!signal.aborted && !this.shuttingDown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.ratingsSyncState.lastError = msg;
+          this.log('warn', `Users Score sync paused: ${msg}`);
+        }
+      } finally {
+        if (this.ratingsSyncAbortController === runAbort) {
+          this.ratingsSyncAbortController = null;
+        }
+        this.ratingsSyncState = {
+          ...this.ratingsSyncState,
+          active: false,
+          currentSystem: null,
+        };
+        this.emitCatalogUpdated('ratings_finished');
+        this.emitStatus();
+      }
+    })();
+
+    return { started: true, targets: targetSlugs };
+  }
+
+  stopRatingsSync(): boolean {
+    if (!this.ratingsSyncState.active || !this.ratingsSyncAbortController) return false;
+    this.ratingsSyncAbortController.abort();
+    this.ratingsSyncAbortController = null;
+    this.ratingsSyncState = {
+      ...this.ratingsSyncState,
+      active: false,
+      currentSystem: null,
+    };
+    this.log('info', 'Users Score sync paused by user');
     this.emitStatus();
     return true;
   }
@@ -7193,6 +7399,9 @@ export class ScraperOrchestrator extends EventEmitter {
     }
     if (this.indexerAbortController) {
       this.indexerAbortController.abort();
+    }
+    if (this.ratingsSyncAbortController) {
+      this.ratingsSyncAbortController.abort();
     }
 
     // Persist interruption metadata BEFORE aborting the active download queue so that

@@ -29,6 +29,11 @@ import {
 import type { AdaptiveRateLimiter } from './rateLimiter.ts';
 import { classifyFileRole, decodeHtmlEntities, deriveReleaseTags, hasHtmlEntities } from './releaseTags.ts';
 import {
+  normalizeUserRating,
+  normalizeVoteCount,
+  parseCompactCount,
+} from '../shared/catalogRating.ts';
+import {
   CANONICAL_SYSTEM_ALIAS_GROUPS,
   canonicalizeSystemSlug,
   extractGamePlatformSlugsFromWpTypes,
@@ -377,6 +382,114 @@ export interface WpPostMetadata {
   coverUrl?: string | null;
   screenshotUrls?: string[];
   downloadHints: { filename: string; fileSize: string }[];
+}
+
+export interface RgtCardRatingEntry {
+  pageUrl: string;
+  userRating: number | null;
+  rgtDownloads: number | null;
+  rgtDownloadsText: string | null;
+}
+
+export interface ParsedRgtDatabasePage {
+  cards: RgtCardRatingEntry[];
+  nextPageUrl: string | null;
+  totalPages: number | null;
+}
+
+export function normalizeComparableReleaseUrl(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl.trim());
+    u.hash = '';
+    u.search = '';
+    const pathname = u.pathname.replace(/\/+$/, '');
+    return `${u.origin.toLowerCase()}${pathname.toLowerCase()}`;
+  } catch {
+    return rawUrl.trim().split('#')[0].split('?')[0].replace(/\/+$/, '').toLowerCase();
+  }
+}
+
+/**
+ * Parses RetroGameTalk database/archive HTML cards (`.game-container`) to extract
+ * each release's canonical URL, Users Score (out of 5.0, null when 0/unrated),
+ * RGT total downloads counter, and next/total pagination metadata.
+ */
+export function parseRgtDatabaseCardsHtml(html: string, baseUrl: string): ParsedRgtDatabasePage {
+  if (!html || !html.trim()) {
+    return { cards: [], nextPageUrl: null, totalPages: null };
+  }
+  const $ = loadHtml(html);
+  const cards: RgtCardRatingEntry[] = [];
+  const seen = new Set<string>();
+
+  $('.game-container').each((_, el) => {
+    const $card = $(el);
+    const rawHref =
+      $card.find('a.cover-link[href]').first().attr('href') ||
+      $card.find('.bottom-section a[href]').first().attr('href') ||
+      $card.find('a[href]').first().attr('href');
+    if (!rawHref) return;
+    let pageUrl: string;
+    try {
+      const resolved = new URL(rawHref.trim(), baseUrl);
+      resolved.hash = '';
+      resolved.search = '';
+      pageUrl = resolved.toString();
+    } catch {
+      return;
+    }
+    const key = normalizeComparableReleaseUrl(pageUrl);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+
+    const scoreText =
+      $card.find('.score').first().text().replace(/\s+/g, ' ').trim() ||
+      $card.find('[title*="Users Rating" i], [title*="Users Score" i]').first().text().replace(/\s+/g, ' ').trim();
+    const userRating = normalizeUserRating(scoreText);
+
+    const dlTextRaw =
+      $card.find('.downloads').first().text().replace(/\s+/g, ' ').trim() ||
+      $card.find('[title*="Total Downloads" i]').first().text().replace(/\s+/g, ' ').trim();
+    const rgtDownloadsText = dlTextRaw || null;
+    const rgtDownloads = parseCompactCount(rgtDownloadsText);
+
+    cards.push({
+      pageUrl,
+      userRating,
+      rgtDownloads,
+      rgtDownloadsText,
+    });
+  });
+
+  let nextPageUrl: string | null = null;
+  const rawNextHref =
+    $('a.next.page-numbers[href]').first().attr('href') ||
+    $('a.page-numbers.next[href]').first().attr('href') ||
+    $('a[rel="next"][href]').first().attr('href') ||
+    $('link[rel="next"][href]').first().attr('href') ||
+    null;
+  if (rawNextHref) {
+    try {
+      nextPageUrl = new URL(rawNextHref.trim(), baseUrl).toString();
+    } catch {
+      nextPageUrl = null;
+    }
+  }
+
+  let totalPages: number | null = null;
+  $('a.page-numbers, span.page-numbers, .pagination a, .pagination span, [data-page]').each((_, el) => {
+    const $el = $(el);
+    const candidates = [$el.attr('data-page'), $el.text().replace(/,/g, '').trim()];
+    for (const cand of candidates) {
+      if (!cand || !/^\d+$/.test(cand)) continue;
+      const n = Number(cand);
+      if (Number.isInteger(n) && n > 0 && n <= 10_000) {
+        totalPages = totalPages === null ? n : Math.max(totalPages, n);
+      }
+    }
+  });
+
+  return { cards, nextPageUrl, totalPages };
 }
 
 export interface DownloadProgress {
@@ -4906,6 +5019,298 @@ export class RetroGameTalkClient {
   }
 
   /**
+   * Crawls RetroGameTalk's database archive pages sorted by Users Score (`orderby=meta__rating&order=desc`)
+   * for a console, extracting each release's Users Score and total downloads count.
+   * Stops early as soon as a full page contains only unrated (`0`) entries.
+   */
+  async listConsoleRatingsFromRgt(
+    systemSlug: string,
+    config: ScraperConfigInternal,
+    options: {
+      signal?: AbortSignal;
+      log?: LoggerFn;
+      maxPages?: number;
+      onPageFetched?: (info: {
+        page: number;
+        totalPages: number;
+        cards: RgtCardRatingEntry[];
+      }) => void | Promise<void>;
+    } = {},
+  ): Promise<{
+    supported: boolean;
+    cards: RgtCardRatingEntry[];
+    pagesFetched: number;
+    totalPages: number;
+    stoppedEarlyUnrated: boolean;
+    usedFallback: boolean;
+    errorReason?: string | null;
+  }> {
+    const { signal, log, maxPages, onPageFetched } = options;
+    const cleanSlug = systemSlug.trim().toLowerCase();
+    if (!cleanSlug) {
+      return {
+        supported: false,
+        cards: [],
+        pagesFetched: 0,
+        totalPages: 0,
+        stoppedEarlyUnrated: false,
+        usedFallback: false,
+        errorReason: 'empty_slug',
+      };
+    }
+
+    const restBase = await this.resolveWpRestBaseForSystem(cleanSlug, config, signal, log);
+    if (!restBase || restBase === 'pages' || restBase === 'media' || restBase === 'blocks') {
+      return {
+        supported: false,
+        cards: [],
+        pagesFetched: 0,
+        totalPages: 0,
+        stoppedEarlyUnrated: false,
+        usedFallback: false,
+        errorReason: 'unsupported_rest_base',
+      };
+    }
+
+    const repoBase = ensureTrailingSlash(config.baseUrl);
+    const buildArchivePageUrl = (pageNum: number): string => {
+      const qs = new URLSearchParams();
+      qs.append('types[]', restBase);
+      qs.set('orderby', 'meta__rating');
+      qs.set('order', 'desc');
+      const relPath = pageNum <= 1 ? `?${qs.toString()}` : `page/${pageNum}/?${qs.toString()}`;
+      return new URL(relPath, repoBase).toString();
+    };
+
+    const collected: RgtCardRatingEntry[] = [];
+    const seenUrls = new Set<string>();
+    let page = 1;
+    let totalPages = 1;
+    let pagesFetched = 0;
+    let stoppedEarlyUnrated = false;
+    let reauthedOnce = false;
+    let nextUrl: string | null = buildArchivePageUrl(1);
+    let prevPageFirstKey: string | null = null;
+
+    while (nextUrl) {
+      if (signal?.aborted) break;
+      if (maxPages && pagesFetched >= maxPages) break;
+
+      const currentUrl = nextUrl;
+      const { response, finalUrl } = await this.fetchWithRedirects(
+        currentUrl,
+        config,
+        {
+          method: 'GET',
+          headers: {
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+        },
+        signal,
+        log,
+      );
+
+      if (
+        !reauthedOnce &&
+        (response.status === 401 ||
+          response.status === 403 ||
+          finalUrl.includes('/login') ||
+          finalUrl.includes('wp-login.php')) &&
+        config.username &&
+        config.password
+      ) {
+        reauthedOnce = true;
+        await response.body?.cancel().catch(() => undefined);
+        const auth = await this.login(config, signal, log);
+        if (!auth.authenticated) {
+          log?.('warn', `Ratings sync re-authentication failed for ${cleanSlug}: ${auth.message}`);
+          break;
+        }
+        continue;
+      }
+
+      if (response.status === 404 && page > 1) {
+        await response.body?.cancel().catch(() => undefined);
+        break;
+      }
+
+      if (!response.ok) {
+        const errBody = await response.text().catch(() => '');
+        if (this.isCloudflareChallenge(response.status, response.headers, errBody)) {
+          throw new Error(`Blocked by Cloudflare bot protection (HTTP ${response.status}) at ${finalUrl}`);
+        }
+        if (page === 1) break;
+        log?.('warn', `Ratings sync for ${cleanSlug} stopped at page ${page} (HTTP ${response.status})`);
+        break;
+      }
+
+      const html = await response.text();
+      if (finalUrl.includes('/login') || finalUrl.includes('wp-login.php')) {
+        break;
+      }
+
+      const parsed = parseRgtDatabaseCardsHtml(html, finalUrl || repoBase);
+      if (parsed.cards.length === 0) {
+        if (page === 1) break;
+        break;
+      }
+
+      const firstKey = normalizeComparableReleaseUrl(parsed.cards[0].pageUrl);
+      if (prevPageFirstKey && firstKey === prevPageFirstKey) {
+        // Guard against pagination loop where page N repeats page N-1
+        break;
+      }
+      prevPageFirstKey = firstKey;
+
+      pagesFetched = page;
+      if (parsed.totalPages && parsed.totalPages > totalPages) {
+        totalPages = parsed.totalPages;
+      } else if (parsed.nextPageUrl && totalPages <= page) {
+        totalPages = page + 1;
+      }
+
+      const freshCards: RgtCardRatingEntry[] = [];
+      let ratedOnPage = 0;
+      for (const card of parsed.cards) {
+        const key = normalizeComparableReleaseUrl(card.pageUrl);
+        if (seenUrls.has(key)) continue;
+        seenUrls.add(key);
+        if (card.userRating !== null && card.userRating > 0) {
+          ratedOnPage += 1;
+        }
+        freshCards.push(card);
+        collected.push(card);
+      }
+
+      if (onPageFetched && !signal?.aborted) {
+        await onPageFetched({
+          page,
+          totalPages: Math.max(totalPages, page),
+          cards: freshCards,
+        });
+      }
+
+      // Sorted descending by meta__rating: once an entire page has no rated entries, all remaining pages are unrated.
+      if (ratedOnPage === 0) {
+        stoppedEarlyUnrated = true;
+        break;
+      }
+
+      if (parsed.nextPageUrl) {
+        nextUrl = parsed.nextPageUrl;
+        page += 1;
+      } else if (parsed.totalPages && page < parsed.totalPages) {
+        page += 1;
+        nextUrl = buildArchivePageUrl(page);
+      } else {
+        nextUrl = null;
+      }
+    }
+
+    // Fallback to public repo-db/v1/database page 1 if authenticated HTML crawl yielded nothing
+    if (pagesFetched === 0 && !signal?.aborted) {
+      try {
+        const qs = new URLSearchParams({
+          types: restBase,
+          orderby: 'meta__rating',
+          order: 'desc',
+        });
+        const endpoint = new URL(`wp-json/repo-db/v1/database?${qs.toString()}`, repoBase).toString();
+        const { response } = await this.fetchWithRedirects(
+          endpoint,
+          config,
+          { method: 'GET', headers: { Accept: 'application/json' } },
+          signal,
+          log,
+        );
+        if (response.ok) {
+          const payload = (await response.json()) as {
+            html?: string;
+            max_num_pages?: number;
+          };
+          const parsed = parseRgtDatabaseCardsHtml(String(payload?.html || ''), repoBase);
+          if (parsed.cards.length > 0) {
+            pagesFetched = 1;
+            totalPages = Math.max(1, Number(payload?.max_num_pages) || 1);
+            collected.push(...parsed.cards);
+            if (onPageFetched && !signal?.aborted) {
+              await onPageFetched({ page: 1, totalPages: 1, cards: parsed.cards });
+            }
+            return {
+              supported: true,
+              cards: collected,
+              pagesFetched: 1,
+              totalPages: 1,
+              stoppedEarlyUnrated: false,
+              usedFallback: true,
+              errorReason: null,
+            };
+          }
+        } else {
+          await response.body?.cancel().catch(() => undefined);
+        }
+      } catch (fallbackErr) {
+        if (signal?.aborted) throw fallbackErr;
+        log?.('debug', `[Ratings] repo-db fallback failed for ${cleanSlug}`, formatErrorDetails(fallbackErr));
+      }
+    }
+
+    return {
+      supported: pagesFetched > 0,
+      cards: collected,
+      pagesFetched,
+      totalPages: Math.max(totalPages, pagesFetched),
+      stoppedEarlyUnrated,
+      usedFallback: false,
+      errorReason: pagesFetched > 0 ? null : 'no_cards_parsed',
+    };
+  }
+
+  /**
+   * Lightweight single-release rating lookup via RGT's `repo-db/v1/database` search endpoint
+   * when an individual game detail page doesn't directly expose a rating badge.
+   */
+  async lookupSingleReleaseRatingViaRepoDb(
+    pageUrl: string,
+    systemSlug: string,
+    title: string,
+    config: ScraperConfigInternal,
+    signal?: AbortSignal,
+    log?: LoggerFn,
+  ): Promise<RgtCardRatingEntry | null> {
+    try {
+      const cleanTitle = title.replace(/\([^)]*\)|\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!cleanTitle) return null;
+      const restBase = await this.resolveWpRestBaseForSystem(systemSlug, config, signal, log);
+      const repoBase = ensureTrailingSlash(config.baseUrl);
+      const qs = new URLSearchParams({ search: cleanTitle.slice(0, 64) });
+      if (restBase && restBase !== 'pages' && restBase !== 'media') {
+        qs.set('types', restBase);
+      }
+      const endpoint = new URL(`wp-json/repo-db/v1/database?${qs.toString()}`, repoBase).toString();
+      const { response } = await this.fetchWithRedirects(
+        endpoint,
+        config,
+        { method: 'GET', headers: { Accept: 'application/json' } },
+        signal,
+        log,
+      );
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        return null;
+      }
+      const payload = (await response.json()) as { html?: string };
+      const parsed = parseRgtDatabaseCardsHtml(String(payload?.html || ''), repoBase);
+      const targetKey = normalizeComparableReleaseUrl(pageUrl);
+      return parsed.cards.find((c) => normalizeComparableReleaseUrl(c.pageUrl) === targetKey) ?? null;
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      log?.('debug', `[Ratings] Single-release lookup failed for ${pageUrl}`, formatErrorDetails(err));
+      return null;
+    }
+  }
+
+  /**
    * Queries RetroGameTalk's WordPress REST API (`wp/v2/<postType>?slug=...&_embed`)
    * for authoritative taxonomies (genre, language, source, region, developer, publisher, format)
    * and ACF fields (`game_name`, `download_links`).
@@ -5065,6 +5470,8 @@ export class RetroGameTalkClient {
     }
 
     let downloadsCount: string | null = null;
+    let userRating: number | null = null;
+    let userRatingVotes: number | null = null;
     let releasedAgo: string | null = null;
     let updatedDate: string | null = null;
     $('.rgt-title-stats > div').each((_, div) => {
@@ -5072,7 +5479,14 @@ export class RetroGameTalkClient {
       const val = $(div).find('dd').first().text().replace(/\s+/g, ' ').trim();
       if (!val) return;
       if (label.includes('download')) downloadsCount = val;
-      else if (label.includes('release')) releasedAgo = val;
+      else if (label.includes('score') || label.includes('rating')) {
+        const parsedScore = normalizeUserRating(val);
+        if (parsedScore !== null) userRating = parsedScore;
+        const votesMatch = val.match(/\((\d[\d,]*)\s*(?:vote|rating|review)?/i);
+        if (votesMatch?.[1]) {
+          userRatingVotes = normalizeVoteCount(votesMatch[1]);
+        }
+      } else if (label.includes('release')) releasedAgo = val;
       else if (label.includes('update')) updatedDate = val;
     });
 
@@ -5124,8 +5538,50 @@ export class RetroGameTalkClient {
         publisher = value;
       } else if ((lower === 'year' || lower.includes('release year')) && !releaseYear) {
         releaseYear = value;
+      } else if ((lower.includes('users score') || lower.includes('user score') || lower.includes('users rating') || lower === 'rating') && userRating === null) {
+        const parsedScore = normalizeUserRating(value);
+        if (parsedScore !== null) userRating = parsedScore;
+        const votesMatch = value.match(/\((\d[\d,]*)\s*(?:vote|rating|review)?/i);
+        if (votesMatch?.[1] && userRatingVotes === null) {
+          userRatingVotes = normalizeVoteCount(votesMatch[1]);
+        }
       }
     });
+
+    // Additional resilient selectors for RGT rating widgets / Schema.org aggregateRating
+    if (userRating === null) {
+      const ratingTextCandidates = [
+        $('[itemprop="ratingValue"]').first().attr('content'),
+        $('[itemprop="ratingValue"]').first().text(),
+        $('.rgt-score, .rgt-rating, .rgt-user-score, .users-score, .rmp-rating-widget__results .js-rmp-avg-rating, .kk-star-ratings .kksr-legend, .post-ratings').first().text(),
+        $('.score[title*="Rating" i], .score[title*="Score" i], [title*="Users Rating" i], [title*="Users Score" i]').first().text(),
+        $('[data-rating]').first().attr('data-rating'),
+        $('[data-score]').first().attr('data-score'),
+      ];
+      for (const cand of ratingTextCandidates) {
+        const parsedScore = normalizeUserRating(cand);
+        if (parsedScore !== null) {
+          userRating = parsedScore;
+          break;
+        }
+      }
+    }
+    if (userRatingVotes === null) {
+      const voteCandidates = [
+        $('[itemprop="ratingCount"]').first().attr('content'),
+        $('[itemprop="ratingCount"]').first().text(),
+        $('[itemprop="reviewCount"]').first().attr('content'),
+        $('.js-rmp-vote-count, .rgt-rating-votes, .rgt-score-votes').first().text(),
+        $('[data-votes]').first().attr('data-votes'),
+      ];
+      for (const cand of voteCandidates) {
+        const parsedVotes = normalizeVoteCount(cand);
+        if (parsedVotes !== null) {
+          userRatingVotes = parsedVotes;
+          break;
+        }
+      }
+    }
 
     // Cover art URL (prioritize full-res zoom links, WP featured media, largest srcset, and unresized originals)
     const rawCoverUrls: (string | null | undefined)[] = [];
@@ -5330,6 +5786,8 @@ export class RetroGameTalkClient {
       formats,
       releaseTags,
       downloadsCount,
+      ...(userRating !== null ? { userRating } : {}),
+      ...(userRatingVotes !== null ? { userRatingVotes } : {}),
       releasedAgo,
       updatedDate,
       publishedAt,

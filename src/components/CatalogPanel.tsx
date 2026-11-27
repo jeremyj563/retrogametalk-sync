@@ -47,6 +47,12 @@ import {
   normalizeCatalogSort,
 } from '../shared/catalogSort';
 import {
+  formatUserRating,
+  normalizeCatalogRatingMode,
+  normalizeMinRatingFilter,
+  type CatalogRatingFilterMode,
+} from '../shared/catalogRating';
+import {
   GRANULAR_STATUS_VALUES,
   migrateLegacyCatalogDownloadPrefs,
   toggleCatalogDownloadedFilter,
@@ -115,6 +121,7 @@ import { CatalogDeviceScopeDropdown } from './CatalogDeviceScopeDropdown';
 import { CatalogStatsPanel } from './CatalogStatsPanel';
 import { GameDetailDrawer, type GameDetailNavigation } from './GameDetailDrawer';
 import { MultiSelectFilterDropdown, type FilterDropdownOption } from './MultiSelectFilterDropdown';
+import { RatingFilterDropdown } from './RatingFilterDropdown';
 
 interface CatalogPanelProps {
   config: ScraperConfigPublic;
@@ -149,6 +156,8 @@ interface CatalogPanelProps {
     options?: { forceFull?: boolean },
   ) => Promise<void>;
   onStopCatalogIndex?: () => Promise<void>;
+  onStartRatingsSync?: (scope?: 'filtered' | 'full') => Promise<void>;
+  onStopRatingsSync?: () => Promise<void>;
   onRefreshStatus: () => Promise<void>;
   onEasterEggEffect?: (effect: SecretSearchEffect | 'clear_askew') => void;
 }
@@ -320,6 +329,8 @@ interface CatalogViewPrefs {
   favoriteOnly: boolean;
   collectionId: number | null;
   syncOverrideFilter: SyncOverrideMode | null;
+  minRating: number | null;
+  ratingMode: CatalogRatingFilterMode;
   tags: string[];
   tagsMode: FilterMatchMode;
   genres: string[];
@@ -356,6 +367,8 @@ const DEFAULT_CATALOG_VIEW_PREFS: CatalogViewPrefs = {
   favoriteOnly: false,
   collectionId: null,
   syncOverrideFilter: null,
+  minRating: null,
+  ratingMode: 'all',
   tags: [],
   tagsMode: 'any',
   genres: [],
@@ -452,6 +465,8 @@ function loadInitialCatalogViewPrefs(): CatalogViewPrefs {
         parsed.syncOverrideFilter === 'pin' || parsed.syncOverrideFilter === 'ignore'
           ? parsed.syncOverrideFilter
           : null,
+      minRating: normalizeMinRatingFilter(parsed.minRating),
+      ratingMode: normalizeCatalogRatingMode(parsed.ratingMode),
       tags: sanitizeStoredList(parsed.tags, parsed.tagFilter),
       tagsMode: sanitizeStoredMatchMode(parsed.tagsMode),
       genres: sanitizeStoredList(parsed.genres, parsed.genreFilter),
@@ -484,6 +499,8 @@ function buildCatalogQueryKey(
     | 'favoriteOnly'
     | 'collectionId'
     | 'syncOverrideFilter'
+    | 'minRating'
+    | 'ratingMode'
     | 'tags'
     | 'tagsMode'
     | 'genres'
@@ -509,6 +526,8 @@ function buildCatalogQueryKey(
     prefs.favoriteOnly,
     prefs.collectionId,
     prefs.syncOverrideFilter,
+    prefs.minRating,
+    prefs.ratingMode,
     prefs.tags,
     prefs.tags.length > 1 ? prefs.tagsMode : 'any',
     prefs.genres,
@@ -557,6 +576,8 @@ export function CatalogPanel({
   onClearDownloadQueue,
   onStartCatalogIndex,
   onStopCatalogIndex,
+  onStartRatingsSync,
+  onStopRatingsSync,
   onRefreshStatus,
   onEasterEggEffect,
 }: CatalogPanelProps) {
@@ -653,6 +674,13 @@ export function CatalogPanel({
   const [syncOverrideFilter, setSyncOverrideFilter] = useState<SyncOverrideMode | null>(
     () => memoryCatalogViewPrefs.syncOverrideFilter,
   );
+  const [minRating, setMinRating] = useState<number | null>(
+    () => memoryCatalogViewPrefs.minRating,
+  );
+  const [ratingMode, setRatingMode] = useState<CatalogRatingFilterMode>(
+    () => memoryCatalogViewPrefs.ratingMode,
+  );
+  const [ratingsSyncBusy, setRatingsSyncBusy] = useState(false);
   const [collections, setCollections] = useState<UserCollectionRecord[]>([]);
   const [creatingCollectionQuick, setCreatingCollectionQuick] = useState(false);
   const [newCollectionQuickName, setNewCollectionQuickName] = useState('');
@@ -809,6 +837,8 @@ export function CatalogPanel({
         favoriteOnly,
         collectionId,
         syncOverrideFilter,
+        minRating,
+        ratingMode,
         tags,
         tags.length > 1 ? tagsMode : 'any',
         genres,
@@ -831,6 +861,8 @@ export function CatalogPanel({
       favoriteOnly,
       collectionId,
       syncOverrideFilter,
+      minRating,
+      ratingMode,
       tags,
       tagsMode,
       genres,
@@ -870,6 +902,8 @@ export function CatalogPanel({
       favoriteOnly,
       collectionId,
       syncOverrideFilter,
+      minRating,
+      ratingMode,
       tags,
       tagsMode,
       genres,
@@ -902,6 +936,8 @@ export function CatalogPanel({
     favoriteOnly,
     collectionId,
     syncOverrideFilter,
+    minRating,
+    ratingMode,
     tags,
     tagsMode,
     genres,
@@ -949,6 +985,8 @@ export function CatalogPanel({
       if (favoriteOnly) qs.set('favoriteOnly', 'true');
       if (collectionId !== null) qs.set('collectionId', String(collectionId));
       if (syncOverrideFilter) qs.set('syncOverride', syncOverrideFilter);
+      if (ratingMode !== 'all') qs.set('ratingMode', ratingMode);
+      if (minRating !== null && ratingMode !== 'unrated') qs.set('minRating', minRating.toFixed(1));
       for (const t of tags) qs.append('tag', t);
       if (tags.length > 1) qs.set('tagMode', tagsMode);
       for (const g of genres) qs.append('genre', g);
@@ -973,6 +1011,8 @@ export function CatalogPanel({
       favoriteOnly,
       collectionId,
       syncOverrideFilter,
+      minRating,
+      ratingMode,
       tags,
       tagsMode,
       genres,
@@ -1042,6 +1082,8 @@ export function CatalogPanel({
             favoriteOnly,
             collectionId,
             syncOverrideFilter,
+            minRating,
+            ratingMode,
             tags,
             tagsMode,
             genres,
@@ -1148,6 +1190,8 @@ export function CatalogPanel({
       favoriteOnly,
       collectionId,
       syncOverrideFilter,
+      minRating,
+      ratingMode,
       tags,
       tagsMode,
       genres,
@@ -1255,6 +1299,8 @@ export function CatalogPanel({
           favoriteOnly,
           collectionId,
           syncOverrideFilter,
+          minRating,
+          ratingMode,
           tags,
           tagsMode,
           genres,
@@ -1287,6 +1333,8 @@ export function CatalogPanel({
     favoriteOnly,
     collectionId,
     syncOverrideFilter,
+    minRating,
+    ratingMode,
     tags,
     tagsMode,
     genres,
@@ -2303,6 +2351,8 @@ export function CatalogPanel({
       favoriteOnly: favoriteOnly || undefined,
       collectionId: collectionId ?? undefined,
       syncOverride: syncOverrideFilter ?? undefined,
+      minRating: minRating !== null && ratingMode !== 'unrated' ? minRating : undefined,
+      ratingMode: ratingMode !== 'all' ? ratingMode : undefined,
       tag: tags,
       tagMode: tags.length > 1 ? tagsMode : undefined,
       genre: genres,
@@ -2325,6 +2375,8 @@ export function CatalogPanel({
     favoriteOnly,
     collectionId,
     syncOverrideFilter,
+    minRating,
+    ratingMode,
     tags,
     tagsMode,
     genres,
@@ -2931,6 +2983,38 @@ export function CatalogPanel({
       });
     }
 
+    if (ratingMode === 'unrated') {
+      tokens.push({
+        key: 'rating:unrated',
+        groupLabel: 'Score',
+        valueLabel: 'Unrated',
+        matchAll: false,
+        onRemove: () => {
+          setRatingMode('all');
+          setMinRating(null);
+        },
+      });
+    } else if (minRating !== null) {
+      tokens.push({
+        key: `rating:min:${minRating}`,
+        groupLabel: 'Score',
+        valueLabel: `≥ ${formatUserRating(minRating)}★`,
+        matchAll: false,
+        onRemove: () => {
+          setMinRating(null);
+          setRatingMode('all');
+        },
+      });
+    } else if (ratingMode === 'rated') {
+      tokens.push({
+        key: 'rating:rated',
+        groupLabel: 'Score',
+        valueLabel: 'Rated',
+        matchAll: false,
+        onRemove: () => setRatingMode('all'),
+      });
+    }
+
     return tokens;
   }, [
     search,
@@ -2953,6 +3037,8 @@ export function CatalogPanel({
     collectionId,
     collections,
     syncOverrideFilter,
+    minRating,
+    ratingMode,
     config.systemFilter,
     config.allowedReleaseTypes,
   ]);
@@ -3198,6 +3284,42 @@ export function CatalogPanel({
       });
     }
 
+    if (ratingMode === 'unrated') {
+      groups.push({
+        key: 'rating:unrated',
+        groupLabel: 'Score',
+        valueLabel: 'Unrated',
+        tooltip: 'Showing unrated games only — click to adjust',
+        onEdit: () => setOpenFilterId('rating'),
+        onClear: () => {
+          setRatingMode('all');
+          setMinRating(null);
+        },
+      });
+    } else if (minRating !== null) {
+      const scoreText = formatUserRating(minRating);
+      groups.push({
+        key: `rating:min:${scoreText}`,
+        groupLabel: 'Score',
+        valueLabel: `≥ ${scoreText}★`,
+        tooltip: `Users Score at least ${scoreText} / 5.0 — click to adjust`,
+        onEdit: () => setOpenFilterId('rating'),
+        onClear: () => {
+          setMinRating(null);
+          setRatingMode('all');
+        },
+      });
+    } else if (ratingMode === 'rated') {
+      groups.push({
+        key: 'rating:rated',
+        groupLabel: 'Score',
+        valueLabel: 'Rated',
+        tooltip: 'Showing games with a Users Score — click to adjust',
+        onEdit: () => setOpenFilterId('rating'),
+        onClear: () => setRatingMode('all'),
+      });
+    }
+
     return groups;
   }, [
     search,
@@ -3220,6 +3342,8 @@ export function CatalogPanel({
     collectionId,
     collections,
     syncOverrideFilter,
+    minRating,
+    ratingMode,
     config.systemFilter,
     config.allowedReleaseTypes,
   ]);
@@ -3246,6 +3370,8 @@ export function CatalogPanel({
     setFavoriteOnly(false);
     setCollectionId(null);
     setSyncOverrideFilter(null);
+    setMinRating(null);
+    setRatingMode('all');
     setTags([]);
     setTagsMode('any');
     setGenres([]);
@@ -3999,6 +4125,44 @@ export function CatalogPanel({
                   ))}
                   <option value="__new__">+ New Collection…</option>
                 </select>
+
+                <RatingFilterDropdown
+                  minRating={minRating}
+                  ratingMode={ratingMode}
+                  counts={facets.counts?.ratings}
+                  ratingsSync={status.ratingsSync}
+                  open={openFilterId === 'rating'}
+                  onOpenChange={(open) => setOpenFilterId(open ? 'rating' : null)}
+                  onChange={({ minRating: nextMin, ratingMode: nextMode }) => {
+                    setMinRating(nextMin);
+                    setRatingMode(nextMode);
+                  }}
+                  onStartRatingsSync={
+                    onStartRatingsSync
+                      ? async (scope = 'filtered') => {
+                          setRatingsSyncBusy(true);
+                          try {
+                            await onStartRatingsSync(scope);
+                          } finally {
+                            setRatingsSyncBusy(false);
+                          }
+                        }
+                      : undefined
+                  }
+                  onStopRatingsSync={
+                    onStopRatingsSync
+                      ? async () => {
+                          setRatingsSyncBusy(true);
+                          try {
+                            await onStopRatingsSync();
+                          } finally {
+                            setRatingsSyncBusy(false);
+                          }
+                        }
+                      : undefined
+                  }
+                  syncBusy={ratingsSyncBusy}
+                />
               </div>
             </div>
 
@@ -4443,10 +4607,15 @@ export function CatalogPanel({
               const allTargetsIndexed =
                 targetSystems.length > 0 && unindexedTargetCount === 0;
               const canUpdateTargets = Boolean(onStartCatalogIndex) && targetSystems.length > 0;
+              const ratingsSync = status.ratingsSync;
+              const canSyncRatings =
+                Boolean(onStartRatingsSync) && status.totals.totalCatalogItems > 0;
               const isOpen =
                 indexer.active ||
+                Boolean(ratingsSync?.active) ||
                 indexer.remainingUnindexedSystems > 0 ||
-                canUpdateTargets;
+                canUpdateTargets ||
+                canSyncRatings;
               const freshnessTooltip = `Fresh = catalog metadata checked against RetroGameTalk within 12h (${targetFreshness.fresh.length}/${targetSystems.length}). Stale = last checked >12h ago (${staleTargetCount}).${
                 targetFreshness.oldestIndexedAt
                   ? ` Oldest target check: ${new Date(targetFreshness.oldestIndexedAt).toLocaleString()}.`
@@ -4499,6 +4668,32 @@ export function CatalogPanel({
                                 {indexer.mode === 'delta' ? 'updated' : 'indexed'}
                               </span>
                             </>
+                          ) : ratingsSync?.active ? (
+                            <>
+                              <span className="text-crt-amber font-medium">
+                                Syncing Users Scores{' '}
+                                {ratingsSync.systemsCompleted + (ratingsSync.currentSystem ? 1 : 0)}/
+                                {Math.max(1, ratingsSync.systemsTotal)}
+                              </span>
+                              {ratingsSync.currentSystem && (
+                                <>
+                                  <span aria-hidden="true" className="text-crt-muted">·</span>
+                                  <span className="text-crt-text">{ratingsSync.currentSystem}</span>
+                                </>
+                              )}
+                              {ratingsSync.totalPages > 0 && (
+                                <>
+                                  <span aria-hidden="true" className="text-crt-muted">·</span>
+                                  <span className="text-crt-muted">
+                                    Page {ratingsSync.currentPage}/{ratingsSync.totalPages}
+                                  </span>
+                                </>
+                              )}
+                              <span aria-hidden="true" className="text-crt-muted">·</span>
+                              <span className="text-crt-muted">
+                                {ratingsSync.ratedCount.toLocaleString()} rated
+                              </span>
+                            </>
                           ) : (
                             <>
                               {targetAttentionCount > 0 ? (
@@ -4549,6 +4744,29 @@ export function CatalogPanel({
                                           ? indexer.currentPage / indexer.totalPages
                                           : 0)) /
                                         Math.max(1, indexer.systemsTotal)) *
+                                        100,
+                                    ),
+                                  ),
+                                )}%`,
+                              }}
+                            />
+                          </div>
+                        )}
+                        {!indexer.active && ratingsSync?.active && (
+                          <div className="h-1 w-full max-w-md bg-crt-bg border border-crt-border rounded-sm overflow-hidden">
+                            <div
+                              className="h-full bg-crt-amber crt-indexer-bar"
+                              style={{
+                                width: `${Math.min(
+                                  100,
+                                  Math.max(
+                                    6,
+                                    Math.round(
+                                      ((ratingsSync.systemsCompleted +
+                                        (ratingsSync.totalPages > 0
+                                          ? ratingsSync.currentPage / ratingsSync.totalPages
+                                          : 0)) /
+                                        Math.max(1, ratingsSync.systemsTotal)) *
                                         100,
                                     ),
                                   ),
@@ -4627,6 +4845,43 @@ export function CatalogPanel({
                             Full Re-index
                           </button>
                         )}
+                        {ratingsSync?.active && onStopRatingsSync ? (
+                          <button
+                            type="button"
+                            disabled={ratingsSyncBusy}
+                            onClick={async () => {
+                              setRatingsSyncBusy(true);
+                              try {
+                                await onStopRatingsSync();
+                              } finally {
+                                setRatingsSyncBusy(false);
+                              }
+                            }}
+                            title="Pause Users Score sync (already fetched ratings stay saved)"
+                            className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-mono border border-crt-amber/55 text-crt-amber hover:bg-crt-amber/10 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                          >
+                            <Pause className="h-3 w-3" />
+                            Pause Scores
+                          </button>
+                        ) : canSyncRatings && onStartRatingsSync ? (
+                          <button
+                            type="button"
+                            disabled={ratingsSyncBusy}
+                            onClick={async () => {
+                              setRatingsSyncBusy(true);
+                              try {
+                                await onStartRatingsSync('filtered');
+                              } finally {
+                                setRatingsSyncBusy(false);
+                              }
+                            }}
+                            title="Sync RetroGameTalk Users Scores (out of 5.0 stars) for cataloged target consoles so you can filter and sort by rating"
+                            className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-mono border border-transparent text-crt-muted hover:text-crt-amber hover:bg-crt-amber/10 hover:border-crt-amber/40 rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                          >
+                            <Star className={`h-3 w-3 shrink-0 ${ratingsSyncBusy ? 'animate-spin' : ''}`} />
+                            Sync Scores
+                          </button>
+                        ) : null}
                         {(!indexer.active || indexer.scope === 'filtered') &&
                           indexer.remainingUnindexedSystems > 0 &&
                           onStartCatalogIndex && (
@@ -5228,6 +5483,27 @@ export function CatalogPanel({
                     <th className="py-2.5 px-3 font-medium text-right">
                       <button
                         type="button"
+                        onClick={() =>
+                          setSort((cur) => (cur === 'rating_desc' ? 'rating_asc' : 'rating_desc'))
+                        }
+                        className={`inline-flex items-center justify-end gap-1 font-medium whitespace-nowrap shrink-0 transition-colors hover:text-crt-text cursor-pointer focus-visible:outline-none focus-visible:text-crt-phosphor ${
+                          sort === 'rating_desc' || sort === 'rating_asc' ? 'text-crt-amber' : ''
+                        }`}
+                        title="Sort by RetroGameTalk Users Score"
+                      >
+                        <span>Score</span>
+                        {sort === 'rating_asc' ? (
+                          <ArrowUp className="h-3 w-3 shrink-0" />
+                        ) : sort === 'rating_desc' ? (
+                          <ArrowDown className="h-3 w-3 shrink-0" />
+                        ) : (
+                          <ArrowUpDown className="h-3 w-3 shrink-0 opacity-50" />
+                        )}
+                      </button>
+                    </th>
+                    <th className="py-2.5 px-3 font-medium text-right">
+                      <button
+                        type="button"
                         onClick={() => setSort((cur) => (cur === 'size_desc' ? 'size_asc' : 'size_desc'))}
                         className={`inline-flex items-center justify-end gap-1 font-medium whitespace-nowrap shrink-0 transition-colors hover:text-crt-text cursor-pointer focus-visible:outline-none focus-visible:text-crt-phosphor ${
                           sort === 'size_desc' || sort === 'size_asc' ? 'text-crt-phosphor' : ''
@@ -5421,6 +5697,23 @@ export function CatalogPanel({
                         </td>
                         <td className="px-3 py-2 font-mono text-crt-muted max-w-xs">
                           <span className="line-clamp-2">{tagsDisplay}</span>
+                        </td>
+                        <td className="px-3 py-2 font-mono text-right tabular-nums whitespace-nowrap">
+                          {item.userRating !== null && item.userRating !== undefined && item.userRating > 0 ? (
+                            <span
+                              title={
+                                item.userRatingVotes
+                                  ? `Users Score: ${formatUserRating(item.userRating)} / 5.0 (${item.userRatingVotes.toLocaleString()} votes)`
+                                  : `Users Score: ${formatUserRating(item.userRating)} / 5.0`
+                              }
+                              className="inline-flex items-center justify-end gap-1 text-crt-amber font-medium"
+                            >
+                              <Star className="h-3 w-3 fill-crt-amber shrink-0" />
+                              <span>{formatUserRating(item.userRating)}</span>
+                            </span>
+                          ) : (
+                            <span className="text-crt-muted/50">—</span>
+                          )}
                         </td>
                         <td className="px-3 py-2 font-mono text-right text-crt-text tabular-nums whitespace-nowrap">
                           {transfer.active
@@ -6088,7 +6381,22 @@ export function CatalogPanel({
                           <h3 className="font-display text-sm font-semibold text-crt-text leading-snug line-clamp-2 group-hover:text-crt-phosphor transition-colors">
                             {item.title}
                           </h3>
-                          <p className="font-mono text-[11px] text-crt-muted truncate">{subline}</p>
+                          <div className="flex items-center justify-between gap-2 min-w-0">
+                            <p className="font-mono text-[11px] text-crt-muted truncate">{subline}</p>
+                            {item.userRating !== null && item.userRating !== undefined && item.userRating > 0 && (
+                              <span
+                                title={
+                                  item.userRatingVotes
+                                    ? `Users Score: ${formatUserRating(item.userRating)} / 5.0 (${item.userRatingVotes.toLocaleString()} votes)`
+                                    : `Users Score: ${formatUserRating(item.userRating)} / 5.0`
+                                }
+                                className="inline-flex items-center gap-0.5 font-mono text-[11px] font-medium text-crt-amber tabular-nums shrink-0"
+                              >
+                                <Star className="h-3 w-3 fill-crt-amber shrink-0" />
+                                <span>{formatUserRating(item.userRating)}</span>
+                              </span>
+                            )}
+                          </div>
                           <div className="flex items-center gap-1.5 min-w-0">
                             <p className="font-mono text-[11px] text-crt-phosphor/90 truncate">
                               {tagsDisplay}

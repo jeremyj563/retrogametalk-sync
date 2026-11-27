@@ -4,6 +4,12 @@ All notable changes to **RetroGameTalk Sync** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to bare `1.x.y` [Semantic Versioning](https://semver.org/).
 
+## [1.45.0] - 2026-11-26
+
+- Added full **RetroGameTalk Users Score** (out of 5.0 stars, down to the tenth) syncing, filtering, sorting, and display across the Catalog and Game Detail Drawer:
+  - **SQLite Schema `v31` & Backend Sync (`migrations.ts`, `rgtClient.ts`, `db.ts`, `orchestrator.ts`, `server.ts`)**: Added `user_rating`, `user_rating_votes`, `rgt_downloads`, and `rating_synced_at` columns with indexing to `catalog_releases` (preserved automatically across WP REST re-indexes), live RGT rating extraction via authenticated archive pagination (`orderby=meta__rating&order=desc` with early stop on unrated pages and public `repo-db/v1/database` fallback), on-demand detail hydration rating fallback, and new `POST /api/catalog/sync-ratings` / `POST /api/catalog/sync-ratings/stop` endpoints with live `status.ratingsSync` telemetry.
+  - **Catalog Filtering, Sorting & Display (`RatingFilterDropdown.tsx`, `CatalogPanel.tsx`, `GameDetailDrawer.tsx`)**: Added a **Score** filter popover with quick presets (`≥ 4.8★` down to `≥ 3.0★`, `Any Rated`, `Unrated Only`), a fine-grained `0.1`-step slider and `±0.1` stepper down to the tenth of a star, live facet counts, and 1-click **Sync Scores** controls; added `Sort: Users Score (Highest/Lowest)` (always keeping unrated games at the bottom), a sortable **Score** column in Table view, amber `★` ratings on Grid cards, and Users Score specs in the Game Detail Drawer.
+
 ## [1.44.5] - 2026-11-26
 
 - Propagated detected ROM-type subfolder sorting prefixes and framing wrappers (such as `!`, `! `, `_`, `~`, `[...]`, `(...)`, `00 - `, and `z_`) to automatically created unseen category folders on mounted storage devices:

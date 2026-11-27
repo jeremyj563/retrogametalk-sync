@@ -1,3 +1,4 @@
+export type { CatalogRatingFilterMode } from '../shared/catalogRating.ts';
 export type { CatalogSortOption } from '../shared/catalogSort.ts';
 export type {
   RomNamingPreviewSample,
@@ -39,6 +40,19 @@ export interface CatalogIndexerStatus {
   totalPages: number;
   indexedCount: number;
   remainingUnindexedSystems: number;
+  lastError: string | null;
+}
+
+export interface RatingsSyncStatus {
+  active: boolean;
+  scope: 'filtered' | 'full' | null;
+  currentSystem: string | null;
+  systemsCompleted: number;
+  systemsTotal: number;
+  currentPage: number;
+  totalPages: number;
+  updatedCount: number;
+  ratedCount: number;
   lastError: string | null;
 }
 
@@ -207,6 +221,8 @@ export interface ReleaseMetadata {
   formats?: string[];
   releaseTags?: string[];
   downloadsCount: string | null;
+  userRating?: number | null;
+  userRatingVotes?: number | null;
   releasedAgo: string | null;
   updatedDate: string | null;
   publishedAt?: string | null;
@@ -253,6 +269,16 @@ export interface CatalogFacetCounts {
   syncOverrides?: {
     pinned: number;
     ignored: number;
+  };
+  ratings?: {
+    rated: number;
+    unrated: number;
+    total: number;
+    atLeast48: number;
+    atLeast45: number;
+    atLeast40: number;
+    atLeast35: number;
+    atLeast30: number;
   };
 }
 
@@ -369,6 +395,10 @@ export interface RepositoryItemRecord {
   screenshotsCount: number;
   hasMetadata: boolean;
   metadata: ReleaseMetadata | null;
+  userRating?: number | null;
+  userRatingVotes?: number | null;
+  rgtDownloads?: number | null;
+  ratingSyncedAt?: string | null;
   installedAt: string | null;
   installedDeviceLabel: string | null;
   installedFileId: number | null;
@@ -561,6 +591,7 @@ export interface ServiceStatusSnapshot {
   auth: AuthSessionStatus;
   storage: StorageStats;
   indexer: CatalogIndexerStatus;
+  ratingsSync?: RatingsSyncStatus;
   queueAutoResume?: import('../shared/queueAutoResume.ts').QueueAutoResumeStatus | null;
   totals: {
     totalCatalogItems: number;

@@ -12,6 +12,14 @@ import {
 } from '../shared/catalogSelection.ts';
 import { normalizeCatalogSort } from '../shared/catalogSort.ts';
 import {
+  normalizeCatalogRatingMode,
+  normalizeMinRatingFilter,
+  normalizeUserRating,
+  normalizeVoteCount,
+  parseCompactCount,
+} from '../shared/catalogRating.ts';
+import { normalizeComparableReleaseUrl } from './rgtClient.ts';
+import {
   DEFAULT_QUEUE_RECOVERY_STATE,
   normalizePersistedQueueRecoveryState,
   type PersistedQueueRecoveryState,
@@ -1263,6 +1271,19 @@ function mapReleaseRow(
     deviceInstalls,
     isFavorite: Boolean(row.is_favorite),
     syncOverride: normalizeSyncOverride(row.sync_override),
+    userRating:
+      row.user_rating !== null && row.user_rating !== undefined
+        ? normalizeUserRating(row.user_rating)
+        : normalizeUserRating(parsedMeta?.userRating),
+    userRatingVotes:
+      row.user_rating_votes !== null && row.user_rating_votes !== undefined
+        ? normalizeVoteCount(row.user_rating_votes)
+        : normalizeVoteCount(parsedMeta?.userRatingVotes),
+    rgtDownloads:
+      row.rgt_downloads !== null && row.rgt_downloads !== undefined
+        ? normalizeVoteCount(row.rgt_downloads)
+        : parseCompactCount(parsedMeta?.downloadsCount),
+    ratingSyncedAt: row.rating_synced_at ? String(row.rating_synced_at) : null,
     collectionIds,
     filesCount: files.length,
     files,
@@ -1535,18 +1556,24 @@ export function upsertCatalogRelease(input: {
   const coverLocalPath = input.coverLocalPath ?? null;
   const screenshotsJson = input.screenshotLocalPaths ? JSON.stringify(input.screenshotLocalPaths) : null;
   const metadataJson = meta ? JSON.stringify({ ...meta, releaseTags }) : null;
+  const userRating = normalizeUserRating(meta?.userRating);
+  const userRatingVotes = normalizeVoteCount(meta?.userRatingVotes);
+  const rgtDownloads = parseCompactCount(meta?.downloadsCount);
+  const ratingSyncedAt = userRating !== null || rgtDownloads !== null ? now : null;
 
   getDb().prepare(`
     INSERT INTO catalog_releases (
       remote_url, wp_post_id, wp_post_type, remote_path, local_path, system_name,
       release_type, release_tags_json, title, published_at, remote_updated_at, status, last_run_id, discovered_at,
       publisher, developer, release_year, genres_json, regions_json, languages_json, sources_json,
-      cover_local_path, screenshots_json, metadata_json
+      cover_local_path, screenshots_json, metadata_json,
+      user_rating, user_rating_votes, rgt_downloads, rating_synced_at
     ) VALUES (
       ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, COALESCE(?, '[]'), COALESCE(?, '[]'), COALESCE(?, '[]'), COALESCE(?, '[]'),
-      ?, COALESCE(?, '[]'), ?
+      ?, COALESCE(?, '[]'), ?,
+      ?, ?, ?, ?
     )
     ON CONFLICT(remote_url) DO UPDATE SET
       wp_post_id = COALESCE(excluded.wp_post_id, catalog_releases.wp_post_id),
@@ -1567,7 +1594,11 @@ export function upsertCatalogRelease(input: {
       sources_json = CASE WHEN ? IS NOT NULL THEN excluded.sources_json ELSE catalog_releases.sources_json END,
       cover_local_path = COALESCE(excluded.cover_local_path, catalog_releases.cover_local_path),
       screenshots_json = CASE WHEN ? IS NOT NULL THEN excluded.screenshots_json ELSE catalog_releases.screenshots_json END,
-      metadata_json = COALESCE(excluded.metadata_json, catalog_releases.metadata_json)
+      metadata_json = COALESCE(excluded.metadata_json, catalog_releases.metadata_json),
+      user_rating = COALESCE(excluded.user_rating, catalog_releases.user_rating),
+      user_rating_votes = COALESCE(excluded.user_rating_votes, catalog_releases.user_rating_votes),
+      rgt_downloads = COALESCE(excluded.rgt_downloads, catalog_releases.rgt_downloads),
+      rating_synced_at = COALESCE(excluded.rating_synced_at, catalog_releases.rating_synced_at)
   `).run(
     canonicalUrl,
     wpPostId,
@@ -1593,6 +1624,10 @@ export function upsertCatalogRelease(input: {
     coverLocalPath,
     screenshotsJson,
     metadataJson,
+    userRating,
+    userRatingVotes,
+    rgtDownloads,
+    ratingSyncedAt,
     genresJson,
     regionsJson,
     languagesJson,
@@ -1664,6 +1699,8 @@ export function upsertIndexedWpRelease(input: {
       detailHydrated: Boolean(prev.detailHydrated || input.metadata.detailHydrated),
       specs: prev.specs?.length ? prev.specs : input.metadata.specs,
       downloadsCount: prev.downloadsCount ?? input.metadata.downloadsCount,
+      userRating: input.metadata.userRating ?? prev.userRating ?? existing.userRating ?? null,
+      userRatingVotes: input.metadata.userRatingVotes ?? prev.userRatingVotes ?? existing.userRatingVotes ?? null,
       releasedAgo: prev.releasedAgo ?? input.metadata.releasedAgo ?? null,
       updatedDate: prev.updatedDate ?? input.metadata.updatedDate ?? null,
       descriptionHtml:
@@ -2154,12 +2191,21 @@ export function updateCatalogReleaseMetadata(
   const regions = metadata.regions && metadata.regions.length > 0 ? metadata.regions : existing.regions;
   const languages = metadata.languages && metadata.languages.length > 0 ? metadata.languages : existing.languages;
   const sources = metadata.sources && metadata.sources.length > 0 ? metadata.sources : existing.sources;
+  const effectiveUserRating = normalizeUserRating(metadata.userRating) ?? existing.userRating ?? null;
+  const effectiveUserRatingVotes = normalizeVoteCount(metadata.userRatingVotes) ?? existing.userRatingVotes ?? null;
+  const effectiveRgtDownloads = parseCompactCount(metadata.downloadsCount) ?? existing.rgtDownloads ?? null;
+  const nowIso = new Date().toISOString();
+  const hasNewRatingData =
+    normalizeUserRating(metadata.userRating) !== null ||
+    parseCompactCount(metadata.downloadsCount) !== null;
   const mergedMetadata: ReleaseMetadata = {
     ...metadata,
     genres,
     regions,
     languages,
     sources,
+    userRating: effectiveUserRating,
+    userRatingVotes: effectiveUserRatingVotes,
   };
 
   const tx = getDb().transaction(() => {
@@ -2179,7 +2225,11 @@ export function updateCatalogReleaseMetadata(
         sources_json = ?,
         cover_local_path = ?,
         screenshots_json = ?,
-        metadata_json = ?
+        metadata_json = ?,
+        user_rating = COALESCE(?, user_rating),
+        user_rating_votes = COALESCE(?, user_rating_votes),
+        rgt_downloads = COALESCE(?, rgt_downloads),
+        rating_synced_at = COALESCE(?, rating_synced_at)
       WHERE id = ?
     `).run(
       mergedMetadata.wpPostId ?? null,
@@ -2197,6 +2247,10 @@ export function updateCatalogReleaseMetadata(
       coverLocalPath,
       JSON.stringify(screenshotLocalPaths),
       JSON.stringify(mergedMetadata),
+      effectiveUserRating,
+      effectiveUserRatingVotes,
+      effectiveRgtDownloads,
+      hasNewRatingData ? nowIso : null,
       id,
     );
 
@@ -2238,12 +2292,21 @@ export function mergeCatalogReleaseDetailMetadata(
   const regions = metadata.regions && metadata.regions.length > 0 ? metadata.regions : existing.regions;
   const languages = metadata.languages && metadata.languages.length > 0 ? metadata.languages : existing.languages;
   const sources = metadata.sources && metadata.sources.length > 0 ? metadata.sources : existing.sources;
+  const effectiveUserRating = normalizeUserRating(metadata.userRating) ?? existing.userRating ?? null;
+  const effectiveUserRatingVotes = normalizeVoteCount(metadata.userRatingVotes) ?? existing.userRatingVotes ?? null;
+  const effectiveRgtDownloads = parseCompactCount(metadata.downloadsCount) ?? existing.rgtDownloads ?? null;
+  const nowIso = new Date().toISOString();
+  const hasNewRatingData =
+    normalizeUserRating(metadata.userRating) !== null ||
+    parseCompactCount(metadata.downloadsCount) !== null;
   const mergedMetadata: ReleaseMetadata = {
     ...metadata,
     genres,
     regions,
     languages,
     sources,
+    userRating: effectiveUserRating,
+    userRatingVotes: effectiveUserRatingVotes,
   };
 
   const tx = getDb().transaction(() => {
@@ -2261,7 +2324,11 @@ export function mergeCatalogReleaseDetailMetadata(
         regions_json = ?,
         languages_json = ?,
         sources_json = ?,
-        metadata_json = ?
+        metadata_json = ?,
+        user_rating = COALESCE(?, user_rating),
+        user_rating_votes = COALESCE(?, user_rating_votes),
+        rgt_downloads = COALESCE(?, rgt_downloads),
+        rating_synced_at = COALESCE(?, rating_synced_at)
       WHERE id = ?
     `).run(
       mergedMetadata.wpPostId ?? null,
@@ -2277,6 +2344,10 @@ export function mergeCatalogReleaseDetailMetadata(
       JSON.stringify(languages),
       JSON.stringify(sources),
       JSON.stringify(mergedMetadata),
+      effectiveUserRating,
+      effectiveUserRatingVotes,
+      effectiveRgtDownloads,
+      hasNewRatingData ? nowIso : null,
       id,
     );
 
@@ -2925,6 +2996,7 @@ interface RuleFilterRow {
   is_outdated?: number;
   sync_override?: string | null;
   is_favorite?: number;
+  user_rating?: number | null;
 }
 
 function parseDownloadHintsJson(raw: unknown): InstalledUpdateDownloadHintLike[] | null {
@@ -3367,6 +3439,275 @@ function listCurationFacetCounts(
   };
 }
 
+export interface BatchReleaseRatingInput {
+  remoteUrl: string;
+  userRating: number | null;
+  userRatingVotes?: number | null;
+  rgtDownloads?: number | null;
+  downloadsLabel?: string | null;
+}
+
+export interface BatchReleaseRatingResult {
+  matched: number;
+  ratedUpdated: number;
+}
+
+/**
+ * Batch-update Users Score (`user_rating`), vote count, and RGT download count
+ * for catalog releases matched by their canonical RGT release URL.
+ */
+export function batchUpdateReleaseRatings(
+  entries: BatchReleaseRatingInput[],
+  syncedAtIso: string = new Date().toISOString(),
+): BatchReleaseRatingResult {
+  if (!entries.length) return { matched: 0, ratedUpdated: 0 };
+
+  const db = getDb();
+  const findStmt = db.prepare(
+    `SELECT id, metadata_json, user_rating
+     FROM catalog_releases
+     WHERE remote_url = ? OR remote_url = ? OR remote_url = ?
+     LIMIT 1`,
+  );
+  const updateStmt = db.prepare(
+    `UPDATE catalog_releases SET
+       user_rating = COALESCE(?, user_rating),
+       user_rating_votes = COALESCE(?, user_rating_votes),
+       rgt_downloads = COALESCE(?, rgt_downloads),
+       rating_synced_at = ?,
+       metadata_json = COALESCE(?, metadata_json)
+     WHERE id = ?`,
+  );
+
+  let matched = 0;
+  let ratedUpdated = 0;
+
+  const tx = db.transaction(() => {
+    for (const entry of entries) {
+      const rawUrl = String(entry.remoteUrl || '').split('#')[0].trim();
+      if (!rawUrl) continue;
+      const normalized = normalizeComparableReleaseUrl(rawUrl);
+      const withSlash = normalized ? `${normalized}/` : rawUrl;
+      const withoutSlash = normalized || rawUrl.replace(/\/+$/, '');
+      const row = findStmt.get(rawUrl, withSlash, withoutSlash) as
+        | { id: number; metadata_json: string | null; user_rating: number | null }
+        | undefined;
+      if (!row) continue;
+
+      const cleanRating = normalizeUserRating(entry.userRating);
+      const cleanVotes = normalizeVoteCount(entry.userRatingVotes);
+      const cleanDownloads = normalizeVoteCount(entry.rgtDownloads);
+
+      let nextMetadataJson: string | null = null;
+      if (row.metadata_json && (cleanRating !== null || cleanVotes !== null || entry.downloadsLabel)) {
+        try {
+          const parsed = JSON.parse(row.metadata_json) as ReleaseMetadata;
+          let changed = false;
+          if (cleanRating !== null && parsed.userRating !== cleanRating) {
+            parsed.userRating = cleanRating;
+            changed = true;
+          }
+          if (cleanVotes !== null && parsed.userRatingVotes !== cleanVotes) {
+            parsed.userRatingVotes = cleanVotes;
+            changed = true;
+          }
+          if (entry.downloadsLabel && !parsed.downloadsCount) {
+            parsed.downloadsCount = entry.downloadsLabel;
+            changed = true;
+          }
+          if (changed) {
+            nextMetadataJson = JSON.stringify(parsed);
+          }
+        } catch {
+          nextMetadataJson = null;
+        }
+      }
+
+      updateStmt.run(
+        cleanRating,
+        cleanVotes,
+        cleanDownloads,
+        syncedAtIso,
+        nextMetadataJson,
+        row.id,
+      );
+      matched += 1;
+      if (cleanRating !== null) {
+        ratedUpdated += 1;
+      }
+    }
+  });
+
+  tx();
+  return { matched, ratedUpdated };
+}
+
+export function updateReleaseRatingById(
+  releaseId: number,
+  input: {
+    userRating: number | null;
+    userRatingVotes?: number | null;
+    rgtDownloads?: number | null;
+    downloadsLabel?: string | null;
+  },
+  syncedAtIso: string = new Date().toISOString(),
+): boolean {
+  const row = getDb()
+    .prepare('SELECT id, metadata_json FROM catalog_releases WHERE id = ?')
+    .get(releaseId) as { id: number; metadata_json: string | null } | undefined;
+  if (!row) return false;
+
+  const cleanRating = normalizeUserRating(input.userRating);
+  const cleanVotes = normalizeVoteCount(input.userRatingVotes);
+  const cleanDownloads = normalizeVoteCount(input.rgtDownloads);
+  let nextMetadataJson: string | null = null;
+  if (row.metadata_json && (cleanRating !== null || cleanVotes !== null || input.downloadsLabel)) {
+    try {
+      const parsed = JSON.parse(row.metadata_json) as ReleaseMetadata;
+      if (cleanRating !== null) parsed.userRating = cleanRating;
+      if (cleanVotes !== null) parsed.userRatingVotes = cleanVotes;
+      if (input.downloadsLabel && !parsed.downloadsCount) {
+        parsed.downloadsCount = input.downloadsLabel;
+      }
+      nextMetadataJson = JSON.stringify(parsed);
+    } catch {
+      nextMetadataJson = null;
+    }
+  }
+
+  getDb()
+    .prepare(
+      `UPDATE catalog_releases SET
+         user_rating = COALESCE(?, user_rating),
+         user_rating_votes = COALESCE(?, user_rating_votes),
+         rgt_downloads = COALESCE(?, rgt_downloads),
+         rating_synced_at = ?,
+         metadata_json = COALESCE(?, metadata_json)
+       WHERE id = ?`,
+    )
+    .run(cleanRating, cleanVotes, cleanDownloads, syncedAtIso, nextMetadataJson, releaseId);
+  return true;
+}
+
+export function listCatalogSystemsWithItems(): string[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT system_name, COUNT(*) AS cnt
+       FROM catalog_releases
+       WHERE system_name IS NOT NULL AND TRIM(system_name) != ''
+       GROUP BY system_name
+       ORDER BY cnt DESC, system_name COLLATE NOCASE ASC`,
+    )
+    .all() as { system_name: string; cnt: number }[];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const row of rows) {
+    const slug = canonicalizeSystemSlug(row.system_name) || row.system_name.trim().toLowerCase();
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    out.push(slug);
+  }
+  return out;
+}
+
+function listRatingsFacetCounts(
+  params: CatalogQueryFilterParams,
+  cfg?: ScraperConfigPublic,
+  ruleIndexMap?: Map<number, CachedReleaseRuleData>,
+): NonNullable<CatalogFacetCounts['ratings']> {
+  const scopedParams: CatalogQueryFilterParams = {
+    ...params,
+    minRating: undefined,
+    ratingMode: undefined,
+  };
+  const resolvedCfg = cfg ?? (scopedParams.syncRules ? getPublicConfig() : undefined);
+  const { where, args } = buildCatalogWhereAndOrder(scopedParams, resolvedCfg);
+
+  if (scopedParams.syncRules && resolvedCfg) {
+    const indexMap = ruleIndexMap ?? loadAllReleaseRuleIndexMap();
+    const allowedTypes = normalizeAllowedReleaseTypes(resolvedCfg.allowedReleaseTypes);
+    const candidates = getDb()
+      .prepare(
+        `SELECT id, system_name, release_type, release_tags_json, status, file_size_bytes, sync_override, user_rating
+         FROM catalog_releases ${where}`,
+      )
+      .all(...args) as RuleFilterRow[];
+    const matched = filterRuleMatchedRowsByDownloadedState(
+      filterCandidateRowsBySyncRules(candidates, resolvedCfg, indexMap),
+      scopedParams.downloaded,
+      allowedTypes,
+      indexMap,
+    );
+    let rated = 0;
+    let unrated = 0;
+    let atLeast48 = 0;
+    let atLeast45 = 0;
+    let atLeast40 = 0;
+    let atLeast35 = 0;
+    let atLeast30 = 0;
+    for (const row of matched) {
+      const score = normalizeUserRating(row.user_rating);
+      if (score !== null && score > 0) {
+        rated += 1;
+        if (score >= 4.8) atLeast48 += 1;
+        if (score >= 4.5) atLeast45 += 1;
+        if (score >= 4.0) atLeast40 += 1;
+        if (score >= 3.5) atLeast35 += 1;
+        if (score >= 3.0) atLeast30 += 1;
+      } else {
+        unrated += 1;
+      }
+    }
+    return {
+      rated,
+      unrated,
+      total: matched.length,
+      atLeast48,
+      atLeast45,
+      atLeast40,
+      atLeast35,
+      atLeast30,
+    };
+  }
+
+  const agg = getDb()
+    .prepare(
+      `SELECT
+         COUNT(*) AS total_cnt,
+         SUM(CASE WHEN user_rating IS NOT NULL AND user_rating > 0 THEN 1 ELSE 0 END) AS rated_cnt,
+         SUM(CASE WHEN user_rating IS NULL OR user_rating <= 0 THEN 1 ELSE 0 END) AS unrated_cnt,
+         SUM(CASE WHEN user_rating >= 4.8 THEN 1 ELSE 0 END) AS gte48_cnt,
+         SUM(CASE WHEN user_rating >= 4.5 THEN 1 ELSE 0 END) AS gte45_cnt,
+         SUM(CASE WHEN user_rating >= 4.0 THEN 1 ELSE 0 END) AS gte40_cnt,
+         SUM(CASE WHEN user_rating >= 3.5 THEN 1 ELSE 0 END) AS gte35_cnt,
+         SUM(CASE WHEN user_rating >= 3.0 THEN 1 ELSE 0 END) AS gte30_cnt
+       FROM catalog_releases ${where}`,
+    )
+    .get(...args) as
+    | {
+        total_cnt: number | null;
+        rated_cnt: number | null;
+        unrated_cnt: number | null;
+        gte48_cnt: number | null;
+        gte45_cnt: number | null;
+        gte40_cnt: number | null;
+        gte35_cnt: number | null;
+        gte30_cnt: number | null;
+      }
+    | undefined;
+
+  return {
+    rated: Number(agg?.rated_cnt || 0),
+    unrated: Number(agg?.unrated_cnt || 0),
+    total: Number(agg?.total_cnt || 0),
+    atLeast48: Number(agg?.gte48_cnt || 0),
+    atLeast45: Number(agg?.gte45_cnt || 0),
+    atLeast40: Number(agg?.gte40_cnt || 0),
+    atLeast35: Number(agg?.gte35_cnt || 0),
+    atLeast30: Number(agg?.gte30_cnt || 0),
+  };
+}
+
 function normalizeFilterList(raw: string | string[] | undefined): string[] {
   if (!raw) return [];
   const list = Array.isArray(raw) ? raw : [raw];
@@ -3425,6 +3766,8 @@ const CATALOG_SORT_ORDER_BY: Record<CatalogSortOption, string> = {
   year_asc: "CASE WHEN release_year GLOB '[0-9][0-9][0-9][0-9]*' THEN 0 ELSE 1 END ASC, CAST(substr(release_year, 1, 4) AS INTEGER) ASC, title COLLATE NOCASE ASC, id DESC",
   system_asc: 'system_name COLLATE NOCASE ASC, title COLLATE NOCASE ASC, id DESC',
   system_desc: 'system_name COLLATE NOCASE DESC, title COLLATE NOCASE ASC, id DESC',
+  rating_desc: 'CASE WHEN user_rating IS NOT NULL AND user_rating > 0 THEN 0 ELSE 1 END ASC, user_rating DESC, COALESCE(user_rating_votes, rgt_downloads, 0) DESC, title COLLATE NOCASE ASC, id DESC',
+  rating_asc: 'CASE WHEN user_rating IS NOT NULL AND user_rating > 0 THEN 0 ELSE 1 END ASC, user_rating ASC, COALESCE(user_rating_votes, rgt_downloads, 0) DESC, title COLLATE NOCASE ASC, id DESC',
 };
 
 export interface CatalogQueryFilterParams {
@@ -3439,6 +3782,8 @@ export interface CatalogQueryFilterParams {
   favoriteOnly?: boolean;
   collectionId?: number;
   syncOverride?: SyncOverrideMode;
+  minRating?: number;
+  ratingMode?: string;
   tag?: string | string[];
   tagMode?: string;
   genre?: string | string[];
@@ -3594,6 +3939,17 @@ function buildCatalogWhereAndOrder(
       conditions.push('catalog_releases.id IN (SELECT value FROM json_each(?))');
       args.push(JSON.stringify(outdatedPartition.outdatedIds));
     }
+  }
+
+  const normalizedRatingMode = normalizeCatalogRatingMode(params.ratingMode);
+  const normalizedMinRating = normalizeMinRatingFilter(params.minRating);
+  if (normalizedRatingMode === 'unrated') {
+    conditions.push('(user_rating IS NULL OR user_rating <= 0)');
+  } else if (normalizedMinRating !== null) {
+    conditions.push('user_rating IS NOT NULL AND user_rating >= ?');
+    args.push(normalizedMinRating);
+  } else if (normalizedRatingMode === 'rated') {
+    conditions.push('user_rating IS NOT NULL AND user_rating > 0');
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -3821,6 +4177,7 @@ export function queryRepositoryItems(
   const installedCounts = listInstalledFacetCounts(params, cfg, ruleIndexMap);
   const syncRulesMatched = listSyncRulesMatchedFacetCount(params, cfg, ruleIndexMap);
   const curationCounts = listCurationFacetCounts(params, cfg, ruleIndexMap);
+  const ratingsCounts = listRatingsFacetCounts(params, cfg, ruleIndexMap);
 
   const counts: CatalogFacetCounts = {
     tags: tagsFacet.counts,
@@ -3835,6 +4192,7 @@ export function queryRepositoryItems(
     queueableFiltered,
     favorites: curationCounts.favorites,
     syncOverrides: curationCounts.syncOverrides,
+    ratings: ratingsCounts,
   };
 
   const facets: CatalogFacets = {
